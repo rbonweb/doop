@@ -8,8 +8,11 @@
 #   setup             ask a few questions, generate the secrets, start Doop
 #   invite EMAIL...   let these addresses create an account
 #   admin EMAIL       make an account an admin, creating it if it does not exist
+#   admin --remove EMAIL   take the admin role away again
 #   update [TAG]      back up the database, then install the latest release (or TAG)
 #   backup            save the database to $DOOP_DATA_DIR/backups
+#   restore FILE      replace the database with a backup (asks first)
+#   restart           restart Doop, applying any change made to deploy/.env
 #   status            what runs, and which release
 #   logs              follow the app's logs
 #
@@ -196,6 +199,38 @@ backup() {
   note "Database saved to $file"
 }
 
+# Replace the database with a backup, saving the current one first.
+restore() {
+  need_setup
+  local file=${1:-} answer
+  [[ -f $file ]] || fail "Usage: doop.sh restore $(data_dir)/backups/doop-YYYYMMDD-HHMMSS.sql.gz"
+  gzip -t "$file" 2>/dev/null || fail "$file is not a readable backup"
+  say "This replaces every account, canvas and setting in the database with $file"
+  if [[ ${DOOP_CONFIRM:-} != yes ]]; then
+    need_tty DOOP_CONFIRM
+    read -r -p "Type yes to go on: " answer </dev/tty
+    [[ $answer == yes ]] || fail "Nothing was changed"
+  fi
+  note "First, the database as it is now:"
+  backup
+  compose stop doop >/dev/null 2>&1
+  if ! compose exec -T db psql -X -q -v ON_ERROR_STOP=1 -U doop -d postgres \
+    -c 'DROP DATABASE doop WITH (FORCE)' -c 'CREATE DATABASE doop OWNER doop' >/dev/null ||
+    ! gunzip -c "$file" | compose exec -T db psql -X -q -v ON_ERROR_STOP=1 -U doop -d doop >/dev/null; then
+    fail "The backup could not be loaded and Doop is stopped. Restore the backup saved just above to go back."
+  fi
+  compose start doop >/dev/null 2>&1
+  wait_healthy || fail "Doop did not start after the restore; see: $DEPLOY_DIR/doop.sh logs"
+  note "Restored $file. Uploaded images were not touched: they live in $(data_dir)/data."
+}
+
+restart() {
+  need_setup
+  compose up -d --no-build
+  wait_healthy || fail "Doop did not come back; see: $DEPLOY_DIR/doop.sh logs"
+  note "Doop is running with the settings in $ENV_FILE"
+}
+
 # --------------------------------------------------------------------- people
 
 # Add addresses to SIGNUP_ALLOWED_EMAILS, restarting the app when any is new.
@@ -239,6 +274,15 @@ fetch("http://127.0.0.1:4400/api/auth/sign-up/email", {
 
 admin() {
   need_setup
+  if [[ ${1:-} == --remove ]]; then
+    [[ $# -eq 2 ]] || fail "Usage: doop.sh admin --remove EMAIL"
+    local former
+    former=$(emails "$2")
+    [[ -n $(sql "update \"user\" set role = 'user' where lower(email) = :'email' and role = 'admin' returning id" email="$former") ]] ||
+      fail "$former is not an admin"
+    note "$former is no longer an admin."
+    return 0
+  fi
   [[ $# -eq 1 ]] || fail "Usage: doop.sh admin EMAIL"
   local email
   email=$(emails "$1")
@@ -316,7 +360,7 @@ on_install_exit() {
 }
 
 # Put the previous image and checkout back after a release that failed.
-restore() {
+put_back() {
   env_set DOOP_IMAGE "$1"
   if [[ -n $2 ]]; then git_ -c advice.detachedHead=false checkout --quiet "$2" || true; fi
 }
@@ -330,7 +374,7 @@ install_release() {
   backup
   report running "$tag" "Installing $tag"
   if ! use_release "$tag"; then
-    restore "$previous" "$previous_ref"
+    put_back "$previous" "$previous_ref"
     report failed "$tag" "$tag could not be built, so nothing changed"
     fail "$tag could not be built"
   fi
@@ -341,7 +385,7 @@ install_release() {
     return 0
   fi
   report running "$tag" "$tag did not start; going back to the previous version"
-  restore "$previous" "$previous_ref"
+  put_back "$previous" "$previous_ref"
   compose up -d --no-build >/dev/null 2>&1 || true
   wait_healthy || true
   report failed "$tag" "$tag did not start, so the previous version is back. See: doop.sh logs"
@@ -507,7 +551,7 @@ status() {
   compose ps
 }
 
-usage() { sed -n '3,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,/^set -e/{/^#/p}' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 main() {
   # no checkout around this copy: fetch one and run its script
@@ -525,6 +569,8 @@ main() {
     install-release) install_release "$@" ;;
     apply-request) apply_request ;;
     backup) backup ;;
+    restore) restore "$@" ;;
+    restart) restart ;;
     status) status ;;
     logs) compose logs -f --tail=200 "${@:-doop}" ;;
     help | -h | --help) usage ;;
