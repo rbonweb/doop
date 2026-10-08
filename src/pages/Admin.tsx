@@ -11,6 +11,7 @@ import { Input } from '../components/ui/input'
 import { Wordmark } from '../components/ui/wordmark'
 import { cardVariants } from '../components/ui/card'
 import { Skeleton } from '../components/ui/skeleton'
+import { VersionCard } from '../components/VersionCard'
 import {
   DashContent,
   DashHeader,
@@ -197,6 +198,8 @@ export function Admin() {
               </DashSubtitle>
             </div>
           </div>
+
+          <VersionCard />
 
           <Tabs
             value={tab}

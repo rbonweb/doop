@@ -4,6 +4,7 @@ import { store } from './store.ts'
 import { isAdmin } from './access.ts'
 import { db } from './db/index.ts'
 import * as authSchema from './db/auth-schema.ts'
+import { requestUpdate, UpdateRefused, updateInfo } from './selfUpdate.ts'
 
 /**
  * Instance-admin surface, mounted at /api/admin (so already behind the
@@ -70,4 +71,20 @@ adminRouter.get('/users', async (req, res) => {
       .map((u) => ({ ...u, createdAt: u.createdAt.getTime(), canvasCount: owned.get(u.id) ?? 0 }))
       .sort((a, b) => b.createdAt - a.createdAt),
   )
+})
+
+/** The running version, the latest release, and how an update is going. */
+adminRouter.get('/update', async (req, res) => {
+  res.json(await updateInfo(req.query.fresh === '1'))
+})
+
+/** Ask the host to install the latest release (see server/selfUpdate.ts). */
+adminRouter.post('/update', async (req, res) => {
+  try {
+    res.json(await requestUpdate(String(req.body?.tag ?? ''), req.user!.email))
+  } catch (e) {
+    if (e instanceof UpdateRefused) return res.status(409).json({ error: e.message })
+    console.error('[update] request failed', e)
+    res.status(500).json({ error: 'The update request could not be written.' })
+  }
 })

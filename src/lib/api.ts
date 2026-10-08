@@ -17,6 +17,7 @@ import type {
   WorkspaceSummary,
 } from '../../shared/types'
 import type { Automation, AutomationRun, Schedule, Step } from '../../shared/automations'
+import type { UpdateInfo } from '../../shared/selfUpdate'
 import type { BillingInterval, Plan } from '../../shared/billing'
 
 export type HomeActivity = ActivityItem & { canvasId: string; canvasName: string }
@@ -519,6 +520,9 @@ export const adminApi = {
   canvases: () => req<{ total: number; canvases: AdminCanvas[] }>('/api/admin/canvases'),
   stats: () => req<{ users: number; canvases: number; frames: number }>('/api/admin/stats'),
   users: () => req<AdminUser[]>('/api/admin/users'),
+  update: (fresh = false) => req<UpdateInfo>(`/api/admin/update${fresh ? '?fresh=1' : ''}`),
+  installUpdate: (tag: string) =>
+    req<UpdateInfo>('/api/admin/update', { method: 'POST', body: JSON.stringify({ tag }) }),
 
   /* better-auth's own endpoints, not ours: they swap the session cookie, so
      every caller reloads afterwards rather than trying to reconcile state. */
