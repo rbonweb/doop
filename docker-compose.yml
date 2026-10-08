@@ -14,6 +14,7 @@ services:
       SIGNUP_ALLOWED_EMAILS: ${SIGNUP_ALLOWED_EMAILS:-}
       # optional — see .env.example for everything else (SMTP, ANTHROPIC_API_KEY, …)
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       CONTEXT_DEV_API_KEY: ${CONTEXT_DEV_API_KEY:-}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-}

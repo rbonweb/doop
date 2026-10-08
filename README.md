@@ -227,6 +227,7 @@ own agent over MCP.
 | ------------------------------- | --------------------------- | ------------------------------------------------------------------------------------ |
 | `DOOP_AGENT_PROVIDER`           | `anthropic`                 | What the free tier runs on: `anthropic` \| `azure`                                   |
 | `ANTHROPIC_API_KEY`             | _unset_                     | Pays for the free Doop Agent tier (default provider) and the distiller               |
+| `ANTHROPIC_BASE_URL`            | Anthropic                   | Sends the server key's calls to a proxy or compatible endpoint (never users' keys)   |
 | `AZURE_OPENAI_ENDPOINT`         | _unset_                     | The free tier's Azure OpenAI resource, when `DOOP_AGENT_PROVIDER=azure`              |
 | `AZURE_OPENAI_API_KEY`          | _unset_                     | A key of that resource                                                               |
 | `AZURE_OPENAI_DEPLOYMENT`       | _unset_                     | The deployment the free tier runs on                                                 |

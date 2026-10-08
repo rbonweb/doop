@@ -207,10 +207,22 @@ function joinSystem(req: AgentTurnRequest): string {
   return req.system.map((block) => block.text).join('\n\n')
 }
 
+/* Anthropic's own API. ANTHROPIC_BASE_URL, which the SDK reads for every
+   client built without a baseURL, moves the server's calls (the free tier,
+   the distiller, background tagging) to a proxy or compatible endpoint. A
+   user's connected key is pinned here instead: it is their credential, and
+   the operator's endpoint is not where they agreed to send it. */
+export const ANTHROPIC_API = 'https://api.anthropic.com'
+
+/** The client for a user's own Claude API key, which only ever talks to Anthropic. */
+export function userAnthropicClient(apiKey: string): Anthropic {
+  return new Anthropic({ apiKey, baseURL: ANTHROPIC_API })
+}
+
 function byoModel(account: ModelAccount): AgentModel {
   if (account.kind === 'anthropic-key') {
     if (!account.apiKey) throw new ModelAuthError('Reconnect your Claude API key in Settings.')
-    const client = new Anthropic({ apiKey: account.apiKey })
+    const client = userAnthropicClient(account.apiKey)
     const model = accountModelFor(account)
     return {
       provider: account.kind,
