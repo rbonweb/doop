@@ -19,7 +19,7 @@
 #
 # Every answer can be given in the environment instead (DOOP_URL,
 # DOOP_ADMIN_EMAIL, DOOP_ADMIN_NAME, DOOP_ADMIN_PASSWORD, DOOP_ANTHROPIC_KEY,
-# DOOP_ANTHROPIC_BASE_URL, DOOP_AGENT_MODEL, DOOP_DISTILL_MODEL, DOOP_PROXY=caddy|own,
+# DOOP_ANTHROPIC_BASE_URL, DOOP_AGENT_MODEL, DOOP_DISTILL_MODEL, DOOP_PROXY=caddy|edge|own,
 # DOOP_DATA_DIR), which is how it runs with no terminal. Everything it keeps
 # lives in DOOP_DATA_DIR (default /srv/doop): uploads, the database,
 # certificates, backups, and the update requests the Admin page leaves for
@@ -472,11 +472,15 @@ setup() {
     ask DOOP_DISTILL_MODEL "  Model for style-rule suggestions" claude-haiku-4-5-20251001
   fi
 
-  local proxy=${DOOP_PROXY:-}
-  if [[ -z $proxy ]]; then
-    if ports_taken; then proxy=own; else proxy=caddy; fi
-  fi
-  [[ $proxy == caddy || $proxy == own ]] || fail "DOOP_PROXY is caddy or own"
+  local detected=caddy
+  if ports_taken; then detected=own; fi
+  note "How does HTTPS reach this server?"
+  note "  caddy  Caddy runs here and gets the certificate (DNS A record -> this server)"
+  note "  edge   your hosting platform's domain mapping (e.g. Krova Cloud) sends HTTP to port ${DOOP_PORT:-4400}"
+  note "  own    a web server already on this machine forwards to 127.0.0.1:${DOOP_PORT:-4400}"
+  ask DOOP_PROXY "caddy, edge or own" "$detected"
+  local proxy=$DOOP_PROXY
+  [[ $proxy == caddy || $proxy == edge || $proxy == own ]] || fail "Answer caddy, edge or own"
 
   local data=${DOOP_DATA_DIR:-/srv/doop}
   mkdir -p "$data"/{data,postgres,caddy,updates,backups}
@@ -496,6 +500,7 @@ setup() {
       echo "DOOP_DATA_DIR=$data"
       echo "DOOP_NOINDEX=1"
       echo "COMPOSE_PROFILES=$(if [[ $proxy == caddy ]]; then echo caddy; fi)"
+      if [[ $proxy == edge ]]; then echo "DOOP_BIND=0.0.0.0"; fi
       echo "DOOP_UPDATE_REPO=$REPO_SLUG"
       if ((updater)); then echo "DOOP_UPDATE_DIR=/app/updates"; fi
       if [[ -n $DOOP_ANTHROPIC_KEY ]]; then
@@ -527,9 +532,10 @@ setup() {
   note "  Open           $url"
   if [[ $proxy == caddy ]]; then
     note "                 (its DNS A record must point at this server; the certificate follows by itself)"
+  elif [[ $proxy == edge ]]; then
+    note "                 Map the domain to port ${DOOP_PORT:-4400} of this server, over HTTP: the platform does HTTPS"
   else
-    note "                 Ports 80/443 are taken here, so point your proxy at http://127.0.0.1:${DOOP_PORT:-4400}"
-    note "                 (deploy/README.md has an nginx example)"
+    note "                 Point your web server at http://127.0.0.1:${DOOP_PORT:-4400} (deploy/README.md has an nginx example)"
   fi
   note "  Invite         Admin page -> Accounts -> Invite someone, or $DEPLOY_DIR/doop.sh invite friend@example.com"
   note "  Make an admin  $DEPLOY_DIR/doop.sh admin someone@example.com"

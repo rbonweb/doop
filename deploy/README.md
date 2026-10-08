@@ -20,9 +20,10 @@ is managed by one script, `/opt/doop/deploy/doop.sh`.
 [Prepare the server](#2-prepare-the-server) · [Install](#3-install) · [Admins](#4-admins) ·
 [People](#5-people) · [Models](#6-models) · [Updating](#7-updating) · [Backups](#8-backups) ·
 [Changing settings](#9-changing-settings) · [Claude Code](#10-connect-claude-code) ·
-[Your own web server](#11-your-own-web-server-instead-of-caddy) · [Commands](#12-all-commands) ·
-[Where things are](#13-where-things-are) · [Troubleshooting](#14-troubleshooting) ·
-[Uninstall](#15-uninstall)
+[Krova Cloud](#11-behind-krova-clouds-domain-mapping) ·
+[Your own web server](#12-your-own-web-server-instead-of-caddy) · [Commands](#13-all-commands) ·
+[Where things are](#14-where-things-are) · [Troubleshooting](#15-troubleshooting) ·
+[Uninstall](#16-uninstall)
 
 ## 1. Once, on GitHub: publish the first release
 
@@ -60,6 +61,9 @@ Actions, Variables) before running the workflow.
 - **Firewall:** open ports **80** and **443** (with ufw: `sudo ufw allow 80/tcp` and
   `sudo ufw allow 443/tcp`).
 
+On **Krova Cloud** (or another host whose domain mapping handles HTTPS for you), skip the DNS and
+firewall steps: see [Behind Krova Cloud's domain mapping](#11-behind-krova-clouds-domain-mapping).
+
 ## 3. Install
 
 ```sh
@@ -68,14 +72,15 @@ curl -fsSL https://raw.githubusercontent.com/rbonweb/doop/main/deploy/doop.sh | 
 
 It downloads the latest release into `/opt/doop` and asks:
 
-| Question                     | Example                           | Notes                                                                 |
-| ---------------------------- | --------------------------------- | --------------------------------------------------------------------- |
-| The address people will open | `https://doop.yourbrand.com`      | The full address, starting with `https://`                            |
-| Your email                   | `you@gmail.com`                   | Becomes the admin account. Everyone else joins through an invite link |
-| Your name and a password     |                                   | At least 8 characters, typed twice                                    |
-| Anthropic API key            | `sk-ant-...`                      | Optional, for Doop's built-in agent. Press Enter to skip              |
-| Anthropic base URL           | `https://llm-proxy.yourbrand.com` | Only if your key is for a proxy or compatible endpoint                |
-| Model names                  | `claude-opus-5`                   | Asked with a key. Enter keeps the default; change them any time later |
+| Question                     | Example                           | Notes                                                                                                        |
+| ---------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| The address people will open | `https://doop.yourbrand.com`      | The full address, starting with `https://`                                                                   |
+| Your email                   | `you@gmail.com`                   | Becomes the admin account. Everyone else joins through an invite link                                        |
+| Your name and a password     |                                   | At least 8 characters, typed twice                                                                           |
+| Anthropic API key            | `sk-ant-...`                      | Optional, for Doop's built-in agent. Press Enter to skip                                                     |
+| Anthropic base URL           | `https://llm-proxy.yourbrand.com` | Only if your key is for a proxy or compatible endpoint                                                       |
+| Model names                  | `claude-opus-5`                   | Asked with a key. Enter keeps the default; change them any time later                                        |
+| How HTTPS reaches the server | `caddy`                           | `caddy` (Caddy here gets the certificate), `edge` (Krova Cloud's domain mapping), or `own` (your web server) |
 
 Then it:
 
@@ -299,11 +304,35 @@ claude mcp add --transport http doop https://doop.yourbrand.com/mcp
 
 A browser window opens; sign in to your Doop and approve. Claude Code then works as you.
 
-## 11. Your own web server instead of Caddy
+## 11. Behind Krova Cloud's domain mapping
 
-If ports 80 and 443 are already used on the server (by nginx, for example), the install leaves
-Caddy out and Doop listens on `127.0.0.1:4400`, reachable only from the server itself. Point your
-web server at it. For nginx:
+Krova's domain mapping does HTTPS at its edge and forwards plain HTTP to a port inside the Cube. So
+Doop runs without Caddy, and the mapping points straight at it:
+
+1. At install, answer **`edge`** to "How does HTTPS reach this server?" (or set `DOOP_PROXY=edge`).
+   Caddy is left out and Doop listens on port **4400** of the Cube.
+2. In Krova, attach your domain to the Cube with **port 4400**. Leave the origin scheme on
+   **HTTP** and the PROXY protocol **off** (both are the defaults).
+3. Publish the DNS record Krova shows (a CNAME for a subdomain). On Cloudflare it must be **DNS
+   only** (grey cloud), or the certificate is never issued.
+
+Point the mapping at 4400, not 80: without Caddy nothing answers on 80, and with Caddy every
+request would loop, because Caddy redirects plain HTTP to HTTPS and the edge sends plain HTTP. You
+do not need to open 4400 to the internet; the mapping reaches it through Krova.
+
+**Already installed with Caddy?** Switch it over: in `/opt/doop/deploy/.env` set
+`COMPOSE_PROFILES=` (empty) and add `DOOP_BIND=0.0.0.0`, then:
+
+```sh
+cd /opt/doop/deploy && sudo docker compose rm -sf caddy
+sudo /opt/doop/deploy/doop.sh restart
+```
+
+## 12. Your own web server instead of Caddy
+
+If ports 80 and 443 are already used on the server (by nginx, for example), answer **`own`** at
+install. Caddy is left out and Doop listens on `127.0.0.1:4400`, reachable only from the server
+itself. Point your web server at it. For nginx:
 
 ```nginx
 server {
@@ -326,7 +355,7 @@ server {
 }
 ```
 
-## 12. All commands
+## 13. All commands
 
 Run each as `sudo /opt/doop/deploy/doop.sh <command>`; `help` lists them too.
 
@@ -344,7 +373,7 @@ Run each as `sudo /opt/doop/deploy/doop.sh <command>`; `help` lists them too.
 | `status`                       | What is running, and which release                       |
 | `logs`                         | Follows Doop's log (Ctrl+C to stop)                      |
 
-## 13. Where things are
+## 14. Where things are
 
 | Path                           | Holds                                                                         |
 | ------------------------------ | ----------------------------------------------------------------------------- |
@@ -357,21 +386,22 @@ Run each as `sudo /opt/doop/deploy/doop.sh <command>`; `help` lists them too.
 | `/srv/doop/caddy`              | HTTPS certificates                                                            |
 | `/srv/doop/updates`            | Update requests from the Admin page, and their progress                       |
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
-| What you see                                                          | What to do                                                                                                                                        |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The address does not open, or the browser warns about the certificate | Check that the A record points at this server and ports 80 and 443 are open, then look at `cd /opt/doop/deploy && sudo docker compose logs caddy` |
-| "No account found", and no way to sign up                             | Accounts come from invite links: Admin page, **Accounts**, **Invite someone**                                                                     |
-| "This invite link has expired or was already used."                   | Make a new one for that address                                                                                                                   |
-| The agent's runs fail after changing a model                          | Press **Test** next to the name on the Admin page (**Settings**): it shows what the endpoint answered                                             |
-| No **Update now** on the Admin page                                   | The card says why: this is already the latest release, or no release exists yet (see [step 1](#1-once-on-github-publish-the-first-release))       |
-| The card keeps saying "Waiting for the server to start installing"    | The updater is not running: `sudo systemctl enable --now doop-update.path`                                                                        |
-| An update failed                                                      | The previous version is back. `sudo journalctl -u doop-update -n 100` says why                                                                    |
-| Every update takes 5-10 minutes                                       | The server cannot download the image, so it builds it. Make the package public (see [step 1](#1-once-on-github-publish-the-first-release))        |
-| Doop does not start                                                   | `sudo /opt/doop/deploy/doop.sh logs` shows the error                                                                                              |
+| What you see                                                          | What to do                                                                                                                                                               |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The address does not open, or the browser warns about the certificate | Check that the A record points at this server and ports 80 and 443 are open, then look at `cd /opt/doop/deploy && sudo docker compose logs caddy`                        |
+| On Krova Cloud, the domain shows an error or redirects in a loop      | The mapping must point at port **4400** with origin scheme **HTTP**, and the install must be `edge` (no Caddy; see [section 11](#11-behind-krova-clouds-domain-mapping)) |
+| "No account found", and no way to sign up                             | Accounts come from invite links: Admin page, **Accounts**, **Invite someone**                                                                                            |
+| "This invite link has expired or was already used."                   | Make a new one for that address                                                                                                                                          |
+| The agent's runs fail after changing a model                          | Press **Test** next to the name on the Admin page (**Settings**): it shows what the endpoint answered                                                                    |
+| No **Update now** on the Admin page                                   | The card says why: this is already the latest release, or no release exists yet (see [step 1](#1-once-on-github-publish-the-first-release))                              |
+| The card keeps saying "Waiting for the server to start installing"    | The updater is not running: `sudo systemctl enable --now doop-update.path`                                                                                               |
+| An update failed                                                      | The previous version is back. `sudo journalctl -u doop-update -n 100` says why                                                                                           |
+| Every update takes 5-10 minutes                                       | The server cannot download the image, so it builds it. Make the package public (see [step 1](#1-once-on-github-publish-the-first-release))                               |
+| Doop does not start                                                   | `sudo /opt/doop/deploy/doop.sh logs` shows the error                                                                                                                     |
 
-## 15. Uninstall
+## 16. Uninstall
 
 ```sh
 cd /opt/doop/deploy && sudo docker compose down
