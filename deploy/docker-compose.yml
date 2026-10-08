@@ -1,0 +1,58 @@
+# Doop on one server: the app, its Postgres, and Caddy for HTTPS (left out
+# when the server already has a proxy on ports 80 and 443). deploy/doop.sh
+# writes deploy/.env and runs this file; see deploy/README.md.
+name: doop
+
+services:
+  doop:
+    # a release from GHCR, or doop:local when this server builds its own
+    image: ${DOOP_IMAGE:?run deploy/doop.sh setup first}
+    build:
+      context: ..
+      args:
+        DOOP_VERSION: ${DOOP_BUILD_VERSION:-dev}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://doop:${POSTGRES_PASSWORD}@db:5432/doop
+      DOOP_NOINDEX: ${DOOP_NOINDEX:-1}
+    # loopback only: the world reaches Doop through the proxy
+    ports:
+      - 127.0.0.1:${DOOP_PORT:-4400}:4400
+    volumes:
+      - ${DOOP_DATA_DIR:?}/data:/app/data
+      - ${DOOP_DATA_DIR:?}/updates:/app/updates
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: doop
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run deploy/doop.sh setup first}
+      POSTGRES_DB: doop
+    volumes:
+      - ${DOOP_DATA_DIR:?}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U doop -d doop']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  caddy:
+    image: caddy:2
+    profiles: [caddy]
+    restart: unless-stopped
+    # a certificate from Let's Encrypt for DOOP_DOMAIN, renewed by itself
+    command: caddy reverse-proxy --from ${DOOP_DOMAIN:-localhost} --to doop:4400
+    ports:
+      - 80:80
+      - 443:443
+      - 443:443/udp
+    volumes:
+      - ${DOOP_DATA_DIR:?}/caddy:/data
+    depends_on:
+      - doop
