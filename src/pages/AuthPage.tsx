@@ -116,7 +116,7 @@ const SSO_ERROR_MESSAGES: Record<string, string> = {
    ssoSignIn's own res.error check could see it — that check only ever
    catches failures of the *initiating* request (e.g. unknown providerId). */
 /* better-auth's OAuth callbacks relay an error thrown by our own user-create
-   hook (SIGNUP_EMAIL_DOMAINS, see assertSignupDomainAllowed in
+   hook (SIGNUP_EMAIL_DOMAINS / SIGNUP_ALLOWED_EMAILS, see assertSignupAllowed in
    server/auth.ts) as the ?error= code itself, message with its spaces
    turned into underscores. Neither the message's words nor an email domain
    contain underscores, so flipping them back restores it verbatim. */

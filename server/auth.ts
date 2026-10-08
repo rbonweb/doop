@@ -40,6 +40,13 @@ const SIGNUP_EMAIL_DOMAINS = (process.env.SIGNUP_EMAIL_DOMAINS || '')
   .map((s) => s.trim().toLowerCase().replace(/^@/, ''))
   .filter(Boolean)
 
+/** Exact addresses that may register, for invite-only instances. Either list
+ *  admits an address, so domains and invited individuals combine. */
+const SIGNUP_ALLOWED_EMAILS = (process.env.SIGNUP_ALLOWED_EMAILS || '')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean)
+
 /**
  * Whether an unverified account may sign in. Set REQUIRE_EMAIL_VERIFICATION
  * to "false" to let people use doop the moment they sign up — fewer people
@@ -253,23 +260,27 @@ async function linkVerifiedProviderEmail(profile: {
 }
 
 /**
- * SIGNUP_EMAIL_DOMAINS, enforced where every sign-up path converges — the
- * user row's creation — rather than on the email/password endpoint alone,
- * so an OAuth provider (Google, SSO) can't walk around the allowlist with
- * an address it would have rejected typed in. The email endpoint returns
- * the thrown error as a plain 400; the OAuth callbacks (social and
- * genericOAuth alike, as of better-auth 1.6.26) catch it and redirect back
- * to /auth with the MESSAGE as the ?error= code, spaces turned into
- * underscores — see SIGNUP_RESTRICTED_PREFIX in AuthPage.tsx, which undoes
- * that. Keep the message's first words stable.
+ * SIGNUP_EMAIL_DOMAINS and SIGNUP_ALLOWED_EMAILS, enforced where every
+ * sign-up path converges — the user row's creation — rather than on the
+ * email/password endpoint alone, so an OAuth provider (Google, SSO) can't
+ * walk around the allowlist with an address it would have rejected typed in.
+ * The email endpoint returns the thrown error as a plain 400; the OAuth
+ * callbacks (social and genericOAuth alike, as of better-auth 1.6.26) catch
+ * it and redirect back to /auth with the MESSAGE as the ?error= code, spaces
+ * turned into underscores — see SIGNUP_RESTRICTED_PREFIX in AuthPage.tsx,
+ * which undoes that. Keep the message's first words stable. The message
+ * names allowed domains but never invited addresses, which a stranger
+ * trying their luck must not learn.
  */
-function assertSignupDomainAllowed(email: string): void {
-  if (!SIGNUP_EMAIL_DOMAINS.length) return
+function assertSignupAllowed(email: string): void {
+  if (!SIGNUP_EMAIL_DOMAINS.length && !SIGNUP_ALLOWED_EMAILS.length) return
   const lowered = email.toLowerCase()
   const domain = lowered.slice(lowered.lastIndexOf('@') + 1)
-  if (SIGNUP_EMAIL_DOMAINS.includes(domain)) return
+  if (SIGNUP_EMAIL_DOMAINS.includes(domain) || SIGNUP_ALLOWED_EMAILS.includes(lowered)) return
   throw new APIError('BAD_REQUEST', {
-    message: `Sign up is restricted to ${SIGNUP_EMAIL_DOMAINS.map((d) => `@${d}`).join(', ')} email addresses.`,
+    message: SIGNUP_EMAIL_DOMAINS.length
+      ? `Sign up is restricted to ${SIGNUP_EMAIL_DOMAINS.map((d) => `@${d}`).join(', ')} email addresses.`
+      : 'Sign up is restricted to invited email addresses.',
   })
 }
 
@@ -372,7 +383,7 @@ function buildAuth() {
       user: {
         create: {
           before: async (user) => {
-            assertSignupDomainAllowed(user.email)
+            assertSignupAllowed(user.email)
           },
           after: async (user) => {
             const first = (user.name || 'Your').split(/\s+/)[0]
