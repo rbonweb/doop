@@ -174,11 +174,47 @@ function useOidcConfig(): OidcClientConfig {
    gone before anyone read it. A page load (the sign-in landing) resets it. */
 let browserSignInNotice: string | null = null
 
+/* An admin's invite link (/?invite=…) opens the sign-up form for one address;
+   the token goes with the sign-up request, which the server checks. On an
+   invite-only instance (DOOP_INVITE_ONLY) that is the only way to sign up. */
+const INVITE_HEADER = 'x-doop-invite'
+
+function useInviteOnly(): boolean {
+  const [inviteOnly, setInviteOnly] = useState(false)
+  useEffect(() => {
+    fetch('/api/signup-config')
+      .then((res) => (res.ok ? res.json() : { inviteOnly: false }))
+      .then((config: { inviteOnly?: boolean }) => setInviteOnly(Boolean(config.inviteOnly)))
+      .catch(() => {})
+  }, [])
+  return inviteOnly
+}
+type InviteState =
+  { status: 'none' } | { status: 'checking' } | { status: 'valid'; email: string } | { status: 'invalid' }
+
+function useInvite(token: string | null): InviteState {
+  const [state, setState] = useState<InviteState>(token ? { status: 'checking' } : { status: 'none' })
+  useEffect(() => {
+    if (!token) return
+    fetch(`/api/invites/${encodeURIComponent(token)}`)
+      .then(async (res) =>
+        setState(res.ok ? { status: 'valid', email: (await res.json()).email } : { status: 'invalid' }),
+      )
+      .catch(() => setState({ status: 'invalid' }))
+  }, [token])
+  return state
+}
+
 export function AuthPage() {
   const oidc = useOidcConfig()
   /* better-auth lands password-reset links on /auth/reset?token=… */
   const resetToken = location.pathname === '/auth/reset' ? new URLSearchParams(location.search).get('token') : null
-  const [mode, setMode] = useState<AuthMode>(resetToken ? 'reset' : 'signin')
+  const [inviteToken] = useState(() => new URLSearchParams(location.search).get('invite'))
+  const invite = useInvite(inviteToken)
+  const inviteOnly = useInviteOnly()
+  /* with no invite, an invite-only instance has nobody to sign up */
+  const canSignUp = !inviteOnly || invite.status === 'valid'
+  const [mode, setMode] = useState<AuthMode>(resetToken ? 'reset' : inviteToken ? 'signup' : 'signin')
   const [name, setNameField] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -191,6 +227,17 @@ export function AuthPage() {
      email, or signup with an existing one */
   const [suggestMode, setSuggestMode] = useState<'signin' | 'signup' | null>(null)
   const [busy, setBusy] = useState(false)
+
+  /* the invite fixes the address; a dead link says so and offers sign-in */
+  const [seenInvite, setSeenInvite] = useState(invite.status)
+  if (seenInvite !== invite.status) {
+    setSeenInvite(invite.status)
+    if (invite.status === 'valid') setEmail(invite.email)
+    if (invite.status === 'invalid') {
+      setMode('signin')
+      setError('This invite link has expired or was already used. Ask an admin of this Doop for a new one.')
+    }
+  }
 
   function switchMode(next: AuthMode) {
     setMode(next)
@@ -285,15 +332,24 @@ export function AuthPage() {
       }
       const res =
         mode === 'signup'
-          ? await authClient.signUp.email({ name: name.trim() || email.split('@')[0] || email, email, password })
+          ? await authClient.signUp.email({
+              name: name.trim() || email.split('@')[0] || email,
+              email,
+              password,
+              ...(inviteToken ? { fetchOptions: { headers: { [INVITE_HEADER]: inviteToken } } } : {}),
+            })
           : await authClient.signIn.email({ email, password })
       if (res.error) {
         if (mode === 'signin' && res.error.code === 'EMAIL_NOT_VERIFIED') {
           setError('This email hasn’t been verified yet.')
           setUnverified(true)
         } else if (mode === 'signin' && !(await accountExists(email))) {
-          setError('No account found for this email.')
-          setSuggestMode('signup')
+          setError(
+            canSignUp
+              ? 'No account found for this email.'
+              : 'No account found for this email. Accounts here are made from invite links: ask an admin of this Doop for one.',
+          )
+          if (canSignUp) setSuggestMode('signup')
           posthog.capture('login_no_account_found')
         } else if (mode === 'signup' && res.error.code?.startsWith('USER_ALREADY_EXISTS')) {
           setError('An account with this email already exists.')
@@ -353,56 +409,57 @@ export function AuthPage() {
             </>
           )}
         </p>
-        {(oidc.enabled || oidc.google || oidc.microsoft) && (mode === 'signin' || mode === 'signup') && (
-          <>
-            {oidc.google && (
-              <Button
-                variant="default"
-                size="lg"
-                block
-                className="border-line"
-                type="button"
-                onClick={() => socialSignIn('google')}
-                disabled={busy}
-              >
-                <GoogleMark />
-                {mode === 'signup' ? 'Sign up' : 'Sign in'} with Google
-              </Button>
-            )}
-            {oidc.microsoft && (
-              <Button
-                variant="default"
-                size="lg"
-                block
-                className="border-line"
-                type="button"
-                onClick={() => socialSignIn('microsoft')}
-                disabled={busy}
-              >
-                <MicrosoftMark />
-                {mode === 'signup' ? 'Sign up' : 'Sign in'} with Microsoft
-              </Button>
-            )}
-            {oidc.enabled && (
-              <Button
-                variant="default"
-                size="lg"
-                block
-                className="border-line"
-                type="button"
-                onClick={ssoSignIn}
-                disabled={busy}
-              >
-                {mode === 'signup' ? 'Sign up' : 'Sign in'} with {oidc.displayName}
-              </Button>
-            )}
-            <div className="flex items-center gap-3 text-[11px] uppercase tracking-wide text-ink-faint">
-              <span className="h-px flex-1 bg-line" />
-              or
-              <span className="h-px flex-1 bg-line" />
-            </div>
-          </>
-        )}
+        {(oidc.enabled || oidc.google || oidc.microsoft) &&
+          (mode === 'signin' || (mode === 'signup' && !inviteOnly)) && (
+            <>
+              {oidc.google && (
+                <Button
+                  variant="default"
+                  size="lg"
+                  block
+                  className="border-line"
+                  type="button"
+                  onClick={() => socialSignIn('google')}
+                  disabled={busy}
+                >
+                  <GoogleMark />
+                  {mode === 'signup' ? 'Sign up' : 'Sign in'} with Google
+                </Button>
+              )}
+              {oidc.microsoft && (
+                <Button
+                  variant="default"
+                  size="lg"
+                  block
+                  className="border-line"
+                  type="button"
+                  onClick={() => socialSignIn('microsoft')}
+                  disabled={busy}
+                >
+                  <MicrosoftMark />
+                  {mode === 'signup' ? 'Sign up' : 'Sign in'} with Microsoft
+                </Button>
+              )}
+              {oidc.enabled && (
+                <Button
+                  variant="default"
+                  size="lg"
+                  block
+                  className="border-line"
+                  type="button"
+                  onClick={ssoSignIn}
+                  disabled={busy}
+                >
+                  {mode === 'signup' ? 'Sign up' : 'Sign in'} with {oidc.displayName}
+                </Button>
+              )}
+              <div className="flex items-center gap-3 text-[11px] uppercase tracking-wide text-ink-faint">
+                <span className="h-px flex-1 bg-line" />
+                or
+                <span className="h-px flex-1 bg-line" />
+              </div>
+            </>
+          )}
         {mode === 'signup' && (
           <Field label="Name" labelVariant="form">
             <Input
@@ -424,6 +481,7 @@ export function AuthPage() {
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@example.com"
               autoComplete="email"
+              readOnly={mode === 'signup' && invite.status === 'valid'}
             />
           </Field>
         )}
@@ -489,14 +547,20 @@ export function AuthPage() {
                   ? 'Send reset link'
                   : 'Set new password'}
         </Button>
-        <Button
-          variant="link"
-          size="sm"
-          className="p-1.5 text-[13px] font-normal text-ink-faint hover:text-ink"
-          onClick={() => switchMode(mode === 'signin' ? 'signup' : 'signin')}
-        >
-          {mode === 'signin' ? 'No account yet? Sign up' : 'Have an account? Sign in'}
-        </Button>
+        {mode === 'signin' && !canSignUp ? (
+          <p className="p-1.5 text-center text-[13px] text-ink-faint">
+            No account yet? Ask an admin of this Doop for an invite link.
+          </p>
+        ) : (
+          <Button
+            variant="link"
+            size="sm"
+            className="p-1.5 text-[13px] font-normal text-ink-faint hover:text-ink"
+            onClick={() => switchMode(mode === 'signin' ? 'signup' : 'signin')}
+          >
+            {mode === 'signin' ? 'No account yet? Sign up' : 'Have an account? Sign in'}
+          </Button>
+        )}
       </form>
     </AuthScreen>
   )

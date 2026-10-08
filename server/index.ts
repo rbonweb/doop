@@ -21,6 +21,7 @@ import * as webhooks from './webhooks.ts'
 import { webhooksRouter } from './webhookRoutes.ts'
 import { canAccessCanvas, canManageCanvas, hasDurableCanvasAccess, isAdmin } from './access.ts'
 import { auth, initAuth, syncAdmins, getUserName, PUBLIC_ORIGIN, loginProvidersConfig } from './auth.ts'
+import { inviteFor, inviteOnly } from './instanceSettings.ts'
 import { adminRouter } from './admin.ts'
 import { communityRouter, parseListing, publishableFrames } from './community.ts'
 import { automationsRouter, startScheduler } from './automations.ts'
@@ -543,6 +544,19 @@ app.post('/api/account-exists', async (req, res) => {
    see server/auth.ts loginProvidersConfig for what's safe to expose here. */
 app.get('/api/oidc-config', (req, res) => {
   res.json(loginProvidersConfig())
+})
+
+/* whether the sign-in page may offer sign-up at all (DOOP_INVITE_ONLY) */
+app.get('/api/signup-config', (req, res) => {
+  res.json({ inviteOnly: inviteOnly() })
+})
+
+/* An invite link's address, for the sign-up form to show. Open to anyone:
+   the token is 192 random bits, and answers only for itself. */
+app.get('/api/invites/:token', (req, res) => {
+  const invite = inviteFor(req.params.token)
+  if (!invite) return res.status(404).json({ error: 'This invite link has expired or was already used.' })
+  res.json({ email: invite.email, expiresAt: invite.expiresAt })
 })
 
 /* ------------------------------------------------------------------ */

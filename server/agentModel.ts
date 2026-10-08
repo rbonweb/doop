@@ -8,6 +8,7 @@ import type { AccountKind, ModelAccount } from './modelAccounts.ts'
 import { ModelAuthError, ModelUnavailableError, runAzureTurn, runOpenAiTurn } from './openaiAgent.ts'
 import type { StopReason, TurnBlock } from './openaiAgent.ts'
 import { geminiConfig, openrouterConfig, runChatCompletionsTurn } from './chatCompletionsAgent.ts'
+import { agentModel } from './instanceSettings.ts'
 
 /**
  * Which model runs a Doop Agent turn, and on whose bill.
@@ -63,8 +64,6 @@ export class ModelConfigurationError extends ModelAuthError {}
 /* the server tier: pays for everyone's free tasks                  */
 /* ---------------------------------------------------------------- */
 
-const ANTHROPIC_MODEL = process.env.DOOP_AGENT_MODEL || 'claude-opus-5'
-
 let anthropic: Anthropic | null = null
 
 function anthropicTier(): AgentModel | null {
@@ -76,10 +75,31 @@ function anthropicTier(): AgentModel | null {
   }
   if (!anthropic) anthropic = new Anthropic()
   const client = anthropic
+  /* read per run: an admin changes it from the Admin page, no restart */
+  const model = agentModel()
   return {
     provider: 'anthropic',
-    label: `Doop (${ANTHROPIC_MODEL})`,
-    run: (req) => runAnthropicTurn(client, ANTHROPIC_MODEL, req),
+    label: `Doop (${model})`,
+    run: (req) => runAnthropicTurn(client, model, req),
+  }
+}
+
+/** One small call on the server's key, to check a model name before an admin saves it. */
+export async function checkServerModel(
+  model: string,
+): Promise<{ ok: true; model: string } | { ok: false; error: string }> {
+  if (!process.env.ANTHROPIC_API_KEY) return { ok: false, error: 'This server has no ANTHROPIC_API_KEY.' }
+  try {
+    const reply = await new Anthropic({ maxRetries: 0, timeout: 60_000 }).messages.create({
+      model,
+      max_tokens: 64,
+      messages: [{ role: 'user', content: 'Say hello in one word.' }],
+    })
+    return { ok: true, model: reply.model }
+  } catch (error) {
+    if (error instanceof Anthropic.APIError)
+      return { ok: false, error: `${error.status ?? ''} ${error.message}`.trim() }
+    return { ok: false, error: error instanceof Error ? error.message : 'The call failed.' }
   }
 }
 

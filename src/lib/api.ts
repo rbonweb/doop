@@ -516,6 +516,28 @@ export interface AdminUser {
 
 /** Instance-admin surface. Every route 404s for non-admins, so a failure here
  *  is indistinguishable from the feature not existing — which is the point. */
+/** An invite link waiting to be used (server/instanceSettings.ts). */
+export interface AdminInvite {
+  email: string
+  invitedBy: string
+  createdAt: number
+  expiresAt: number
+  link: string
+}
+
+export interface AdminModel {
+  value: string
+  default: string
+}
+
+/** The models the server's own Anthropic key runs on. */
+export interface AdminModels {
+  agent: AdminModel
+  distill: AdminModel
+  serverKey: boolean
+  baseUrl: string | null
+}
+
 export const adminApi = {
   canvases: () => req<{ total: number; canvases: AdminCanvas[] }>('/api/admin/canvases'),
   stats: () => req<{ users: number; canvases: number; frames: number }>('/api/admin/stats'),
@@ -523,6 +545,19 @@ export const adminApi = {
   update: (fresh = false) => req<UpdateInfo>(`/api/admin/update${fresh ? '?fresh=1' : ''}`),
   installUpdate: (tag: string) =>
     req<UpdateInfo>('/api/admin/update', { method: 'POST', body: JSON.stringify({ tag }) }),
+  invites: () => req<AdminInvite[]>('/api/admin/invites'),
+  invite: (email: string) =>
+    req<AdminInvite>('/api/admin/invites', { method: 'POST', body: JSON.stringify({ email }) }),
+  revokeInvite: (email: string) =>
+    req<{ ok: boolean }>(`/api/admin/invites/${encodeURIComponent(email)}`, { method: 'DELETE' }),
+  models: () => req<AdminModels>('/api/admin/models'),
+  setModels: (change: { agent?: string; distill?: string }) =>
+    req<AdminModels>('/api/admin/models', { method: 'PUT', body: JSON.stringify(change) }),
+  testModel: (model: string) =>
+    req<{ ok: true; model: string } | { ok: false; error: string }>('/api/admin/models/test', {
+      method: 'POST',
+      body: JSON.stringify({ model }),
+    }),
 
   /* better-auth's own endpoints, not ours: they swap the session cookie, so
      every caller reloads afterwards rather than trying to reconcile state. */

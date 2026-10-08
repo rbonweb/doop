@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { store } from './store.ts'
 import * as actions from './actions.ts'
+import { distillModel } from './instanceSettings.ts'
 
 /**
  * The Memory distiller: when enough undistilled design decisions pile up on a
@@ -14,7 +15,6 @@ import * as actions from './actions.ts'
  * disabled otherwise, like the resident agents.
  */
 
-const MODEL = process.env.DOOP_DISTILL_MODEL || 'claude-haiku-4-5-20251001'
 /** most recent unconsumed decisions the judge sees per run */
 const MAX_WINDOW = 15
 
@@ -43,7 +43,7 @@ async function summarizeDecision(canvasId: string, decisionId: string) {
   const decision = actions.getDecisions(canvasId).find((d) => d.id === decisionId)
   if (!anthropic || !decision || decision.summary) return
   const res = await anthropic.messages.create({
-    model: MODEL,
+    model: distillModel(),
     max_tokens: 100,
     messages: [
       {
@@ -156,7 +156,7 @@ Do not restate anything a guide already covers. Prefer an existing guide's slug;
 
   console.log(`[distill] run canvas=${canvasId} decisions=${decisions.length}`)
   const res = await anthropic.messages.create({
-    model: MODEL,
+    model: distillModel(),
     max_tokens: 1000,
     tools: [DISTILL_TOOL],
     tool_choice: { type: 'tool', name: 'distill_result' },

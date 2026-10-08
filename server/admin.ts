@@ -1,10 +1,21 @@
 import express from 'express'
-import { inArray, count } from 'drizzle-orm'
+import { inArray, count, eq, sql } from 'drizzle-orm'
 import { store } from './store.ts'
 import { isAdmin } from './access.ts'
 import { db } from './db/index.ts'
 import * as authSchema from './db/auth-schema.ts'
 import { requestUpdate, UpdateRefused, updateInfo } from './selfUpdate.ts'
+import { checkServerModel } from './agentModel.ts'
+import {
+  assertModelName,
+  createInvite,
+  inviteLink,
+  listInvites,
+  modelSettings,
+  revokeInvite,
+  setModels,
+  SettingRefused,
+} from './instanceSettings.ts'
 
 /**
  * Instance-admin surface, mounted at /api/admin (so already behind the
@@ -87,4 +98,73 @@ adminRouter.post('/update', async (req, res) => {
     console.error('[update] request failed', e)
     res.status(500).json({ error: 'The update request could not be written.' })
   }
+})
+
+/** Invites waiting to be used, each with the link to send. */
+adminRouter.get('/invites', (req, res) => {
+  res.json(listInvites().map((invite) => ({ ...invite, token: undefined, link: inviteLink(invite) })))
+})
+
+/** A new invite link for an address that has no account yet. */
+adminRouter.post('/invites', async (req, res) => {
+  const email = String(req.body?.email ?? '')
+    .trim()
+    .toLowerCase()
+  const [existing] = await db
+    .select({ id: authSchema.user.id })
+    .from(authSchema.user)
+    .where(eq(sql`lower(${authSchema.user.email})`, email))
+  if (existing) return res.status(409).json({ error: `${email} already has an account.` })
+  try {
+    const invite = createInvite(email, req.user!.email)
+    res.json({ ...invite, token: undefined, link: inviteLink(invite) })
+  } catch (e) {
+    if (e instanceof SettingRefused) return res.status(400).json({ error: e.message })
+    console.error('[invites] could not save', e)
+    res.status(500).json({ error: 'The invite could not be saved.' })
+  }
+})
+
+adminRouter.delete('/invites/:email', (req, res) => {
+  if (!revokeInvite(req.params.email)) return res.status(404).json({ error: 'No invite for that address.' })
+  res.json({ ok: true })
+})
+
+function modelsView() {
+  return {
+    ...modelSettings(),
+    /* whether the server's own key exists, and where its calls go */
+    serverKey: Boolean(process.env.ANTHROPIC_API_KEY),
+    baseUrl: process.env.ANTHROPIC_BASE_URL || null,
+  }
+}
+
+/** The models the server's Anthropic key runs on. */
+adminRouter.get('/models', (req, res) => {
+  res.json(modelsView())
+})
+
+/** Change them; an empty name goes back to the default. */
+adminRouter.put('/models', (req, res) => {
+  const change: { agent?: string; distill?: string } = {}
+  if (typeof req.body?.agent === 'string') change.agent = req.body.agent
+  if (typeof req.body?.distill === 'string') change.distill = req.body.distill
+  try {
+    setModels(change)
+  } catch (e) {
+    if (e instanceof SettingRefused) return res.status(400).json({ error: e.message })
+    throw e
+  }
+  res.json(modelsView())
+})
+
+/** Try a model name with one small call before saving it. */
+adminRouter.post('/models/test', async (req, res) => {
+  const model = String(req.body?.model ?? '').trim()
+  try {
+    assertModelName(model)
+  } catch (e) {
+    return res.status(400).json({ error: e instanceof Error ? e.message : 'not a model name' })
+  }
+  res.json(await checkServerModel(model))
 })

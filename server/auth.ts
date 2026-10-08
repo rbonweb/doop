@@ -10,6 +10,7 @@ import * as demo from './demo.ts'
 import { mailerConfigured, sendMail } from './mailer.ts'
 import { acceptInvites } from './workspaces.ts'
 import { purgeUserData } from './accountDeletion.ts'
+import { consumeInvite, INVITE_HEADER, inviteFor, inviteOnly } from './instanceSettings.ts'
 
 /**
  * better-auth on our own database: email/password + cookie sessions now;
@@ -271,16 +272,24 @@ async function linkVerifiedProviderEmail(profile: {
  * which undoes that. Keep the message's first words stable. The message
  * names allowed domains but never invited addresses, which a stranger
  * trying their luck must not learn.
+ *
+ * An invite an admin made (server/instanceSettings.ts) admits its own address
+ * whatever the lists say; its token rides the sign-up request in a header.
+ * DOOP_INVITE_ONLY closes sign-up to everyone else, lists or not.
  */
-function assertSignupAllowed(email: string): void {
-  if (!SIGNUP_EMAIL_DOMAINS.length && !SIGNUP_ALLOWED_EMAILS.length) return
+function assertSignupAllowed(email: string, inviteToken: string | null): void {
   const lowered = email.toLowerCase()
+  if (inviteToken && inviteFor(inviteToken)?.email === lowered) return
   const domain = lowered.slice(lowered.lastIndexOf('@') + 1)
   if (SIGNUP_EMAIL_DOMAINS.includes(domain) || SIGNUP_ALLOWED_EMAILS.includes(lowered)) return
+  const listed = SIGNUP_EMAIL_DOMAINS.length > 0 || SIGNUP_ALLOWED_EMAILS.length > 0
+  if (!listed && !inviteOnly()) return
   throw new APIError('BAD_REQUEST', {
     message: SIGNUP_EMAIL_DOMAINS.length
       ? `Sign up is restricted to ${SIGNUP_EMAIL_DOMAINS.map((d) => `@${d}`).join(', ')} email addresses.`
-      : 'Sign up is restricted to invited email addresses.',
+      : inviteOnly()
+        ? 'Sign up is restricted to people with an invite link. Ask an admin of this Doop for one.'
+        : 'Sign up is restricted to invited email addresses.',
   })
 }
 
@@ -382,10 +391,12 @@ function buildAuth() {
     databaseHooks: {
       user: {
         create: {
-          before: async (user) => {
-            assertSignupAllowed(user.email)
+          before: async (user, context) => {
+            assertSignupAllowed(user.email, context?.headers?.get(INVITE_HEADER) ?? null)
           },
           after: async (user) => {
+            /* the invite that let this address in is spent */
+            consumeInvite(user.email)
             const first = (user.name || 'Your').split(/\s+/)[0]
             const canvas = store.createCanvas(`${first}'s first canvas`, user.id)
             demo.markPending(canvas.id)

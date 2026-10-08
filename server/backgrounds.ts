@@ -8,6 +8,7 @@ import { nanoid } from 'nanoid'
 import sharp from 'sharp'
 import { db } from './db/index.ts'
 import * as t from './db/schema.ts'
+import { agentModel } from './instanceSettings.ts'
 import * as storage from './storage.ts'
 
 /**
@@ -99,7 +100,6 @@ const MIN_SOURCE_WIDTH = 1200
 const DISPLAY_WIDTH = 1600
 const THUMB_WIDTH = 320
 const TAGGING_WIDTH = 768
-const TAGGING_MODEL = 'claude-opus-5'
 
 const SEED_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'backgrounds.json')
 
@@ -574,7 +574,7 @@ export async function tagWithModel(jpeg: Buffer): Promise<BackgroundTags> {
   if (!taggingEnabled()) throw new Error('auto-tagging is off (ANTHROPIC_API_KEY is not set)')
   const client = new Anthropic()
   const response = await client.beta.messages.create({
-    model: TAGGING_MODEL,
+    model: agentModel(),
     max_tokens: 2048,
     betas: ['server-side-fallback-2026-07-01'],
     fallbacks: 'default',

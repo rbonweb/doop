@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { adminApi, type AdminCanvas, type AdminUser } from '../lib/api'
 import { navigate } from '../App'
 import { timeAgo } from '../lib/time'
-import { AccountMenu, ConnectCard, IconBack, IconChevron, IconGrid, IconShare } from '../components/DashShell'
+import { AccountMenu, ConnectCard, IconBack, IconChevron, IconGear, IconGrid, IconShare } from '../components/DashShell'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { Button } from '../components/ui/button'
@@ -12,6 +12,8 @@ import { Wordmark } from '../components/ui/wordmark'
 import { cardVariants } from '../components/ui/card'
 import { Skeleton } from '../components/ui/skeleton'
 import { VersionCard } from '../components/VersionCard'
+import { InvitesCard } from '../components/InvitesCard'
+import { ModelsCard } from '../components/ModelsCard'
 import {
   DashContent,
   DashHeader,
@@ -23,6 +25,8 @@ import {
   DashSubtitle,
   DashTitle,
 } from '../components/ui/dash'
+
+type Tab = 'canvases' | 'users' | 'settings'
 
 /* rows and tiles share the Card surface */
 const cardShell = cn(cardVariants(), 'overflow-hidden text-left transition-[transform,box-shadow,border-color]')
@@ -39,7 +43,7 @@ export function Admin() {
   const [data, setData] = useState<{ total: number; canvases: AdminCanvas[] } | null>(null)
   const [users, setUsers] = useState<AdminUser[] | null>(null)
   const [stats, setStats] = useState<{ users: number; canvases: number; frames: number } | null>(null)
-  const [tab, setTab] = useState<'canvases' | 'users'>('canvases')
+  const [tab, setTab] = useState<Tab>('canvases')
   const [q, setQ] = useState('')
   const [denied, setDenied] = useState(false)
 
@@ -144,6 +148,9 @@ export function Admin() {
           >
             Accounts
           </DashNavItem>
+          <DashNavItem icon={<IconGear />} active={tab === 'settings'} onClick={() => setTab('settings')}>
+            Settings
+          </DashNavItem>
         </nav>
 
         <div className="min-h-6 flex-1" />
@@ -164,21 +171,23 @@ export function Admin() {
             <IconChevron />
             <b className="font-semibold text-ink">Admin</b>
           </nav>
-          <label className="order-2 flex h-10 max-w-none flex-1 basis-full items-center gap-[9px] rounded-[10px] border border-line bg-surface px-[11px] text-ink-faint focus-within:border-ink-faint md:order-none md:h-[34px] md:max-w-[400px] md:basis-auto">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="7" />
-              <path d="m20 20-3.2-3.2" />
-            </svg>
-            <Input
-              variant="bare"
-              inputSize="auto"
-              className="flex-1 md:text-[13px]"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder={tab === 'canvases' ? 'Search canvases or owners…' : 'Search accounts…'}
-              aria-label={tab === 'canvases' ? 'Search canvases or owners' : 'Search accounts'}
-            />
-          </label>
+          {tab !== 'settings' && (
+            <label className="order-2 flex h-10 max-w-none flex-1 basis-full items-center gap-[9px] rounded-[10px] border border-line bg-surface px-[11px] text-ink-faint focus-within:border-ink-faint md:order-none md:h-[34px] md:max-w-[400px] md:basis-auto">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.2-3.2" />
+              </svg>
+              <Input
+                variant="bare"
+                inputSize="auto"
+                className="flex-1 md:text-[13px]"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder={tab === 'canvases' ? 'Search canvases or owners…' : 'Search accounts…'}
+                aria-label={tab === 'canvases' ? 'Search canvases or owners' : 'Search accounts'}
+              />
+            </label>
+          )}
           <span className="flex-1" />
           <AccountMenu />
         </DashHeader>
@@ -201,17 +210,16 @@ export function Admin() {
 
           <VersionCard />
 
-          <Tabs
-            value={tab}
-            onValueChange={(next) => setTab(next as 'canvases' | 'users')}
-            className="mt-4 flex md:hidden"
-          >
+          <Tabs value={tab} onValueChange={(next) => setTab(next as Tab)} className="mt-4 flex md:hidden">
             <TabsList className="h-10 w-full border border-line bg-surface p-1 shadow-card">
               <TabsTrigger value="canvases">
                 <IconGrid /> Canvases · {stats?.canvases ?? '…'}
               </TabsTrigger>
               <TabsTrigger value="users">
                 <IconShare /> Accounts · {stats?.users ?? '…'}
+              </TabsTrigger>
+              <TabsTrigger value="settings">
+                <IconGear /> Settings
               </TabsTrigger>
             </TabsList>
           </Tabs>
@@ -273,45 +281,54 @@ export function Admin() {
                 ))}
               </div>
             </>
+          ) : tab === 'settings' ? (
+            <ModelsCard />
           ) : (
-            <div className="mt-4 overflow-hidden rounded-[14px] border border-line bg-surface shadow-card">
-              {users === null && <p className="mt-7 text-[13.5px] text-ink-soft">…</p>}
-              {shownUsers.map((u) => (
-                <div
-                  key={u.id}
-                  className="flex flex-col items-stretch justify-between gap-2.5 border-b border-line-soft p-3.5 last:border-b-0 md:flex-row md:items-center md:gap-4 md:px-[18px] md:py-[13px]"
-                >
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2 font-display text-[14.5px] font-semibold">
-                      {u.name}
-                      {u.role === 'admin' && <Badge tone="admin">admin</Badge>}
-                      {u.banned && <Badge tone="banned">banned</Badge>}
+            <>
+              <InvitesCard />
+              <div className="mt-4 overflow-hidden rounded-[14px] border border-line bg-surface shadow-card">
+                {users === null && <p className="mt-7 text-[13.5px] text-ink-soft">…</p>}
+                {shownUsers.map((u) => (
+                  <div
+                    key={u.id}
+                    className="flex flex-col items-stretch justify-between gap-2.5 border-b border-line-soft p-3.5 last:border-b-0 md:flex-row md:items-center md:gap-4 md:px-[18px] md:py-[13px]"
+                  >
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2 font-display text-[14.5px] font-semibold">
+                        {u.name}
+                        {u.role === 'admin' && <Badge tone="admin">admin</Badge>}
+                        {u.banned && <Badge tone="banned">banned</Badge>}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12.5px] text-ink-faint">
+                        <span>{u.email}</span>
+                        <span>·</span>
+                        <span>
+                          {u.canvasCount} {u.canvasCount === 1 ? 'canvas' : 'canvases'}
+                        </span>
+                        <span>·</span>
+                        <span>joined {timeAgo(u.createdAt)}</span>
+                      </div>
                     </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12.5px] text-ink-faint">
-                      <span>{u.email}</span>
-                      <span>·</span>
-                      <span>
-                        {u.canvasCount} {u.canvasCount === 1 ? 'canvas' : 'canvases'}
-                      </span>
-                      <span>·</span>
-                      <span>joined {timeAgo(u.createdAt)}</span>
-                    </div>
-                  </div>
-                  {u.role !== 'admin' && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      {!u.banned && (
-                        <Button variant="ghost" size="sm" onClick={() => viewAs(u.id)}>
-                          View as
+                    {u.role !== 'admin' && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        {!u.banned && (
+                          <Button variant="ghost" size="sm" onClick={() => viewAs(u.id)}>
+                            View as
+                          </Button>
+                        )}
+                        <Button
+                          variant={u.banned ? 'ghost' : 'danger'}
+                          size="sm"
+                          onClick={() => setBanned(u, !u.banned)}
+                        >
+                          {u.banned ? 'Unban' : 'Ban'}
                         </Button>
-                      )}
-                      <Button variant={u.banned ? 'ghost' : 'danger'} size="sm" onClick={() => setBanned(u, !u.banned)}>
-                        {u.banned ? 'Unban' : 'Ban'}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </DashContent>
       </DashMain>
