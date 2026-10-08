@@ -36,6 +36,17 @@ activity feed.
 - **Self-host in one command** — `docker compose up`, or `bun run dev` with zero configuration
   (embedded Postgres, no external services required).
 
+## Run it on your own server
+
+**[deploy/README.md](deploy/README.md)** installs this fork on any server with Docker in one
+command: HTTPS on your own subdomain, invite-only sign-up, an admin account, nightly backups, and
+**Update now** on the Admin page. It also covers adding admins, inviting people, forgotten
+passwords, restoring a backup, changing settings and uninstalling.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rbonweb/doop/main/deploy/doop.sh | sudo bash
+```
+
 ## Quickstart
 
 ```bash
