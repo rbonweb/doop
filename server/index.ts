@@ -256,6 +256,18 @@ const app = express()
    and secure cookies see https, and OAuth metadata echoes the right origin */
 app.set('trust proxy', 1)
 
+/* DOOP_NOINDEX keeps a private instance out of search results. The header
+   rides every response, pages and images alike, and is what search engines
+   act on; robots.txt below still lets them fetch everything, because a
+   crawler refused a page never sees its noindex and may list the bare URL. */
+const NOINDEX = ['1', 'true'].includes((process.env.DOOP_NOINDEX ?? '').toLowerCase())
+if (NOINDEX) {
+  app.use((_req, res, next) => {
+    res.set('X-Robots-Tag', 'noindex, nofollow, noarchive')
+    next()
+  })
+}
+
 app.get('/healthz', (_req, res) => res.json({ ok: true }))
 
 /* ------------------------------------------------------------------ */
@@ -1749,13 +1761,18 @@ app.get('/.well-known/oauth-protected-resource', protectedResourceMetadata)
 /* path-aware variant some clients probe for a resource at /mcp */
 app.get('/.well-known/oauth-protected-resource/mcp', protectedResourceMetadata)
 
-/* robots + minimal sitemap for every deployment */
+/* robots + minimal sitemap for every deployment; a noindex one lists nothing */
 app.get('/robots.txt', (_req, res) => {
   res
     .type('text/plain')
-    .send(`User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /c/\n\nSitemap: ${PUBLIC_ORIGIN}/sitemap.xml\n`)
+    .send(
+      NOINDEX
+        ? 'User-agent: *\nAllow: /\n'
+        : `User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /c/\n\nSitemap: ${PUBLIC_ORIGIN}/sitemap.xml\n`,
+    )
 })
 app.get('/sitemap.xml', (_req, res) => {
+  if (NOINDEX) return res.status(404).end()
   res
     .type('application/xml')
     .send(
