@@ -1,0 +1,111 @@
+# Publishes every commit on main that passes CI as a release of this fork: a
+# container image on GHCR and a GitHub release of the same tag. A server set up
+# with deploy/doop.sh runs that image, and its Admin page's Update now installs
+# the latest one (server/selfUpdate.ts reads the releases; the host pulls the
+# image).
+#
+# Tags read v<package.json version>-fork.<n>: the upstream version the build
+# carries, and which build of that version this fork published. The image is
+# built for linux/amd64; set the repository variable IMAGE_PLATFORMS to
+# "linux/amd64,linux/arm64" for an ARM server too (much slower to build).
+name: Fork release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.repository != 'kgoedecke/doop' && (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Pick the tag
+        id: plan
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          existing=$(git tag --points-at "$sha" --list 'v*-fork.*' | head -n 1)
+          if [ -n "$existing" ]; then
+            echo "$existing already released this commit."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(node -p "require('./package.json').version")
+          last=$(git tag --list "v$version-fork.*" | sed "s/^v$version-fork\.//" | sort -n | tail -n 1)
+          tag="v$version-fork.$(( ${last:-0} + 1 ))"
+          previous=$(git describe --tags --abbrev=0 --match 'v*-fork.*' 2>/dev/null || true)
+          {
+            echo "Built from ${GITHUB_REPOSITORY}@${sha::12}."
+            echo
+            echo "Install it from the Admin page's **Update now**, or on the server: \`deploy/doop.sh update\`."
+            echo
+            echo "### Changes"
+            if [ -n "$previous" ]; then
+              git log --no-merges --format='- %s (%h)' "$previous..$sha"
+            else
+              git log --no-merges --format='- %s (%h)' -n 30 "$sha"
+            fi
+          } > "$RUNNER_TEMP/notes.md"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag"
+
+      - uses: docker/setup-qemu-action@v4
+        if: steps.plan.outputs.skip == 'false'
+
+      - uses: docker/setup-buildx-action@v4
+        if: steps.plan.outputs.skip == 'false'
+
+      - uses: docker/login-action@v4
+        if: steps.plan.outputs.skip == 'false'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        if: steps.plan.outputs.skip == 'false'
+        with:
+          context: .
+          platforms: ${{ vars.IMAGE_PLATFORMS || 'linux/amd64' }}
+          push: true
+          build-args: |
+            DOOP_VERSION=${{ steps.plan.outputs.tag }}
+          tags: |
+            ${{ steps.plan.outputs.image }}:${{ steps.plan.outputs.tag }}
+            ${{ steps.plan.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.plan.outputs.tag }}
+            org.opencontainers.image.revision=${{ steps.plan.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # last, so a failed build leaves no tag behind and a re-run picks the same one
+      - name: Publish the release
+        if: steps.plan.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          SHA: ${{ steps.plan.outputs.sha }}
+        run: gh release create "$TAG" --target "$SHA" --title "Doop $TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest

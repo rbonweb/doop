@@ -29,6 +29,8 @@ permissions:
 
 jobs:
   release-please:
+    # upstream's release PRs only; a fork releases through fork-release.yml
+    if: github.repository == 'kgoedecke/doop'
     runs-on: ubuntu-latest
     concurrency:
       group: release-please

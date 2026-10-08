@@ -51,6 +51,11 @@ COPY --from=build /app/dist ./dist
 COPY server ./server
 COPY shared ./shared
 
+# The release this image is (a tag such as v0.7.0-fork.3), which the Admin
+# page compares with the latest release; last, so a new tag rebuilds nothing.
+ARG DOOP_VERSION=dev
+ENV DOOP_VERSION=$DOOP_VERSION
+
 EXPOSE 4400
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://localhost:'+process.env.PORT+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 # the installed binary rather than npx: npm is not what resolves packages here
