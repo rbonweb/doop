@@ -39,9 +39,10 @@ activity feed.
 ## Run it on your own server
 
 **[deploy/README.md](deploy/README.md)** installs this fork on any server with Docker in one
-command: HTTPS on your own subdomain, invite-only sign-up, an admin account, nightly backups, and
-**Update now** on the Admin page. It also covers adding admins, inviting people, forgotten
-passwords, restoring a backup, changing settings and uninstalling.
+command: HTTPS on your own subdomain, no public sign-up (accounts come from invite links an admin
+makes), an admin account, model names you change from the Admin page, nightly backups, and **Update
+now** on the Admin page. It also covers adding admins, forgotten passwords, restoring a backup,
+changing settings and uninstalling.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rbonweb/doop/main/deploy/doop.sh | sudo bash

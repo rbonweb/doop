@@ -1,13 +1,14 @@
 # Running Doop on your own server
 
 This guide installs Doop on a Linux server that has Docker, and covers everything after: the admin
-account, inviting people, updating, backups, and changing settings.
+account, inviting people, choosing models, updating, backups, and changing settings.
 
 What you get:
 
 - Doop on your own subdomain with HTTPS, e.g. `https://doop.yourbrand.com`.
-- Invite-only sign-up: only the email addresses you list can create an account.
+- No public sign-up: accounts come only from invite links an admin makes.
 - An admin account, made during the install.
+- Model names you can change any time from the Admin page.
 - A database backup every night.
 - **Update now** on the Admin page, which installs the latest release.
 - No search engine indexing.
@@ -17,11 +18,11 @@ is managed by one script, `/opt/doop/deploy/doop.sh`.
 
 **Contents:** [First release](#1-once-on-github-publish-the-first-release) ·
 [Prepare the server](#2-prepare-the-server) · [Install](#3-install) · [Admins](#4-admins) ·
-[People](#5-people) · [Updating](#6-updating) · [Backups](#7-backups) ·
-[Changing settings](#8-changing-settings) · [Claude Code](#9-connect-claude-code) ·
-[Your own web server](#10-your-own-web-server-instead-of-caddy) · [Commands](#11-all-commands) ·
-[Where things are](#12-where-things-are) · [Troubleshooting](#13-troubleshooting) ·
-[Uninstall](#14-uninstall)
+[People](#5-people) · [Models](#6-models) · [Updating](#7-updating) · [Backups](#8-backups) ·
+[Changing settings](#9-changing-settings) · [Claude Code](#10-connect-claude-code) ·
+[Your own web server](#11-your-own-web-server-instead-of-caddy) · [Commands](#12-all-commands) ·
+[Where things are](#13-where-things-are) · [Troubleshooting](#14-troubleshooting) ·
+[Uninstall](#15-uninstall)
 
 ## 1. Once, on GitHub: publish the first release
 
@@ -67,15 +68,14 @@ curl -fsSL https://raw.githubusercontent.com/rbonweb/doop/main/deploy/doop.sh | 
 
 It downloads the latest release into `/opt/doop` and asks:
 
-| Question                     | Example                           | Notes                                                                  |
-| ---------------------------- | --------------------------------- | ---------------------------------------------------------------------- |
-| The address people will open | `https://doop.yourbrand.com`      | The full address, starting with `https://`                             |
-| Emails allowed to sign up    | `anna@gmail.com, ben@outlook.com` | Any addresses, comma-separated. You can add more later                 |
-| Your email                   | `you@gmail.com`                   | Becomes the admin account                                              |
-| Your name and a password     |                                   | At least 8 characters, typed twice                                     |
-| Anthropic API key            | `sk-ant-...`                      | Optional, for Doop's built-in agent. Press Enter to skip               |
-| Anthropic base URL           | `https://llm-proxy.yourbrand.com` | Only if your key is for a proxy or compatible endpoint                 |
-| Model names                  | `claude-opus-5`                   | Only with a custom base URL, if your endpoint names models its own way |
+| Question                     | Example                           | Notes                                                                 |
+| ---------------------------- | --------------------------------- | --------------------------------------------------------------------- |
+| The address people will open | `https://doop.yourbrand.com`      | The full address, starting with `https://`                            |
+| Your email                   | `you@gmail.com`                   | Becomes the admin account. Everyone else joins through an invite link |
+| Your name and a password     |                                   | At least 8 characters, typed twice                                    |
+| Anthropic API key            | `sk-ant-...`                      | Optional, for Doop's built-in agent. Press Enter to skip              |
+| Anthropic base URL           | `https://llm-proxy.yourbrand.com` | Only if your key is for a proxy or compatible endpoint                |
+| Model names                  | `claude-opus-5`                   | Asked with a key. Enter keeps the default; change them any time later |
 
 Then it:
 
@@ -98,14 +98,13 @@ Give every answer in the environment (an empty value skips the optional ones):
 ```sh
 curl -fsSL https://raw.githubusercontent.com/rbonweb/doop/main/deploy/doop.sh | sudo \
   DOOP_URL=https://doop.yourbrand.com \
-  DOOP_EMAILS="anna@gmail.com,ben@outlook.com" \
   DOOP_ADMIN_EMAIL=you@gmail.com DOOP_ADMIN_NAME="Your Name" DOOP_ADMIN_PASSWORD='a long password' \
   DOOP_ANTHROPIC_KEY= \
   bash
 ```
 
-With a key, also set `DOOP_ANTHROPIC_BASE_URL` (empty for Anthropic itself), and with a base URL,
-`DOOP_AGENT_MODEL` and `DOOP_DISTILL_MODEL`.
+With a key, also set `DOOP_ANTHROPIC_BASE_URL` (empty for Anthropic itself), `DOOP_AGENT_MODEL` and
+`DOOP_DISTILL_MODEL`.
 
 </details>
 
@@ -130,7 +129,8 @@ sudo /opt/doop/deploy/doop.sh admin anna@gmail.com
 ```
 
 If that address has no account yet, the command asks for a name and a password and creates it.
-Give them the password; they sign in with it.
+Give them the password; they sign in with it. (Or invite them first, as below, and run the command
+once they have signed up.)
 
 **Take the admin role away:**
 
@@ -144,18 +144,24 @@ to the server can run `doop.sh admin`, which makes it the safe way.
 
 ## 5. People
 
-**Invite someone:**
+Nobody can sign up on their own. Every account comes from an **invite link** an admin makes for
+one email address. The link opens the sign-up form for that address only, works once, and expires
+after 7 days. There is no mail server, so you send the link yourself (chat, email, anything).
+
+**Invite someone from the Admin page:** open **Accounts**, type their email under **Invite
+someone**, press **Make invite link**, then **Copy** and send it. Invites not used yet are listed
+under **Waiting to sign up**, where you can copy a link again or **Cancel** it.
+
+**Or from the server:**
 
 ```sh
 sudo /opt/doop/deploy/doop.sh invite anna@gmail.com ben@outlook.com
 ```
 
-Doop restarts for a few seconds. Then they open your address, choose **Create account**, and sign
-up with that email. Nobody checks that an address really belongs to the person you meant, so tell
-them to sign up straight away.
+It prints one link per address. Nothing restarts.
 
-Anyone not on the list who tries to sign up sees "Sign up is restricted to invited email
-addresses."
+Without a link, the sign-in page has no way to create an account; it says to ask an admin for an
+invite link.
 
 **Share a canvas** from the canvas's **Share** button: invite people who have an account, or
 turn on link sharing.
@@ -169,11 +175,38 @@ cd /opt/doop/deploy && sudo docker compose logs doop | grep -A6 "Reset your doop
 ```
 
 **Someone should no longer have access.** On the Admin page, open **Accounts** and press **Ban**
-next to them. They are signed out everywhere and cannot sign back in. To also stop an invited
-address that has not signed up yet, remove it from `SIGNUP_ALLOWED_EMAILS` (see
-[Changing settings](#8-changing-settings)).
+next to them. They are signed out everywhere and cannot sign back in. An invite nobody has used yet
+is cancelled with **Cancel** under **Waiting to sign up**.
 
-## 6. Updating
+## 6. Models
+
+Doop's built-in agent runs on the server's Anthropic key with two models:
+
+- **Doop Agent model** (default `claude-opus-5`): designs on canvases when a card or @mention runs,
+  and describes uploaded backgrounds.
+- **Style-rule model** (default `claude-haiku-4-5-20251001`): turns feedback into the style rules
+  Memory proposes. A small, fast model is enough.
+
+**Change them on the Admin page**, under **Settings**, in **Models**: type a name, press **Test**
+(one small call through your key and base URL, so a typo shows up straight away), then **Save**.
+The next run uses it; nothing restarts. **use the default** goes back to the name set at install.
+The card also shows where the key's calls go (Anthropic, or your base URL).
+
+**Or from the server:**
+
+```sh
+sudo /opt/doop/deploy/doop.sh models                        # show them
+sudo /opt/doop/deploy/doop.sh models agent claude-opus-5    # change one
+sudo /opt/doop/deploy/doop.sh models distill default        # back to the default
+```
+
+The defaults are `DOOP_AGENT_MODEL` and `DOOP_DISTILL_MODEL` in the settings file (asked at
+install). What the Admin page saves is kept in `/srv/doop/data/instance.json` and wins over them.
+
+These are the server key's models only. People who connect their own model account (in their own
+Settings) pick their models there.
+
+## 7. Updating
 
 ### From the Admin page
 
@@ -210,7 +243,7 @@ for the latest release, and installs it. To watch it work:
 sudo journalctl -u doop-update -f
 ```
 
-## 7. Backups
+## 8. Backups
 
 The database is backed up **every night at 03:17** into `/srv/doop/backups`. Backups are kept for
 14 days. Every update makes one too.
@@ -223,15 +256,15 @@ sudo /opt/doop/deploy/doop.sh restore /srv/doop/backups/doop-20261008-031700.sql
 `restore` asks before it does anything, and saves the current database first, so a restore can be
 undone by restoring that newer file.
 
-The backups hold accounts, canvases and settings. Uploaded images are kept as files in
-`/srv/doop/data` and are not part of them. **Copy the whole `/srv/doop` folder to another machine
+The backups hold accounts and canvases. Uploaded images, pending invites and the models chosen on
+the Admin page are kept as files in `/srv/doop/data` and are not part of them. **Copy the whole `/srv/doop` folder to another machine
 regularly**, for example:
 
 ```sh
 rsync -a /srv/doop/ you@backup-machine:doop-backup/
 ```
 
-## 8. Changing settings
+## 9. Changing settings
 
 Settings live in `/opt/doop/deploy/.env`. Edit the file, then restart Doop so it reads them:
 
@@ -242,11 +275,11 @@ sudo /opt/doop/deploy/doop.sh restart
 
 | Setting                                                          | What it does                                                                                                          |
 | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `SIGNUP_ALLOWED_EMAILS`                                          | Who may sign up, comma-separated (`doop.sh invite` adds to it for you)                                                |
+| `DOOP_INVITE_ONLY`                                               | `1`: accounts come only from invite links (set at install)                                                            |
 | `BETTER_AUTH_URL` and `DOOP_DOMAIN`                              | The address, e.g. `https://doop.yourbrand.com` and `doop.yourbrand.com`. Change both together                         |
 | `ANTHROPIC_API_KEY`                                              | The key for Doop's built-in agent                                                                                     |
 | `ANTHROPIC_BASE_URL`                                             | Send that key's calls to a proxy or compatible endpoint (base URL, no `/v1`)                                          |
-| `DOOP_AGENT_MODEL`, `DOOP_DISTILL_MODEL`                         | Model names, when your endpoint uses its own                                                                          |
+| `DOOP_AGENT_MODEL`, `DOOP_DISTILL_MODEL`                         | The default model names. The Admin page's **Settings** changes them without a restart                                 |
 | `RESIDENT_TASK_LIMIT`                                            | How many tasks the built-in agent runs on your key per person (setup sets a large number)                             |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM` | Optional mail server. Reset links are then emailed, and new accounts must confirm their email before they can sign in |
 | `DOOP_NOINDEX`                                                   | `1` keeps search engines out (the default)                                                                            |
@@ -256,7 +289,7 @@ disconnects every connected agent, the second stops Doop from opening its databa
 
 Doop's other settings are listed in [`.env.example`](../.env.example).
 
-## 9. Connect Claude Code
+## 10. Connect Claude Code
 
 Claude Code (or any MCP client) can design on your canvases. Connect it once:
 
@@ -266,7 +299,7 @@ claude mcp add --transport http doop https://doop.yourbrand.com/mcp
 
 A browser window opens; sign in to your Doop and approve. Claude Code then works as you.
 
-## 10. Your own web server instead of Caddy
+## 11. Your own web server instead of Caddy
 
 If ports 80 and 443 are already used on the server (by nginx, for example), the install leaves
 Caddy out and Doop listens on `127.0.0.1:4400`, reachable only from the server itself. Point your
@@ -293,48 +326,52 @@ server {
 }
 ```
 
-## 11. All commands
+## 12. All commands
 
 Run each as `sudo /opt/doop/deploy/doop.sh <command>`; `help` lists them too.
 
-| Command                | What it does                                             |
-| ---------------------- | -------------------------------------------------------- |
-| `setup`                | The install (runs once)                                  |
-| `invite EMAIL...`      | Lets these addresses sign up                             |
-| `admin EMAIL`          | Makes that account an admin, creating it if needed       |
-| `admin --remove EMAIL` | Takes the admin role away                                |
-| `update [TAG]`         | Backs up, then installs the latest release (or that one) |
-| `backup`               | Backs up the database now                                |
-| `restore FILE`         | Replaces the database with a backup, after asking        |
-| `restart`              | Restarts Doop, applying changes made to `deploy/.env`    |
-| `status`               | What is running, and which release                       |
-| `logs`                 | Follows Doop's log (Ctrl+C to stop)                      |
+| Command                        | What it does                                             |
+| ------------------------------ | -------------------------------------------------------- |
+| `setup`                        | The install (runs once)                                  |
+| `invite EMAIL...`              | Prints an invite link for each address                   |
+| `admin EMAIL`                  | Makes that account an admin, creating it if needed       |
+| `admin --remove EMAIL`         | Takes the admin role away                                |
+| `update [TAG]`                 | Backs up, then installs the latest release (or that one) |
+| `backup`                       | Backs up the database now                                |
+| `restore FILE`                 | Replaces the database with a backup, after asking        |
+| `restart`                      | Restarts Doop, applying changes made to `deploy/.env`    |
+| `models [agent\|distill NAME]` | Shows the models, or changes one (`default` goes back)   |
+| `status`                       | What is running, and which release                       |
+| `logs`                         | Follows Doop's log (Ctrl+C to stop)                      |
 
-## 12. Where things are
+## 13. Where things are
 
-| Path                    | Holds                                                   |
-| ----------------------- | ------------------------------------------------------- |
-| `/opt/doop`             | The code, at the installed release                      |
-| `/opt/doop/deploy/.env` | Settings and secrets                                    |
-| `/srv/doop/data`        | Uploaded images and frame thumbnails                    |
-| `/srv/doop/postgres`    | The database                                            |
-| `/srv/doop/backups`     | Database backups                                        |
-| `/srv/doop/caddy`       | HTTPS certificates                                      |
-| `/srv/doop/updates`     | Update requests from the Admin page, and their progress |
+| Path                           | Holds                                                                         |
+| ------------------------------ | ----------------------------------------------------------------------------- |
+| `/opt/doop`                    | The code, at the installed release                                            |
+| `/opt/doop/deploy/.env`        | Settings and secrets                                                          |
+| `/srv/doop/data`               | Uploaded images and frame thumbnails                                          |
+| `/srv/doop/data/instance.json` | Invite links waiting to be used, and the model names chosen on the Admin page |
+| `/srv/doop/postgres`           | The database                                                                  |
+| `/srv/doop/backups`            | Database backups                                                              |
+| `/srv/doop/caddy`              | HTTPS certificates                                                            |
+| `/srv/doop/updates`            | Update requests from the Admin page, and their progress                       |
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | What you see                                                          | What to do                                                                                                                                        |
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | The address does not open, or the browser warns about the certificate | Check that the A record points at this server and ports 80 and 443 are open, then look at `cd /opt/doop/deploy && sudo docker compose logs caddy` |
-| "Sign up is restricted to invited email addresses."                   | Invite that address: `doop.sh invite`                                                                                                             |
+| "No account found", and no way to sign up                             | Accounts come from invite links: Admin page, **Accounts**, **Invite someone**                                                                     |
+| "This invite link has expired or was already used."                   | Make a new one for that address                                                                                                                   |
+| The agent's runs fail after changing a model                          | Press **Test** next to the name on the Admin page (**Settings**): it shows what the endpoint answered                                             |
 | No **Update now** on the Admin page                                   | The card says why: this is already the latest release, or no release exists yet (see [step 1](#1-once-on-github-publish-the-first-release))       |
 | The card keeps saying "Waiting for the server to start installing"    | The updater is not running: `sudo systemctl enable --now doop-update.path`                                                                        |
 | An update failed                                                      | The previous version is back. `sudo journalctl -u doop-update -n 100` says why                                                                    |
 | Every update takes 5-10 minutes                                       | The server cannot download the image, so it builds it. Make the package public (see [step 1](#1-once-on-github-publish-the-first-release))        |
 | Doop does not start                                                   | `sudo /opt/doop/deploy/doop.sh logs` shows the error                                                                                              |
 
-## 14. Uninstall
+## 15. Uninstall
 
 ```sh
 cd /opt/doop/deploy && sudo docker compose down

@@ -6,17 +6,18 @@
 #   or, from a clone of the repository:   sudo ./deploy/doop.sh setup
 #
 #   setup             ask a few questions, generate the secrets, start Doop
-#   invite EMAIL...   let these addresses create an account
+#   invite EMAIL...   make an invite link for each address (nobody signs up without one)
 #   admin EMAIL       make an account an admin, creating it if it does not exist
 #   admin --remove EMAIL   take the admin role away again
 #   update [TAG]      back up the database, then install the latest release (or TAG)
 #   backup            save the database to $DOOP_DATA_DIR/backups
 #   restore FILE      replace the database with a backup (asks first)
 #   restart           restart Doop, applying any change made to deploy/.env
+#   models [agent|distill NAME]   show or change the models (also on the Admin page)
 #   status            what runs, and which release
 #   logs              follow the app's logs
 #
-# Every answer can be given in the environment instead (DOOP_URL, DOOP_EMAILS,
+# Every answer can be given in the environment instead (DOOP_URL,
 # DOOP_ADMIN_EMAIL, DOOP_ADMIN_NAME, DOOP_ADMIN_PASSWORD, DOOP_ANTHROPIC_KEY,
 # DOOP_ANTHROPIC_BASE_URL, DOOP_AGENT_MODEL, DOOP_DISTILL_MODEL, DOOP_PROXY=caddy|own,
 # DOOP_DATA_DIR), which is how it runs with no terminal. Everything it keeps
@@ -233,39 +234,40 @@ restart() {
 
 # --------------------------------------------------------------------- people
 
-# Add addresses to SIGNUP_ALLOWED_EMAILS, restarting the app when any is new.
-allow() {
-  local current e added=0
-  current=$(env_get SIGNUP_ALLOWED_EMAILS)
-  for e in ${1//,/ }; do
-    if [[ ",$current," == *",$e,"* ]]; then continue; fi
-    current=${current:+$current,}$e
-    added=1
-  done
-  if ((added)); then
-    env_set SIGNUP_ALLOWED_EMAILS "$current"
-    compose up -d --no-build doop >/dev/null
-    wait_healthy || fail "Doop did not come back after the change; see: $DEPLOY_DIR/doop.sh logs"
-  fi
+# The instance settings the Admin page also changes: invites and models
+# (server/instanceCli.ts, run inside the app, so nothing restarts).
+instance() { compose exec -T doop node_modules/.bin/tsx server/instanceCli.ts "$@"; }
+
+has_account() {
+  [[ $(sql 'select count(*) from "user" where lower(email) = :'"'email'" email="$1") != 0 ]]
 }
 
 invite() {
   need_setup
   [[ $# -gt 0 ]] || fail "Usage: doop.sh invite EMAIL..."
-  local list
+  local list e fresh=()
   list=$(emails "$*")
-  allow "$list"
-  note "These can now create their account at $(env_get BETTER_AUTH_URL): ${list//,/, }"
-  note "Nobody checks who owns an address, so tell them to sign up straight away."
+  for e in ${list//,/ }; do
+    if has_account "$e"; then note "$e already has an account."; else fresh+=("$e"); fi
+  done
+  ((${#fresh[@]})) || return 0
+  note "Send each person their link. It opens the sign-up form for that address, works once and expires in 7 days:"
+  instance invite "${fresh[@]}"
 }
 
-# Through the app's own sign-up, so the account is made exactly as in the browser.
+models() {
+  need_setup
+  instance models "$@"
+}
+
+# Through the app's own sign-up, with an invite, so the account is made
+# exactly as one made in the browser.
 create_account() {
-  printf '%s\n%s\n%s\n' "$1" "$2" "$3" | compose exec -T doop node -e '
-const [email, name, password] = require("fs").readFileSync(0, "utf8").split("\n")
+  printf '%s\n%s\n%s\n%s\n' "$1" "$2" "$3" "$4" | compose exec -T doop node -e '
+const [email, name, password, invite] = require("fs").readFileSync(0, "utf8").split("\n")
 fetch("http://127.0.0.1:4400/api/auth/sign-up/email", {
   method: "POST",
-  headers: { "content-type": "application/json", origin: process.env.BETTER_AUTH_URL },
+  headers: { "content-type": "application/json", origin: process.env.BETTER_AUTH_URL, "x-doop-invite": invite },
   body: JSON.stringify({ email, name, password }),
 })
   .then(async (res) => { if (!res.ok) throw new Error(await res.text()) })
@@ -286,12 +288,13 @@ admin() {
   [[ $# -eq 1 ]] || fail "Usage: doop.sh admin EMAIL"
   local email
   email=$(emails "$1")
-  if [[ $(sql 'select count(*) from "user" where lower(email) = :'"'email'" email="$email") == 0 ]]; then
+  if ! has_account "$email"; then
     say "$email has no account yet; creating it"
     ask DOOP_ADMIN_NAME "Name for $email"
     ask_password DOOP_ADMIN_PASSWORD "Password for $email (8 characters or more)"
-    allow "$email"
-    create_account "$email" "$DOOP_ADMIN_NAME" "$DOOP_ADMIN_PASSWORD" || fail "The account could not be created"
+    local token
+    token=$(instance invite-token "$email") || fail "The account could not be created"
+    create_account "$email" "$DOOP_ADMIN_NAME" "$DOOP_ADMIN_PASSWORD" "$token" || fail "The account could not be created"
   fi
   [[ -n $(sql "update \"user\" set role = 'admin' where lower(email) = :'email' returning id" email="$email") ]] ||
     fail "No account for $email"
@@ -454,22 +457,19 @@ setup() {
     fail "Give the full https:// address of the (sub)domain, with no path, e.g. https://doop.yourbrand.com"
   domain=${BASH_REMATCH[1]}
 
-  ask DOOP_EMAILS "Email addresses allowed to sign up, comma-separated (more later with: invite)"
-  local allowed admin_email
-  allowed=$(emails "$DOOP_EMAILS")
-  ask DOOP_ADMIN_EMAIL "Your email, for the admin account" "${allowed%%,*}"
+  ask DOOP_ADMIN_EMAIL "Your email, for the admin account (everyone else joins through an invite link)"
+  local admin_email
   admin_email=$(emails "$DOOP_ADMIN_EMAIL")
-  if [[ ",$allowed," != *",$admin_email,"* ]]; then allowed+=",$admin_email"; fi
+  [[ $admin_email != *,* ]] || fail "Give one email address for the admin account"
 
   ask DOOP_ANTHROPIC_KEY "Anthropic API key for the built-in agent (Enter to skip)"
   local base=
   if [[ -n $DOOP_ANTHROPIC_KEY ]]; then
     ask DOOP_ANTHROPIC_BASE_URL "Anthropic base URL, for a proxy or compatible endpoint (Enter for Anthropic itself)"
     base=${DOOP_ANTHROPIC_BASE_URL%/}
-    if [[ -n $base ]]; then
-      ask DOOP_AGENT_MODEL "Model name for the agent" claude-opus-5
-      ask DOOP_DISTILL_MODEL "Model name for style-rule suggestions" claude-haiku-4-5-20251001
-    fi
+    note "Model names (Enter keeps the one shown; you can change them any time on the Admin page):"
+    ask DOOP_AGENT_MODEL "  Model for the agent" claude-opus-5
+    ask DOOP_DISTILL_MODEL "  Model for style-rule suggestions" claude-haiku-4-5-20251001
   fi
 
   local proxy=${DOOP_PROXY:-}
@@ -490,7 +490,7 @@ setup() {
       echo "# Written by deploy/doop.sh setup on $(date -u +%F). It holds this server's secrets: keep it private."
       echo "BETTER_AUTH_URL=$url"
       echo "DOOP_DOMAIN=$domain"
-      echo "SIGNUP_ALLOWED_EMAILS=$allowed"
+      echo "DOOP_INVITE_ONLY=1"
       echo "BETTER_AUTH_SECRET=$(secret)"
       echo "POSTGRES_PASSWORD=$(secret)"
       echo "DOOP_DATA_DIR=$data"
@@ -501,11 +501,9 @@ setup() {
       if [[ -n $DOOP_ANTHROPIC_KEY ]]; then
         echo "ANTHROPIC_API_KEY=$DOOP_ANTHROPIC_KEY"
         echo "RESIDENT_TASK_LIMIT=1000000"
-        if [[ -n $base ]]; then
-          echo "ANTHROPIC_BASE_URL=$base"
-          echo "DOOP_AGENT_MODEL=$DOOP_AGENT_MODEL"
-          echo "DOOP_DISTILL_MODEL=$DOOP_DISTILL_MODEL"
-        fi
+        echo "DOOP_AGENT_MODEL=$DOOP_AGENT_MODEL"
+        echo "DOOP_DISTILL_MODEL=$DOOP_DISTILL_MODEL"
+        if [[ -n $base ]]; then echo "ANTHROPIC_BASE_URL=$base"; fi
       fi
     } >"$ENV_FILE"
   )
@@ -533,7 +531,7 @@ setup() {
     note "                 Ports 80/443 are taken here, so point your proxy at http://127.0.0.1:${DOOP_PORT:-4400}"
     note "                 (deploy/README.md has an nginx example)"
   fi
-  note "  Invite         $DEPLOY_DIR/doop.sh invite friend@example.com"
+  note "  Invite         Admin page -> Accounts -> Invite someone, or $DEPLOY_DIR/doop.sh invite friend@example.com"
   note "  Make an admin  $DEPLOY_DIR/doop.sh admin someone@example.com"
   if ((updater)); then
     note "  Update         Admin page -> Update now, or $DEPLOY_DIR/doop.sh update"
@@ -571,6 +569,7 @@ main() {
     backup) backup ;;
     restore) restore "$@" ;;
     restart) restart ;;
+    models) models "$@" ;;
     status) status ;;
     logs) compose logs -f --tail=200 "${@:-doop}" ;;
     help | -h | --help) usage ;;
