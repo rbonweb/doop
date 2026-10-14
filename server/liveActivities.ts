@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { Router, type NextFunction, type Request, type Response } from 'express'
 import { and, eq, lt } from 'drizzle-orm'
 import { z } from 'zod'
 import { db } from './db/index.ts'
@@ -10,6 +10,18 @@ import { agentActivityState } from '../shared/agentActivity.ts'
 import { apnsConfigured, sendLiveActivityPush } from './apns.ts'
 
 export const liveActivitiesRouter = Router()
+
+/** Request log for the Live Activity endpoints. Mounted ahead of the API auth
+ *  middleware so a registration that fails with 401 (the app launched in the
+ *  background before its session was restored) shows up next to the 400/403/503
+ *  answers from this router. Logs the method, route shape and status; never a token. */
+export function logLiveActivityRequests(req: Request, res: Response, next: NextFunction) {
+  res.on('finish', () => {
+    const path = req.path.replace(/[a-f0-9]{32,}/g, '<token>')
+    console.log(`[live-activities] ${req.method} ${path} -> ${res.statusCode}`)
+  })
+  next()
+}
 const registration = z.object({
   canvasId: z.string().min(1).max(100),
   token: z.string().regex(/^[a-f0-9]{32,512}$/),
@@ -17,6 +29,40 @@ const registration = z.object({
 })
 
 liveActivitiesRouter.get('/config', (_req, res) => res.json({ enabled: apnsConfigured() }))
+// Registered before `/:id`, which would otherwise swallow the literal path.
+const starter = z.object({
+  token: z.string().regex(/^[a-f0-9]{32,512}$/),
+  environment: z.enum(['sandbox', 'production']),
+  origin: z.string().url().max(200),
+})
+/** A push-to-start token: lets the server open an activity for any canvas the
+ *  user belongs to. Refreshed on every app launch; retired after 30 days. */
+liveActivitiesRouter.put('/push-to-start', async (req, res) => {
+  const parsed = starter.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: 'invalid push-to-start registration' })
+  if (!apnsConfigured())
+    return res.status(503).json({ error: 'Live Activity push delivery is not configured on this server' })
+  const values = { ...parsed.data, userId: req.user!.id, expiresAt: Date.now() + 30 * 24 * 60 * 60_000 }
+  await db
+    .insert(liveActivityStarters)
+    .values(values)
+    .onConflictDoUpdate({
+      target: liveActivityStarters.token,
+      set: {
+        userId: values.userId,
+        environment: values.environment,
+        origin: values.origin,
+        expiresAt: values.expiresAt,
+      },
+    })
+  res.json({ ok: true })
+})
+liveActivitiesRouter.delete('/push-to-start/:token', async (req, res) => {
+  await db
+    .delete(liveActivityStarters)
+    .where(and(eq(liveActivityStarters.token, req.params.token), eq(liveActivityStarters.userId, req.user!.id)))
+  res.json({ ok: true })
+})
 liveActivitiesRouter.put('/:id', async (req, res) => {
   const parsed = registration.safeParse(req.body)
   if (!parsed.success || !/^[\w-]{1,100}$/.test(req.params.id))
@@ -53,39 +99,6 @@ liveActivitiesRouter.put('/:id', async (req, res) => {
   } catch {
     res.status(409).json({ error: 'could not register live activity' })
   }
-})
-const starter = z.object({
-  token: z.string().regex(/^[a-f0-9]{32,512}$/),
-  environment: z.enum(['sandbox', 'production']),
-  origin: z.string().url().max(200),
-})
-/** A push-to-start token: lets the server open an activity for any canvas the
- *  user belongs to. Refreshed on every app launch; retired after 30 days. */
-liveActivitiesRouter.put('/push-to-start', async (req, res) => {
-  const parsed = starter.safeParse(req.body)
-  if (!parsed.success) return res.status(400).json({ error: 'invalid push-to-start registration' })
-  if (!apnsConfigured())
-    return res.status(503).json({ error: 'Live Activity push delivery is not configured on this server' })
-  const values = { ...parsed.data, userId: req.user!.id, expiresAt: Date.now() + 30 * 24 * 60 * 60_000 }
-  await db
-    .insert(liveActivityStarters)
-    .values(values)
-    .onConflictDoUpdate({
-      target: liveActivityStarters.token,
-      set: {
-        userId: values.userId,
-        environment: values.environment,
-        origin: values.origin,
-        expiresAt: values.expiresAt,
-      },
-    })
-  res.json({ ok: true })
-})
-liveActivitiesRouter.delete('/push-to-start/:token', async (req, res) => {
-  await db
-    .delete(liveActivityStarters)
-    .where(and(eq(liveActivityStarters.token, req.params.token), eq(liveActivityStarters.userId, req.user!.id)))
-  res.json({ ok: true })
 })
 liveActivitiesRouter.delete('/:id', async (req, res) => {
   await db
@@ -167,6 +180,7 @@ export async function deliverLiveActivities(send = sendLiveActivityPush) {
       }
       try {
         const status = await send(row.token, row.environment, { aps })
+        console.log(`[live-activities] ${aps.event} push for ${row.id} -> ${status} (${content.phase})`)
         if (status === 410 || status === 400 || (status === 200 && ended)) {
           await db.delete(liveActivities).where(eq(liveActivities.id, row.id))
         } else if (status === 200) {
@@ -176,13 +190,19 @@ export async function deliverLiveActivities(send = sendLiveActivityPush) {
             .where(eq(liveActivities.id, row.id))
         }
         // Transient errors retain the row; the next tick retries. Never log the token.
-      } catch {
-        /* APNs/network failure must not affect canvas mutations. */
+      } catch (err) {
+        /* APNs/network failure must not affect canvas mutations; the row stays for the next tick. */
+        console.log(`[live-activities] ${aps.event} push for ${row.id} failed (${content.phase}): ${describe(err)}`)
       }
     })
   } finally {
     processing = false
   }
+}
+
+/** Error text for the delivery log: message only, never a token or payload. */
+function describe(err: unknown) {
+  return err instanceof Error ? err.message : String(err)
 }
 
 /** Open an activity on every registered device for each agent task that just
@@ -214,17 +234,21 @@ async function startLiveActivities(send: typeof sendLiveActivityPush, deadline: 
         'attributes-type': 'AgentActivityAttributes',
         attributes: { canvasID: canvas.id, serverOrigin: device.origin },
         alert: { title: state.canvasName, body: `${state.agentName}: ${state.status}` },
-        'stale-date': now + 120,
+        // The first update can only follow once the woken app has registered the
+        // activity's token, which takes a minute or two on a sleeping phone.
+        'stale-date': now + 300,
       }
       try {
         const status = await send(device.token, device.environment, { aps }, 10)
+        console.log(`[live-activities] start push for canvas ${canvas.id} -> ${status} (${state.phase})`)
         if (status === 200) announced.set(`${device.token}/${canvas.id}`, state.startedAt)
         else if (status === 410 || status === 400) {
           await db.delete(liveActivityStarters).where(eq(liveActivityStarters.token, device.token))
           break
         }
-      } catch {
+      } catch (err) {
         /* retried on the next tick */
+        console.log(`[live-activities] start push for canvas ${canvas.id} failed (${state.phase}): ${describe(err)}`)
       }
     }
   })

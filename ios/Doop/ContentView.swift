@@ -102,6 +102,8 @@ private struct LibraryView: View {
     @State private var deleting: CanvasSummary?
     @State private var renaming: CanvasSummary?
     @State private var busy = false
+    /// A Live Activity tapped before the library loaded; opened after the first reload.
+    @State private var pendingLink: (canvasID: String, serverOrigin: String)?
 
     private var filtered: [CanvasSummary] {
         app.canvases.filter { canvas in
@@ -183,6 +185,7 @@ private struct LibraryView: View {
             .refreshable { await app.reload() }
             .task {
                 await app.reload()
+                if let link = pendingLink { pendingLink = nil; open(link) }
                 #if DEBUG
                 // -openCanvas <id> jumps straight to a canvas (simulator automation).
                 if path.isEmpty, let id = UserDefaults.standard.string(forKey: "openCanvas"), let canvas = app.canvases.first(where: { $0.id == id }) {
@@ -192,6 +195,10 @@ private struct LibraryView: View {
             }
 
             .navigationDestination(for: CanvasSummary.self) { canvas in NativeCanvasView(summary: canvas, client: app.client) }
+            .onOpenURL { url in
+                guard let link = CanvasLink.parse(url) else { return }
+                if app.canvases.isEmpty { pendingLink = link } else { open(link) }
+            }
             .alert("New canvas", isPresented: $creating) {
                 TextField("Canvas name", text: $title)
                 Button("Cancel", role: .cancel) {}
@@ -238,6 +245,14 @@ private struct LibraryView: View {
             }
         }.frame(maxWidth: 600).padding(.horizontal, 20).padding(.top, 10)
             .frame(maxWidth: .infinity)
+    }
+
+    /// Opens the canvas a Live Activity links to, if it lives on this app's server.
+    private func open(_ link: (canvasID: String, serverOrigin: String)) {
+        guard link.serverOrigin == app.client.server.origin.absoluteString,
+              let canvas = app.canvases.first(where: { $0.id == link.canvasID }) else { return }
+        showingAgents = false
+        path = [canvas]
     }
 
     private func create() {
@@ -474,6 +489,7 @@ struct WorkingAgentsView: View {
     }
 
     @MainActor private func refresh() async {
+        let openBefore = AgentLiveActivities.shared.openActivityIDs(client: client)
         do {
             let result: [CanvasSummary] = try await client.get("/api/canvases")
             guard !Task.isCancelled else { return }
@@ -485,6 +501,7 @@ struct WorkingAgentsView: View {
                 return
             }
             canvases = result; updatedAt = Date(); error = nil
+            await AgentLiveActivities.shared.reconcile(canvases: result, openBefore: openBefore, client: client)
         } catch {
             guard !Task.isCancelled else { return }
             canvases = []; updatedAt = nil

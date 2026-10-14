@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.8.0](https://github.com/kgoedecke/doop/compare/v0.7.0...v0.8.0) (2026-10-13)
+
+
+### Features
+
+* **canvas:** add named pages within canvases ([#235](https://github.com/kgoedecke/doop/issues/235)) ([0e3484c](https://github.com/kgoedecke/doop/commit/0e3484cfcbb8f60b17ffcb188a6dbe16590f0a48))
+* **comments:** email collaborators about new comments and replies ([e402606](https://github.com/kgoedecke/doop/commit/e402606987c4f1c3e267679753155485c41af107))
+* **connect:** pick the agent first in Connect AI, nudge to connect a plan from the prompt bar ([#226](https://github.com/kgoedecke/doop/issues/226)) ([aa1442b](https://github.com/kgoedecke/doop/commit/aa1442bc9aa3e836fbe6025e6ad3ad85461e9c70))
+* **ios:** add native app with agent status and Live Activities ([#173](https://github.com/kgoedecke/doop/issues/173)) ([94afcd7](https://github.com/kgoedecke/doop/commit/94afcd75b12de12c9fab84898b8716fdfb010453))
+* **ios:** end Live Activities as soon as the app sees the task is over ([#243](https://github.com/kgoedecke/doop/issues/243)) ([6f1aabf](https://github.com/kgoedecke/doop/commit/6f1aabf4316167bc0502f8e165ca3b09a0c4e56d))
+* **ios:** redesign Live Activity with doop logo and step log ([#241](https://github.com/kgoedecke/doop/issues/241)) ([fa2a02a](https://github.com/kgoedecke/doop/commit/fa2a02a71c8afc4eafa5bfecc6ebe4e6385321e0))
+* **server:** make per-tool rate limits configurable via env vars ([#176](https://github.com/kgoedecke/doop/issues/176)) ([a7322df](https://github.com/kgoedecke/doop/commit/a7322df187e338007efdc7c067fc53329264f66b))
+* **ui:** dark mode with theme tokens, zero-flash boot and contrast fixes ([#164](https://github.com/kgoedecke/doop/issues/164)) ([1a3c3a6](https://github.com/kgoedecke/doop/commit/1a3c3a6678d88e30d3359a305bdcd64fd2fee625))
+* **webhooks:** add per-user outbound webhooks for canvas events ([#230](https://github.com/kgoedecke/doop/issues/230)) ([74df768](https://github.com/kgoedecke/doop/commit/74df76835554593a7dd2f7b7e583c232e21ba863))
+
+
+### Bug Fixes
+
+* **agent:** recover interrupted model streams ([#223](https://github.com/kgoedecke/doop/issues/223)) ([67ee169](https://github.com/kgoedecke/doop/commit/67ee169b431859774b3a186bdbde49f233c373a2))
+* **identity:** keep one client id when localStorage writes throw ([a939c69](https://github.com/kgoedecke/doop/commit/a939c690f2787f1beb61c272b144808f7c3e5cdb))
+* **integrations:** stop the Linear tile shrinking in Safari ([#227](https://github.com/kgoedecke/doop/issues/227)) ([e1f3861](https://github.com/kgoedecke/doop/commit/e1f3861d6af6bf6b7a06b476b2cb67bc5e4cf8d1))
+* **ios:** only reconcile activities open before the fetch ([1e9136d](https://github.com/kgoedecke/doop/commit/1e9136dc0a837452821c837c0ea6cd7c9d140fb8))
+* **ios:** pick the APNs environment from the provisioning profile ([#237](https://github.com/kgoedecke/doop/issues/237)) ([32f62a2](https://github.com/kgoedecke/doop/commit/32f62a25f95672107529c4db1ab94a9255a50df3))
+* **live-activities:** log every push outcome ([#240](https://github.com/kgoedecke/doop/issues/240)) ([9036777](https://github.com/kgoedecke/doop/commit/90367770441e8f8649b83135e40ba603518e755f))
+* **live-activities:** log registration requests ahead of auth ([#238](https://github.com/kgoedecke/doop/issues/238)) ([ce76cb7](https://github.com/kgoedecke/doop/commit/ce76cb75dd4a93ea00f428c1b05834db4e18170b))
+* **live-activities:** register push-to-start tokens on their own route ([#236](https://github.com/kgoedecke/doop/issues/236)) ([5be9651](https://github.com/kgoedecke/doop/commit/5be9651b0880a5a79a179ba10f599f4425e5ab92))
+* **pages:** rehome frames whose page is gone on boot ([178dff9](https://github.com/kgoedecke/doop/commit/178dff9100ddb9b244ae94423b5a91e9ee435f7d))
+* **ui:** use theme colors in element action popover ([1c20765](https://github.com/kgoedecke/doop/commit/1c2076529fc583a803f9becf0548b694509b18aa))
+
 ## [0.7.0](https://github.com/kgoedecke/doop/compare/v0.6.0...v0.7.0) (2026-10-01)
 
 
