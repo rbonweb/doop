@@ -15,7 +15,7 @@ import { Client, startServer, type Server } from './harness.ts'
    whole range clear of every other test file's port (they run in parallel —
    a second server on a taken port passes /healthz against the WRONG instance
    and the test then reads someone else's database). */
-const PORT = 4993
+const PORT = 5040
 
 let server: Server
 let boss: Client
