@@ -3,6 +3,7 @@ import { useStore } from '../lib/store'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { FrameView } from './FrameView'
+import { useFrameMountScheduler } from '../lib/frameMounting'
 import { FlowOverlay } from './FlowOverlay'
 import { GhostFrames } from './GhostFrames'
 import { Cursors } from './Cursors'
@@ -44,6 +45,8 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   const bgAt = useRef({ x: 0, y: 0 })
   /* iframe oversampling factor — bumped only once the zoom settles */
   const [raster, setRaster] = useState(1)
+  /* frame iframes mount progressively, near the viewport first (lib/frameMounting.ts) */
+  useFrameMountScheduler(ref)
   const fitted = useRef(false)
 
   /* Viewport → DOM without React: no component subscribes to the viewport, so

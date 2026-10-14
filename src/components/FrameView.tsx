@@ -8,6 +8,7 @@ import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
+import { useFrameMounted } from '../lib/frameMounting'
 import { recordCreate, recordUpdate, recordUpdates, trackSave } from '../lib/history'
 import { snapFrame } from '../lib/snap'
 import { gesture } from '../lib/gesture'
@@ -107,6 +108,11 @@ interface HoverHit {
    this component — memo holds as long as the frame and raster are unchanged. */
 export const FrameView = memo(function FrameView({ frame, raster }: { frame: Frame; raster: number }) {
   const selected = useStore((s) => s.selectedIds.includes(frame.id))
+  /* the document renders once the Stage's scheduler reaches this frame, or at once when someone selects it */
+  const scheduled = useFrameMounted(frame.id)
+  const [selectedOnce, setSelectedOnce] = useState(false)
+  if (selected && !selectedOnce) setSelectedOnce(true)
+  const mounted = scheduled || selectedOnce
   /* space held: the shield stays up even in edit mode, so the press reaches
      the Stage and pans instead of vanishing into the editable iframe */
   const panMode = useStore((s) => s.panMode)
@@ -684,7 +690,7 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
             )}
             style={duping || (dupKeyHeld && !editing) ? { cursor: DUP_CURSOR } : undefined}
             onPointerDown={(e) => startDrag(e, 'move', true)}
-            onDoubleClick={() => canEdit && !editing && enterEdit()}
+            onDoubleClick={() => canEdit && !editing && runtimeReady && enterEdit()}
             onPointerMove={(e) => {
               if (editing || dragging || !frame.html || !runtimeReady) return
               /* screen px → design px: the frame lives inside the zoomed stage */
@@ -694,20 +700,22 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
             }}
             onPointerLeave={clearHover}
           >
-            <iframe
-              ref={iframeRef}
-              className="block border-none bg-white"
-              title={frame.name}
-              data-doop-frame=""
-              sandbox="allow-scripts"
-              srcDoc={FRAME_BOOTSTRAP}
-              style={{
-                width: frame.width * raster,
-                height: frame.height * raster,
-                transform: `scale(${1 / raster})`,
-                transformOrigin: '0 0',
-              }}
-            />
+            {mounted && (
+              <iframe
+                ref={iframeRef}
+                className="block border-none bg-white"
+                title={frame.name}
+                data-doop-frame=""
+                sandbox="allow-scripts"
+                srcDoc={FRAME_BOOTSTRAP}
+                style={{
+                  width: frame.width * raster,
+                  height: frame.height * raster,
+                  transform: `scale(${1 / raster})`,
+                  transformOrigin: '0 0',
+                }}
+              />
+            )}
             {!frame.html && (
               <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
                 empty frame — add HTML

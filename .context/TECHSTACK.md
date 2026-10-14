@@ -70,10 +70,12 @@
 
 - Docker - `Dockerfile` + `docker-compose.yml`; `docker compose up` runs the app container
   (port 4400) and a `postgres:16-alpine` db container for self-hosting.
+- Response compression is done by the app, not a proxy: `server/compression.ts` serves the hashed bundle and svg/css assets as brotli or gzip, and the canvas WebSocket uses permessage-deflate.
 
 ## 10. Frontend Stack
 
 - React 18.3.1 + Vite 5.3.3 - SPA, entry at `index.html`.
+- Frame iframes mount progressively, nearest the viewport first, and only near the viewport (`src/lib/frameMounting.ts`); every frame document renders on the app's own main thread.
 - Tailwind CSS 4.3.3 (`@tailwindcss/vite` 4.3.3) - styling; `tw-animate-css` 1.4.0 for animation
   utilities. Design tokens in `src/styles.css` (see `.context/DESIGN.md`).
 - Tauri 2.9.0 (`@tauri-apps/cli`, `desktop/src-tauri`) - desktop app wrapper around the web build.
