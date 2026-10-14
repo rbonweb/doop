@@ -91,7 +91,17 @@ export async function openIsolatedPage(): Promise<IsolatedPage> {
   }
 }
 
-async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
+interface FrameViewport {
+  width: number
+  height: number
+  deviceScaleFactor: number
+}
+
+/* A capture waits up to this long in total for the page to come to rest: fonts, images, and finite animations and transitions. Infinite or very long animations are captured as they are at the cap. */
+export const SETTLE_CAP_MS = 4000
+
+/* The page loads at the viewport it is captured at: resizing it afterwards would start new transitions and lazy-image loads after the settle. */
+async function loadFramePage(frame: Frame, viewport: FrameViewport): Promise<IsolatedPage> {
   const loaded = await openIsolatedPage()
   const { page } = loaded
   try {
@@ -99,13 +109,7 @@ async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
     await guardPublicPageRequests(page, {
       allowUrl: (url) => url.origin === assetOrigin && url.pathname.startsWith('/a/'),
     })
-    await page.setViewport({
-      width: Math.max(1, Math.round(frame.width)),
-      /* A viewport does not need to span an entire imported landing page for
-         layout/computed-style inspection; full-page content remains in the DOM. */
-      height: Math.max(1, Math.min(Math.round(frame.height), 4000)),
-      deviceScaleFactor: 1,
-    })
+    await page.setViewport(viewport)
     try {
       await page.setContent(frame.html || '<!doctype html><html><body></body></html>', {
         waitUntil: 'load',
@@ -114,12 +118,45 @@ async function loadFramePage(frame: Frame): Promise<IsolatedPage> {
     } catch {
       /* Slow external resources: inspect whatever has rendered. */
     }
-    await new Promise((resolve) => setTimeout(resolve, 120))
+    await settle(page)
     return loaded
   } catch (error) {
     await loaded.close()
     throw error
   }
+}
+
+/* The load event does not wait for what layout starts afterwards: web fonts named by a linked stylesheet, CSS background images, and entrance animations such as a 0.8 s fade-in. Captured at load, a design shows fallback fonts, missing images and sections half faded in. */
+async function settle(page: Page): Promise<void> {
+  const deadline = Date.now() + SETTLE_CAP_MS
+  const left = () => Math.max(0, deadline - Date.now())
+  await page.waitForNetworkIdle({ idleTime: 150, timeout: left() }).catch(() => {})
+  /* tsx annotates nested functions with __name, which the page does not have; see inspectFrame */
+  await page.evaluate('globalThis.__name = (target) => target')
+  await page
+    .evaluate(async (ms: number) => {
+      const end = performance.now() + ms
+      const capped = (work: Promise<unknown>) =>
+        Promise.race([work, new Promise((done) => setTimeout(done, Math.max(0, end - performance.now())))])
+      const loadedImage = (img: HTMLImageElement) =>
+        img.complete
+          ? Promise.resolve()
+          : new Promise((done) => {
+              img.addEventListener('load', done, { once: true })
+              img.addEventListener('error', done, { once: true })
+            })
+      await capped(Promise.all([document.fonts.ready, ...Array.from(document.images, loadedImage)]))
+      const finite = document
+        .getAnimations()
+        .filter((a) => a.playState === 'running' && Number.isFinite(Number(a.effect?.getComputedTiming().endTime)))
+      await capped(Promise.all(finite.map((a) => a.finished.catch(() => undefined))))
+      /* an animation's end state can name a font of its own */
+      await capped(document.fonts.ready)
+      await capped(new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+    }, left())
+    .catch(() => {
+      /* a page that broke its own globals still gets captured */
+    })
 }
 
 export interface FrameInspection {
@@ -146,7 +183,12 @@ export interface FrameInspection {
 /** A compact, rendered representation for agents. It intentionally relies on
  * visible text, semantics, geometry and computed styles rather than classes. */
 export async function inspectFrame(frame: Frame): Promise<FrameInspection> {
-  const loaded = await loadFramePage(frame)
+  /* inspection reads layout and computed styles, which need no viewport past 4000 px; the full page stays in the DOM */
+  const loaded = await loadFramePage(frame, {
+    width: Math.max(1, Math.round(frame.width)),
+    height: Math.max(1, Math.min(Math.round(frame.height), 4000)),
+    deviceScaleFactor: 1,
+  })
   const { page } = loaded
   try {
     /* tsx/esbuild annotates nested functions with __name; page.evaluate
@@ -361,12 +403,11 @@ export async function renderFrame(
   scale: number = 1,
   opts: { type?: 'png' | 'jpeg'; quality?: number; maxHeight?: number } = {},
 ): Promise<Buffer> {
-  const loaded = await loadFramePage(frame)
+  const width = Math.max(1, Math.round(frame.width))
+  const height = Math.max(1, Math.round(frame.height))
+  const loaded = await loadFramePage(frame, { width, height, deviceScaleFactor: scale })
   const { page } = loaded
   try {
-    const width = Math.max(1, Math.round(frame.width))
-    const height = Math.max(1, Math.round(frame.height))
-    await page.setViewport({ width, height, deviceScaleFactor: scale })
     const type = opts.type ?? 'png'
     const quality = opts.quality ?? 90
     const captured = opts.maxHeight && frame.height > opts.maxHeight ? Math.round(opts.maxHeight) : height
