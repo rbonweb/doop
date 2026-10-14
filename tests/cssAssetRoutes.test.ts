@@ -124,6 +124,32 @@ describe('serving a stylesheet', () => {
     expect(await res.text()).toBe(THEME)
   })
 
+  it('compresses stylesheets for clients that accept it, and never binary images', async () => {
+    const big = `${THEME}${'.grid-item{display:grid;gap:12px;padding:24px}\n'.repeat(400)}`
+    const { body } = await uploadTool({ data: Buffer.from(big).toString('base64') })
+    const cssPath = pathOf((body as { url: string }).url)
+    const br = await fetch(`${server.base}${cssPath}`, { headers: { 'Accept-Encoding': 'br' } })
+    expect(br.headers.get('content-encoding')).toBe('br')
+    expect(br.headers.get('vary')).toContain('Accept-Encoding')
+    expect(await br.text()).toBe(big)
+    const plain = await fetch(`${server.base}${cssPath}`, { headers: { 'Accept-Encoding': 'identity' } })
+    expect(plain.headers.get('content-encoding')).toBeNull()
+    expect(await plain.text()).toBe(big)
+
+    const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: '#000' } })
+      .png()
+      .toBuffer()
+    const image = (await (
+      await owner.req(`/api/canvases/${canvasId}/assets`, {
+        method: 'POST',
+        body: new Uint8Array(png),
+        headers: { 'Content-Type': 'image/png' },
+      })
+    ).json()) as { url: string }
+    const res = await fetch(`${server.base}${pathOf(image.url)}`, { headers: { 'Accept-Encoding': 'br' } })
+    expect(res.headers.get('content-encoding')).toBeNull()
+  })
+
   it('answers 404 for the right id under another extension', async () => {
     const { body } = await uploadTool({ data: Buffer.from(THEME).toString('base64') })
     const cssPath = pathOf((body as { url: string }).url)

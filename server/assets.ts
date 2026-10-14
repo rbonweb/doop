@@ -111,6 +111,11 @@ export function assetResponseHeaders(mime: string): Record<string, string> {
   return headers
 }
 
+/** Assets served as text, which compress well: svg and css. */
+export function isTextAsset(mime: string): boolean {
+  return mime === CSS_MIME || mime === 'image/svg+xml'
+}
+
 /** The markup an agent pastes into frame HTML to use an uploaded asset. */
 export function assetUsage(mime: string, url: string): string {
   return mime === CSS_MIME ? `<link rel="stylesheet" href="${url}">` : `<img src="${url}" alt="">`

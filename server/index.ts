@@ -43,7 +43,9 @@ import {
   MAX_ASSET_BYTES,
   assetResponseHeaders,
   assetUsage,
+  isTextAsset,
 } from './assets.ts'
+import { compressedBundle, compressedOnce, immutableAssets, negotiateCoding } from './compression.ts'
 import * as ingest from './ingest.ts'
 import * as agentKeys from './agentKeys.ts'
 import * as backgrounds from './backgrounds.ts'
@@ -389,7 +391,13 @@ app.get('/a/:id.:ext', async (req, res) => {
     if (!found || found.meta.ext !== ext) return res.status(404).end()
     res.set(assetResponseHeaders(found.meta.mime))
     if (req.query.download !== undefined) res.set('Content-Disposition', `attachment; filename="${id}.${ext}"`)
-    res.send(found.buf)
+    /* Sandboxed frames have opaque origins, so the browser never caches what they load: a logo or theme stylesheet linked from 50 frames is fetched 50 times per canvas open. Text assets therefore go out compressed. */
+    if (!isTextAsset(found.meta.mime)) return res.send(found.buf)
+    res.vary('Accept-Encoding')
+    const coding = negotiateCoding(req.headers['accept-encoding'])
+    if (!coding) return res.send(found.buf)
+    res.set('Content-Encoding', coding)
+    res.send(await compressedOnce(`asset:${id}`, found.buf, coding))
   } catch (e) {
     res.status(500).json({ error: e instanceof Error ? e.message : 'asset fetch failed' })
   }
@@ -1788,14 +1796,20 @@ app.get('/sitemap.xml', (_req, res) => {
 /* production: serve the built client */
 if (process.env.NODE_ENV === 'production') {
   const dist = path.join(process.cwd(), 'dist')
-  app.use(express.static(dist))
+  app.use(compressedBundle(dist))
+  app.use(express.static(dist, { setHeaders: immutableAssets }))
   app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')))
 }
 
 /* ------------------------------------------------- websocket */
 
 const server = http.createServer(app)
-const wss = new WebSocketServer({ server, path: '/ws' })
+/* permessage-deflate: joining a canvas sends every frame's HTML in one init message (4 MB uncompressed for 77 full-page frames, about 0.75 MB deflated), and every frame edit carries the frame's whole HTML. Small messages (cursors, presence) stay uncompressed, and no context is kept between messages, so a connection holds no compression window. */
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  perMessageDeflate: { threshold: 1024, serverNoContextTakeover: true, clientNoContextTakeover: true },
+})
 
 wss.on('connection', (ws, upgradeReq) => {
   /* the session cookie rides the upgrade request; resolve it once */
