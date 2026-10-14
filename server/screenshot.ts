@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import puppeteer, { type Browser, type Page } from 'puppeteer-core'
+import sharp from 'sharp'
 import type { Frame } from '../shared/types.ts'
 import { guardPublicPageRequests } from './publicUrl.ts'
 
@@ -343,6 +344,17 @@ export async function inspectFrame(frame: Frame): Promise<FrameInspection> {
   }
 }
 
+/* Chrome rasterizes a screenshot into one surface, and a surface past the GPU size limit does not fail: it wraps, so the image of a tall frame repeats or scrambles the top of the page (past 16384 device px in headless Chrome on macOS; earlier for wide frames on a Linux server). A capture taller than this is taken in strips that stay far below any limit, and stitched. */
+export const MAX_STRIP_DEVICE_PX = 4096
+
+interface CaptureArea {
+  width: number
+  height: number
+  scale: number
+  type: 'png' | 'jpeg'
+  quality: number
+}
+
 export async function renderFrame(
   frame: Frame,
   /* output pixel density — fractional values downscale huge frames */
@@ -352,23 +364,55 @@ export async function renderFrame(
   const loaded = await loadFramePage(frame)
   const { page } = loaded
   try {
-    await page.setViewport({
-      width: Math.max(1, Math.round(frame.width)),
-      height: Math.max(1, Math.round(frame.height)),
-      deviceScaleFactor: scale,
-    })
+    const width = Math.max(1, Math.round(frame.width))
+    const height = Math.max(1, Math.round(frame.height))
+    await page.setViewport({ width, height, deviceScaleFactor: scale })
     const type = opts.type ?? 'png'
-    const clip =
-      opts.maxHeight && frame.height > opts.maxHeight
-        ? { x: 0, y: 0, width: Math.round(frame.width), height: Math.round(opts.maxHeight) }
-        : undefined
+    const quality = opts.quality ?? 90
+    const captured = opts.maxHeight && frame.height > opts.maxHeight ? Math.round(opts.maxHeight) : height
+    if (captured * scale > MAX_STRIP_DEVICE_PX) {
+      return await captureInStrips(page, { width, height: captured, scale, type, quality })
+    }
+    const clip = captured < height ? { x: 0, y: 0, width, height: captured } : undefined
     const buf = await page.screenshot({
       type,
-      ...(type === 'jpeg' ? { quality: opts.quality ?? 90 } : {}),
+      ...(type === 'jpeg' ? { quality } : {}),
       ...(clip ? { clip } : {}),
     })
     return Buffer.from(buf)
   } finally {
     await loaded.close()
   }
+}
+
+/* Strips are lossless PNG, so a JPEG is encoded once, from the stitched pixels, exactly as a single capture would be. The viewport keeps the frame's full height, so vh units and fixed elements lay out as they do on the canvas. */
+async function captureInStrips(page: Page, area: CaptureArea): Promise<Buffer> {
+  const outWidth = Math.round(area.width * area.scale)
+  const outHeight = Math.round(area.height * area.scale)
+  const strips: Buffer[] = []
+  for (let top = 0; top < outHeight; top += MAX_STRIP_DEVICE_PX) {
+    const rows = Math.min(MAX_STRIP_DEVICE_PX, outHeight - top)
+    /* optimizeForSpeed: Chrome's fast PNG compression; strips are intermediates, decoded again below */
+    const shot = await page.screenshot({
+      type: 'png',
+      optimizeForSpeed: true,
+      clip: { x: 0, y: top / area.scale, width: area.width, height: rows / area.scale },
+    })
+    strips.push(await exactSize(Buffer.from(shot), outWidth, rows))
+  }
+  /* One strip per row: libvips streams the join into the encoder rather than holding the whole image. The join sizes every cell to the tallest strip, so the short last strip comes back padded and is cropped off. */
+  const stitched = sharp(strips, { join: { across: 1 } })
+    .extract({ left: 0, top: 0, width: outWidth, height: outHeight })
+    .flatten({ background: '#ffffff' })
+  /* optimised Huffman tables need every coefficient of the image in memory at once (about 1 GB for a 2x export of a 20000 px frame); without them the JPEG streams too */
+  return area.type === 'jpeg'
+    ? stitched.jpeg({ quality: area.quality, optimiseCoding: false }).toBuffer()
+    : stitched.png().toBuffer()
+}
+
+/* a fractional scale can round a strip one pixel off its slot; stretch it back so strips never overlap or gap */
+async function exactSize(png: Buffer, width: number, height: number): Promise<Buffer> {
+  const meta = await sharp(png).metadata()
+  if (meta.width === width && meta.height === height) return png
+  return sharp(png).resize(width, height, { fit: 'fill' }).png().toBuffer()
 }
