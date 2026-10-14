@@ -41,6 +41,8 @@ import {
   endTicketUpload,
   createAsset,
   MAX_ASSET_BYTES,
+  assetResponseHeaders,
+  assetUsage,
 } from './assets.ts'
 import * as ingest from './ingest.ts'
 import * as agentKeys from './agentKeys.ts'
@@ -377,10 +379,7 @@ app.get('/i/:id.:ext', async (req, res) => {
 })
 
 /* ------------------------------------------------------------------ */
-/* Uploaded assets: /a/<assetId>.<ext> — written once by the upload_asset */
-/* MCP tool, immutable thereafter, so far-future caching is safe. Public  */
-/* by the same unguessable-id logic as /i/ (frame HTML embedding these    */
-/* URLs renders for anyone who can see the canvas).                       */
+/* Uploaded assets: /a/<assetId>.<ext> — images, and stylesheets that frames link with <link rel="stylesheet">. Written once by the upload_asset MCP tool, immutable thereafter, so far-future caching is safe. Public by the same unguessable-id logic as /i/ (frame HTML embedding these URLs renders for anyone who can see the canvas). */
 /* ------------------------------------------------------------------ */
 
 app.get('/a/:id.:ext', async (req, res) => {
@@ -388,13 +387,7 @@ app.get('/a/:id.:ext', async (req, res) => {
   try {
     const found = await getAsset(id)
     if (!found || found.meta.ext !== ext) return res.status(404).end()
-    res.set('Content-Type', found.meta.mime)
-    res.set('Cache-Control', 'public, max-age=31536000, immutable')
-    res.set('X-Content-Type-Options', 'nosniff')
-    /* svg can script when opened as a document — neuter it; <img> embeds
-       are unaffected */
-    if (found.meta.mime === 'image/svg+xml')
-      res.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'")
+    res.set(assetResponseHeaders(found.meta.mime))
     if (req.query.download !== undefined) res.set('Content-Disposition', `attachment; filename="${id}.${ext}"`)
     res.send(found.buf)
   } catch (e) {
@@ -456,11 +449,12 @@ app.put('/u/:token', async (req, res) => {
       }
       chunks.push(chunk as Buffer)
     }
-    const asset = await createAsset(Buffer.concat(chunks), {
-      canvasId: ticket.canvasId,
-      ownerId: ticket.ownerId,
-      uploadedBy: ticket.uploadedBy,
-    })
+    /* tickets come only from upload_asset, which takes theme stylesheets as well as images */
+    const asset = await createAsset(
+      Buffer.concat(chunks),
+      { canvasId: ticket.canvasId, ownerId: ticket.ownerId, uploadedBy: ticket.uploadedBy },
+      { stylesheets: true },
+    )
     success = true
     const url = `${PUBLIC_ORIGIN}/a/${asset.id}.${asset.ext}`
     res.json({
@@ -468,7 +462,7 @@ app.put('/u/:token', async (req, res) => {
       url,
       mime: asset.mime,
       size_bytes: asset.size,
-      usage: `<img src="${url}" alt="">`,
+      usage: assetUsage(asset.mime, url),
       note: 'Permanent public URL — reference it in frame HTML.',
     })
   } catch (e) {
@@ -1391,10 +1385,7 @@ app.post('/api/canvases/:id/proposals/:pid', (req, res) => {
   res.json(proposal)
 })
 
-/* Browser asset uploads (paste / drop): raw image bytes in, permanent /a/
-   URL out. Same createAsset pipeline as the MCP ticket flow — the bytes are
-   sniffed for the real type and capped at 5 MB. express.json ignores the
-   image content-type, so express.raw here sees the untouched stream. */
+/* Browser asset uploads (paste / drop): raw image bytes in, permanent /a/ URL out. Same createAsset pipeline as the MCP ticket flow — the bytes are sniffed for the real type and capped at 5 MB. Images only: a pasted or dropped file becomes an <img>, never a stylesheet. express.json ignores the image content-type, so express.raw here sees the untouched stream. */
 app.post(
   '/api/canvases/:id/assets',
   express.raw({ type: () => true, limit: MAX_ASSET_BYTES + 1024 }),

@@ -36,6 +36,25 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     return n === 'STYLE' || n === 'TEXTAREA' || n === 'IFRAME' || el.namespaceURI !== 'http://www.w3.org/1999/xhtml'
   }
 
+  /* A stylesheet <link> keeps its node for as long as its href stays in the document. A fresh node re-fetches the sheet and paints the page unstyled until it lands, so when an edit shifts positions, the existing node is moved or stepped around instead of replaced. */
+  function sheetHref(node) {
+    if (!node || node.nodeName !== 'LINK') return null
+    return /(^|\\s)stylesheet(\\s|$)/i.test(node.getAttribute('rel') || '') ? node.getAttribute('href') : null
+  }
+
+  function sheetAfter(nodes, start, href) {
+    for (var k = start; k < nodes.length; k++) if (sheetHref(nodes[k]) === href) return nodes[k]
+    return null
+  }
+
+  /* moveBefore keeps the node connected, so the sheet is never dropped; insertBefore re-adds it from cache */
+  function moveNode(parent, node, before) {
+    if (parent.moveBefore) {
+      try { parent.moveBefore(node, before); return } catch (e) { /* fall back below */ }
+    }
+    parent.insertBefore(node, before)
+  }
+
   function morphChildren(from, to) {
     var tc = to.childNodes
     for (var i = 0; i < tc.length; i++) {
@@ -44,6 +63,18 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       if (!f) {
         from.appendChild(document.importNode(t, true))
         continue
+      }
+      var wanted = sheetHref(t)
+      var held = sheetHref(f)
+      if (held !== wanted) {
+        var kept = wanted !== null ? sheetAfter(from.childNodes, i + 1, wanted) : null
+        if (kept) {
+          moveNode(from, kept, f)
+          f = kept
+        } else if (held !== null && sheetAfter(tc, i + 1, held)) {
+          from.insertBefore(document.importNode(t, true), f)
+          continue
+        }
       }
       if (f.nodeType !== t.nodeType || (f.nodeType === 1 && f.nodeName !== t.nodeName)) {
         from.replaceChild(document.importNode(t, true), f)

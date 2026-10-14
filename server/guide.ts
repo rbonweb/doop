@@ -267,8 +267,7 @@ any public image URL. Source images in this order:
     center" for a product screenshot on top. Then treat it like a library background:
     object-fit: cover, a legibility scrim over the copy zone, and the headline in the
     space you asked for. Monochrome or duotone scenes read as brand rather than stock.
-- **Your own file — upload_asset** (png/jpg/webp/gif/svg, max 5 MB), with the
-  canvas_id it belongs to and ONE input, chosen by where the file lives:
+- **Your own file — upload_asset** (png/jpg/webp/gif/svg images or a .css stylesheet, max 5 MB), with the canvas_id it belongs to and ONE input, chosen by where the file lives:
   - Remote (it has a public URL): pass source_url — the server fetches it directly.
   - Local (a file on your machine): pass local_file=true. You get a one-time upload URL
     and a ready curl command; run it in your shell, and the curl response JSON contains
@@ -276,8 +275,7 @@ any public image URL. Source images in this order:
     context, so it is fast and cannot corrupt.
   - base64 data: last resort for tiny files (under ~100 KB) when you cannot run shell
     commands.
-  Either way you get a permanent URL on this origin (/a/<id>.<ext>) to use in <img> or
-  CSS.
+  Either way you get a permanent URL on this origin (/a/<id>.<ext>) to use in <img> or CSS. A stylesheet comes back as /a/<id>.css: link it from each frame's <head> with <link rel="stylesheet" href="…"> — one shared theme file instead of the same large <style> block pasted into every frame. url() paths inside it resolve against its own URL, so it can reference other uploaded assets.
 - **When to use them.** Enumerated content — feature cards, step lists, capability
   grids, value rows — needs a visual anchor per item: an icon (search_icons), a big
   number, or a mono label. Naked text lists read as drafts. Pick ONE anchor style per

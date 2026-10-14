@@ -548,6 +548,7 @@ Steering happens at three layers (the same architecture paper.design uses, plus 
 | `edit_frame_html`      | Targeted exact find/replace in a frame's HTML — morphs into the render in place                                                                                        |
 | `update_frame`         | Rename / move / resize a frame                                                                                                                                         |
 | `delete_frame`         | Remove a frame                                                                                                                                                         |
+| `upload_asset`         | Store an image (png/jpg/webp/gif/svg) or a CSS stylesheet, max 5 MB, from a URL, a one-time `curl -T` upload or base64 → permanent `/a/<id>.<ext>` URL                 |
 | `generate_image`       | Generate an image from a prompt with the image model picked in Settings (GPT Image, Nano Banana or Seedream), on the user's own account, else a server key → asset URL |
 
 Mutating tools accept `agent_name`; the agent then appears in the presence stack (pulsing square avatar),

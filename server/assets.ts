@@ -5,14 +5,7 @@ import * as t from './db/schema.ts'
 import * as storage from './storage.ts'
 
 /**
- * Uploaded image assets: bytes in object storage (server/storage.ts), one
- * metadata row per asset in the assets table (including the canvas it was
- * uploaded for). Frame HTML is the ground truth for which assets are still
- * in use, tracked as a projection in asset_refs: every durable frame write
- * re-extracts that frame's /a/<id> references (db/persist.ts), and boot
- * rebuilds the whole table from hydrated frames — so a failed fire-and-
- * forget write self-heals. Nothing is ever deleted; if cleanup is wanted
- * some day, asset_refs is the ledger to build it on.
+ * Uploaded assets: images, plus CSS stylesheets for the callers that opt in. Bytes live in object storage (server/storage.ts), one metadata row per asset in the assets table (including the canvas it was uploaded for). Frame HTML is the ground truth for which assets are still in use, tracked as a projection in asset_refs: every durable frame write re-extracts that frame's /a/<id> references (db/persist.ts), and boot rebuilds the whole table from hydrated frames — so a failed fire-and-forget write self-heals. Nothing is ever deleted; if cleanup is wanted some day, asset_refs is the ledger to build it on.
  */
 
 export const MAX_ASSET_BYTES = 5 * 1024 * 1024
@@ -23,12 +16,27 @@ const MIME_EXT = {
   'image/webp': 'webp',
   'image/gif': 'gif',
   'image/svg+xml': 'svg',
+  'text/css': 'css',
 } as const
 
 type AssetMime = keyof typeof MIME_EXT
 
+const CSS_MIME = 'text/css'
+
+/** What a caller is willing to store. Images are always accepted; a stylesheet only when the caller opts in, as the agent upload paths do so a theme stylesheet can be linked from frame HTML. Routes and pipelines that promise images (browser paste, repo transplants, generated images) keep that promise by leaving it off. */
+export interface AssetAcceptance {
+  stylesheets?: boolean
+}
+
+const IMAGES_ONLY_ERROR = 'unsupported file type — png, jpg, webp, gif and svg are accepted'
+const WITH_CSS_ERROR = 'unsupported file type — png, jpg, webp, gif, svg and css are accepted'
+
 /* trust the bytes, not the sender: content sniffing decides the type */
-function sniffMime(buf: Buffer): AssetMime | undefined {
+export function sniffMime(buf: Buffer, accept: AssetAcceptance = {}): AssetMime | undefined {
+  return sniffImage(buf) ?? (accept.stylesheets && looksLikeCss(buf) ? CSS_MIME : undefined)
+}
+
+function sniffImage(buf: Buffer): AssetMime | undefined {
   if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg'
   if (buf.length >= 6 && buf.toString('latin1', 0, 4) === 'GIF8') return 'image/gif'
@@ -37,6 +45,75 @@ function sniffMime(buf: Buffer): AssetMime | undefined {
   const head = buf.toString('utf8', 0, Math.min(buf.length, 1500)).trimStart()
   if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return 'image/svg+xml'
   return undefined
+}
+
+/* Every pattern below is linear in the input: a 5 MB upload must not be able to stall the event loop with backtracking. */
+// eslint-disable-next-line no-control-regex -- matching control characters is the point
+const BINARY_CONTROL = /[\u0000-\u0008\u000B\u000E-\u001F\u007F]/
+const MARKUP_TAG = /<(?:script|html|!doctype|body|iframe)\b/i
+const CSS_AT_RULE =
+  /(?:^|[\s;{}])@(?:charset|import|namespace|font-face|media|layer|supports|keyframes|-webkit-keyframes|property|container|page|counter-style|font-feature-values|scope|starting-style)\b/i
+const DECLARATION = /(?:^|[{;\s])-{0,2}[a-z][\w-]*\s*:/i
+
+/** True when the bytes are a stylesheet and nothing else: strict UTF-8 text without binary control characters, not markup, and shaped like CSS — an at-rule, or a `selector { property: value }` block. */
+export function looksLikeCss(buf: Buffer): boolean {
+  let text: string
+  try {
+    /* fatal: invalid UTF-8 throws instead of decoding to U+FFFD. A leading BOM is dropped here, and trimStart() below drops any stray one. */
+    text = new TextDecoder('utf-8', { fatal: true }).decode(buf)
+  } catch {
+    return false
+  }
+  if (BINARY_CONTROL.test(text) || MARKUP_TAG.test(text)) return false
+  const start = text.trimStart()
+  if (!start || start.startsWith('<')) return false
+  const css = stripCssComments(start)
+  return CSS_AT_RULE.test(css) || hasRuleBlock(css)
+}
+
+function stripCssComments(css: string): string {
+  let out = ''
+  let from = 0
+  for (;;) {
+    const open = css.indexOf('/*', from)
+    if (open < 0) return out + css.slice(from)
+    out += css.slice(from, open) + ' '
+    const close = css.indexOf('*/', open + 2)
+    if (close < 0) return out // an unterminated comment runs to the end
+    from = close + 2
+  }
+}
+
+/* The first block must read as a rule: a selector before `{`, and a body that is empty or holds declarations (`color: red`), as a nested rule does too. JSON (`{"a": 1}`, `[{"a": 1}]`) fails both. */
+function hasRuleBlock(css: string): boolean {
+  const open = css.indexOf('{')
+  if (open < 0) return false
+  const close = css.indexOf('}', open)
+  if (close < 0) return false
+  const selector = css.slice(css.lastIndexOf(';', open) + 1, open).trim()
+  if (!selector) return false
+  const body = css.slice(open + 1, close)
+  return !body.trim() || DECLARATION.test(body)
+}
+
+/** Response headers for serving an asset. Every type gets nosniff, so a browser never second-guesses the sniffed type. Documents are neutered: an svg can script, and a stylesheet opened in a tab is a document too. Neither affects embedding, because <img>, CSS backgrounds and <link rel="stylesheet"> ignore a resource's own CSP. Stylesheets also allow any origin, so a <link crossorigin integrity> in a frame loads as well. */
+export function assetResponseHeaders(mime: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': mime === CSS_MIME ? 'text/css; charset=utf-8' : mime,
+    'Cache-Control': 'public, max-age=31536000, immutable',
+    'X-Content-Type-Options': 'nosniff',
+  }
+  if (mime === 'image/svg+xml') headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'"
+  if (mime === CSS_MIME) {
+    headers['Content-Security-Policy'] = "default-src 'none'"
+    headers['Access-Control-Allow-Origin'] = '*'
+  }
+  return headers
+}
+
+/** The markup an agent pastes into frame HTML to use an uploaded asset. */
+export function assetUsage(mime: string, url: string): string {
+  return mime === CSS_MIME ? `<link rel="stylesheet" href="${url}">` : `<img src="${url}" alt="">`
 }
 
 /* One-time upload tickets: a local file can't ride an MCP tool call (every
@@ -101,12 +178,13 @@ export interface AssetMeta {
 export async function createAsset(
   buf: Buffer,
   meta: { canvasId?: string; ownerId?: string; uploadedBy: string },
+  accept: AssetAcceptance = {},
 ): Promise<AssetMeta> {
   if (buf.length === 0) throw new Error('empty file')
   if (buf.length > MAX_ASSET_BYTES)
     throw new Error(`file is ${(buf.length / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB`)
-  const mime = sniffMime(buf)
-  if (!mime) throw new Error('unsupported file type — png, jpg, webp, gif and svg are accepted')
+  const mime = sniffMime(buf, accept)
+  if (!mime) throw new Error(accept.stylesheets ? WITH_CSS_ERROR : IMAGES_ONLY_ERROR)
   const ext = MIME_EXT[mime]
   const id = nanoid(10)
   /* object first, row second: an orphaned object is swept later, but a row
@@ -133,7 +211,7 @@ export async function getAsset(id: string): Promise<{ meta: AssetMeta; buf: Buff
   return { meta: { id: row.id, mime: row.mime, ext: row.ext, size: row.size }, buf }
 }
 
-/** Fetch a remote image through the SSRF guard, validating every redirect
+/** Fetch a remote file through the SSRF guard, validating every redirect
  *  hop, with a hard size cap enforced while streaming. */
 export async function fetchRemote(rawUrl: string): Promise<Buffer> {
   const { fetchPinnedPublicUrl, parsePublicHttpUrl } = await import('./publicUrl.ts')
@@ -141,7 +219,7 @@ export async function fetchRemote(rawUrl: string): Promise<Buffer> {
   for (let hop = 0; hop < 4; hop++) {
     const res = await fetchPinnedPublicUrl(url, {
       redirect: 'manual',
-      headers: { accept: 'image/*,*/*;q=0.8', 'user-agent': 'DoopAssets/1.0' },
+      headers: { accept: 'image/*,text/css;q=0.9,*/*;q=0.8', 'user-agent': 'DoopAssets/1.0' },
       signal: AbortSignal.timeout(20_000),
     })
     if (res.status >= 300 && res.status < 400) {

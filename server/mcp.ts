@@ -833,9 +833,9 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
   server.registerTool(
     'upload_asset',
     {
-      title: 'Upload an image asset',
+      title: 'Upload an image or stylesheet asset',
       description:
-        'Upload an image (png/jpg/webp/gif/svg, max 5 MB) and get back a permanent public URL to reference in frame HTML (<img src>, CSS background) — use this instead of inlining data: URIs. Pick ONE input by where the file lives: (1) remote — pass source_url and the server fetches it; (2) LOCAL FILE — pass local_file=true to receive a one-time upload URL and a ready-to-run curl command, run it in your shell, and the curl response JSON contains the permanent url. (3) data — base64, LAST RESORT for tiny files (under ~100 KB) when you cannot run shell commands; larger base64 payloads are slow and corrupt easily.',
+        'Upload an image (png/jpg/webp/gif/svg) or a CSS stylesheet (.css), max 5 MB, and get back a permanent public URL to reference in frame HTML: <img src> or a CSS background for an image, <link rel="stylesheet" href> in the <head> for a stylesheet — use this instead of inlining data: URIs, and upload a shared theme stylesheet once instead of pasting the same large <style> block into every frame. Pick ONE input by where the file lives: (1) remote — pass source_url and the server fetches it; (2) LOCAL FILE — pass local_file=true to receive a one-time upload URL and a ready-to-run curl command, run it in your shell, and the curl response JSON contains the permanent url. (3) data — base64, LAST RESORT for tiny files (under ~100 KB) when you cannot run shell commands; larger base64 payloads are slow and corrupt easily.',
       inputSchema: {
         source_url: z.string().optional().describe('Public http(s) URL to fetch the file from (remote files)'),
         local_file: z
@@ -886,14 +886,18 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
         const buf = data
           ? Buffer.from(data.replace(/^data:[^,]*;base64,/, ''), 'base64')
           : await assets.fetchRemote(source_url!)
-        const asset = await assets.createAsset(buf, { canvasId: canvas_id, ownerId, uploadedBy: agent_name })
+        const asset = await assets.createAsset(
+          buf,
+          { canvasId: canvas_id, ownerId, uploadedBy: agent_name },
+          { stylesheets: true },
+        )
         const url = `${PUBLIC_ORIGIN}/a/${asset.id}.${asset.ext}`
         const result = text({
           ok: true,
           url,
           mime: asset.mime,
           size_bytes: asset.size,
-          usage: `<img src="${url}" alt="">`,
+          usage: assets.assetUsage(asset.mime, url),
           note: 'Permanent public URL — safe to reference in any frame on any canvas.',
         })
         return withFeedback(result, canvas_id, actorFrom(agent_name))
