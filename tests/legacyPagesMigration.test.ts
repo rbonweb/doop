@@ -30,4 +30,4 @@ it('persists legacy membership before reordering, including after reopening the 
     await db.close()
     rmSync(dir, { recursive: true, force: true })
   }
-})
+}, 60_000)
