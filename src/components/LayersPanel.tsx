@@ -1,5 +1,7 @@
 import {
+  useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -25,6 +27,7 @@ import {
   type LayerNode,
 } from '../lib/layers'
 import { deleteLayer, dropLayer, duplicateLayer, shiftLayer } from '../lib/layerEdits'
+import { rowWindow } from '../lib/rowWindow'
 import { cn } from '@/lib/utils'
 import { AgentIcon } from './AgentIcon'
 import { LayerKindIcon } from './LayerKindIcon'
@@ -55,6 +58,14 @@ import {
 
 /* the tree indents 18px per level; frame rows sit at depth 0 */
 const INDENT = 18
+/* every row is this tall, and an open frame with nothing in it carries a note
+   of its own height under its row — fixed heights let the list mount only
+   the rows in view, which a search over a large canvas needs: one letter can
+   match tens of thousands of elements */
+const ROW_HEIGHT = 26
+const EMPTY_NOTE_HEIGHT = 24
+/* rows mounted past each edge of the view, so a fast scroll never shows a gap */
+const OVERSCAN = 12
 
 const railBtn = 'shrink-0 text-ink-faint hover:bg-paper-deep hover:text-ink'
 const sectionBtn = 'size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink'
@@ -110,6 +121,17 @@ function targetOf(row: VisibleRow, place: DropPlace): DropTarget {
   return { selector: row.kind === 'frame' ? 'body' : row.node.selector, place }
 }
 
+function rowHeight(row: VisibleRow): number {
+  return row.kind === 'frame' && row.empty ? ROW_HEIGHT + EMPTY_NOTE_HEIGHT : ROW_HEIGHT
+}
+
+/** The top of every row and, last, the height of the whole list. */
+function rowOffsets(rows: VisibleRow[]): number[] {
+  const offsets = [0]
+  for (const row of rows) offsets.push((offsets.at(-1) ?? 0) + rowHeight(row))
+  return offsets
+}
+
 function visibleRows(frames: Frame[], query: string, expanded: Set<string>): VisibleRow[] {
   const rows: VisibleRow[] = []
   for (const frame of frames) {
@@ -150,6 +172,9 @@ export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
   const [drop, setDrop] = useState<{ key: string; place: DropPlace } | null>(null)
   const rowsRef = useRef<VisibleRow[]>([])
   const didDrag = useRef(false)
+  /* the list's scroll position and height, which decide the rows mounted */
+  const listRef = useRef<HTMLDivElement>(null)
+  const [view, setView] = useState({ top: 0, height: 0 })
 
   /* the selected frame opens on its own, and a selection made inside a frame
      opens every row above it — derived from the selection during render, not
@@ -184,12 +209,51 @@ export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
     })
   }
 
-  const q = query.trim().toLowerCase()
+  /* the field updates as the user types; the rows follow when React has time */
+  const q = useDeferredValue(query.trim().toLowerCase())
   const rows = useMemo(() => visibleRows(frames, q, expanded), [frames, q, expanded])
+  const offsets = useMemo(() => rowOffsets(rows), [rows])
   useEffect(() => {
     rowsRef.current = rows
   }, [rows])
   const currentKey = selectedElement ? rowKey(selectedElement.frameId, selectedElement.selector) : selectedId
+
+  /* before the list is measured (and where nothing is laid out) the window's
+     height stands in, which only mounts a few rows more than needed */
+  const viewHeight = view.height || window.innerHeight
+  const { start, end } = rowWindow(offsets, view.top, viewHeight, OVERSCAN)
+  const total = offsets.at(-1) ?? 0
+
+  function scrollBox() {
+    return listRef.current?.closest<HTMLElement>('[data-slot="panel-body"]') ?? null
+  }
+
+  useEffect(() => {
+    const box = scrollBox()
+    if (!box) return
+    const observer = new ResizeObserver(() => setView({ top: box.scrollTop, height: box.clientHeight }))
+    observer.observe(box)
+    return () => observer.disconnect()
+  }, [])
+
+  /* a selection — made in the frame, or by the arrow keys — may sit far down
+     the list, outside the rows that are mounted: scroll the list to it. Only a
+     new selection scrolls, so expanding a row leaves the list where it is. */
+  useLayoutEffect(() => {
+    const box = scrollBox()
+    const index = rows.findIndex((r) => r.key === currentKey)
+    if (!box || index < 0) return
+    const top = offsets[index] ?? 0
+    const bottom = top + rowHeight(rows[index]!)
+    const height = box.clientHeight || window.innerHeight
+    if (top >= box.scrollTop && bottom <= box.scrollTop + height) return
+    box.scrollTop = top < box.scrollTop ? top : bottom - height
+    /* the scroll event for this arrives a frame later; the rows at the new
+       position have to be mounted on this paint */
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- syncs with a scroll position just written to the DOM
+    setView({ top: box.scrollTop, height: box.clientHeight })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reacts to a new selection only, reading the rows it lands in
+  }, [currentKey])
 
   /* a layer row opens the element properties panel; a frame row closes it
      and leaves the frame's own inspector to the frame-name click */
@@ -382,6 +446,7 @@ export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
               didDrag.current = false
               e.stopPropagation()
             }}
+            onScroll={(e) => setView({ top: e.currentTarget.scrollTop, height: e.currentTarget.clientHeight })}
           >
             {frames.length === 0 && (
               <div className="px-3 py-6 text-center text-[12.5px] text-ink-faint">
@@ -393,30 +458,36 @@ export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
                 Nothing matches “{query.trim()}”.
               </div>
             )}
-            {rows.map((row) =>
-              row.kind === 'frame' ? (
-                <FrameRow
-                  key={row.key}
-                  row={row}
-                  selected={row.frame.id === selectedId && !selectedElement}
-                  current={row.frame.id === selectedId}
-                  drop={drop?.key === row.key ? drop.place : undefined}
-                  onToggle={() => setOpen(row.key, !row.open)}
-                  onActivate={() => activate(row)}
-                />
-              ) : (
-                <NodeRow
-                  key={row.key}
-                  row={row}
-                  selected={row.key === currentKey}
-                  dragging={drag?.key === row.key}
-                  drop={drop?.key === row.key ? drop.place : undefined}
-                  onToggle={() => setOpen(row.key, !row.open)}
-                  onActivate={() => activate(row)}
-                  onPointerDown={(e) => onRowPointerDown(e, row)}
-                />
-              ),
-            )}
+            <div ref={listRef}>
+              <div aria-hidden data-slot="rows-spacer" style={{ height: offsets[start] ?? 0 }} />
+              {rows
+                .slice(start, end)
+                .map((row) =>
+                  row.kind === 'frame' ? (
+                    <FrameRow
+                      key={row.key}
+                      row={row}
+                      selected={row.frame.id === selectedId && !selectedElement}
+                      current={row.frame.id === selectedId}
+                      drop={drop?.key === row.key ? drop.place : undefined}
+                      onToggle={() => setOpen(row.key, !row.open)}
+                      onActivate={() => activate(row)}
+                    />
+                  ) : (
+                    <NodeRow
+                      key={row.key}
+                      row={row}
+                      selected={row.key === currentKey}
+                      dragging={drag?.key === row.key}
+                      drop={drop?.key === row.key ? drop.place : undefined}
+                      onToggle={() => setOpen(row.key, !row.open)}
+                      onActivate={() => activate(row)}
+                      onPointerDown={(e) => onRowPointerDown(e, row)}
+                    />
+                  ),
+                )}
+              <div aria-hidden data-slot="rows-spacer" style={{ height: total - (offsets[end] ?? total) }} />
+            </div>
           </PanelBody>
           <footer className="flex flex-none items-center justify-between gap-2 whitespace-nowrap border-t border-line-soft px-3 py-[9px] font-mono text-[10px] tracking-[0.04em] text-ink-faint">
             <span>
@@ -542,7 +613,11 @@ function FrameRow({
         </ContextMenuTrigger>
         <FrameContextMenu frame={frame} at={pasteAt} />
       </ContextMenu>
-      {row.empty && <div className="py-1 pl-[42px] text-[11.5px] text-ink-faint">empty frame</div>}
+      {row.empty && (
+        <div className="flex items-center pl-[42px] text-[11.5px] text-ink-faint" style={{ height: EMPTY_NOTE_HEIGHT }}>
+          empty frame
+        </div>
+      )}
     </>
   )
 }
@@ -648,24 +723,18 @@ function Row({
   onClick,
   ...rest
 }: RowProps) {
-  const ref = useRef<HTMLDivElement>(null)
-  /* a selection made in the frame may sit far down the tree — bring it into view */
-  useEffect(() => {
-    if (selected) ref.current?.scrollIntoView({ block: 'nearest' })
-  }, [selected])
   return (
     <div
       {...rest}
-      ref={ref}
       role="treeitem"
       aria-selected={selected}
       className={cn(
-        'relative flex h-[26px] cursor-default select-none items-center gap-1 whitespace-nowrap rounded-md pr-1.5 text-[12.5px] text-ink hover:bg-paper-deep',
+        'relative flex cursor-default select-none items-center gap-1 whitespace-nowrap rounded-md pr-1.5 text-[12.5px] text-ink hover:bg-paper-deep',
         selected && 'bg-brand text-white hover:bg-brand [&_[data-icon]]:text-white/85',
         drop === 'inside' && 'shadow-[inset_0_0_0_2px_var(--brand)]',
         className,
       )}
-      style={{ ...rest.style, paddingLeft: 6 + depth * INDENT }}
+      style={{ ...rest.style, height: ROW_HEIGHT, paddingLeft: 6 + depth * INDENT }}
       onClick={onClick}
     >
       {(drop === 'before' || drop === 'after') && (
