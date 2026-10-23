@@ -72,6 +72,8 @@ interface State {
   /** open frame context menu; deferPanel hides the Inspector until it closes
    *  (right-click selecting a frame must not slide a panel in under the menu) */
   ctxMenu: { frameId: string; deferPanel: boolean } | null
+  /** frames the export dialog is open for (null: closed) — set by the frame's Export button, the top bar, and ⌘⇧E */
+  exportIds: string[] | null
   /** the element outlined inside the selected frame — a click on the frame
    *  surface and a click on a Layers row both land here, so the outline in
    *  the frame and the highlighted row stay in step */
@@ -171,6 +173,8 @@ interface State {
   selectMany(ids: string[]): void
   setPanMode(v: boolean): void
   setInspectorOpen(v: boolean): void
+  openExport(frameIds: string[]): void
+  closeExport(): void
   openCtxMenu(menu: { frameId: string; deferPanel: boolean }): void
   closeCtxMenu(): void
   setSelectedElement(el: { frameId: string; selector: string } | null): void
@@ -221,6 +225,7 @@ export const useStore = create<State>((set, get) => ({
   panMode: false,
   inspectorOpen: false,
   ctxMenu: null,
+  exportIds: null,
   selectedElement: null,
   elementPanelOpen: false,
   layersOpen: readLayersOpen(),
@@ -511,6 +516,8 @@ export const useStore = create<State>((set, get) => ({
   },
   setPanMode: (panMode) => set({ panMode }),
   setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
+  openExport: (exportIds) => set({ exportIds }),
+  closeExport: () => set({ exportIds: null }),
   openCtxMenu: (ctxMenu) => set({ ctxMenu }),
   closeCtxMenu: () => set({ ctxMenu: null }),
   setSelectedElement: (selectedElement) =>

@@ -23,7 +23,8 @@ import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
 import { Tooltip } from './ui/tooltip'
-import { GithubIcon, SyncIcon } from './ui/icons'
+import { DownloadIcon, GithubIcon, SyncIcon } from './ui/icons'
+import { EXPORT_SHORTCUT } from '../lib/keys'
 import { isSyncedFrame } from '../lib/sync'
 import { isGithubFrame, isGithubPlaceholder } from '../lib/github'
 import { AgentIcon } from './AgentIcon'
@@ -109,6 +110,9 @@ interface HoverHit {
    this component — memo holds as long as the frame is unchanged. */
 export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   const selected = useStore((s) => s.selectedIds.includes(frame.id))
+  /* the title bar offers Export only when this is the one selected frame: with
+     a group, the top bar's Export acts on all of them */
+  const soleSelected = useStore((s) => s.selectedIds.length === 1 && s.selectedIds[0] === frame.id)
   /* the document renders once the Stage's scheduler reaches this frame, or at once when someone selects it */
   const scheduled = useFrameMounted(frame.id)
   const [selectedOnce, setSelectedOnce] = useState(false)
@@ -650,6 +654,21 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
               </Tooltip>
             )}
             <span className="overflow-hidden text-ellipsis">{frame.name}</span>
+            {soleSelected && !editing && !dragging && (
+              <Button
+                variant="default"
+                size="pill"
+                className="gap-1 border-line bg-surface font-semibold text-ink-soft hover:text-ink"
+                title={`Export this frame as PNG or JPG (${EXPORT_SHORTCUT})`}
+                aria-label={`Export ${frame.name}`}
+                /* a press here is a button press, not the start of a frame drag */
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => useStore.getState().openExport([frame.id])}
+              >
+                <DownloadIcon width={10} height={10} strokeWidth={2.2} aria-hidden />
+                Export
+              </Button>
+            )}
             <span className="flex gap-1">
               {stream && (
                 <span className={EDITOR_CHIP} style={{ background: stream.color }}>
