@@ -27,18 +27,16 @@ activity feed.
   to connect. Runs on the server's `ANTHROPIC_API_KEY` for a handful of free tasks, then on the
   **ChatGPT subscription** (or OpenAI key) each user connects ([setup](#the-doop-agent)); the
   first-canvas welcome performance is scripted and runs without any of it.
-- **Pages within a canvas** — organize frames into named pages from the Layers panel. Add, rename,
-  drag to reorder, double-click to rename, or right-click to rename and delete empty pages.
-  Page edits support Undo/Redo; selected frames can move between pages. Agents can list pages
-  with `get_canvas`, manage them with `set_canvas_pages` (passing the original list as
-  `expectedPages` to protect collaborators), and target frames with `pageId`.
-- **True multiplayer** — live cursors, presence, per-frame editing indicators, undo/redo, comments
-  pinned to elements, and an activity feed, all over one WebSocket room.
-- **Design memory** — pin exemplar frames, capture decisions, and let the distiller propose durable
-  style rules that every agent follows.
-- **Private by default** — invite collaborators by email as viewers, commenters or editors, share by
-  link (signed-in, anyone, or password-protected), or open a canvas to a whole email domain;
-  agents inherit exactly their human's access.
+- **Pages within a canvas** — organize frames into named pages from the Layers panel, and nest a page under another to group related ones (two levels of subpages, collapsible). Add, rename, drag to reorder or nest, or right-click to add a subpage, rename and delete empty pages. Page edits support Undo/Redo; selected frames can move between pages. Agents list pages with `get_canvas`, manage them with `set_canvas_pages` (a page nests under another with `parent_id`; pass the original list as `expectedPages` to protect collaborators), and target frames with `pageId`.
+- **True multiplayer** — live cursors, presence, per-frame editing indicators, undo/redo, comments pinned to elements, sticky notes, and an activity feed, all over one WebSocket room.
+- **Comment pins that survive edits** — a pin finds its element again by tag, label, test id and text after an agent redesigns the frame, and parks as a dashed orphan if the element is gone. Agents start threads with `add_comment`. See [Review, history and notes](#review-history-and-notes).
+- **Review marks** — a blue dot for frames that changed since you last looked and an orange one where an agent is waiting on your reply, with a "needs you" chip in the top bar and <kbd>U</kbd> to jump to the next one.
+- **Frame version history** — every change an agent or person makes saves the earlier design first; preview and restore any version from the frame menu or over MCP.
+- **Sticky notes** — pin markdown notes beside a frame or free on the page, for people and agents, and show or hide them with <kbd>N</kbd>.
+- **Prototypes, present mode and slide decks** — `data-goto` links, a walkable present mode, slides with speaker notes and a presenter window, and a deck PDF. See [Prototypes, present mode and decks](#prototypes-present-mode-and-decks).
+- **Keyboard first** — one shortcut registry behind <kbd>?</kbd>: select all, fit, copy a frame as an image, laser, comment mode, tidy, device sizes and more. See [Keyboard shortcuts](#keyboard-shortcuts).
+- **Design memory** — pin exemplar frames, capture decisions, and let the distiller propose durable style rules that every agent follows.
+- **Private by default** — invite collaborators by email as viewers, commenters or editors, share by link (signed-in, anyone, or password-protected), grant a whole email domain, let people ask for access and `@mention` teammates in comments; agents inherit exactly their human's access. See [docs/sharing.md](docs/sharing.md).
 - **Self-host in one command** — `docker compose up`, or `bun run dev` with zero configuration
   (embedded Postgres, no external services required).
 
@@ -91,14 +89,53 @@ The canvas Chat tab keeps a shared conversation alongside the design. Mention an
 queue a design card; its reply threads back into the chat.
 
 The import source picker offers **Website**, **Live app** (the sync snippet), and **GitHub repo**.
-Right-click a frame and choose **Export…** to download PNG or JPG. A progress toast tracks the
-render; the desktop app opens its native save panel.
+Select a frame and use **Export** (on the frame, in the top bar, or <kbd>⌘⇧E</kbd>) to download PNG or JPG; with several frames selected the dialog exports them one after another and shows its own progress. Right-click **Export…** works too. A progress toast tracks a single render; the desktop app opens its native save panel. <kbd>I</kbd> and <kbd>⇧I</kbd> copy the selected frame to the clipboard as a PNG at 2× or 4×.
 
 ## Prototypes, present mode and decks
 
 Put `data-goto="<frame id or frame name>"` on any element in a frame and it becomes a prototype link. On the canvas a click still selects the element and ⌥-click follows the link; press **K** to draw an arrow for every link. Press **P** (or the play button) to present from the selected frame, or from the first frame of the page: ← and → walk the page in reading order, a link jumps to its frame, **Backspace** goes back, **Esc** exits. Frames that share a `view-transition-name` morph between screens.
 
-Mark frames as slides (the Inspector's **Slide** checkbox, or `slide: true` over MCP) and the slides of a page play as a deck, 1280×720 by default: **Space**, a click and → advance, and the runtime sets `data-sl-play` on the document for the whole show and `data-sl-entered` once a slide has arrived, so entrance animations can key off them. **S** opens the presenter view with the slide's speaker notes, the next slide, a timer and the slide number; the toolbar can also open it in a window of its own. **Export deck as PDF** (present toolbar, or right-click a page) renders one PDF page per slide at the slide's own size.
+Mark frames as slides (the Inspector's **Slide** checkbox, or `slide: true` over MCP) and the slides of a page play as a deck, 1280×720 by default: **Space**, a click and → advance, and the runtime sets `data-sl-play` on the document for the whole show and `data-sl-entered` once a slide has arrived, so entrance animations can key off them. **S** opens the presenter view with the slide's speaker notes, the next slide, a timer and the slide number; the toolbar can also open it in a window of its own. **Export deck as PDF** (present toolbar, or right-click a page) renders one PDF page per slide at the slide's own size. Presenting needs only the view role. More in [docs/presenting.md](docs/presenting.md).
+
+## Review, history and notes
+
+**Comments** pin to an element, not a coordinate. Each pin stores the element's tag, label, test id and text, so it follows the element when a frame is edited and falls back to a dashed orphan pin at the frame's corner if the element is gone; the thread still opens, replies and resolves. `@mention` a teammate to email them, or an agent role to queue work.
+
+**Review marks** tell a returning person what changed. A blue dot on a frame, its Layers row and its page means someone else (or an agent) changed it since you last looked; an orange dot means an agent replied in a thread you are part of and is waiting on you. The top bar chip counts both, and <kbd>U</kbd> flies to the next frame that needs you, then the next new one.
+
+**Version history** saves a frame's earlier design before every change (up to 50 per frame, bursts by one actor coalesced). Open **Version history…** from the frame menu or the Inspector, preview a version in place and restore it; the current design is saved first, so a restore can itself be undone. Reading or restoring history needs the edit role.
+
+**Sticky notes** hold markdown beside a frame (they travel with it) or free on a page, in six colours. Notes link to frames with `[label](goto:<frame id>)`. <kbd>N</kbd> shows or hides them.
+
+## Keyboard shortcuts
+
+Press <kbd>?</kbd> on a canvas for the full list; it is generated from the shortcut registry in [`src/lib/shortcuts.ts`](src/lib/shortcuts.ts). <kbd>⌘</kbd> is <kbd>Ctrl</kbd> outside macOS. Plain keys never fire while you type in a field.
+
+| Keys                                                | Action                                                                       |
+| --------------------------------------------------- | ---------------------------------------------------------------------------- |
+| <kbd>⌘A</kbd>                                       | Select every frame on this page                                              |
+| <kbd>⌘C</kbd> / <kbd>⌘V</kbd> / <kbd>⌘D</kbd>       | Copy, paste and duplicate frames                                             |
+| <kbd>⌫</kbd>                                        | Delete the selected element or frames                                        |
+| <kbd>⌘Z</kbd> / <kbd>⌘⇧Z</kbd>                      | Undo and redo                                                                |
+| <kbd>Esc</kbd>                                      | Leave laser or comment mode, or clear the selection                          |
+| <kbd>⇧1</kbd>                                       | Fit every frame on screen                                                    |
+| <kbd>⇧2</kbd>                                       | Fit the selection                                                            |
+| <kbd>⇧0</kbd> or <kbd>⌘0</kbd>                      | Zoom to 100%                                                                 |
+| <kbd>⌘+</kbd> / <kbd>⌘-</kbd>                       | Zoom in and out                                                              |
+| <kbd>I</kbd> / <kbd>⇧I</kbd>                        | Copy the selected frame as an image, 2× or 4×                                |
+| <kbd>⌘⇧E</kbd>                                      | Export the selected frames                                                   |
+| <kbd>L</kbd>                                        | Laser: outline every element and click one to copy its path                  |
+| <kbd>C</kbd>                                        | Comment mode: click an element to comment on it                              |
+| <kbd>T</kbd>                                        | Tidy the selection, or the page, into rows                                   |
+| <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> | Resize to mobile 390×844, tablet 834×1194, laptop 1280×800, desktop 1440×900 |
+| <kbd>0</kbd>                                        | Restore the sizes and positions from before the device keys                  |
+| <kbd>P</kbd>                                        | Present from the selected frame, or the page's first                         |
+| <kbd>K</kbd>                                        | Show or hide prototype link arrows                                           |
+| <kbd>N</kbd>                                        | Show or hide sticky notes                                                    |
+| <kbd>U</kbd>                                        | Jump to the next frame that needs you, then the next new one                 |
+| <kbd>?</kbd>                                        | Keyboard shortcuts                                                           |
+
+Delete, duplicate, undo, redo, tidy and the device keys need the edit role; comment mode needs the comment role; everything else works for viewers too.
 
 ## Linear
 
@@ -275,18 +312,17 @@ it to a large number, since you're paying Anthropic directly either way.
 
 ## Accounts
 
-The web app requires an account (better-auth, email/password — open signup). Your account
-name is your identity everywhere: cursors, presence, the activity feed, and feedback
-attribution are all server-authoritative from the session, and the WebSocket rejects
-unauthenticated joins. **Canvases are private by default**, Figma-style: only the owner
-and people they invite (Share → invite by email, existing doop accounts) can open one.
-Every person holds a role: **view**, **comment** or **edit**. The Share modal can also turn on link sharing per
-canvas at any of those roles, for signed-in people only, for anyone with the link (signed-out guests
-can look and comment under a name they pick, never edit), or behind a password. People without access can
-ask for it and the owner approves a role from the Share modal. Your home screen lists
-your own canvases plus ones shared with you (plus unowned legacy ones, claimable there).
-Agents connected over MCP act under the account that approved them and get exactly that
-user's access.
+The web app requires an account (better-auth, email/password — open signup). Your account name is your identity everywhere: cursors, presence, the activity feed, and feedback attribution are all server-authoritative from the session, and the WebSocket rejects unauthenticated joins. **Canvases are private by default**, Figma-style: only the owner and people they invite (Share → invite by email, existing doop accounts) can open one. Your home screen lists your own canvases plus ones shared with you (plus unowned legacy ones, claimable there). Agents connected over MCP act under the account that approved them and get exactly that user's access.
+
+### Sharing and roles
+
+Every person holds a role: **view** (look, follow, present, export), **comment** (adds commenting and `@mentions`) or **edit** (everything else). The Share modal sets a role per invited person and a link-access floor (No access, Can view, Can comment, Can edit), and the link can be offered to:
+
+- **Anyone signed in to doop**, the default.
+- **Anyone with the link, no sign-in**: signed-out guests pick a name, can look and comment (rate limited, marked "guest"), and are capped at comment whatever the link role.
+- **Anyone with the password**: an 8 to 200 character password sets a 30-day cookie for that canvas; changing it signs everyone out.
+
+You can also grant a role to a whole email domain (`@acme.com`, verified addresses only), and people without access can request it; the owner approves a role from the Share modal. Roles are enforced on REST, the WebSocket and every MCP tool, and an agent never gets more than its human. Guest and password links never admit agents. Details in [docs/sharing.md](docs/sharing.md) and the [sharing-roles spec](.context/specs/sharing-roles.md).
 
 <p align="center">
   <img src=".github/assets/share-modal.png" alt="The share modal: invite collaborators by email, see who has access, and toggle link sharing" width="100%">
@@ -541,31 +577,49 @@ Steering happens at three layers (the same architecture paper.design uses, plus 
 
 ### MCP tools
 
+Every tool below is registered in [`server/mcp.ts`](server/mcp.ts); a tool needs at least the role noted in [Sharing and roles](#sharing-and-roles) (reads view, comments comment, writes edit).
+
 | Tool                    | What it does                                                                                                                                                           |
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `get_guide`             | The agent playbook — agents are instructed to load this first                                                                                                          |
+| `search_inspiration`    | Search a curated gallery of well-designed live sites and see thumbnails with distilled style facts — the inspiration step before a brief                               |
 | `set_status`            | Broadcast a one-line "what I'm working on" — shown live in the working-now strip, avatar tooltip, and activity feed                                                    |
-| `get_feedback`          | Fetch & claim open human feedback requests — for agents whose job is to poll the canvas periodically                                                                   |
-| `get_comments`          | Read element-pinned comments and replies, optionally filtered by frame or resolution state, without claiming work                                                      |
-| `reply_to_comment`      | Reply inside an element-comment thread; `@mention` of a resident role is metered like a browser comment                                                                |
-| `resolve_comment`       | Resolve an element-comment thread; resolving an `@mention` thread records the exchange in canvas Memory                                                                |
-| `list_canvases`         | List all canvases                                                                                                                                                      |
-| `create_canvas`         | Create a canvas, returns its shareable id                                                                                                                              |
-| `get_canvas`            | Canvas layout: every frame's position/size/meta                                                                                                                        |
-| `view_website`          | Inspect one public page read-only; returns a desktop screenshot and visible text without changing the canvas                                                           |
-| `import_webpage`        | Import one public URL onto a canvas as an editable HTML snapshot/frame                                                                                                 |
-| `create_frame`          | Add a frame with HTML (auto-placed if no x/y)                                                                                                                          |
+| `list_canvases`         | List all canvases, including shared workspaces                                                                                                                         |
+| `create_canvas`         | Create a canvas (optionally in a `workspace_id`), returns its shareable id                                                                                             |
+| `get_canvas`            | Canvas layout: pages (nested pages carry `parent_id`), every frame's position/size/meta, notes, style guides and references                                            |
+| `set_canvas_pages`      | Create, rename, reorder, nest (`parent_id`) or delete pages; send the full ordered `pages` list plus `expectedPages` from `get_canvas` to protect collaborators        |
+| `create_frame`          | Add a frame with HTML (auto-placed if no x/y); `pageId` targets a page, `slide` makes it a slide (1280×720), `speaker_notes` sets presenter notes                      |
 | `get_frame`             | Read a frame including its HTML                                                                                                                                        |
 | `get_frame_screenshot`  | Render the frame headlessly and return a PNG — lets agents _see_ and iterate on their design                                                                           |
 | `set_frame_html`        | Replace a frame's design in one shot — renders live for everyone                                                                                                       |
 | `append_frame_html`     | **Stream** a design in chunks (`start=true` first, `done=true` last) — viewers watch it build up                                                                       |
 | `edit_frame_html`       | Targeted exact find/replace in a frame's HTML — morphs into the render in place                                                                                        |
-| `update_frame`          | Rename / move / resize a frame, make it a slide (`slide`) and set its `speaker_notes`                                                                                  |
-| `list_frame_versions`   | List a frame's saved earlier versions, newest first (no HTML)                                                                                                          |
-| `restore_frame_version` | Roll a frame back to a saved version; the current design is saved first                                                                                                |
+| `update_frame`          | Rename / move / resize a frame, move it to another page (`pageId`), make it a slide (`slide`) and set its `speaker_notes`                                              |
+| `list_frame_versions`   | List a frame's saved earlier versions, newest first (no HTML); needs the edit role                                                                                     |
+| `restore_frame_version` | Roll a frame back to a saved version; the current design is saved first; needs the edit role                                                                           |
 | `delete_frame`          | Remove a frame                                                                                                                                                         |
+| `export_frame`          | Get public PNG/JPG URLs that render a frame's current design, for a CMS, a social post or `og:image`                                                                   |
+| `get_comments`          | Read element-pinned comments and replies, optionally filtered by frame or resolution state, without claiming work                                                      |
+| `add_comment`           | Start a thread pinned to an element in a frame, found by `quote` text and/or CSS `selector`; an `@mention` of a resident role is metered like a browser comment        |
+| `reply_to_comment`      | Reply inside an element-comment thread; `@mention` of a resident role is metered like a browser comment                                                                |
+| `resolve_comment`       | Resolve an element-comment thread; resolving an `@mention` thread records the exchange in canvas Memory                                                                |
+| `create_note`           | Pin a markdown sticky note beside a frame (`frame_id`) or free on a page (`page_id`, `x`, `y`), with a `color`                                                         |
+| `update_note`           | Rewrite, recolour, move or resize a sticky note; only the fields you pass change                                                                                       |
+| `delete_note`           | Remove a sticky note                                                                                                                                                   |
+| `get_feedback`          | Fetch & claim open human feedback requests — for agents whose job is to poll the canvas periodically                                                                   |
+| `save_decision`         | Record a design decision your human made in conversation with the agent; lands in canvas Memory                                                                        |
+| `list_guidelines`       | List a canvas's named style guides with one-line summaries                                                                                                             |
+| `get_guidelines`        | Read one style guide in full                                                                                                                                           |
+| `set_guidelines`        | Create, replace or delete a named style guide (markdown; an empty string deletes)                                                                                      |
+| `get_reference`         | Read a pinned exemplar frame's HTML in full, listed by `get_canvas`                                                                                                    |
+| `view_website`          | Inspect one public page read-only; returns a desktop screenshot and visible text without changing the canvas                                                           |
+| `import_webpage`        | Import one public URL onto a canvas as an editable HTML snapshot/frame                                                                                                 |
 | `upload_asset`          | Store an image (png/jpg/webp/gif/svg) or a CSS stylesheet, max 5 MB, from a URL, a one-time `curl -T` upload or base64 → permanent `/a/<id>.<ext>` URL                 |
 | `generate_image`        | Generate an image from a prompt with the image model picked in Settings (GPT Image, Nano Banana or Seedream), on the user's own account, else a server key → asset URL |
+| `search_images`         | Search free stock photos and see thumbnails to pick from                                                                                                               |
+| `list_backgrounds`      | Browse a curated library of hero, section and bento backgrounds as thumbnails                                                                                          |
+| `search_icons`          | Search 200,000+ open-source UI icons and get hotlinkable SVG URLs                                                                                                      |
+| `search_logos`          | Find a company's real logo by brand name or domain                                                                                                                     |
 
 Mutating tools accept `agent_name`; the agent then appears in the presence stack (pulsing square avatar),
 gets an "editing" ring + chip on the frame it touched, and its actions land in the activity feed. Agents
@@ -624,6 +678,8 @@ so conversation context remains available. An empty result is `[]`. The tool enf
 canvas access permissions as other MCP reads; optional `agent_name` announces presence.
 It does not claim task feedback or comments, or mark anything resolved.
 
+`add_comment({ canvas_id, frame_id, quote?, selector?, text, agent_name })` starts a thread pinned to an element of a frame. Give it a `quote` (a short piece of text the element shows, such as a button label) and/or a CSS `selector`; at least one is required. The pin finds the element by that text even after the frame is edited, and shows as an orphan if it is gone. It needs the comment role, and an `@mention` of a resident role counts as a resident task like a comment left in the browser.
+
 `reply_to_comment({ canvas_id, comment_id, text, agent_name })` adds a reply to a thread,
 inheriting the root's element anchor. `resolve_comment({ canvas_id, comment_id, agent_name })`
 closes it, and resolving an `@mention` thread also records the exchange in canvas Memory. Both
@@ -641,7 +697,11 @@ free. `resolve_comment` also costs nothing.
 - **Multiplayer** — live cursors with name tags, presence avatars, per-frame "who's editing" indicators,
   colored flash when a remote actor changes a frame, drag positions streamed live, auto-reconnect.
 - **Activity feed** — every create/edit/rename/delete, by whom (user or agent), with timestamps.
-- **Sharing** — the canvas URL is the share link (`Share` button copies it).
+- **Sharing** — view, comment and edit roles, domain grants, access requests, and signed-in, guest or password-protected links; see [Sharing and roles](#sharing-and-roles).
+- **Pages** — named pages in the Layers panel, nestable under each other.
+- **Review and history** — comment pins that survive edits, review marks, frame version history and sticky notes.
+- **Present** — walkable prototypes, slide decks with speaker notes and a presenter window, and a deck PDF.
+- **Keyboard shortcuts** — press <kbd>?</kbd> for the full list.
 - **Connect AI modal** — copy-paste MCP setup instructions from the app itself.
 
 ## Architecture
@@ -681,6 +741,8 @@ the frame with a full document reload. Changed `<script>`s re-execute; unchanged
 untouched. The realtime layer is plain JSON over a per-canvas WebSocket room;
 REST/MCP mutations are broadcast to the room by the shared actions layer, so human and agent edits go
 through identical plumbing.
+
+Frames that are off screen, or on screen while the camera is moving, **sleep**: their CSS animations, Web Animations and playing videos pause until the camera rests (selected, hovered, edited and agent-worked frames and present mode never sleep, and `?awake=1` on the canvas URL turns sleeping off for debugging). The canvas also composites GPU-safely: the world layer is promoted only while the camera moves and re-rasterized only when the zoom changed, floating panels sit on a permanent layer of their own, and frames far outside the view are not rendered at all, so zooming a large canvas neither flickers nor corrupts.
 
 ## Contributing
 
