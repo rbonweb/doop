@@ -4,7 +4,7 @@ import { api, errorMessage } from '../lib/api'
 import { copyFrames, duplicateFrames, hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { deleteFramesTracked } from '../lib/history'
 import { useStore } from '../lib/store'
-import { MOD_KEY } from '../lib/keys'
+import { EXPORT_SHORTCUT, MOD_KEY } from '../lib/keys'
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from './ui/context-menu'
 import { MenuHint } from './ui/menu'
 import { FrameExportModal } from './FrameExportModal'
@@ -22,7 +22,8 @@ async function copyImageUrl(frame: Frame) {
 /** Right-click menu for a frame. FrameView owns the trigger, and passes the
  *  point the right-click happened at — Paste lands there. */
 export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefObject<{ x: number; y: number }> }) {
-  const [showExport, setShowExport] = useState(false)
+  /* the frames the open export dialog is for, fixed when Export is chosen */
+  const [exportTargets, setExportTargets] = useState<Frame[] | null>(null)
   /* a right-click inside a multi-selection acts on the whole group */
   const groupSize = useStore((s) => (s.selectedIds.includes(frame.id) ? s.selectedIds.length : 1))
   function groupFrames(): Frame[] {
@@ -38,7 +39,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
       <ContextMenuContent
         onCloseAutoFocus={(event) => {
           // The export dialog owns focus once the menu closes.
-          if (showExport) event.preventDefault()
+          if (exportTargets) event.preventDefault()
         }}
       >
         <ContextMenuItem onSelect={() => copyFrames(groupFrames())}>
@@ -63,7 +64,10 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
           Copy link
         </ContextMenuItem>
         <ContextMenuItem onSelect={() => void copyImageUrl(frame)}>Copy image URL</ContextMenuItem>
-        <ContextMenuItem onSelect={() => setShowExport(true)}>Export…</ContextMenuItem>
+        <ContextMenuItem onSelect={() => setExportTargets(groupFrames())}>
+          {groupSize > 1 ? `Export ${groupSize} frames…` : 'Export…'}
+          <MenuHint>{EXPORT_SHORTCUT}</MenuHint>
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
           title="Will be used as reference — agents copy its style in new designs"
@@ -77,7 +81,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
           <MenuHint>⌫</MenuHint>
         </ContextMenuItem>
       </ContextMenuContent>
-      {showExport && <FrameExportModal frame={frame} onClose={() => setShowExport(false)} />}
+      {exportTargets && <FrameExportModal frames={exportTargets} onClose={() => setExportTargets(null)} />}
     </>
   )
 }

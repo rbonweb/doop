@@ -37,6 +37,7 @@ import {
   SourcePicker,
 } from '../components/ImportSources'
 import { PresentMode } from '../components/PresentMode'
+import { FrameExportModal } from '../components/FrameExportModal'
 import { getIdentity, setName } from '../lib/identity'
 import {
   copyFrames,
@@ -47,6 +48,8 @@ import {
 } from '../lib/frameClipboard'
 import { clearHistory, redo, undo } from '../lib/history'
 import { deleteSelection } from '../lib/layerEdits'
+import { EXPORT_SHORTCUT } from '../lib/keys'
+import { useSelectedFrames } from '../lib/useSelectedFrames'
 import { authClient } from '../lib/auth'
 import { posthog } from '../lib/posthog'
 import { useIsMobile } from '../hooks/use-mobile'
@@ -57,6 +60,7 @@ import { AuthScreen } from '../components/ui/screen'
 import { Wordmark } from '../components/ui/wordmark'
 import {
   BrainIcon,
+  DownloadIcon,
   GithubIcon,
   ImportIcon,
   MoreHorizontalIcon,
@@ -151,6 +155,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
       useStore.getState().setCanvas(null)
       useStore.getState().setPresences([])
       useStore.getState().setCanvasNotFound(false)
+      useStore.getState().closeExport()
       select(null)
       clearHistory()
     }
@@ -185,6 +190,14 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
       if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'y') {
         e.preventDefault()
         void redo()
+        return
+      }
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'e') {
+        /* ⌘⇧E exports the selection; a dialog already open keeps its run */
+        if (selectedIds.length && !useStore.getState().exportIds) {
+          e.preventDefault()
+          useStore.getState().openExport(selectedIds)
+        }
         return
       }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
@@ -269,6 +282,12 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
   )
 
   const selectedFrame = canvas?.frames.find((f) => f.id === selectedId) ?? null
+  const selectedFrames = useSelectedFrames()
+  const exportIds = useStore((s) => s.exportIds)
+  const exportTargets = useMemo(
+    () => (exportIds ? exportIds.flatMap((id) => canvas?.frames.find((f) => f.id === id) ?? []) : []),
+    [exportIds, canvas],
+  )
   /* the panel only shows when a frame-name click (or deep link) opened it —
      selecting a frame by clicking its surface must not slide it in */
   const inspectorOpen = useStore((s) => s.inspectorOpen)
@@ -372,6 +391,25 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
               <PlayIcon className="size-3.5" />
             </Button>
           </Tooltip>
+          <Button
+            variant="ghost"
+            className="h-[34px] rounded-[7px] bg-surface px-3 text-[12.5px] font-semibold hover:border-ink-faint hover:bg-paper-deep disabled:opacity-40"
+            disabled={!selectedFrames.length}
+            title={
+              selectedFrames.length
+                ? `Export ${selectedFrames.length > 1 ? `${selectedFrames.length} frames` : 'the selected frame'} as PNG or JPG (${EXPORT_SHORTCUT})`
+                : 'Select a frame to export it'
+            }
+            onClick={() => useStore.getState().openExport(selectedFrames.map((f) => f.id))}
+          >
+            <DownloadIcon className="size-3.5" aria-hidden />
+            Export
+            {selectedFrames.length > 1 && (
+              <span className="rounded-full bg-ink px-1.5 py-px text-[10.5px] font-bold leading-[1.3] text-paper">
+                {selectedFrames.length}
+              </span>
+            )}
+          </Button>
           <Button
             variant="ghost"
             className="h-[34px] rounded-[7px] bg-surface px-[17px] text-[12.5px] font-semibold hover:border-ink-faint hover:bg-paper-deep"
@@ -479,6 +517,24 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
                 </Button>
               )}
             </div>
+            {isMobile && selectedFrames.length > 0 && (
+              /* phones have no right-click and no top-bar action group, so a
+                 selection brings its own Export */
+              <div className="absolute top-2 right-2 z-30 flex items-center gap-2 rounded-full border border-line bg-surface py-1 pr-1 pl-3.5 text-[12.5px] font-semibold text-ink-soft shadow-pop animate-[chip-in_0.25s_ease]">
+                <span className="max-w-[22vw] truncate">
+                  {selectedFrames.length > 1 ? `${selectedFrames.length} selected` : selectedFrames[0]?.name}
+                </span>
+                <Button
+                  variant="solid"
+                  size="pill"
+                  className="h-8 gap-1.5 px-3.5 text-[12.5px]"
+                  onClick={() => useStore.getState().openExport(selectedFrames.map((f) => f.id))}
+                >
+                  <DownloadIcon className="size-3.5" aria-hidden />
+                  Export
+                </Button>
+              </div>
+            )}
             <WorkingNow />
             <PromptBar canvasId={canvasId} />
             <Onboarding canvasId={canvasId} />
@@ -583,6 +639,9 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
         </>
       )}
 
+      {exportTargets.length > 0 && (
+        <FrameExportModal frames={exportTargets} onClose={() => useStore.getState().closeExport()} />
+      )}
       {renaming && <RenameSelfModal current={me.name} onClose={() => setRenaming(false)} />}
       {showConnect && <ConnectModal canvasId={canvasId} onClose={() => setShowConnect(false)} />}
       {presenting && selectedId && <PresentMode frameId={selectedId} onClose={() => setPresenting(false)} />}
