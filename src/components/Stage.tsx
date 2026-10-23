@@ -16,6 +16,7 @@ import { FollowFrame } from './FollowFrame'
 import { cameraOnCursor, cameraToFollow } from '../lib/follow'
 import { SnapGuides } from './SnapGuides'
 import { MOD_KEY } from '../lib/keys'
+import { MAX_ZOOM, MIN_ZOOM } from '../lib/fit'
 import { cn } from '../lib/utils'
 import { gesture } from '../lib/gesture'
 import { hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
@@ -23,8 +24,6 @@ import { MenuHint } from './ui/menu'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from './ui/context-menu'
 import { Toolbar, ToolbarButton, ToolbarDivider, ToolbarValue } from './ui/toolbar'
 
-const MIN_ZOOM = 0.08
-const MAX_ZOOM = 3
 /* how long the camera must be still before the world layer is re-rasterized at its final scale */
 const CAMERA_IDLE_MS = 150
 
@@ -43,6 +42,24 @@ const sendViewport = throttle(
     }),
   50,
 )
+
+/* the canvas says so while laser or comment mode is on, and how to leave it */
+function ModePill() {
+  const laser = useStore((s) => s.laser)
+  const commentMode = useStore((s) => s.commentMode)
+  if (!laser && !commentMode) return null
+  const label = laser ? 'Laser' : 'Comment mode'
+  return (
+    <div
+      role="status"
+      className="pointer-events-none absolute top-3 left-1/2 z-[35] flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink py-1.5 pr-3.5 pl-3 text-[12px] font-semibold text-paper shadow-pop animate-[chip-in_0.18s_ease]"
+    >
+      <span className="size-1.5 rounded-full bg-brand" aria-hidden />
+      {label}
+      <span className="font-normal text-paper/60">· Esc to exit</span>
+    </div>
+  )
+}
 
 export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -71,6 +88,20 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   const fitted = useRef(false)
   const deepLinkHandled = useRef(false)
   const focusedPage = useRef<string | null>(null)
+
+  /* the shortcuts (fit, zoom) measure against the stage, which lives here */
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const publish = () => useStore.getState().setStageSize({ width: el.clientWidth, height: el.clientHeight })
+    publish()
+    const ro = new ResizeObserver(publish)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      useStore.getState().setStageSize(null)
+    }
+  }, [])
 
   /* Viewport → DOM without React: no component subscribes to the viewport, so
      pan/zoom never renders anything. A store subscription writes the world
@@ -275,32 +306,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
     [setViewport, select],
   )
 
-  const fit = useCallback(() => {
-    const el = ref.current
-    const c = currentPageCanvas()
-    if (!el || !c) return
-    const boxes = c.frames.map((f) => ({ x: f.x, y: f.y - 30, w: f.width, h: f.height + 30 }))
-    if (!boxes.length) {
-      setViewport({ x: 80, y: 80, zoom: 1 })
-      return
-    }
-    const minX = Math.min(...boxes.map((b) => b.x))
-    const minY = Math.min(...boxes.map((b) => b.y))
-    const maxX = Math.max(...boxes.map((b) => b.x + b.w))
-    const maxY = Math.max(...boxes.map((b) => b.y + b.h))
-    const pad = 80
-    const w = el.clientWidth
-    const h = el.clientHeight
-    const zoom = Math.min(
-      MAX_ZOOM,
-      Math.max(MIN_ZOOM, Math.min((w - pad * 2) / (maxX - minX), (h - pad * 2) / (maxY - minY), 1.25)),
-    )
-    setViewport({
-      x: (w - (maxX - minX) * zoom) / 2 - minX * zoom,
-      y: (h - (maxY - minY) * zoom) / 2 - minY * zoom,
-      zoom,
-    })
-  }, [setViewport])
+  const fit = useCallback(() => useStore.getState().fitAll(), [])
 
   useEffect(() => {
     fitted.current = focusedPage.current === activePageId
@@ -442,40 +448,6 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       el.removeEventListener('touchcancel', onEnd)
       gesture.pinching = false
     }
-  }, [])
-
-  /* ⌘0 → 100%, ⌘+ / ⌘− → step zoom, all pivoting on the view center —
-     preventDefault keeps the browser's own page zoom out of it */
-  useEffect(() => {
-    function zoomTo(next: number) {
-      const el = ref.current
-      if (!el) return
-      const cx = el.clientWidth / 2
-      const cy = el.clientHeight / 2
-      const vp = useStore.getState().viewport
-      const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next))
-      const scale = zoom / vp.zoom
-      useStore.getState().setViewport({
-        x: cx - (cx - vp.x) * scale,
-        y: cy - (cy - vp.y) * scale,
-        zoom,
-      })
-    }
-    function onKey(e: KeyboardEvent) {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return
-      const t = e.target as HTMLElement
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
-      if (e.key !== '0' && e.key !== '=' && e.key !== '+' && e.key !== '-') return
-      /* '+' arrives as ⇧= on most layouts; any other shifted combo isn't ours */
-      if (e.shiftKey && e.key !== '+') return
-      e.preventDefault()
-      const zoom = useStore.getState().viewport.zoom
-      if (e.key === '0') zoomTo(1)
-      else if (e.key === '-') zoomTo(zoom / 1.25)
-      else zoomTo(zoom * 1.25)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
   }, [])
 
   function toWorld(clientX: number, clientY: number) {
@@ -699,8 +671,19 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
             +
           </ToolbarButton>
           <ToolbarDivider />
-          <ToolbarButton onClick={fit}>Fit</ToolbarButton>
+          <ToolbarButton onClick={fit} title="Fit every frame (⇧1)">
+            Fit
+          </ToolbarButton>
+          <ToolbarDivider />
+          <ToolbarButton
+            aria-label="Keyboard shortcuts"
+            title="Keyboard shortcuts (?)"
+            onClick={() => useStore.getState().setShortcutsOpen(true)}
+          >
+            ?
+          </ToolbarButton>
         </Toolbar>
+        <ModePill />
 
         {canvas && (
           <ContextMenuContent>
@@ -719,6 +702,10 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
               }}
             >
               New note
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => useStore.getState().setShortcutsOpen(true)}>
+              Keyboard shortcuts
+              <MenuHint>?</MenuHint>
             </ContextMenuItem>
           </ContextMenuContent>
         )}

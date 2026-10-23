@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { canvasPages, framePageId } from '../../shared/pages'
+import { canvasPages, framePageId, pageFrames } from '../../shared/pages'
 import { shiftAttachedNotes } from '../../shared/notes'
 import type {
   ActivityItem,
@@ -18,6 +18,7 @@ import type {
   TaskFeedback,
 } from '../../shared/types'
 import type { SnapGuide } from './snap'
+import { fitViewport, zoomAroundCenter } from './fit'
 
 export interface Viewport {
   x: number
@@ -90,6 +91,14 @@ interface State {
    *  Inspector's spot until closed */
   historyFrameId: string | null
   viewport: Viewport
+  /** the stage's size in screen px, kept current by the Stage — what fit and zoom shortcuts measure against */
+  stageSize: { width: number; height: number } | null
+  /** laser mode: every frame outlines its element tree and the next click copies an element's path */
+  laser: boolean
+  /** comment mode: the next element click in any frame opens the comment composer on it */
+  commentMode: boolean
+  /** the Keyboard shortcuts dialog is showing */
+  shortcutsOpen: boolean
   /** live alignment guide lines while a frame drag is snapped to a neighbour */
   snapGuides: SnapGuide[]
   connected: boolean
@@ -208,6 +217,17 @@ interface State {
   setLayersOpen(v: boolean): void
   openFrameHistory(frameId: string | null): void
   setViewport(v: Viewport): void
+  setStageSize(size: { width: number; height: number } | null): void
+  /** frame every frame on the current page */
+  fitAll(): void
+  /** frame the selected frames; with nothing selected, the whole page */
+  fitSelection(): void
+  /** zoom to a level around the stage center */
+  zoomTo(zoom: number): void
+  /** laser and comment mode are exclusive: turning one on turns the other off */
+  setLaser(on: boolean): void
+  setCommentMode(on: boolean): void
+  setShortcutsOpen(open: boolean): void
   setSnapGuides(guides: SnapGuide[]): void
   flash(frameId: string, color: string): void
   setStream(frameId: string, actor: { name: string; color: string } | null): void
@@ -287,6 +307,10 @@ export const useStore = create<State>((set, get) => ({
   foldedNotes: readFoldedNotes(),
   editingNoteId: null,
   viewport: { x: 0, y: 0, zoom: 1 },
+  stageSize: null,
+  laser: false,
+  commentMode: false,
+  shortcutsOpen: false,
   snapGuides: [],
   connected: false,
   canvasNotFound: false,
@@ -666,6 +690,31 @@ export const useStore = create<State>((set, get) => ({
   },
   /* every ordinary camera move (pan, zoom, fit, fly-to) is ours, so it ends a follow */
   setViewport: (viewport) => set({ viewport, following: null }),
+  setStageSize: (stageSize) =>
+    set((s) =>
+      s.stageSize?.width === stageSize?.width && s.stageSize?.height === stageSize?.height ? s : { stageSize },
+    ),
+  fitAll: () => {
+    const s = get()
+    if (!s.stageSize || !s.canvas) return
+    const frames = pageFrames(s.canvas, s.activePageId ?? canvasPages(s.canvas)[0]!.id)
+    s.setViewport(fitViewport(frames, s.stageSize))
+  },
+  fitSelection: () => {
+    const s = get()
+    if (!s.stageSize || !s.canvas) return
+    const frames = pageFrames(s.canvas, s.activePageId ?? canvasPages(s.canvas)[0]!.id)
+    const picked = frames.filter((f) => s.selectedIds.includes(f.id))
+    s.setViewport(fitViewport(picked.length ? picked : frames, s.stageSize))
+  },
+  zoomTo: (zoom) => {
+    const s = get()
+    if (s.stageSize) s.setViewport(zoomAroundCenter(s.viewport, zoom, s.stageSize))
+  },
+  setLaser: (laser) => set((s) => (laser ? { laser, commentMode: false } : s.laser ? { laser } : s)),
+  setCommentMode: (commentMode) =>
+    set((s) => (commentMode ? { commentMode, laser: false } : s.commentMode ? { commentMode } : s)),
+  setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   /* fires on every pointermove during a drag — skip the no-op transitions
      so unsnapped drags don't render the (empty) guide layer each frame */
   setPresenting: (presenting) => set({ presenting }),

@@ -137,6 +137,128 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     if (sleeping) ensureSleepStyle()
   }
 
+  /* ---- laser mode ----
+     The parent flips it on for every frame. Each nesting level of the document gets its own hue, so the structure
+     reads at a glance; the element under the cursor is drawn heavier with a floating label, and a click sends the
+     element's CSS path to the parent, which copies it. The style, box and label hang off <html> rather than <head> or
+     <body>, where the morph would sweep them away on the next edit, and are stripped again by serialize(). */
+  var laserOn = false
+  var laserBox = null
+  var laserLabel = null
+  var laserHue = ''
+
+  function laserCss() {
+    var css = ''
+    var sel = 'body'
+    for (var d = 1; d <= 12; d++) {
+      sel += ' > *'
+      css += sel + '{--doop-hue:' + ((d % 6) * 60) + ';outline:1px solid hsl(var(--doop-hue) 80% 55%) !important;outline-offset:-1px}'
+    }
+    return css
+  }
+
+  function depthOf(el) {
+    var depth = 0
+    while (el && el !== document.body && el !== document.documentElement) { depth++; el = el.parentElement }
+    return depth
+  }
+
+  function laserEl(el) {
+    return el && el.nodeType === 1 && el !== document.documentElement && el !== document.body ? el : null
+  }
+
+  function laserHide() {
+    if (laserBox) laserBox.style.display = 'none'
+    if (laserLabel) laserLabel.style.display = 'none'
+  }
+
+  /* x, y: the pointer in design px, or null when it left the frame */
+  function laserHover(el, x, y) {
+    el = laserEl(el)
+    if (!el || x === null) { laserHide(); return }
+    laserHue = 'hsl(' + ((depthOf(el) % 6) * 60) + ' 80% 55%'
+    var r = designRect(el)
+    var b = laserBox.style
+    b.display = 'block'
+    b.left = r.x + 'px'
+    b.top = r.y + 'px'
+    b.width = r.width + 'px'
+    b.height = r.height + 'px'
+    b.outline = '2px solid ' + laserHue + ')'
+    b.background = laserHue + ' / 0.08)'
+    var text = (el.textContent || '').replace(/\\s+/g, ' ').trim()
+    laserLabel.textContent = el.tagName.toLowerCase() + (text ? ' · "' + text.slice(0, 40) + '"' : '')
+    var l = laserLabel.style
+    l.display = 'block'
+    l.left = '0px'
+    l.top = '0px'
+    var box = laserLabel.getBoundingClientRect()
+    var w = box.width
+    var h = box.height
+    var vw = window.innerWidth
+    var vh = window.innerHeight
+    /* below-right of the pointer; above it near the bottom edge, shifted left near the right edge */
+    var top = y + 18
+    if (top + h > vh - 4) top = Math.max(4, y - 12 - h)
+    var left = x + 14
+    if (left + w > vw - 4) left = Math.max(4, vw - 4 - w)
+    l.left = left + 'px'
+    l.top = top + 'px'
+  }
+
+  function laserFromPoint(x, y) {
+    if (x === null || x === undefined) { laserHide(); return }
+    laserHover(document.elementFromPoint(x, y), x, y)
+  }
+
+  function laserPick(el) {
+    el = laserEl(el)
+    if (!el) return
+    parent.postMessage({ type: 'doop:laser-copy', selector: cssPath(el) }, '*')
+    if (laserBox && laserHue) {
+      laserBox.style.background = laserHue + ' / 0.3)'
+      setTimeout(function () { if (laserBox) laserBox.style.background = laserHue + ' / 0.08)' }, 160)
+    }
+  }
+
+  function overlayNode(tag, id, css) {
+    var n = document.createElement(tag)
+    n.id = id
+    n.setAttribute('style', css)
+    document.documentElement.appendChild(n)
+    return n
+  }
+
+  function setLaser(on) {
+    if (on === laserOn) return
+    laserOn = on
+    if (on) {
+      var st = document.createElement('style')
+      st.id = 'doop-laser'
+      st.textContent = laserCss()
+      document.documentElement.appendChild(st)
+      laserBox = overlayNode('div', 'doop-laser-box', 'position:fixed;display:none;pointer-events:none;z-index:2147483646;box-sizing:border-box')
+      laserLabel = overlayNode('div', 'doop-laser-label', 'position:fixed;display:none;pointer-events:none;z-index:2147483647;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 7px;border-radius:5px;background:#17171b;color:#f7f7f9;font:600 11px/1.3 ui-monospace,monospace')
+    } else {
+      var nodes = document.querySelectorAll('#doop-laser,#doop-laser-box,#doop-laser-label')
+      for (var i = 0; i < nodes.length; i++) nodes[i].parentNode.removeChild(nodes[i])
+      laserBox = null
+      laserLabel = null
+    }
+  }
+
+  /* real pointer events, for when nothing shields the frame (the parent normally relays the pointer instead) */
+  document.addEventListener('mousemove', function (ev) {
+    if (laserOn) laserHover(ev.target, ev.clientX, ev.clientY)
+  }, true)
+
+  document.addEventListener('click', function (ev) {
+    if (!laserOn) return
+    ev.preventDefault()
+    ev.stopPropagation()
+    laserPick(ev.target)
+  }, true)
+
   /* ---- inline text editing ----
      The parent flips edit mode on. Instead of designMode (which makes the
      whole document a caret trap), we hit-test: hovering a text-bearing
@@ -231,6 +353,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     }
     var boot = root.querySelector('script[data-v-boot]')
     if (boot && boot.parentNode) boot.parentNode.removeChild(boot)
+    var lasers = root.querySelectorAll('#doop-laser,#doop-laser-box,#doop-laser-label')
+    for (var li = 0; li < lasers.length; li++) lasers[li].parentNode.removeChild(lasers[li])
     var es = root.querySelector('style[data-v-edit]')
     if (es && es.parentNode) es.parentNode.removeChild(es)
     var ran = root.querySelectorAll('[data-v-ran]')
@@ -272,7 +396,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
 
   /* capture-phase: no link navigation or button handlers while editing */
   document.addEventListener('click', function (ev) {
-    if (!editing) return
+    if (!editing || laserOn) return
     ev.preventDefault()
     ev.stopPropagation()
     var el = candidate(ev.target)
@@ -281,7 +405,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   }, true)
 
   document.addEventListener('mousemove', function (ev) {
-    if (!editing) return
+    if (!editing || laserOn) return
     var el = candidate(ev.target)
     var prev = document.querySelector('[data-v-hover]')
     if (prev && prev !== el) prev.removeAttribute('data-v-hover')
@@ -337,8 +461,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     var fx = 0.5
     var fy = 0.5
     if (typeof x === 'number' && typeof y === 'number' && box.width > 0 && box.height > 0) {
-      fx = (x * curZoom - box.left) / box.width
-      fy = (y * curZoom - box.top) / box.height
+      fx = (x - box.left) / box.width
+      fy = (y - box.top) / box.height
     }
     var snippet = el.outerHTML || ''
     if (snippet.length > 400) snippet = snippet.slice(0, 397) + '...'
@@ -584,6 +708,9 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) render(d.html)
     if (d.type === 'doop:edit') setEdit(!!d.on)
     if (d.type === 'doop:sleep') setSleep(!!d.on)
+    if (d.type === 'doop:laser') setLaser(!!d.on)
+    if (d.type === 'doop:laser-move' && laserOn) laserFromPoint(d.x, d.y)
+    if (d.type === 'doop:laser-click' && laserOn) laserPick(document.elementFromPoint(d.x, d.y))
     if (d.type === 'doop:probe') {
       parent.postMessage({ type: 'doop:probe-result', reqId: d.reqId, hit: probe(d.x, d.y) }, '*')
     }

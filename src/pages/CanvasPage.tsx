@@ -40,15 +40,12 @@ import {
 import { PresentMode } from '../components/PresentMode'
 import { FrameExportModal } from '../components/FrameExportModal'
 import { getIdentity, setName } from '../lib/identity'
-import {
-  copyFrames,
-  duplicateFrames,
-  hasFrameClip,
-  pasteFrameCentered,
-  pasteImagesCentered,
-} from '../lib/frameClipboard'
-import { clearHistory, redo, undo } from '../lib/history'
-import { deleteSelection } from '../lib/layerEdits'
+import { hasFrameClip, pasteFrameCentered, pasteImagesCentered } from '../lib/frameClipboard'
+import { clearHistory } from '../lib/history'
+import { clearLayoutSnapshots } from '../lib/layoutEdits'
+import { useShortcuts } from '../lib/shortcuts'
+import { canvasShortcuts } from '../lib/canvasShortcuts'
+import { ShortcutsDialog } from '../components/ShortcutsDialog'
 import { EXPORT_SHORTCUT } from '../lib/keys'
 import { useSelectedFrames } from '../lib/useSelectedFrames'
 import { authClient } from '../lib/auth'
@@ -162,6 +159,10 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
       useStore.getState().closeExport()
       select(null)
       clearHistory()
+      clearLayoutSnapshots()
+      useStore.getState().setLaser(false)
+      useStore.getState().setCommentMode(false)
+      useStore.getState().setShortcutsOpen(false)
     }
   }, [canvasId, select])
 
@@ -170,61 +171,8 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
     sendWs({ type: 'editing', frameId: selectedId })
   }, [selectedId])
 
-  /* frame keyboard shortcuts: delete, copy/paste/duplicate, undo/redo */
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const t = e.target as HTMLElement
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
-      const selectedIds = useStore.getState().selectedIds
-      /* a picked element (from the canvas or the layers tree) is what ⌫
-         removes — the frame it lives in only goes when nothing inside it is
-         selected. Auto-repeat is ignored: a held key must not take the
-         element and then, on the next repeat, the frame under it. */
-      if ((e.key === 'Delete' || e.key === 'Backspace') && !e.repeat && deleteSelection()) e.preventDefault()
-      if (e.key === 'Escape') {
-        select(null)
-        useStore.getState().setFollowing(null)
-      }
-      /* N shows or hides every sticky note, for this viewer only */
-      if (e.key.toLowerCase() === 'n' && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-        const s = useStore.getState()
-        s.setNotesVisible(!s.notesVisible)
-        s.pushNotice(s.notesVisible ? 'Notes hidden. Press N to show them.' : 'Notes shown')
-        return
-      }
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
-        e.preventDefault()
-        if (e.shiftKey) void redo()
-        else void undo()
-        return
-      }
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'y') {
-        e.preventDefault()
-        void redo()
-        return
-      }
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'e') {
-        /* ⌘⇧E exports the selection; a dialog already open keeps its run */
-        if (selectedIds.length && !useStore.getState().exportIds) {
-          e.preventDefault()
-          useStore.getState().openExport(selectedIds)
-        }
-        return
-      }
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-        /* ⌘C and ⌘D act on the whole selection */
-        const frames = useStore.getState().canvas?.frames.filter((f) => selectedIds.includes(f.id)) ?? []
-        /* don't hijack ⌘C when the user is copying selected text */
-        if (e.key === 'c' && frames.length && !window.getSelection()?.toString()) copyFrames(frames)
-        if (e.key === 'd' && frames.length) {
-          e.preventDefault()
-          duplicateFrames(frames)
-        }
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [canvasId]) // eslint-disable-line react-hooks/exhaustive-deps
+  /* every keyboard shortcut lives in the registry (lib/shortcuts.ts); ⌘V is the exception below */
+  useShortcuts(canvasShortcuts)
 
   /* ⌘V lands here as a real paste event: clipboard images upload and drop in
      as frames; otherwise a copied frame (⌘C) pastes centered. Handled on
@@ -685,6 +633,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
       )}
       {renaming && <RenameSelfModal current={me.name} onClose={() => setRenaming(false)} />}
       {showConnect && <ConnectModal canvasId={canvasId} onClose={() => setShowConnect(false)} />}
+      <ShortcutsDialog />
       {presenting && selectedId && <PresentMode frameId={selectedId} onClose={() => setPresenting(false)} />}
       {showShare && canvas && (
         <ShareModal

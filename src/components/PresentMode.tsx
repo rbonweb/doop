@@ -67,6 +67,7 @@ export function PresentMode({ frameId, onClose }: { frameId: string; onClose: ()
     <div
       className="fixed inset-0 z-[80] grid place-items-center bg-ink"
       role="dialog"
+      aria-modal="true"
       aria-label={`Presenting ${frame.name}`}
     >
       <div
