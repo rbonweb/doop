@@ -12,3 +12,9 @@ desktop/src-tauri/gen
 # files are ignored.
 .claude/settings.local.json
 .claude/.current-tool
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# agent worktrees (full repo copies made by Claude Code subagents)
+/.claude/worktrees/
