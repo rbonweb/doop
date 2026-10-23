@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   cla-assistant:
+    # signatures live on the upstream repo's cla-signatures branch; a fork has none to write to
+    if: github.repository == 'kgoedecke/doop'
     runs-on: ubuntu-latest
     steps:
       - name: CLA assistant

@@ -3,6 +3,7 @@ import { store } from './store.ts'
 import * as persist from './db/persist.ts'
 import * as thumbs from './thumbs.ts'
 import { colorFor } from '../shared/types.ts'
+import { sanitizeAnchor } from '../shared/commentAnchor.ts'
 import {
   DEFAULT_ROLE_ID,
   mentionedRole,
@@ -12,6 +13,17 @@ import {
   roleName,
   stripMentions,
 } from '../shared/agents.ts'
+import { canvasPages, framePageId } from '../shared/pages.ts'
+import {
+  attachedNotePlacement,
+  clampNoteHeight,
+  clampNoteWidth,
+  isNoteColor,
+  MAX_NOTE_CHARS,
+  NOTE_COLORS,
+  NOTE_DEFAULT_SIZE,
+  shiftAttachedNotes,
+} from '../shared/notes.ts'
 import { decodeEscapedHtml, looksEscapedHtml, repairEscapedHtml } from './escapedHtml.ts'
 import { emitCanvasEvent } from './events.ts'
 import type {
@@ -19,11 +31,14 @@ import type {
   ActorKind,
   ActivityItem,
   AgentTask,
+  CanvasNote,
   CardScope,
   ChatMessage,
+  CommentAnchor,
   DesignDecision,
   ElementComment,
   Frame,
+  FrameVersion,
   GuidelineDoc,
   MemoryProposal,
   MemoryReference,
@@ -141,12 +156,17 @@ function logActivity(canvasId: string, actor: Actor, message: string, frameId?: 
   broadcast(canvasId, { type: 'activity', item })
 }
 
+/** The account and kind store.createFrame / updateFrame record as the editor. */
+function editorOf(actor: Actor): { userId?: string; kind: Actor['kind'] } {
+  return { userId: actor.userId, kind: actor.kind }
+}
+
 export function resolveActor(
-  raw: { name?: string; kind?: string; clientId?: string; owner?: string } | undefined,
+  raw: { name?: string; kind?: string; clientId?: string; owner?: string; userId?: string } | undefined,
 ): Actor {
   const kind = raw?.kind === 'agent' ? 'agent' : raw?.kind === 'user' ? 'user' : 'agent'
   const name = raw?.name?.trim() || (kind === 'agent' ? 'AI Agent' : 'Anonymous')
-  return { name, kind, color: colorFor(name), clientId: raw?.clientId, owner: raw?.owner }
+  return { name, kind, color: colorFor(name), clientId: raw?.clientId, owner: raw?.owner, userId: raw?.userId }
 }
 
 function touch(canvasId: string, actor: Actor, frameId?: string | null) {
@@ -337,10 +357,12 @@ export function addChatMessage(
   text: string,
   from: string,
   fromUserId?: string,
+  allowAgent = true,
 ): ChatMessage | undefined {
   const clean = text.trim().slice(0, MAX_CHAT_CHARS)
   if (!clean || !store.getCanvas(canvasId)) return undefined
-  const roles = mentionedRoles(clean)
+  /* an author who may not ask agents to change the canvas posts plain chat */
+  const roles = allowAgent ? mentionedRoles(clean) : []
   const card =
     roles.length > 0
       ? addQueuedCard(
@@ -549,20 +571,37 @@ export function findComment(commentId: string): ElementComment | undefined {
   return undefined
 }
 
+/** How a comment is posted beyond its text and author. */
+export interface CommentOptions {
+  /** false stores an @agent mention as plain text: the author may not ask agents to change the canvas */
+  allowAgent?: boolean
+  /** account ids of the people the text @mentions — already checked by the caller, order kept */
+  mentions?: string[]
+}
+
 export function addElementComment(
   frameId: string,
-  input: { selector: string; snippet: string; text: string },
+  input: { selector: string; snippet: string; text: string; anchor?: unknown },
   from: string,
   fromUserId?: string,
+  kind: ActorKind = 'user',
+  options: CommentOptions = {},
 ): ElementComment | undefined {
   const frame = store.getFrame(frameId)
   if (!frame) return undefined
+  const anchor = sanitizeAnchor(input.anchor)
   return postComment(
     frame,
-    { selector: String(input.selector ?? '').slice(0, 300), snippet: String(input.snippet ?? '').slice(0, 400) },
+    {
+      selector: String(input.selector ?? '').slice(0, MAX_SELECTOR_LENGTH),
+      snippet: String(input.snippet ?? '').slice(0, 400),
+      ...(anchor ? { anchor } : {}),
+    },
     input.text,
     from,
     fromUserId,
+    kind,
+    options,
   )
 }
 
@@ -574,17 +613,24 @@ export function replyToComment(
   from: string,
   fromUserId?: string,
   kind: ActorKind = 'user',
+  options: CommentOptions = {},
 ): ElementComment | undefined {
   const open = openThread(commentId)
   if (!open) return undefined
   const { root, frame } = open
   return postComment(
     frame,
-    { selector: root.selector, snippet: root.snippet, parentId: root.id },
+    {
+      selector: root.selector,
+      snippet: root.snippet,
+      parentId: root.id,
+      ...(root.anchor ? { anchor: root.anchor } : {}),
+    },
     text,
     from,
     fromUserId,
     kind,
+    options,
   )
 }
 
@@ -603,16 +649,19 @@ export function openThread(commentId: string): { root: ElementComment; frame: Fr
 
 function postComment(
   frame: Frame,
-  anchor: { selector: string; snippet: string; parentId?: string },
+  anchor: { selector: string; snippet: string; parentId?: string; anchor?: CommentAnchor },
   text: string,
   from: string,
   fromUserId?: string,
   kind: ActorKind = 'user',
+  options: CommentOptions = {},
 ): ElementComment | undefined {
   const clean = text.trim()
   if (!clean) return undefined
-  /* @Doop, @brand, @a11y… — whichever resident agent is mentioned picks it up */
-  const mentioned = mentionedRole(clean)
+  /* @Doop, @brand, @a11y… — whichever resident agent is mentioned picks it up,
+     unless the author may not ask agents to change the canvas */
+  const mentioned = options.allowAgent === false ? undefined : mentionedRole(clean)
+  const people = [...new Set(options.mentions ?? [])]
   const list = commentLog.get(frame.canvasId) ?? []
   /* strictly increasing per canvas: thread order is reconstructed from `at`
      after a restart, so two messages must never share a timestamp */
@@ -625,9 +674,12 @@ function postComment(
     snippet: anchor.snippet,
     from,
     ...(fromUserId ? { fromUserId } : {}),
+    fromKind: kind,
     text: clean,
     at,
+    ...(anchor.anchor ? { anchor: anchor.anchor } : {}),
     ...(mentioned ? { forAgent: true, targetAgent: mentioned.name } : {}),
+    ...(people.length ? { mentions: people } : {}),
     ...(anchor.parentId ? { parentId: anchor.parentId } : {}),
   }
   list.unshift(comment)
@@ -656,6 +708,45 @@ function postComment(
     actorKind: kind,
   })
   return comment
+}
+
+/** Longest CSS path a comment may carry, from the browser or an agent. */
+export const MAX_SELECTOR_LENGTH = 1000
+const HEAL_BROADCAST_MS = 250
+const pendingHeals = new Map<string, Map<string, ElementComment>>() // canvasId -> comments awaiting broadcast
+const healTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/** Point a thread at the element's new CSS path after the frame was edited.
+ *  The browser that re-found the element sends this, so many pins healing at
+ *  once (an agent rewrote the frame) collapse into one broadcast per canvas
+ *  instead of one message per pin. The stored anchor is left as captured. */
+export function healCommentSelector(commentId: string, selector: string): ElementComment | undefined {
+  const found = findComment(commentId)
+  if (!found) return undefined
+  const rootId = found.parentId ?? found.id
+  const list = commentLog.get(found.canvasId) ?? []
+  const pending = pendingHeals.get(found.canvasId) ?? new Map<string, ElementComment>()
+  for (const c of list) {
+    if ((c.id !== rootId && c.parentId !== rootId) || c.selector === selector) continue
+    c.selector = selector
+    persist.saveComment(c)
+    pending.set(c.id, c)
+  }
+  if (pending.size === 0) return found.parentId ? (findComment(rootId) ?? found) : found
+  const canvasId = found.canvasId
+  pendingHeals.set(canvasId, pending)
+  if (!healTimers.has(canvasId)) {
+    healTimers.set(
+      canvasId,
+      setTimeout(() => {
+        healTimers.delete(canvasId)
+        const batch = pendingHeals.get(canvasId)
+        pendingHeals.delete(canvasId)
+        for (const c of batch?.values() ?? []) broadcast(canvasId, { type: 'comment', comment: c })
+      }, HEAL_BROADCAST_MS),
+    )
+  }
+  return found.parentId ? (findComment(rootId) ?? found) : found
 }
 
 /** The whole conversation a comment belongs to, oldest first. */
@@ -1107,6 +1198,101 @@ export function retryCard(canvasId: string, cardId: string, by: string): AgentTa
 }
 
 /* ------------------------------------------------------------------ */
+/* Frame version history.                                              */
+/*                                                                     */
+/* A snapshot saves a frame's state BEFORE a change, so a design can be*/
+/* rolled back later. A burst of edits by one actor becomes one version*/
+/* (2 minutes), and identical html is never saved twice. Streaming     */
+/* chunks never snapshot — only the start of a stream does.            */
+/* ------------------------------------------------------------------ */
+
+export const SNAPSHOT_COALESCE_MS = 2 * 60_000
+
+interface LastSnapshot {
+  at: number
+  /** who took it: kind plus account (people) or name (agents) */
+  by: string
+  /** the html it saved, so an unchanged frame is never saved twice */
+  html: string
+}
+
+const lastSnapshots = new Map<string, LastSnapshot>() // frameId -> latest snapshot taken by this process
+
+function snapshotReason(actor: Actor): FrameVersion['reason'] {
+  return actor.kind === 'agent' ? 'agent' : 'human'
+}
+
+function snapshotKey(actor: Actor): string {
+  return actor.kind === 'agent' ? `agent:${actor.name}` : `user:${actor.userId ?? actor.name}`
+}
+
+async function saveSnapshot(version: FrameVersion, checkLatest: boolean) {
+  if (checkLatest) {
+    /* first snapshot since the process started: the memory of the last one
+       is gone, so compare against what the database holds */
+    const [latest] = await persist.listFrameVersions(version.frameId)
+    const full = latest && (await persist.getFrameVersion(latest.id))
+    if (full?.html === version.html) return
+  }
+  await persist.saveFrameVersion(version)
+}
+
+/** Save the frame's current state as a version, unless that adds nothing: the
+ *  frame is empty, its html matches the latest version, or this actor already
+ *  snapshotted it within the last 2 minutes. A restore skips only the time
+ *  check. Returns whether a version was saved. */
+export function snapshotFrame(frame: Frame, actor: Actor, reason: FrameVersion['reason']): boolean {
+  if (!frame.html) return false
+  const last = lastSnapshots.get(frame.id)
+  const now = Date.now()
+  const by = snapshotKey(actor)
+  if (last?.html === frame.html) return false
+  if (reason !== 'restore' && last && last.by === by && now - last.at < SNAPSHOT_COALESCE_MS) return false
+  lastSnapshots.set(frame.id, { at: now, by, html: frame.html })
+  const version: FrameVersion = {
+    id: nanoid(12),
+    frameId: frame.id,
+    canvasId: frame.canvasId,
+    name: frame.name,
+    html: frame.html,
+    width: frame.width,
+    height: frame.height,
+    savedAt: now,
+    savedBy: actor.name,
+    reason,
+  }
+  saveSnapshot(version, !last).catch((err) => console.error('[frame-history] snapshot failed', err))
+  return true
+}
+
+function describeVersionTime(savedAt: number): string {
+  return new Date(savedAt).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+}
+
+/** Roll a frame back to a saved version. The current state is snapshotted
+ *  first (reason 'restore'), then html, size and name are applied through the
+ *  normal update path, so viewers get the change live. */
+export function restoreFrameVersion(version: FrameVersion, actor: Actor): Frame | undefined {
+  const before = store.getFrame(version.frameId)
+  if (!before) return undefined
+  snapshotFrame(before, actor, 'restore')
+  const frame = updateFrame(
+    before.id,
+    { html: version.html, width: version.width, height: version.height, name: version.name },
+    actor,
+    { restoring: true },
+  )
+  if (!frame) return undefined
+  logActivity(
+    frame.canvasId,
+    actor,
+    `restored “${frame.name}” to the version from ${describeVersionTime(version.savedAt)}`,
+    frame.id,
+  )
+  return frame
+}
+
+/* ------------------------------------------------------------------ */
 /* Live rendering of agent writes.                                     */
 /*                                                                     */
 /* Streams (append_frame_html): every chunk broadcasts the moment it   */
@@ -1236,13 +1422,16 @@ export function appendFrameHtml(
   if (!before) return undefined
 
   const starting = opts.start || !streams.has(frameId)
+  /* the design as it stood before this stream rewrites it — once per stream,
+     never per chunk */
+  if (starting) snapshotFrame(before, actor, snapshotReason(actor))
   /* an agent that escapes its opening chunk escapes the whole stream, so latch
      the verdict there: a chunk mid-design can hold a legitimate `&lt;` (a code
      sample) and must never be sniffed on its own */
   const escaped = starting ? looksEscapedHtml(chunk) : (streams.get(frameId)?.escaped ?? false)
   const piece = escaped ? decodeEscapedHtml(chunk) : chunk
   const html = opts.start ? piece : before.html + piece
-  const frame = store.updateFrame(frameId, { html }, actor.name)!
+  const frame = store.updateFrame(frameId, { html }, actor.name, editorOf(actor))!
 
   if (starting) {
     finishReveal(frameId) /* a live stream overrides any one-shot playback in flight */
@@ -1285,11 +1474,13 @@ export function createFrame(
     height?: number
     html?: string
     demo?: boolean
+    slide?: boolean
+    speakerNotes?: string
   },
   actor: Actor,
 ): Frame | undefined {
   if (input.html !== undefined) input = { ...input, html: repairEscapedHtml(input.html) }
-  const frame = store.createFrame(canvasId, input, actor.name)
+  const frame = store.createFrame(canvasId, input, actor.name, editorOf(actor))
   if (!frame) return undefined
   if (actor.kind === 'agent' && frame.html.length > 0) {
     /* agent one-shot creation still plays back as a reveal */
@@ -1307,16 +1498,24 @@ export function createFrame(
 
 export function updateFrame(
   frameId: string,
-  patch: Partial<Pick<Frame, 'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html'>>,
+  patch: Partial<Pick<Frame, 'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html' | 'slide' | 'speakerNotes'>>,
   actor: Actor,
+  /** restoring: a version restore already snapshotted and logs its own activity line */
+  opts: { restoring?: boolean } = {},
 ): Frame | undefined {
   const before = store.getFrame(frameId)
   if (!before) return undefined
   if (patch.html !== undefined) patch = { ...patch, html: repairEscapedHtml(patch.html) }
   const prevName = before.name
   const prevHtml = before.html
-  const frame = store.updateFrame(frameId, patch, actor.name)
+  const prevPos = { x: before.x, y: before.y }
+  /* a live stream's frame holds a half-written design: not worth keeping */
+  if (!opts.restoring && patch.html !== undefined && patch.html !== prevHtml && !streams.has(frameId)) {
+    snapshotFrame(before, actor, snapshotReason(actor))
+  }
+  const frame = store.updateFrame(frameId, patch, actor.name, editorOf(actor))
   if (!frame) return undefined
+  carryNotesWithFrame(frame, prevPos, actor)
 
   const htmlChanged = patch.html !== undefined && patch.html !== prevHtml
   if (htmlChanged && actor.kind === 'agent') {
@@ -1334,11 +1533,11 @@ export function updateFrame(
       trackTaskFrame(frame.canvasId, actor, frameId)
     } else if (smallTweak) {
       broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
-      logActivity(frame.canvasId, actor, `tweaked the design of “${frame.name}”`, frame.id)
+      if (!opts.restoring) logActivity(frame.canvasId, actor, `tweaked the design of “${frame.name}”`, frame.id)
       autoTask(frame.canvasId, actor, `Tweaking “${frame.name}”`, frameId)
     } else {
       startReveal(frame, actor, prefix)
-      logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
+      if (!opts.restoring) logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
       autoTask(frame.canvasId, actor, `Redesigning “${frame.name}”`, frameId)
     }
   } else {
@@ -1349,7 +1548,7 @@ export function updateFrame(
     }
     broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
     if (htmlChanged) {
-      logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
+      if (!opts.restoring) logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
     } else if (patch.name !== undefined && patch.name !== prevName) {
       logActivity(frame.canvasId, actor, `renamed “${prevName}” to “${frame.name}”`, frame.id)
     }
@@ -1366,6 +1565,7 @@ export function deleteFrame(frameId: string, actor: Actor): Frame | undefined {
   finishReveal(frameId)
   const frame = store.deleteFrame(frameId)
   if (!frame) return undefined
+  lastSnapshots.delete(frameId)
   thumbs.purge(frameId)
   broadcast(frame.canvasId, { type: 'frame:deleted', frameId, actor })
   logActivity(frame.canvasId, actor, `deleted frame “${frame.name}”`, frame.id)
@@ -1373,11 +1573,123 @@ export function deleteFrame(frameId: string, actor: Actor): Frame | undefined {
   return frame
 }
 
+/* ------------------------------------------------------------------ */
+/* Sticky notes: markdown cards on the canvas, free-floating or       */
+/* attached beside a frame. Validated here so REST and MCP agree.     */
+/* ------------------------------------------------------------------ */
+
+export type NoteResult = { ok: true; note: CanvasNote } | { ok: false; error: string; status: 400 | 404 }
+
+const noteFail = (error: string, status: 400 | 404 = 400): NoteResult => ({ ok: false, error, status })
+
+type NoteFields = Pick<CanvasNote, 'x' | 'y' | 'width' | 'height' | 'markdown' | 'color'>
+
+/** Check the editable fields of a note request. Sizes are clamped into range
+ *  rather than refused (an agent asking for 5000 px gets the largest allowed);
+ *  everything else that is wrong is an error naming the field. */
+function parseNoteFields(raw: Record<string, unknown>): { fields: Partial<NoteFields> } | { error: string } {
+  const fields: Partial<NoteFields> = {}
+  if (raw.markdown !== undefined) {
+    if (typeof raw.markdown !== 'string') return { error: 'markdown must be a string' }
+    if (raw.markdown.length > MAX_NOTE_CHARS) return { error: `markdown is limited to ${MAX_NOTE_CHARS} characters` }
+    fields.markdown = raw.markdown
+  }
+  if (raw.color !== undefined) {
+    if (!isNoteColor(raw.color)) return { error: `color must be one of ${NOTE_COLORS.join(', ')}` }
+    fields.color = raw.color
+  }
+  for (const key of ['x', 'y', 'width', 'height'] as const) {
+    const value = raw[key]
+    if (value === undefined) continue
+    if (typeof value !== 'number' || !Number.isFinite(value)) return { error: `${key} must be a finite number` }
+    if (key === 'width') fields.width = clampNoteWidth(value)
+    else if (key === 'height') fields.height = clampNoteHeight(value)
+    else fields[key] = Math.round(value)
+  }
+  return { fields }
+}
+
+export function createNote(canvasId: string, raw: Record<string, unknown>, actor: Actor): NoteResult {
+  const canvas = store.getCanvas(canvasId)
+  if (!canvas) return noteFail('canvas not found', 404)
+  const parsed = parseNoteFields(raw)
+  if ('error' in parsed) return noteFail(parsed.error)
+  const { frameId, pageId } = raw
+  if (frameId !== undefined && typeof frameId !== 'string') return noteFail('frame_id must be a string')
+  if (pageId !== undefined && typeof pageId !== 'string') return noteFail('page_id must be a string')
+  const frame = frameId ? canvas.frames.find((f) => f.id === frameId) : undefined
+  if (frameId && !frame) return noteFail(`no frame with id ${frameId} on this canvas`)
+  if (pageId && !canvasPages(canvas).some((p) => p.id === pageId)) return noteFail(`no page with id ${pageId}`)
+
+  const width = parsed.fields.width ?? NOTE_DEFAULT_SIZE.width
+  /* attached with no spot given: beside the frame, like a margin note */
+  const spot = frame ? attachedNotePlacement(frame, width) : undefined
+  const note = store.createNote(
+    canvasId,
+    {
+      ...parsed.fields,
+      width,
+      x: parsed.fields.x ?? spot?.x,
+      y: parsed.fields.y ?? spot?.y,
+      /* an attached note lives on its frame's page */
+      pageId: frame ? framePageId(canvas, frame) : pageId,
+      frameId: frame?.id,
+    },
+    actor.name,
+    actor.userId,
+  )
+  if (!note) return noteFail('could not create the note')
+  broadcast(canvasId, { type: 'note:upsert', note, actor })
+  logActivity(canvasId, actor, frame ? `added a sticky note beside “${frame.name}”` : 'added a sticky note', frame?.id)
+  touch(canvasId, actor, frame?.id)
+  return { ok: true, note }
+}
+
+export function updateNote(noteId: string, raw: Record<string, unknown>, actor: Actor): NoteResult {
+  const found = store.findNote(noteId)
+  if (!found) return noteFail('note not found', 404)
+  const parsed = parseNoteFields(raw)
+  if ('error' in parsed) return noteFail(parsed.error)
+  const textChanged = parsed.fields.markdown !== undefined && parsed.fields.markdown !== found.note.markdown
+  const note = store.updateNote(found.canvasId, noteId, parsed.fields, actor.name)
+  if (!note) return noteFail('note not found', 404)
+  broadcast(found.canvasId, { type: 'note:upsert', note, actor })
+  /* moving and resizing are not worth an activity line each; the words are */
+  if (textChanged) logActivity(found.canvasId, actor, 'edited a sticky note', note.frameId)
+  touch(found.canvasId, actor, note.frameId)
+  return { ok: true, note }
+}
+
+export function deleteNote(noteId: string, actor: Actor): NoteResult {
+  const found = store.findNote(noteId)
+  if (!found) return noteFail('note not found', 404)
+  const note = store.deleteNote(found.canvasId, noteId)
+  if (!note) return noteFail('note not found', 404)
+  broadcast(found.canvasId, { type: 'note:delete', id: noteId, actor })
+  logActivity(found.canvasId, actor, 'removed a sticky note', note.frameId)
+  touch(found.canvasId, actor, null)
+  return { ok: true, note }
+}
+
+/** A frame that moved takes the notes attached to it along: same delta, same
+ *  update path, so an Inspector edit, an agent's update_frame and an undo all
+ *  carry them without every caller remembering to. */
+function carryNotesWithFrame(frame: Frame, prev: { x: number; y: number }, actor: Actor) {
+  const moves = shiftAttachedNotes(store.getNotes(frame.canvasId), frame.id, frame.x - prev.x, frame.y - prev.y)
+  for (const move of moves) {
+    const note = store.updateNote(frame.canvasId, move.id, { x: move.x, y: move.y }, actor.name)
+    if (note) broadcast(frame.canvasId, { type: 'note:upsert', note, actor })
+  }
+}
+
 /** Remove a canvas with everything attached to it; viewers are told to leave. */
 export function deleteCanvas(canvasId: string): boolean {
   const c = store.deleteCanvas(canvasId)
   if (!c) return false
-  for (const f of c.frames) thumbs.purge(f.id)
+  for (const f of c.frames) {
+    thumbs.purge(f.id)
+    lastSnapshots.delete(f.id)
+  }
   broadcast(canvasId, { type: 'canvas:deleted' })
   taskLog.delete(canvasId)
   feedbackLog.delete(canvasId)

@@ -18,6 +18,7 @@ import { ensureTab } from '../lib/desktop'
 import { Stage } from '../components/Stage'
 import { Board } from '../components/Board'
 import { Inspector } from '../components/Inspector'
+import { FrameHistoryPanel } from '../components/FrameHistoryPanel'
 import { ElementPanel } from '../components/ElementPanel'
 import { ActivityPanel } from '../components/ActivityPanel'
 import { ConnectModal } from '../components/ConnectModal'
@@ -25,6 +26,7 @@ import { LimitWall, isResidentLimit } from '../components/TeamAllowance'
 import { PromptBar } from '../components/PromptBar'
 import { WorkingNow } from '../components/WorkingNow'
 import { SideRail } from '../components/SideRail'
+import { MarksChip, MarksController } from '../components/MarksChip'
 import { LayersPanel, LayersRailToggle } from '../components/LayersPanel'
 import { PagesPanel } from '../components/PagesPanel'
 import { Onboarding } from '../components/Onboarding'
@@ -37,16 +39,19 @@ import {
   SourcePicker,
 } from '../components/ImportSources'
 import { PresentMode } from '../components/PresentMode'
+import { startPresenting } from '../lib/present'
+import { FrameExportModal } from '../components/FrameExportModal'
 import { getIdentity, setName } from '../lib/identity'
-import {
-  copyFrames,
-  duplicateFrames,
-  hasFrameClip,
-  pasteFrameCentered,
-  pasteImagesCentered,
-} from '../lib/frameClipboard'
-import { clearHistory, redo, undo } from '../lib/history'
-import { deleteSelection } from '../lib/layerEdits'
+import { hasFrameClip, pasteFrameCentered, pasteImagesCentered } from '../lib/frameClipboard'
+import { clearHistory } from '../lib/history'
+import { clearLayoutSnapshots } from '../lib/layoutEdits'
+import { useShortcuts } from '../lib/shortcuts'
+import { canvasShortcuts } from '../lib/canvasShortcuts'
+import { ShortcutsDialog } from '../components/ShortcutsDialog'
+import { EXPORT_SHORTCUT } from '../lib/keys'
+import { useSelectedFrames } from '../lib/useSelectedFrames'
+import { canEditNow, roleBadge, useCanEdit } from '../lib/role'
+import { GuestNamePrompt, NoAccess } from '../components/AccessScreens'
 import { authClient } from '../lib/auth'
 import { posthog } from '../lib/posthog'
 import { useIsMobile } from '../hooks/use-mobile'
@@ -57,6 +62,7 @@ import { AuthScreen } from '../components/ui/screen'
 import { Wordmark } from '../components/ui/wordmark'
 import {
   BrainIcon,
+  DownloadIcon,
   GithubIcon,
   ImportIcon,
   MoreHorizontalIcon,
@@ -102,8 +108,16 @@ const STARTER_HTML = `<!doctype html>
 const importNoteCls = 'mt-2.5 text-[11.5px] leading-[1.4] text-ink-faint'
 const errorNoteCls = 'mt-2.5 text-[13px] text-accent-ink'
 
-export function CanvasPage({ canvasId }: { canvasId: string }) {
+export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string; guestEntry?: boolean }) {
   const canvas = useStore((s) => s.canvas)
+  /* what this connection may do: only editors get the toolbar, inspector,
+     prompt bar, board and shortcuts; the server refuses the rest regardless */
+  const role = useStore((s) => s.role)
+  const canEdit = useCanEdit()
+  const guest = useStore((s) => s.guest) || guestEntry
+  const noAccess = useStore((s) => s.noAccess)
+  const guestNameRequest = useStore((s) => s.guestNameRequest)
+  const badge = roleBadge(role, guest)
   const connected = useStore((s) => s.connected)
   const presences = useStore((s) => s.presences)
   const selectedId = useStore((s) => s.selectedId)
@@ -113,7 +127,11 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
   const [view, setView] = useState<'canvas' | 'board'>('canvas')
   const [showConnect, setShowConnect] = useState(false)
   const [showShare, setShowShare] = useState(false)
-  const [presenting, setPresenting] = useState(false)
+  const presenting = useStore((s) => s.presenting)
+  const setPresenting = useStore((s) => s.setPresenting)
+  const presentFrameId = useStore((s) => s.presentFrameId)
+  /* leaving the canvas ends a presentation, so the next canvas starts with its frames awake */
+  useEffect(() => () => useStore.getState().setPresenting(false), [])
   /* returning from a GitHub App install: the setup redirect appends a signed
      pass — pull it off the URL and open the import modal on the repo picker */
   const [ghInstallPass, setGhInstallPass] = useState<string | null>(() => {
@@ -151,8 +169,13 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
       useStore.getState().setCanvas(null)
       useStore.getState().setPresences([])
       useStore.getState().setCanvasNotFound(false)
+      useStore.getState().closeExport()
       select(null)
       clearHistory()
+      clearLayoutSnapshots()
+      useStore.getState().setLaser(false)
+      useStore.getState().setCommentMode(false)
+      useStore.getState().setShortcutsOpen(false)
     }
   }, [canvasId, select])
 
@@ -161,46 +184,9 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
     sendWs({ type: 'editing', frameId: selectedId })
   }, [selectedId])
 
-  /* frame keyboard shortcuts: delete, copy/paste/duplicate, undo/redo */
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const t = e.target as HTMLElement
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
-      const selectedIds = useStore.getState().selectedIds
-      /* a picked element (from the canvas or the layers tree) is what ⌫
-         removes — the frame it lives in only goes when nothing inside it is
-         selected. Auto-repeat is ignored: a held key must not take the
-         element and then, on the next repeat, the frame under it. */
-      if ((e.key === 'Delete' || e.key === 'Backspace') && !e.repeat && deleteSelection()) e.preventDefault()
-      if (e.key === 'Escape') {
-        select(null)
-        useStore.getState().setFollowing(null)
-      }
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
-        e.preventDefault()
-        if (e.shiftKey) void redo()
-        else void undo()
-        return
-      }
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'y') {
-        e.preventDefault()
-        void redo()
-        return
-      }
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-        /* ⌘C and ⌘D act on the whole selection */
-        const frames = useStore.getState().canvas?.frames.filter((f) => selectedIds.includes(f.id)) ?? []
-        /* don't hijack ⌘C when the user is copying selected text */
-        if (e.key === 'c' && frames.length && !window.getSelection()?.toString()) copyFrames(frames)
-        if (e.key === 'd' && frames.length) {
-          e.preventDefault()
-          duplicateFrames(frames)
-        }
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [canvasId]) // eslint-disable-line react-hooks/exhaustive-deps
+  /* every keyboard shortcut lives in the registry (lib/shortcuts.ts); ⌘V is the exception below.
+     Entries that change the canvas carry a role guard there, so below edit only Esc, zoom and the like run. */
+  useShortcuts(canvasShortcuts)
 
   /* ⌘V lands here as a real paste event: clipboard images upload and drop in
      as frames; otherwise a copied frame (⌘C) pastes centered. Handled on
@@ -210,6 +196,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
     function onPaste(e: ClipboardEvent) {
       const t = e.target as HTMLElement
       if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
+      if (!canEditNow()) return
       const images = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'))
       if (images.length) {
         e.preventDefault()
@@ -269,6 +256,12 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
   )
 
   const selectedFrame = canvas?.frames.find((f) => f.id === selectedId) ?? null
+  const selectedFrames = useSelectedFrames()
+  const exportIds = useStore((s) => s.exportIds)
+  const exportTargets = useMemo(
+    () => (exportIds ? exportIds.flatMap((id) => canvas?.frames.find((f) => f.id === id) ?? []) : []),
+    [exportIds, canvas],
+  )
   /* the panel only shows when a frame-name click (or deep link) opened it —
      selecting a frame by clicking its surface must not slide it in */
   const inspectorOpen = useStore((s) => s.inspectorOpen)
@@ -276,6 +269,12 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
      context menu closes — it would slide in right under the open menu */
   const deferPanel = useStore((s) => !!s.ctxMenu?.deferPanel)
   const layersOpen = useStore((s) => s.layersOpen)
+  /* the version history rail takes the Inspector's spot while a frame's
+     history is open; it follows that frame, not the selection */
+  const historyFrameId = useStore((s) => s.historyFrameId)
+  /* history needs edit, so a role that drops below it closes the rail */
+  const historyFrame = canEdit ? (canvas?.frames.find((f) => f.id === historyFrameId) ?? null) : null
+  const closeHistory = () => useStore.getState().openFrameHistory(null)
   /* the element panel takes the frame inspector's spot while a Layers row
      has it open; it follows the element selection until it is closed */
   const selectedElement = useStore((s) => s.selectedElement)
@@ -306,10 +305,14 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
     )
   }
 
+  /* turned away at the join (never had access, or it was taken away) */
+  if (noAccess && !guest) return <NoAccess canvasId={canvasId} />
+
   return (
     /* --app-inset is 0 normally; the impersonation shell raises it so this
        fixed layer starts below the banner instead of under it */
     <div className="fixed inset-x-0 bottom-0 top-[var(--app-inset,0px)] flex flex-col">
+      <MarksController canvasId={canvasId} />
       {/* Three tiers. Desktop (≥ md): one row with the full action set. Tablet
           (xs..md): still one row — the id badge and the text actions fold
           into the ••• sheet so the name and the view switch keep their room.
@@ -317,37 +320,65 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
           below it, each at its natural width. */}
       <TopBar>
         <div className="flex min-w-0 items-center gap-1.5 max-xs:basis-full">
-          <TopBarHome label="All canvases" to="/" />
+          {guest ? (
+            <span className="grid size-9 place-items-center">
+              <DoopMark size={22} />
+            </span>
+          ) : (
+            <TopBarHome label="All canvases" to="/" />
+          )}
           <CanvasName />
-          <Badge className="max-md:hidden" title="Canvas id — agents use this with the MCP tools">
-            {canvasId}
-          </Badge>
+          {canEdit && (
+            <Badge className="max-md:hidden" title="Canvas id — agents use this with the MCP tools">
+              {canvasId}
+            </Badge>
+          )}
+          {badge && (
+            <Badge
+              tone="outline"
+              className="shrink-0 animate-[chip-in_0.25s_ease]"
+              title={
+                role === 'view'
+                  ? 'You can look around and present, but not change anything'
+                  : 'You can leave comments, but not change the design'
+              }
+            >
+              {badge}
+            </Badge>
+          )}
           {!connected && (
             <Badge tone="accent" className="max-md:ml-auto">
               reconnecting…
             </Badge>
           )}
         </div>
-        <Segmented
-          className="shrink-0 max-xs:order-2"
-          aria-label="View"
-          value={view}
-          onValueChange={(next) => setView(next as 'canvas' | 'board')}
-        >
-          <SegmentedItem value="canvas">Canvas</SegmentedItem>
-          <SegmentedItem value="board">Board</SegmentedItem>
-        </Segmented>
-        <div className="ml-auto flex items-center gap-2.5 max-md:hidden">
-          <Button
-            variant="bare"
-            className="h-8 px-2.5 text-[12.5px] font-medium"
-            onClick={() => setShowImport(true)}
-            title="Import from a website, live app or GitHub repo"
+        {canEdit && (
+          <Segmented
+            className="shrink-0 max-xs:order-2"
+            aria-label="View"
+            value={view}
+            onValueChange={(next) => setView(next as 'canvas' | 'board')}
           >
-            <ImportIcon className="size-[13px]" />
-            Import
-          </Button>
-          <BarDivider />
+            <SegmentedItem value="canvas">Canvas</SegmentedItem>
+            <SegmentedItem value="board">Board</SegmentedItem>
+          </Segmented>
+        )}
+        <div className="ml-auto flex items-center gap-2.5 max-md:hidden">
+          <MarksChip />
+          {canEdit && (
+            <>
+              <Button
+                variant="bare"
+                className="h-8 px-2.5 text-[12.5px] font-medium"
+                onClick={() => setShowImport(true)}
+                title="Import from a website, live app or GitHub repo"
+              >
+                <ImportIcon className="size-[13px]" />
+                Import
+              </Button>
+              <BarDivider />
+            </>
+          )}
           <div className="flex items-center px-0.5" title={others.map((p) => p.name).join(', ') || 'Just you here'}>
             <Button
               variant="bare"
@@ -360,36 +391,67 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
             <PeerAvatars others={others} />
           </div>
           <BarDivider />
-          <Tooltip label={selectedId ? 'Present this frame' : 'Select a frame to present'} side="bottom">
+          <Tooltip label={selectedId ? 'Present from this frame (P)' : 'Present this page (P)'} side="bottom">
             <Button
               variant="ghost"
               size="icon"
               className="size-[34px] rounded-[7px] bg-surface hover:border-ink-faint hover:bg-paper-deep disabled:opacity-40"
-              aria-label="Present selected frame"
-              disabled={!selectedId}
-              onClick={() => setPresenting(true)}
+              aria-label="Present"
+              disabled={!canvas?.frames.length}
+              onClick={() => startPresenting()}
             >
               <PlayIcon className="size-3.5" />
             </Button>
           </Tooltip>
           <Button
             variant="ghost"
-            className="h-[34px] rounded-[7px] bg-surface px-[17px] text-[12.5px] font-semibold hover:border-ink-faint hover:bg-paper-deep"
-            onClick={() => setShowShare(true)}
+            className="h-[34px] rounded-[7px] bg-surface px-3 text-[12.5px] font-semibold hover:border-ink-faint hover:bg-paper-deep disabled:opacity-40"
+            disabled={!selectedFrames.length}
+            title={
+              selectedFrames.length
+                ? `Export ${selectedFrames.length > 1 ? `${selectedFrames.length} frames` : 'the selected frame'} as PNG or JPG (${EXPORT_SHORTCUT})`
+                : 'Select a frame to export it'
+            }
+            onClick={() => useStore.getState().openExport(selectedFrames.map((f) => f.id))}
           >
-            Share
+            <DownloadIcon className="size-3.5" aria-hidden />
+            Export
+            {selectedFrames.length > 1 && (
+              <span className="rounded-full bg-ink px-1.5 py-px text-[10.5px] font-bold leading-[1.3] text-paper">
+                {selectedFrames.length}
+              </span>
+            )}
           </Button>
-          <Button
-            variant="primary"
-            className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
-            onClick={() => {
-              posthog.capture('agent_connection_opened')
-              setShowConnect(true)
-            }}
-          >
-            <SparkIcon className="size-3" />
-            Connect AI
-          </Button>
+          {guest ? (
+            <Button
+              variant="primary"
+              className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
+              onClick={() => location.assign(`/c/${canvasId}?signin=1`)}
+            >
+              Sign in
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              className="h-[34px] rounded-[7px] bg-surface px-[17px] text-[12.5px] font-semibold hover:border-ink-faint hover:bg-paper-deep"
+              onClick={() => setShowShare(true)}
+            >
+              Share
+            </Button>
+          )}
+          {canEdit && (
+            <Button
+              variant="primary"
+              className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
+              onClick={() => {
+                posthog.capture('agent_connection_opened')
+                setShowConnect(true)
+              }}
+            >
+              <SparkIcon className="size-3" />
+              Connect AI
+            </Button>
+          )}
         </div>
         <div className="ml-auto hidden items-center gap-1.5 max-md:flex max-xs:order-3">
           <div
@@ -399,18 +461,20 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
             <Avatar name={me.name} kind="user" stacked />
             <PeerAvatars others={others} />
           </div>
-          <Button
-            variant="primary"
-            className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
-            onClick={() => {
-              posthog.capture('agent_connection_opened')
-              setShowConnect(true)
-            }}
-          >
-            <SparkIcon className="size-3" />
-            <span className="max-sm:hidden">Connect AI</span>
-            <span className="sm:hidden">AI</span>
-          </Button>
+          {canEdit && (
+            <Button
+              variant="primary"
+              className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
+              onClick={() => {
+                posthog.capture('agent_connection_opened')
+                setShowConnect(true)
+              }}
+            >
+              <SparkIcon className="size-3" />
+              <span className="max-sm:hidden">Connect AI</span>
+              <span className="sm:hidden">AI</span>
+            </Button>
+          )}
           <Tooltip label="Canvas actions" side="bottom" align="end">
             <Button
               variant="ghost"
@@ -426,7 +490,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
       </TopBar>
 
       <div className="relative flex-1 overflow-hidden">
-        {view === 'board' ? (
+        {view === 'board' && canEdit ? (
           <Board canvasId={canvasId} />
         ) : (
           <>
@@ -479,11 +543,38 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
                 </Button>
               )}
             </div>
+            {isMobile && selectedFrames.length > 0 && (
+              /* phones have no right-click and no top-bar action group, so a
+                 selection brings its own Export */
+              <div className="absolute top-2 right-2 z-30 flex items-center gap-2 rounded-full border border-line bg-surface py-1 pr-1 pl-3.5 text-[12.5px] font-semibold text-ink-soft shadow-pop animate-[chip-in_0.25s_ease]">
+                <span className="max-w-[22vw] truncate">
+                  {selectedFrames.length > 1 ? `${selectedFrames.length} selected` : selectedFrames[0]?.name}
+                </span>
+                <Button
+                  variant="solid"
+                  size="pill"
+                  className="h-8 gap-1.5 px-3.5 text-[12.5px]"
+                  onClick={() => useStore.getState().openExport(selectedFrames.map((f) => f.id))}
+                >
+                  <DownloadIcon className="size-3.5" aria-hidden />
+                  Export
+                </Button>
+              </div>
+            )}
             <WorkingNow />
-            <PromptBar canvasId={canvasId} />
-            <Onboarding canvasId={canvasId} />
-            {!isMobile && (layersOpen ? <LayersPanel onAddFrame={addFrame} /> : <LayersRailToggle />)}
-            {!isMobile && selectedFrame && panelElement && !deferPanel && (
+            {canEdit && <PromptBar canvasId={canvasId} />}
+            {canEdit && <Onboarding canvasId={canvasId} />}
+            {!isMobile && canEdit && (layersOpen ? <LayersPanel onAddFrame={addFrame} /> : <LayersRailToggle />)}
+            {/* history is readable by anyone who can view; the panel itself hides Restore below edit */}
+            {!isMobile && historyFrame && (
+              <FrameHistoryPanel
+                key={historyFrame.id}
+                frame={historyFrame}
+                className={propertiesPanelCls}
+                onClose={closeHistory}
+              />
+            )}
+            {!isMobile && canEdit && !historyFrame && selectedFrame && panelElement && !deferPanel && (
               <ElementPanel
                 key={`${selectedFrame.id}|${panelElement.selector}`}
                 frame={selectedFrame}
@@ -491,11 +582,15 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
                 className={propertiesPanelCls}
               />
             )}
-            {!isMobile && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
-              <Inspector frame={selectedFrame} className={propertiesPanelCls} />
-            )}
-            {!isMobile && !showActivity && <SideRail onOpen={() => setShowActivity(true)} />}
-            {!isMobile && showActivity && <ActivityPanel onClose={() => setShowActivity(false)} />}
+            {!isMobile &&
+              canEdit &&
+              !historyFrame &&
+              selectedFrame &&
+              inspectorOpen &&
+              !panelElement &&
+              !deferPanel && <Inspector frame={selectedFrame} className={propertiesPanelCls} />}
+            {!isMobile && canEdit && !showActivity && <SideRail onOpen={() => setShowActivity(true)} />}
+            {!isMobile && canEdit && showActivity && <ActivityPanel onClose={() => setShowActivity(false)} />}
           </>
         )}
       </div>
@@ -515,48 +610,73 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
               </div>
               <PagesPanel />
               <div className="grid gap-2 p-4">
-                <Button
-                  variant="ghost"
-                  className="h-11 justify-start border-line bg-surface px-4"
-                  onClick={() => {
-                    setShowMobileActions(false)
-                    setShowImport(true)
-                  }}
-                >
-                  Import website
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-11 justify-start border-line bg-surface px-4"
-                  onClick={() => {
-                    setShowMobileActions(false)
-                    setShowShare(true)
-                  }}
-                >
-                  Share canvas
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-11 justify-start border-line bg-surface px-4"
-                  onClick={() => {
-                    setShowMobileActions(false)
-                    setShowActivity(true)
-                  }}
-                >
-                  <PulseIcon /> Chat, agents & activity
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-11 justify-start px-4 text-ink-soft"
-                  onClick={() => navigate('/settings')}
-                >
-                  Settings
-                </Button>
+                {canEdit && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start border-line bg-surface px-4"
+                    onClick={() => {
+                      setShowMobileActions(false)
+                      setShowImport(true)
+                    }}
+                  >
+                    Import website
+                  </Button>
+                )}
+                {!guest && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start border-line bg-surface px-4"
+                    onClick={() => {
+                      setShowMobileActions(false)
+                      setShowShare(true)
+                    }}
+                  >
+                    Share canvas
+                  </Button>
+                )}
+                {canEdit && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start border-line bg-surface px-4"
+                    onClick={() => {
+                      setShowMobileActions(false)
+                      setShowActivity(true)
+                    }}
+                  >
+                    <PulseIcon /> Chat, agents & activity
+                  </Button>
+                )}
+                {!guest && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start px-4 text-ink-soft"
+                    onClick={() => navigate('/settings')}
+                  >
+                    Settings
+                  </Button>
+                )}
               </div>
             </SheetContent>
           </Sheet>
           <Sheet
-            open={!!selectedFrame && inspectorOpen && !deferPanel}
+            open={!!historyFrame}
+            onOpenChange={(open) => {
+              if (!open) closeHistory()
+            }}
+          >
+            <SheetContent
+              side="bottom"
+              showCloseButton={false}
+              className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
+            >
+              <SheetTitle className="sr-only">Version history</SheetTitle>
+              {historyFrame && (
+                <FrameHistoryPanel key={historyFrame.id} frame={historyFrame} surface="inline" onClose={closeHistory} />
+              )}
+            </SheetContent>
+          </Sheet>
+          <Sheet
+            open={canEdit && !!selectedFrame && inspectorOpen && !deferPanel && !historyFrame}
             onOpenChange={(open) => {
               if (!open) select(null)
             }}
@@ -570,7 +690,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
               {selectedFrame && <Inspector frame={selectedFrame} surface="inline" />}
             </SheetContent>
           </Sheet>
-          <Sheet open={showActivity} onOpenChange={setShowActivity}>
+          <Sheet open={canEdit && showActivity} onOpenChange={setShowActivity}>
             <SheetContent
               side="bottom"
               showCloseButton={false}
@@ -583,9 +703,25 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
         </>
       )}
 
+      {exportTargets.length > 0 && (
+        <FrameExportModal frames={exportTargets} onClose={() => useStore.getState().closeExport()} />
+      )}
+      {guestNameRequest && (
+        <GuestNamePrompt
+          onDone={(name) => {
+            guestNameRequest.resolve(name)
+            useStore.getState().setGuestNameRequest(null)
+          }}
+          onCancel={() => {
+            guestNameRequest.reject()
+            useStore.getState().setGuestNameRequest(null)
+          }}
+        />
+      )}
       {renaming && <RenameSelfModal current={me.name} onClose={() => setRenaming(false)} />}
-      {showConnect && <ConnectModal canvasId={canvasId} onClose={() => setShowConnect(false)} />}
-      {presenting && selectedId && <PresentMode frameId={selectedId} onClose={() => setPresenting(false)} />}
+      {showConnect && canEdit && <ConnectModal canvasId={canvasId} onClose={() => setShowConnect(false)} />}
+      <ShortcutsDialog />
+      {presenting && presentFrameId && <PresentMode startId={presentFrameId} onClose={() => setPresenting(false)} />}
       {showShare && canvas && (
         <ShareModal
           key={canvas.id}
@@ -612,7 +748,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
           }}
         />
       )}
-      {showImport && (
+      {showImport && canEdit && (
         <ImportModal
           canvasId={canvasId}
           installPass={ghInstallPass}
@@ -1658,6 +1794,14 @@ function GithubSection({
 /* The canvas title doubles as its rename field. */
 function CanvasName() {
   const canvas = useStore((s) => s.canvas)
+  const canEdit = useCanEdit()
+  /* renaming is a design edit: below edit the name is just a label */
+  if (!canEdit && canvas)
+    return (
+      <span className="min-w-0 max-w-[240px] truncate px-2 font-display text-[15px] font-semibold sm:max-w-[320px]">
+        {canvas.name}
+      </span>
+    )
   return (
     <TopBarTitle
       loading={!canvas}

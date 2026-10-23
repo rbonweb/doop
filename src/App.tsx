@@ -4,6 +4,8 @@ import { Home } from './pages/Home'
 import { Community } from './pages/Community'
 import { Settings } from './pages/Settings'
 import { CanvasPage } from './pages/CanvasPage'
+import { GuestCanvas } from './pages/GuestCanvas'
+import { PresenterWindow } from './components/PresenterView'
 import { AuthPage } from './pages/AuthPage'
 import { DesktopHandoff } from './pages/DesktopHandoff'
 import { DesktopSignIn } from './pages/DesktopSignIn'
@@ -122,13 +124,18 @@ export function App() {
      a separate service (see server/marketing.ts) that owns `/` for
      visitors; share links (/c/…) and interrupted MCP OAuth redirects keep
      their URL so the deep link / resume logic survives the sign-in. */
-  if (!session)
+  if (!session) {
+    /* a share link that admits guests (or asks for its password) opens for a
+       signed-out visitor; the page asks the server which, and falls back to
+       the sign-in form for everything else */
+    const guestCanvasId = path.match(/^\/c\/([^/]+)/)?.[1]
     return (
       <>
         <ShellDragBar />
-        <AuthPage />
+        {guestCanvasId ? <GuestCanvas canvasId={guestCanvasId} key={guestCanvasId} /> : <AuthPage />}
       </>
     )
+  }
 
   /* /admin waits for /api/me: before it answers we can't tell an admin from
      a borrowed "view as" session, and rendering Admin in the latter flashes
@@ -137,8 +144,14 @@ export function App() {
   if (path.startsWith('/admin') && (!me || returningToAdmin)) return <div className="auth-page" />
 
   const canvasId = path.match(/^\/c\/([^/]+)/)?.[1]
+  /* /c/<id>?presenter=1 is the presenter's own window: notes and the next slide, driven by the presentation (src/components/PresenterView.tsx) */
+  const presenterWindow = !!canvasId && new URLSearchParams(location.search).has('presenter')
   const page = canvasId ? (
-    <CanvasPage canvasId={canvasId} key={canvasId} />
+    presenterWindow ? (
+      <PresenterWindow canvasId={canvasId} key={canvasId} />
+    ) : (
+      <CanvasPage canvasId={canvasId} key={canvasId} />
+    )
   ) : path === DESKTOP_HANDOFF_PATH ? (
     <DesktopHandoff />
   ) : path.startsWith('/admin') ? (

@@ -46,8 +46,11 @@ import {
   ViewStructureUp,
   NavArrowDown,
   NavArrowRight,
+  OpenNewWindow,
   PlaySolid,
+  Presentation,
   Plus,
+  Post,
   RefreshDouble,
   Search,
   ShareAndroid,
@@ -58,6 +61,7 @@ import {
   SunLight,
   Text,
   Trash,
+  Undo,
   Xmark,
 } from 'iconoir-react'
 
@@ -97,12 +101,18 @@ export const PanelCollapseRightIcon = icon(SidebarCollapse, mirrored)
 export const PanelExpandRightIcon = icon(SidebarExpand, mirrored)
 export const LayersIcon = icon(ViewStructureUp)
 export const FrameIcon = icon(FrameAltEmpty)
+/** a sticky note */
+export const NoteIcon = icon(Post)
 export const BoxIcon = icon(Square)
 export const TextIcon = icon(Text)
 export const ImageIcon = icon(MediaImage)
 export const VectorIcon = icon(DesignNib)
 export const BookmarkIcon = icon(Bookmark)
 export const PlayIcon = icon(PlaySolid)
+/** a slide: the deck stage */
+export const SlideIcon = icon(Presentation)
+export const OpenWindowIcon = icon(OpenNewWindow)
+export const UndoIcon = icon(Undo)
 export const ArrowUpIcon = icon(ArrowUp)
 export const ChevronLeftIcon = icon(NavArrowLeft)
 export const GridIcon = icon(ViewGrid)

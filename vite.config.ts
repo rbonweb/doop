@@ -15,6 +15,8 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   test: {
     setupFiles: ['tests/setup.ts'],
+    /* agent worktrees under .claude/ are full repo copies; their tests are not this checkout's */
+    exclude: ['**/node_modules/**', '**/dist/**', '.claude/**'],
   },
   resolve: {
     alias: {

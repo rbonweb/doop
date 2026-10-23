@@ -125,13 +125,14 @@ function scheduleNext(row: Pick<AutomationRow, 'enabled' | 'schedule' | 'steps'>
   return nextRunAt(row.schedule, after)
 }
 
-/** Every step's canvas must be one the owner durably reaches — a share-link
- *  visit is not a place to park an automation that outlives the visit. */
+/** Every step's canvas must be one the owner durably edits — a share-link
+ *  visit, or a view or comment role, is not a place to park an automation
+ *  that writes frames and outlives the visit. */
 function checkCanvases(ownerId: string, steps: Step[]): string | undefined {
   for (const s of steps) {
     if (!s.canvasId) continue
     const c = store.getCanvas(s.canvasId)
-    if (!c || !hasDurableCanvasAccess(ownerId, c)) return 'one of the canvases is not yours'
+    if (!c || !hasDurableCanvasAccess(ownerId, c, 'edit')) return 'one of the canvases is not yours'
   }
   return undefined
 }

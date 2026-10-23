@@ -8,7 +8,7 @@ import type { GeminiCloudJob } from '../shared/geminiCloud.ts'
 
 const state = vi.hoisted(() => ({ allowed: true, banned: false }))
 vi.mock('../server/auth.ts', () => ({ isBanned: async () => state.banned }))
-vi.mock('../server/access.ts', () => ({ canAccessCanvas: (user: string) => user === 'alice' && state.allowed }))
+vi.mock('../server/access.ts', () => ({ canEdit: (user: string) => user === 'alice' && state.allowed }))
 vi.mock('../server/store.ts', () => ({ store: { getCanvas: (id: string) => ({ id }) } }))
 import { handleGeminiCloudMcp } from '../server/geminiCloudMcp.ts'
 import { geminiCloudRuns } from '../server/geminiCloudRuns.ts'

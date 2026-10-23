@@ -114,4 +114,26 @@ describe('the mount scheduler', () => {
     await advance(200)
     expect(state()).toEqual({ a: 'mounted', b: 'mounted', far: 'mounted' })
   })
+
+  it('holds off mounting while the viewport keeps moving, then settles once it stops', async () => {
+    act(() =>
+      root.render(
+        <>
+          <Stage />
+          <Probe id="a" />
+          <Probe id="b" />
+          <Probe id="far" />
+        </>,
+      ),
+    )
+    await advance(50)
+    /* a gesture: the camera reaches the far frame but keeps moving every 100 ms */
+    for (let i = 0; i < 6; i++) {
+      act(() => useStore.setState({ viewport: { x: -8800 - i, y: -8800, zoom: 1 } }))
+      await advance(100)
+    }
+    expect(state().far).toBe('waiting')
+    await advance(200)
+    expect(state().far).toBe('mounted')
+  })
 })

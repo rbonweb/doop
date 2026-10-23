@@ -1,4 +1,4 @@
-import { canvasPages, samePages } from '../shared/pages.ts'
+import { canvasPages, normalizePageTree, samePages, validatePageTree } from '../shared/pages.ts'
 import { localAgentRouter, handleLocalAgentMcp } from './localAgent.ts'
 import { handleGeminiCloudMcp } from './geminiCloudMcp.ts'
 import { geminiCloudWorkerFor } from './geminiCloudRuns.ts'
@@ -7,12 +7,13 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import express from 'express'
-import { eq, inArray } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
 import { toNodeHandler, fromNodeHeaders } from 'better-auth/node'
 import { oAuthDiscoveryMetadata } from 'better-auth/plugins'
 import { WebSocketServer, WebSocket } from 'ws'
 import { store } from './store.ts'
 import { getImage } from './previews.ts'
+import { parseImageScale } from '../shared/imageScale.ts'
 import * as actions from './actions.ts'
 import { liveActivitiesRouter, logLiveActivityRequests, startLiveActivityDelivery } from './liveActivities.ts'
 import { onCanvasEvent } from './events.ts'
@@ -20,7 +21,27 @@ import * as commentNotifications from './commentNotifications.ts'
 import { notificationsRouter } from './notifications.ts'
 import * as webhooks from './webhooks.ts'
 import { webhooksRouter } from './webhookRoutes.ts'
-import { canAccessCanvas, canManageCanvas, hasDurableCanvasAccess, isAdmin } from './access.ts'
+import { commentAnchorRouter } from './commentRoutes.ts'
+import { seenRouter } from './seenRoutes.ts'
+import { canvasRole, canManageCanvas, guestRole, hasDurableCanvasAccess, isAdmin, type AccessUser } from './access.ts'
+import { deckRouter } from './deckRoutes.ts'
+import { MAX_SPEAKER_NOTES_CHARS } from '../shared/slides.ts'
+import {
+  accessUserOf,
+  agentNotice,
+  applyLinkSettings,
+  publicRouter,
+  requireCanvas as requireCanvasRole,
+  requireFrame as requireFrameRole,
+  roleFor,
+  sharingRouter,
+  startAccessRequestExpiry,
+  unlockedByCookie,
+  validMentions,
+  wireSharing,
+  GUEST_MARK,
+  guestDisplayName,
+} from './sharing.ts'
 import { auth, initAuth, syncAdmins, getUserName, PUBLIC_ORIGIN, loginProvidersConfig } from './auth.ts'
 import { inviteFor, inviteOnly } from './instanceSettings.ts'
 import { adminRouter } from './admin.ts'
@@ -68,7 +89,8 @@ import { mentionedRole } from '../shared/agents.ts'
 import { activeAgentTasks } from '../shared/agentActivity.ts'
 import { colorFor } from '../shared/types.ts'
 import { isPeerViewport } from '../shared/viewport.ts'
-import type { ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
+import { roleAtLeast } from '../shared/types.ts'
+import type { Canvas, CanvasPageInfo, CanvasRole, ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
 
 const PORT = Number(process.env.PORT || 4400)
 
@@ -96,7 +118,7 @@ let data = await persist.hydrate()
 if (data.canvases.length === 0 && (await persist.importLegacyJson())) {
   data = await persist.hydrate()
 }
-store.init(data.canvases)
+store.init(data.canvases, data)
 await workspaces.hydrateWorkspaces() // before the first request: canAccessCanvas reads membership
 await webhooks.hydrateWebhooks()
 billing.reportBillingConfig()
@@ -163,7 +185,42 @@ interface Conn {
    *  Showing their borrowed identity as a live cursor would tell the room
    *  the owner is here when they aren't. */
   silent?: boolean
+  /** the account behind the socket; unset for a signed-out guest */
+  user?: AccessUser
+  /** a signed-out visitor on an anyone-with-the-link canvas */
+  guest?: boolean
+  /** what this socket may do, re-resolved whenever sharing changes */
+  role: CanvasRole
+  /** the Cookie header of the upgrade request: carries the link-password unlock */
+  cookie?: string
 }
+
+/* A guest (and a view-only member) is sent the canvas itself, its comments and
+   presence, nothing of the team's working conversation: chat, agent tasks,
+   Memory and the activity feed. */
+const RESTRICTED_MESSAGES: ReadonlySet<ServerMessage['type']> = new Set([
+  'presence:join',
+  'presence:leave',
+  'cursor',
+  'viewport',
+  'editing',
+  'status',
+  'comment',
+  'frame:drag',
+  'frame:created',
+  'frame:updated',
+  'frame:deleted',
+  'frame:streaming',
+  'canvas:renamed',
+  'canvas:pages',
+  'note:upsert',
+  'note:delete',
+  'canvas:deleted',
+  'role',
+  'error',
+  'mention',
+])
+const isRestricted = (c: Conn) => c.guest || c.role === 'view'
 
 const conns = new Map<WebSocket, Conn>()
 
@@ -178,7 +235,35 @@ function send(ws: WebSocket, msg: ServerMessage) {
 function broadcast(canvasId: string, msg: ServerMessage, excludeClientId?: string) {
   for (const c of room(canvasId)) {
     if (excludeClientId && c.presence.clientId === excludeClientId) continue
+    if (isRestricted(c) && !RESTRICTED_MESSAGES.has(msg.type)) continue
     send(c.ws, msg)
+  }
+}
+
+/* one message to every socket these accounts have on the canvas */
+function sendToUsers(canvasId: string, userIds: readonly string[], msg: ServerMessage) {
+  for (const c of room(canvasId)) if (c.user && userIds.includes(c.user.id)) send(c.ws, msg)
+}
+
+/* Sharing changed (a role, the link, a domain grant, the password): re-resolve
+   every socket on the canvas. Someone who lost access is closed, not left
+   listening; everyone else learns their new role so the UI follows. */
+function refreshRoomAccess(canvasId: string) {
+  const canvas = store.getCanvas(canvasId)
+  for (const c of room(canvasId)) {
+    const role = canvas
+      ? c.guest
+        ? guestRole(canvas, { unlocked: unlockedByCookie(canvas, c.cookie) })
+        : canvasRole(c.user, canvas, { unlocked: unlockedByCookie(canvas, c.cookie) })
+      : null
+    if (!role) {
+      c.ws.close(4403, 'no access')
+      continue
+    }
+    if (role !== c.role) {
+      c.role = role
+      send(c.ws, { type: 'role', role })
+    }
   }
 }
 
@@ -249,9 +334,29 @@ setInterval(() => {
   }
 }, 5000)
 
+/* What a guest or a view-only member is sent of the canvas record: the design
+   itself (frames, pages, notes), without who is on it or the team's style
+   guides and Memory. */
+function publicCanvasView(canvas: Canvas, guest: boolean): Canvas {
+  const { guidelines: _guidelines, references: _references, ...rest } = canvas
+  if (!guest) return rest
+  const { memberIds: _members, memberRoles: _roles, ownerId: _owner, workspaceId: _workspace, ...visible } = rest
+  return visible
+}
+
 actions.wire(broadcast, agentTouch)
+wireSharing({ refreshAccess: refreshRoomAccess, sendToUsers })
+startAccessRequestExpiry()
 /* after the room has been told: email for the people who were not in it */
 onCanvasEvent(commentNotifications.onCanvasEvent)
+/* a person @mentioned in a comment who is in the room hears about it live
+   (toast + a pulsing pin); the email path above covers everyone else */
+onCanvasEvent((canvasId, event) => {
+  if (event.type !== 'comment.created' && event.type !== 'comment.replied') return
+  const { comment } = event
+  const targets = (comment.mentions ?? []).filter((id) => id !== comment.fromUserId)
+  if (targets.length) sendToUsers(canvasId, targets, { type: 'mention', comment })
+})
 onCanvasEvent(webhooks.onCanvasEvent)
 
 /* ------------------------------------------------- http api */
@@ -351,7 +456,8 @@ app.get('/i/:id.:ext', async (req, res) => {
   try {
     result = await getImage(frame, {
       ext,
-      scale: req.query.scale === '2' ? 2 : 1,
+      /* 1, 2 or 4; previews.ts lowers it for frames too big to render that dense */
+      scale: parseImageScale(req.query.scale),
       quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
       /* ?preview — the dashboard-card variant; see previews.ts */
       preview: req.query.preview !== undefined,
@@ -583,12 +689,20 @@ app.post('/ingest/:key', express.json({ limit: '10mb', type: () => true }), (req
   })
 })
 
+/* The few endpoints a signed-out visitor can reach: whether a share link is
+   open to guests or behind a password, the password gate itself, and guest
+   comments. Each one decides for itself (server/sharing.ts) — nothing here
+   reads a session. */
+app.use('/api/public', publicRouter)
+
 /* everything else under /api requires a logged-in user; the session's user
    is authoritative for names — clients don't get to pick who they are */
 interface SessionUser {
   id: string
   name: string
   email: string
+  emailVerified?: boolean
+  banned?: boolean | null
   role?: string | null
 }
 declare global {
@@ -638,38 +752,29 @@ app.get('/api/me', async (req, res) => {
 })
 
 /* Canvas access on the REST surface: resolve the canvas (or the frame's
-   canvas) and run it through canAccessCanvas before touching anything.
-   Both helpers write the error response themselves and return null. */
-function requireCanvas(req: express.Request, res: express.Response, canvasId: string) {
-  const c = store.getCanvas(canvasId)
-  if (!c) {
-    res.status(404).json({ error: 'not found' })
-    return null
-  }
-  if (!canAccessCanvas(req.user!.id, c)) {
-    res.status(403).json({ error: 'this canvas is private — ask the owner for access' })
-    return null
-  }
-  return c
-}
+   canvas) and run it through the role resolver before touching anything.
+   `min` is the least role the route needs: view for reads, comment for
+   commenting, edit for everything that changes the design. Both helpers write
+   the error response themselves and return null. */
+const requireCanvas = requireCanvasRole
+const requireFrame = requireFrameRole
 
-function requireFrame(req: express.Request, res: express.Response, frameId: string) {
-  const frame = store.getFrame(frameId)
-  if (!frame) {
-    res.status(404).json({ error: 'frame not found' })
+/** The version, if it belongs to this frame; otherwise answers 404. */
+async function requireFrameVersion(res: express.Response, frameId: string, versionId: string) {
+  const version = await persist.getFrameVersion(versionId)
+  if (!version || version.frameId !== frameId) {
+    res.status(404).json({ error: 'version not found' })
     return null
   }
-  const c = store.getCanvas(frame.canvasId)
-  if (!c || !canAccessCanvas(req.user!.id, c)) {
-    res.status(403).json({ error: 'this canvas is private — ask the owner for access' })
-    return null
-  }
-  return frame
+  return version
 }
 
 app.use('/api/local-agent', localAgentRouter)
 app.use('/api/notifications', notificationsRouter)
 app.use('/api/webhooks', webhooksRouter)
+app.use('/api/comments', commentAnchorRouter)
+app.use('/api/canvases', seenRouter)
+app.use('/api/canvases', deckRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/community', communityRouter)
 app.use('/api/automations', automationsRouter)
@@ -910,10 +1015,14 @@ app.post('/api/canvases', (req, res) => {
   res.json(store.createCanvas(name, req.user!.id, workspaceId))
 })
 
+/* members and their roles, domain grants, access requests, the mention picker */
+app.use('/api/canvases', sharingRouter)
+
 app.post('/api/canvases/:id/duplicate', async (req, res) => {
   const source = store.getCanvas(req.params.id)
   if (!source) return res.status(404).json({ error: 'not found' })
-  if (!hasDurableCanvasAccess(req.user!.id, source)) return res.status(403).json({ error: 'access denied' })
+  if (!hasDurableCanvasAccess(accessUserOf(req), source, 'edit'))
+    return res.status(403).json({ error: 'access denied' })
   /* a copy stays in the workspace when the copier is a member of it and the
      workspace may still take canvases; otherwise it lands in their personal space */
   const sourceWs = source.workspaceId ? workspaces.getWorkspace(source.workspaceId) : undefined
@@ -1012,75 +1121,32 @@ app.delete('/api/canvases/:id', (req, res) => {
   res.json({ ok: true })
 })
 
-app.patch('/api/canvases/:id', (req, res) => {
+app.patch('/api/canvases/:id', async (req, res) => {
   const c = requireCanvas(req, res, req.params.id)
   if (!c) return
-  const { name, linkAccess } = req.body ?? {}
-  /* the link policy is the owner's alone — collaborators can rename, not lock */
-  if (linkAccess !== undefined) {
-    if (c.ownerId !== req.user!.id) return res.status(403).json({ error: 'only the owner can change link access' })
-    if (linkAccess !== 'edit' && linkAccess !== 'none')
-      return res.status(400).json({ error: 'linkAccess must be "edit" or "none"' })
-    store.setLinkAccess(c.id, linkAccess)
+  const { name, linkAccess, linkAudience, linkPassword } = req.body ?? {}
+  const touchesLink = linkAccess !== undefined || linkAudience !== undefined || linkPassword !== undefined
+  const renames = typeof name === 'string' && name.trim() !== ''
+  /* the link policy is the owner's alone — collaborators can rename, not lock;
+     and renaming is a design edit, which a view or comment role does not have */
+  if (touchesLink && c.ownerId !== req.user!.id)
+    return res.status(403).json({ error: 'only the owner can change link access' })
+  if (renames && !roleAtLeast(roleFor(req, c), 'edit'))
+    return res.status(403).json({ error: 'you do not have edit access to this canvas' })
+  if (touchesLink) {
+    const problem = await applyLinkSettings(c, { linkAccess, linkAudience, linkPassword })
+    if (problem) return res.status(400).json({ error: problem })
   }
-  if (typeof name === 'string' && name.trim()) {
-    const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  if (renames) {
+    const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
     actions.renameCanvas(c.id, name.trim(), actor)
   }
-  res.json({ ok: true })
-})
-
-/* ------------------------------------------------------------------ */
-/* Collaborators: Figma-style invites. The owner invites existing doop */
-/* accounts by email; members get full edit access regardless of the   */
-/* link setting. Management is owner-only (members may remove          */
-/* themselves); the people list is visible to anyone with access.      */
-/* ------------------------------------------------------------------ */
-
-app.get('/api/canvases/:id/members', async (req, res) => {
-  const c = requireCanvas(req, res, req.params.id)
-  if (!c) return
-  const ids = [...(c.ownerId ? [c.ownerId] : []), ...(c.memberIds ?? [])]
-  const rows = ids.length
-    ? await db
-        .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
-        .from(authSchema.user)
-        .where(inArray(authSchema.user.id, ids))
-    : []
-  const byId = new Map(rows.map((r) => [r.id, r]))
-  res.json(
-    ids.map((id) => ({
-      userId: id,
-      name: byId.get(id)?.name ?? 'Unknown',
-      email: byId.get(id)?.email ?? '',
-      owner: id === c.ownerId,
-    })),
-  )
-})
-
-app.post('/api/canvases/:id/members', async (req, res) => {
-  const c = requireCanvas(req, res, req.params.id)
-  if (!c) return
-  if (c.ownerId !== req.user!.id) return res.status(403).json({ error: 'only the owner can invite people' })
-  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
-  if (!email) return res.status(400).json({ error: 'email required' })
-  const [row] = await db
-    .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
-    .from(authSchema.user)
-    .where(eq(authSchema.user.email, email))
-  if (!row) return res.status(404).json({ error: 'no doop account with that email — ask them to sign up first' })
-  if (row.id === c.ownerId) return res.status(400).json({ error: 'the owner already has access' })
-  store.addMember(c.id, row.id, req.user!.id)
-  res.json({ userId: row.id, name: row.name, email: row.email, owner: false })
-})
-
-app.delete('/api/canvases/:id/members/:userId', (req, res) => {
-  const c = requireCanvas(req, res, req.params.id)
-  if (!c) return
-  if (c.ownerId !== req.user!.id && req.params.userId !== req.user!.id)
-    return res.status(403).json({ error: 'only the owner can remove collaborators' })
-  if (!store.removeMember(c.id, req.params.userId)) return res.status(404).json({ error: 'not a collaborator' })
-  res.json({ ok: true })
+  res.json({
+    ok: true,
+    linkAccess: c.linkAccess ?? 'none',
+    linkAudience: c.linkAudience ?? 'signed-in',
+    hasLinkPassword: !!c.hasLinkPassword,
+  })
 })
 
 /* ---- design-sync keys: mint/list/revoke the write-only snippet creds.
@@ -1090,9 +1156,9 @@ app.delete('/api/canvases/:id/members/:userId', (req, res) => {
    keep writing frames after the owner turns the link off. */
 
 function requireDurableCanvas(req: express.Request, res: express.Response, canvasId: string) {
-  const c = requireCanvas(req, res, canvasId)
+  const c = requireCanvas(req, res, canvasId, 'edit')
   if (!c) return null
-  if (!hasDurableCanvasAccess(req.user!.id, c)) {
+  if (!hasDurableCanvasAccess(accessUserOf(req), c, 'edit')) {
     res.status(403).json({ error: 'sync keys are managed by the owner and invited members' })
     return null
   }
@@ -1336,8 +1402,8 @@ app.get('/api/canvases/:id/guidelines/:name/history', async (req, res) => {
 })
 
 app.put('/api/canvases/:id/guidelines/:name', (req, res) => {
-  if (!requireCanvas(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  if (!requireCanvas(req, res, req.params.id, 'edit')) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const { markdown, x, y, title } = req.body ?? {}
   /* no markdown = metadata patch (position/title): content and history untouched */
   if (markdown === undefined) {
@@ -1368,8 +1434,8 @@ app.put('/api/canvases/:id/guidelines/:name', (req, res) => {
 
 /* design memory: pin/unpin reference frames, accept/dismiss rule proposals */
 app.post('/api/canvases/:id/references', (req, res) => {
-  if (!requireCanvas(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  if (!requireCanvas(req, res, req.params.id, 'edit')) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   try {
     const ref = actions.pinReference(req.params.id, String(req.body?.frameId ?? ''), actor)
     if (!ref) return res.status(404).json({ error: 'canvas or frame not found' })
@@ -1380,16 +1446,16 @@ app.post('/api/canvases/:id/references', (req, res) => {
 })
 
 app.delete('/api/canvases/:id/references/:refId', (req, res) => {
-  if (!requireCanvas(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  if (!requireCanvas(req, res, req.params.id, 'edit')) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   if (!actions.unpinReference(req.params.id, req.params.refId, actor))
     return res.status(404).json({ error: 'reference not found' })
   res.json({ ok: true })
 })
 
 app.post('/api/canvases/:id/proposals/:pid', (req, res) => {
-  if (!requireCanvas(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  if (!requireCanvas(req, res, req.params.id, 'edit')) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const proposal = actions.resolveProposal(req.params.id, req.params.pid, !!req.body?.accept, actor)
   if (!proposal) return res.status(404).json({ error: 'proposal not found' })
   res.json(proposal)
@@ -1400,7 +1466,7 @@ app.post(
   '/api/canvases/:id/assets',
   express.raw({ type: () => true, limit: MAX_ASSET_BYTES + 1024 }),
   async (req, res) => {
-    const c = requireCanvas(req, res, req.params.id)
+    const c = requireCanvas(req, res, req.params.id, 'edit')
     if (!c) return
     try {
       const asset = await createAsset(Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0), {
@@ -1418,7 +1484,7 @@ app.post(
 )
 
 app.put('/api/canvases/:id/pages', (req, res) => {
-  const canvas = requireCanvas(req, res, req.params.id)
+  const canvas = requireCanvas(req, res, req.params.id, 'edit')
   if (!canvas) return
   const pages = req.body?.pages
   if (
@@ -1433,12 +1499,20 @@ app.put('/api/canvases/:id/pages', (req, res) => {
         p.id.length > 100 ||
         typeof p.name !== 'string' ||
         !p.name.trim() ||
-        p.name.length > 100,
+        p.name.length > 100 ||
+        (p.parentId !== undefined && (typeof p.parentId !== 'string' || !p.parentId || p.parentId.length > 100)),
     ) ||
     new Set(pages.map((p) => p.id)).size !== pages.length
   ) {
     return res.status(400).json({ error: 'Provide 1–100 pages with unique IDs and names of up to 100 characters.' })
   }
+  const requested: CanvasPageInfo[] = pages.map((p) => ({
+    id: p.id,
+    name: p.name.trim(),
+    ...(p.parentId === undefined ? {} : { parentId: p.parentId }),
+  }))
+  const treeError = validatePageTree(requested)
+  if (treeError) return res.status(400).json({ error: treeError })
   if (!samePages(req.body?.expectedPages, canvasPages(canvas)))
     return res
       .status(409)
@@ -1447,22 +1521,36 @@ app.put('/api/canvases/:id/pages', (req, res) => {
   if (canvas.frames.some((f) => !pages.some((p) => p.id === (f.pageId ?? firstId)))) {
     return res.status(400).json({ error: 'Move the frames to another page before deleting this page.' })
   }
-  const clean = pages.map((p) => ({ id: p.id, name: p.name.trim() }))
+  const clean = normalizePageTree(requested)
   store.setPages(canvas.id, clean)
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   broadcast(canvas.id, { type: 'canvas:pages', pages: clean, actor })
   res.json(clean)
 })
 
+const validSpeakerNotes = (v: unknown): v is string => typeof v === 'string' && v.length <= MAX_SPEAKER_NOTES_CHARS
+
 app.post('/api/canvases/:id/frames', (req, res) => {
-  if (!requireCanvas(req, res, req.params.id)) return
-  const { name, pageId, x, y, width, height, html } = req.body ?? {}
+  if (!requireCanvas(req, res, req.params.id, 'edit')) return
+  const { name, pageId, x, y, width, height, html, slide, speakerNotes } = req.body ?? {}
   if (pageId !== undefined && !store.getCanvas(req.params.id)?.pages?.some((p) => p.id === pageId))
     return res.status(400).json({ error: 'page not found' })
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  if (speakerNotes !== undefined && !validSpeakerNotes(speakerNotes))
+    return res.status(400).json({ error: `speakerNotes must be text of up to ${MAX_SPEAKER_NOTES_CHARS} characters` })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const frame = actions.createFrame(
     req.params.id,
-    { name: String(name || 'Frame'), pageId, x, y, width, height, html },
+    {
+      name: String(name || 'Frame'),
+      pageId,
+      x,
+      y,
+      width,
+      height,
+      html,
+      ...(slide === true ? { slide: true } : {}),
+      ...(speakerNotes ? { speakerNotes } : {}),
+    },
     actor,
   )
   if (!frame) return res.status(404).json({ error: 'canvas not found' })
@@ -1470,15 +1558,19 @@ app.post('/api/canvases/:id/frames', (req, res) => {
 })
 
 app.patch('/api/frames/:id', (req, res) => {
-  if (!requireFrame(req, res, req.params.id)) return
+  if (!requireFrame(req, res, req.params.id, 'edit')) return
   const { actor: _ignored, ...patch } = req.body ?? {}
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   if (
     patch.pageId !== undefined &&
     !store.getCanvas(store.getFrame(req.params.id)!.canvasId)?.pages?.some((p) => p.id === patch.pageId)
   )
     return res.status(400).json({ error: 'page not found' })
-  const allowed = ['name', 'pageId', 'x', 'y', 'width', 'height', 'html'] as const
+  if (patch.slide !== undefined && typeof patch.slide !== 'boolean')
+    return res.status(400).json({ error: 'slide must be true or false' })
+  if (patch.speakerNotes !== undefined && !validSpeakerNotes(patch.speakerNotes))
+    return res.status(400).json({ error: `speakerNotes must be text of up to ${MAX_SPEAKER_NOTES_CHARS} characters` })
+  const allowed = ['name', 'pageId', 'x', 'y', 'width', 'height', 'html', 'slide', 'speakerNotes'] as const
   const clean: Record<string, unknown> = {}
   for (const k of allowed) if (patch[k] !== undefined) clean[k] = patch[k]
   const frame = actions.updateFrame(req.params.id, clean, actor)
@@ -1487,9 +1579,9 @@ app.patch('/api/frames/:id', (req, res) => {
 })
 
 app.post('/api/frames/:id/append', (req, res) => {
-  if (!requireFrame(req, res, req.params.id)) return
+  if (!requireFrame(req, res, req.params.id, 'edit')) return
   const { html_chunk, start, done } = req.body ?? {}
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const frame = actions.appendFrameHtml(req.params.id, String(html_chunk ?? ''), actor, {
     start: !!start,
     done: !!done,
@@ -1498,52 +1590,131 @@ app.post('/api/frames/:id/append', (req, res) => {
   res.json({ ok: true, htmlBytes: frame.html.length })
 })
 
+/* Frame history needs edit, to read or to restore: an old version can hold
+   content the editors have since removed, which a viewer was never shown. */
+app.get('/api/frames/:id/versions', async (req, res) => {
+  if (!requireFrame(req, res, req.params.id, 'edit')) return
+  res.json(await persist.listFrameVersions(req.params.id))
+})
+
+app.get('/api/frames/:id/versions/:versionId', async (req, res) => {
+  if (!requireFrame(req, res, req.params.id, 'edit')) return
+  const version = await requireFrameVersion(res, req.params.id, req.params.versionId)
+  if (version) res.json(version)
+})
+
+app.post('/api/frames/:id/versions/:versionId/restore', async (req, res) => {
+  if (!requireFrame(req, res, req.params.id, 'edit')) return
+  const version = await requireFrameVersion(res, req.params.id, req.params.versionId)
+  if (!version) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  const frame = actions.restoreFrameVersion(version, actor)
+  if (!frame) return res.status(404).json({ error: 'frame not found' })
+  res.json(frame)
+})
+
 app.delete('/api/frames/:id', (req, res) => {
-  if (!requireFrame(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  if (!requireFrame(req, res, req.params.id, 'edit')) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const frame = actions.deleteFrame(req.params.id, actor)
   if (!frame) return res.status(404).json({ error: 'frame not found' })
   res.json({ ok: true })
 })
 
+/* ---- sticky notes ---- */
+
+/* Notes belong to the design: reading them rides on the canvas payload (view),
+   but creating, moving, editing and deleting one needs the edit role. */
+function requireEditableCanvas(req: express.Request, res: express.Response, canvasId: string) {
+  return requireCanvas(req, res, canvasId, 'edit')
+}
+
+function sendNoteResult(res: express.Response, result: actions.NoteResult) {
+  if (!result.ok) return res.status(result.status).json({ error: result.error })
+  res.json(result.note)
+}
+
+app.post('/api/canvases/:id/notes', (req, res) => {
+  if (!requireEditableCanvas(req, res, req.params.id)) return
+  const { actor: _ignored, frameId, pageId, ...fields } = req.body ?? {}
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  sendNoteResult(res, actions.createNote(req.params.id, { ...fields, frameId, pageId }, actor))
+})
+
+app.patch('/api/notes/:id', (req, res) => {
+  const found = store.findNote(req.params.id)
+  if (!found) return res.status(404).json({ error: 'note not found' })
+  if (!requireEditableCanvas(req, res, found.canvasId)) return
+  /* position, size, text and colour only: a note never changes its frame or page */
+  const { x, y, width, height, markdown, color } = req.body ?? {}
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  sendNoteResult(res, actions.updateNote(req.params.id, { x, y, width, height, markdown, color }, actor))
+})
+
+app.delete('/api/notes/:id', (req, res) => {
+  const found = store.findNote(req.params.id)
+  if (!found) return res.status(404).json({ error: 'note not found' })
+  if (!requireEditableCanvas(req, res, found.canvasId)) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  const result = actions.deleteNote(req.params.id, actor)
+  if (!result.ok) return res.status(result.status).json({ error: result.error })
+  res.json({ ok: true })
+})
+
 app.post('/api/frames/:id/comments', async (req, res) => {
-  if (!requireFrame(req, res, req.params.id)) return
-  const { selector, snippet, text } = req.body ?? {}
+  const frame = requireFrame(req, res, req.params.id, 'comment')
+  if (!frame) return
+  const canvas = store.getCanvas(frame.canvasId)!
+  const { selector, snippet, text, anchor } = req.body ?? {}
+  /* Asking an agent for something would make it edit frames, so only editors
+     may. Anyone else's @agent mention is kept as a plain comment, and they are
+     told so — the agent is never queued and no resident task is spent. */
+  const notice = agentNotice(String(text ?? ''), roleFor(req, canvas))
   /* a comment that @mentions a resident agent is a new command to the team,
      so it's metered like a card; plain comments and replies stay free */
-  if (mentionedRole(String(text ?? ''))) {
+  if (!notice && mentionedRole(String(text ?? ''))) {
     const gate = await allowance.consumeResidentTask(req.user!.id)
     if (!gate.ok) {
       return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
     }
   }
+  const mentions = await validMentions(canvas, String(text ?? ''), req.body?.mentions)
   const comment = actions.addElementComment(
     req.params.id,
-    { selector: String(selector ?? ''), snippet: String(snippet ?? ''), text: String(text ?? '') },
+    { selector: String(selector ?? ''), snippet: String(snippet ?? ''), text: String(text ?? ''), anchor },
     req.user!.name,
     req.user!.id,
+    'user',
+    { allowAgent: !notice, mentions },
   )
   if (!comment) return res.status(404).json({ error: 'frame not found or empty text' })
-  res.json(comment)
+  res.json(notice ? { ...comment, notice } : comment)
 })
 
 app.post('/api/comments/:id/replies', async (req, res) => {
   const found = actions.findComment(req.params.id)
   if (!found) return res.status(404).json({ error: 'comment not found' })
-  if (!requireCanvas(req, res, found.canvasId)) return
+  const canvas = requireCanvas(req, res, found.canvasId, 'comment')
+  if (!canvas) return
   const text = String(req.body?.text ?? '')
   if (!text.trim() || !actions.openThread(req.params.id)) {
     return res.status(404).json({ error: 'thread resolved or empty text' })
   }
-  /* same rule as a fresh comment: only an @mention costs a resident task */
+  /* same rules as a fresh comment: only an editor's @agent mention queues
+     the agent and costs a resident task */
+  const notice = agentNotice(text, roleFor(req, canvas))
   let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
-  if (mentionedRole(text)) {
+  if (!notice && mentionedRole(text)) {
     gate = await allowance.consumeResidentTask(req.user!.id)
     if (!gate.ok) {
       return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
     }
   }
-  const reply = actions.replyToComment(req.params.id, text, req.user!.name, req.user!.id)
+  const mentions = await validMentions(canvas, text, req.body?.mentions)
+  const reply = actions.replyToComment(req.params.id, text, req.user!.name, req.user!.id, 'user', {
+    allowAgent: !notice,
+    mentions,
+  })
   if (!reply) {
     /* the thread closed while the meter was being written: give the task
        back — a failed refund is logged, never turned into a 500 */
@@ -1554,20 +1725,20 @@ app.post('/api/comments/:id/replies', async (req, res) => {
     }
     return res.status(409).json({ error: 'thread resolved meanwhile' })
   }
-  res.json(reply)
+  res.json(notice ? { ...reply, notice } : reply)
 })
 
 app.post('/api/comments/:id/resolve', (req, res) => {
   const found = actions.findComment(req.params.id)
   if (!found) return res.status(404).json({ error: 'comment not found' })
-  if (!requireCanvas(req, res, found.canvasId)) return
+  if (!requireCanvas(req, res, found.canvasId, 'comment')) return
   res.json(actions.resolveComment(req.params.id, req.user!.name))
 })
 
 app.post('/api/comments/:id/retry', async (req, res) => {
   const found = actions.findComment(req.params.id)
   if (!found) return res.status(404).json({ error: 'comment not found' })
-  if (!requireCanvas(req, res, found.canvasId)) return
+  if (!requireCanvas(req, res, found.canvasId, 'edit')) return
   const gate = await allowance.consumeResidentTask(req.user!.id)
   if (!gate.ok) {
     return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
@@ -1589,7 +1760,7 @@ function takeImportSlot(userId: string): boolean {
 }
 
 app.post('/api/canvases/:id/import/discover', async (req, res) => {
-  if (!requireCanvas(req, res, req.params.id)) return
+  if (!requireCanvas(req, res, req.params.id, 'edit')) return
   try {
     const { discoverSitePages, assertPublicHttpUrl } = await import('./importer.ts')
     const url = String(req.body?.url ?? '')
@@ -1602,7 +1773,7 @@ app.post('/api/canvases/:id/import/discover', async (req, res) => {
 })
 
 app.post('/api/canvases/:id/import', async (req, res) => {
-  const canvas = requireCanvas(req, res, req.params.id)
+  const canvas = requireCanvas(req, res, req.params.id, 'edit')
   if (!canvas) return
   try {
     const { importPage, importSitePages, assertPublicHttpUrl, isSameSiteUrl, MAX_SITE_PAGES } =
@@ -1626,7 +1797,7 @@ app.post('/api/canvases/:id/import', async (req, res) => {
       if (!takeImportSlot(req.user!.id)) return res.status(429).json({ error: 'too many imports — wait a minute' })
 
       const captures = await importSitePages(urls)
-      const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+      const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
       const frames = []
       const failures: { url: string; error: string }[] = []
       const rightmost = canvas.frames.reduce((right, frame) => Math.max(right, frame.x + frame.width), 0)
@@ -1675,7 +1846,7 @@ app.post('/api/canvases/:id/import', async (req, res) => {
     assertPublicHttpUrl(url)
     if (!takeImportSlot(req.user!.id)) return res.status(429).json({ error: 'too many imports — wait a minute' })
     const imported = await importPage(url)
-    const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+    const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
     const frame = actions.createFrame(
       canvas.id,
       { name: imported.title.slice(0, 80), width: imported.width, height: imported.height, html: imported.html },
@@ -1689,7 +1860,7 @@ app.post('/api/canvases/:id/import', async (req, res) => {
 })
 
 app.post('/api/canvases/:id/cards', async (req, res) => {
-  if (!requireCanvas(req, res, req.params.id)) return
+  if (!requireCanvas(req, res, req.params.id, 'edit')) return
   const title = String(req.body?.title ?? '').trim()
   if (!title) return res.status(400).json({ error: 'empty title' })
   const gate = await allowance.consumeResidentTask(req.user!.id)
@@ -1712,33 +1883,36 @@ app.post('/api/canvases/:id/cards', async (req, res) => {
 /* the canvas chat: a plain message is free; one that @mentions resident
    agents queues a card for them and is metered like any other card */
 app.post('/api/canvases/:id/chat', async (req, res) => {
-  if (!requireCanvas(req, res, req.params.id)) return
+  const chatCanvas = requireCanvas(req, res, req.params.id, 'comment')
+  if (!chatCanvas) return
   /* the same cut addChatMessage applies, so a mention past the cap is
      never metered for a card that then does not exist */
   const text = String(req.body?.text ?? '')
     .trim()
     .slice(0, actions.MAX_CHAT_CHARS)
   if (!text) return res.status(400).json({ error: 'empty text' })
-  if (mentionedRole(text)) {
+  /* an @agent message queues a card, which makes the agent edit: editors only */
+  const notice = agentNotice(text, roleFor(req, chatCanvas))
+  if (!notice && mentionedRole(text)) {
     const gate = await allowance.consumeResidentTask(req.user!.id)
     if (!gate.ok) {
       return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
     }
   }
-  const message = actions.addChatMessage(req.params.id, text, req.user!.name, req.user!.id)
+  const message = actions.addChatMessage(req.params.id, text, req.user!.name, req.user!.id, !notice)
   if (!message) return res.status(404).json({ error: 'canvas not found or empty text' })
-  res.json(message)
+  res.json(notice ? { ...message, notice } : message)
 })
 
 app.post('/api/canvases/:canvasId/cards/:id/done', (req, res) => {
-  if (!requireCanvas(req, res, req.params.canvasId)) return
+  if (!requireCanvas(req, res, req.params.canvasId, 'edit')) return
   const card = actions.completeCard(req.params.canvasId, req.params.id)
   if (!card) return res.status(404).json({ error: 'card not found' })
   res.json(card)
 })
 
 app.post('/api/canvases/:canvasId/cards/:id/retry', async (req, res) => {
-  if (!requireCanvas(req, res, req.params.canvasId)) return
+  if (!requireCanvas(req, res, req.params.canvasId, 'edit')) return
   const gate = await allowance.consumeResidentTask(req.user!.id)
   if (!gate.ok) {
     return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
@@ -1751,7 +1925,7 @@ app.post('/api/canvases/:canvasId/cards/:id/retry', async (req, res) => {
 app.post('/api/tasks/:id/feedback', async (req, res) => {
   const canvasId = actions.taskCanvasId(req.params.id)
   if (!canvasId) return res.status(404).json({ error: 'task not found' })
-  if (!requireCanvas(req, res, canvasId)) return
+  if (!requireCanvas(req, res, canvasId, 'edit')) return
   const text = String(req.body?.text ?? '').trim()
   if (!text) return res.status(400).json({ error: 'empty text' })
   const gate = await allowance.consumeResidentTask(req.user!.id)
@@ -1766,7 +1940,7 @@ app.post('/api/tasks/:id/feedback', async (req, res) => {
 app.post('/api/feedback/:id/retry', async (req, res) => {
   const found = actions.findFeedback(req.params.id)
   if (!found) return res.status(404).json({ error: 'feedback not found' })
-  if (!requireCanvas(req, res, found.canvasId)) return
+  if (!requireCanvas(req, res, found.canvasId, 'edit')) return
   const gate = await allowance.consumeResidentTask(req.user!.id)
   if (!gate.ok) {
     return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
@@ -1861,9 +2035,16 @@ const wss = new WebSocketServer({
   perMessageDeflate: { threshold: 1024, serverNoContextTakeover: true, clientNoContextTakeover: true },
 })
 
+/* a guest is anonymous, so its socket is throttled: a cursor flood from one
+   would otherwise be fanned out to the whole room */
+const GUEST_MESSAGES_PER_SECOND = 120
+
 wss.on('connection', (ws, upgradeReq) => {
   /* the session cookie rides the upgrade request; resolve it once */
   const sessionPromise = auth.api.getSession({ headers: fromNodeHeaders(upgradeReq.headers) }).catch(() => null)
+  const cookie = upgradeReq.headers.cookie
+  let windowStart = 0
+  let windowCount = 0
 
   ws.on('message', async (raw) => {
     let msg: ClientMessage
@@ -1873,52 +2054,86 @@ wss.on('connection', (ws, upgradeReq) => {
       return
     }
     const conn = conns.get(ws)
+    if (conn?.guest) {
+      const now = Date.now()
+      if (now - windowStart >= 1000) {
+        windowStart = now
+        windowCount = 0
+      }
+      if (++windowCount > GUEST_MESSAGES_PER_SECOND) return
+    }
 
     if (msg.type === 'join') {
       const session = await sessionPromise
-      if (!session) {
-        ws.close(4401, 'unauthorized')
-        return
-      }
       const canvas = store.getCanvas(msg.canvasId)
-      if (!canvas) {
-        /* a typo'd id or a canvas someone just deleted: say so and close,
-           instead of leaving the socket open with nothing ever coming back.
-           The client used to sit on a blank, unusable canvas UI forever
-           waiting for an 'init' that would never arrive. */
-        ws.close(4404, 'not found')
-        return
+      let role: CanvasRole | null
+      let user: AccessUser | undefined
+      let guest = false
+      if (!session) {
+        /* Signed out: only an anyone-with-the-link canvas admits you, as a
+           guest capped at comment. Every other reason looks the same (a
+           missing canvas, a private one, a locked one) so nothing leaks. */
+        role = canvas ? guestRole(canvas, { unlocked: unlockedByCookie(canvas, cookie) }) : null
+        if (!role) {
+          ws.close(4401, 'unauthorized')
+          return
+        }
+        guest = true
+      } else {
+        if (!canvas) {
+          /* a typo'd id or a canvas someone just deleted: say so and close,
+             instead of leaving the socket open with nothing ever coming back.
+             The client used to sit on a blank, unusable canvas UI forever
+             waiting for an 'init' that would never arrive. */
+          ws.close(4404, 'not found')
+          return
+        }
+        user = {
+          id: session.user.id,
+          email: session.user.email,
+          emailVerified: session.user.emailVerified,
+          banned: (session.user as { banned?: boolean | null }).banned,
+        }
+        role = canvasRole(user, canvas, { unlocked: unlockedByCookie(canvas, cookie) })
+        if (!role) {
+          ws.close(4403, 'no access')
+          return
+        }
       }
-      if (!canAccessCanvas(session.user.id, canvas)) {
-        ws.close(4403, 'no access')
-        return
-      }
+      if (!canvas) return // unreachable: both branches above returned for a missing canvas
       const presence: Presence = {
         clientId: msg.clientId,
-        name: session.user.name, // session identity, not whatever the client claims
+        /* session identity, not whatever the client claims; a guest's chosen
+           name always carries the "(guest)" marker so nobody can pass as a member */
+        name: session ? session.user.name : (guestDisplayName(msg.name) ?? `Guest${GUEST_MARK}`),
         color: colorFor(msg.clientId),
         kind: 'user',
         activeFrameId: null,
+        ...(guest ? { guest: true } : {}),
       }
-      const silent = !!(session.session as { impersonatedBy?: string | null }).impersonatedBy
-      conns.set(ws, { ws, canvasId: msg.canvasId, presence, silent })
+      const silent = !!session && !!(session.session as { impersonatedBy?: string | null }).impersonatedBy
+      const next: Conn = { ws, canvasId: msg.canvasId, presence, silent, user, guest, role, cookie }
+      conns.set(ws, next)
+      const restricted = isRestricted(next)
       const others = room(msg.canvasId)
         .filter((c) => c.ws !== ws && !c.silent)
         .map((c) => c.presence)
       const agents = [...(agentPresences.get(msg.canvasId)?.values() ?? [])]
       send(ws, {
         type: 'init',
-        canvas,
+        canvas: restricted ? publicCanvasView(canvas, guest) : canvas,
         presences: [...others, ...agents],
-        activity: actions.getActivity(msg.canvasId),
-        tasks: actions.getTasks(msg.canvasId),
-        feedback: actions.getFeedback(msg.canvasId),
+        activity: restricted ? [] : actions.getActivity(msg.canvasId),
+        tasks: restricted ? [] : actions.getTasks(msg.canvasId),
+        feedback: restricted ? [] : actions.getFeedback(msg.canvasId),
         comments: actions.getComments(msg.canvasId),
-        chat: actions.getChat(msg.canvasId),
-        decisions: actions.getDecisions(msg.canvasId),
-        proposals: actions.getProposals(msg.canvasId),
+        chat: restricted ? [] : actions.getChat(msg.canvasId),
+        decisions: restricted ? [] : actions.getDecisions(msg.canvasId),
+        proposals: restricted ? [] : actions.getProposals(msg.canvasId),
         selfColor: presence.color,
         serverBuild: BUILD_ID,
+        role,
+        ...(guest ? { guest: true } : {}),
       })
       /* An admin looking at a canvas must not act on it. Announcing presence
          would impersonate the owner in the room; maybePlay would have the
@@ -1927,6 +2142,9 @@ wss.on('connection', (ws, upgradeReq) => {
          own visit is supposed to trigger, not a support session. */
       if (silent) return
       broadcast(msg.canvasId, { type: 'presence:join', presence }, presence.clientId)
+      /* Only people who can edit set the demo or the agent in motion: a
+         reviewer opening the link must not start work on the owner's behalf. */
+      if (!roleAtLeast(role, 'edit')) return
       demo.maybePlay(msg.canvasId) // first visit to a fresh signup canvas: the demo agent performs
       /* Start never-attempted cards. Failed/interrupted cards are excluded. */
       if (actions.getTasks(msg.canvasId).some((t) => t.queuedBy && !t.agentName && !t.endedAt)) {
@@ -1957,7 +2175,21 @@ wss.on('connection', (ws, upgradeReq) => {
         presence.activeFrameId = msg.frameId
         broadcast(canvasId, { type: 'editing', clientId: presence.clientId, frameId: msg.frameId }, presence.clientId)
         break
-      case 'frame:drag':
+      case 'frame:drag': {
+        /* A live drag moves the frame on everyone's screen, so it takes edit
+           access — re-resolved now, not trusted from the join. A refused
+           message is answered once to this socket and never broadcast. */
+        const canvas = store.getCanvas(canvasId)
+        const role = !canvas
+          ? null
+          : conn.guest
+            ? guestRole(canvas, { unlocked: unlockedByCookie(canvas, conn.cookie) })
+            : canvasRole(conn.user, canvas, { unlocked: unlockedByCookie(canvas, conn.cookie) })
+        if (!roleAtLeast(role, 'edit')) {
+          send(ws, { type: 'error', message: 'You can look at this canvas but not change it.' })
+          break
+        }
+        if (store.getFrame(msg.frameId)?.canvasId !== canvasId) break
         broadcast(
           canvasId,
           {
@@ -1972,6 +2204,7 @@ wss.on('connection', (ws, upgradeReq) => {
           presence.clientId,
         )
         break
+      }
     }
   })
 

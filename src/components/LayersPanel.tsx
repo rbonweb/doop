@@ -11,6 +11,8 @@ import {
   type ReactNode,
 } from 'react'
 import type { Frame } from '../../shared/types'
+import { deckOf } from '../../shared/slides'
+import { noteColorOf, noteExcerpt, notePageId } from '../../shared/notes'
 import { useStore } from '../lib/store'
 import { usePageCanvas } from '../lib/pages'
 import { PagesPanel } from './PagesPanel'
@@ -36,6 +38,8 @@ import { Panel, PanelBody, PanelHeader, PanelTabsRoot, PanelTabs, PanelTab, Pane
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Tooltip } from './ui/tooltip'
+import { MarkDot } from './MarkDot'
+import { useFrameMark } from '../lib/marks'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -50,6 +54,7 @@ import {
   CollapseAllIcon,
   FrameIcon,
   LayersIcon,
+  NoteIcon,
   PanelCollapseIcon,
   PanelExpandIcon,
   PlusIcon,
@@ -159,6 +164,8 @@ function visibleRows(frames: Frame[], query: string, expanded: Set<string>): Vis
 export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
   const pageCanvas = usePageCanvas()
   const frames = useMemo(() => pageCanvas?.frames ?? [], [pageCanvas])
+  /* each slide's place in the deck this page plays */
+  const deckNumber = useMemo(() => new Map(deckOf(frames).map((f, i) => [f.id, i + 1])), [frames])
   const selectedId = useStore((s) => s.selectedId)
   const selectedElement = useStore((s) => s.selectedElement)
   const setLayersOpen = useStore((s) => s.setLayersOpen)
@@ -469,6 +476,7 @@ export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
                       row={row}
                       selected={row.frame.id === selectedId && !selectedElement}
                       current={row.frame.id === selectedId}
+                      deck={deckNumber.get(row.frame.id)}
                       drop={drop?.key === row.key ? drop.place : undefined}
                       onToggle={() => setOpen(row.key, !row.open)}
                       onActivate={() => activate(row)}
@@ -489,6 +497,7 @@ export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
               <div aria-hidden data-slot="rows-spacer" style={{ height: total - (offsets[end] ?? total) }} />
             </div>
           </PanelBody>
+          <NotesSection />
           <footer className="flex flex-none items-center justify-between gap-2 whitespace-nowrap border-t border-line-soft px-3 py-[9px] font-mono text-[10px] tracking-[0.04em] text-ink-faint">
             <span>
               <Kbd>↑</Kbd>
@@ -503,6 +512,66 @@ export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
         </PanelTabPanel>
       </PanelTabsRoot>
     </Panel>
+  )
+}
+
+/** The sticky notes on the open page, listed under the frames. A row flies the
+ *  camera to its note, so a note off-screen is one click away. */
+function NotesSection() {
+  const canvas = useStore((s) => s.canvas)
+  const activePageId = useStore((s) => s.activePageId)
+  const notesVisible = useStore((s) => s.notesVisible)
+  const notes = useMemo(
+    () => (canvas?.notes ?? []).filter((n) => notePageId(canvas!, n) === activePageId),
+    [canvas, activePageId],
+  )
+  if (!canvas || notes.length === 0) return null
+  return (
+    <section data-slot="notes-section" aria-label="Notes" className="flex-none border-t border-line-soft">
+      <div className="flex items-center justify-between py-1 pr-2 pl-3.5 font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-ink-faint">
+        <span>Notes · {notes.length}</span>
+        <Button
+          variant="bare"
+          size="sm"
+          className="h-5 px-1.5 text-[10px] font-medium uppercase tracking-[0.12em] text-ink-faint hover:bg-paper-deep hover:text-ink"
+          onClick={() => useStore.getState().setNotesVisible(!notesVisible)}
+        >
+          {notesVisible ? 'Hide' : 'Show'}
+        </Button>
+      </div>
+      <div className="max-h-[132px] overflow-y-auto px-2 pb-2">
+        {notes.map((n) => {
+          const frame = n.frameId ? canvas.frames.find((f) => f.id === n.frameId) : undefined
+          return (
+            <button
+              key={n.id}
+              type="button"
+              onClick={() => {
+                const s = useStore.getState()
+                if (!s.notesVisible) s.setNotesVisible(true)
+                s.requestFlyToPoint(n.x + n.width / 2, n.y + n.height / 2)
+              }}
+              style={{ '--note': `var(--note-${noteColorOf(n)})` } as React.CSSProperties}
+              className="flex h-[26px] w-full items-center gap-2 rounded-md px-2 text-left text-[12.5px] text-ink-soft hover:bg-paper-deep hover:text-ink"
+            >
+              <NoteIcon
+                width={13}
+                height={13}
+                className="flex-none text-[color-mix(in_srgb,var(--note)_80%,var(--ink))]"
+              />
+              <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+                {noteExcerpt(n.markdown, 60) || 'Empty note'}
+              </span>
+              {frame && (
+                <span className="max-w-[40%] flex-none overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-ink-faint">
+                  {frame.name}
+                </span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+    </section>
   )
 }
 
@@ -552,6 +621,7 @@ function FrameRow({
   row,
   selected,
   current,
+  deck,
   drop,
   onToggle,
   onActivate,
@@ -560,12 +630,15 @@ function FrameRow({
   selected: boolean
   /** the frame is selected, whether or not an element inside it is */
   current: boolean
+  /** 1-based number of this slide in the page's deck; unset for a frame that is not a slide */
+  deck?: number
   drop?: DropPlace
   onToggle: () => void
   onActivate: () => void
 }) {
   const { frame } = row
   const stream = useStore((s) => s.streams[frame.id])
+  const mark = useFrameMark(frame.id)
   const presences = useStore((s) => s.presences)
   const me = getIdentity().clientId
   const editors = Object.values(presences).filter(
@@ -585,6 +658,7 @@ function FrameRow({
             onCaret={onToggle}
             icon={<FrameIcon width={13} height={13} />}
             label={frame.name}
+            detail={deck === undefined ? undefined : ` · Slide ${deck}`}
             className={cn('font-semibold', current && !selected && 'text-brand [&_[data-icon]]:text-brand')}
             selected={selected}
             onClick={onActivate}
@@ -595,6 +669,7 @@ function FrameRow({
             }}
             trailing={
               <>
+                <MarkDot mark={mark} />
                 {stream && (
                   <span className={editorChip} style={{ background: stream.color }}>
                     <AgentIcon name={stream.name} size={8} color="#fff" />

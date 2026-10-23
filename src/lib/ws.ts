@@ -14,6 +14,7 @@ export function connect(canvasId: string) {
   /* a fresh attempt for a (possibly different) id — any not-found from a
      previous canvas must not leak into this one */
   useStore.getState().setCanvasNotFound(false)
+  useStore.getState().setNoAccess(false)
   open()
 }
 
@@ -66,9 +67,10 @@ function open() {
       return
     }
     if (ev.code === 4403) {
-      /* the owner locked this canvas — retrying would loop forever */
+      /* no access (never had it, or the owner just took it away) — retrying
+         would loop forever. The canvas page explains and offers a request. */
       currentCanvasId = null
-      location.href = '/'
+      useStore.getState().setNoAccess(true)
       return
     }
     if (ev.code === 4404) {
@@ -98,6 +100,8 @@ function handle(msg: ServerMessage) {
         else if (loadedBuild !== msg.serverBuild) s.setUpdateReady(true)
       }
       s.setCanvas(msg.canvas)
+      s.setRole(msg.role)
+      s.setGuest(!!msg.guest)
       s.setPresences(msg.presences)
       s.setActivity(msg.activity)
       s.setTasks(msg.tasks)
@@ -106,6 +110,29 @@ function handle(msg: ServerMessage) {
       s.setChat(msg.chat)
       s.setDecisions(msg.decisions)
       s.setProposals(msg.proposals)
+      break
+    case 'role':
+      s.setRole(msg.role)
+      s.pushNotice(
+        msg.role === 'edit' || msg.role === 'owner'
+          ? 'You can now edit this canvas'
+          : msg.role === 'comment'
+            ? 'You can now comment on this canvas'
+            : 'You can now view this canvas',
+      )
+      break
+    case 'error':
+      s.pushNotice(msg.message)
+      break
+    case 'mention': {
+      s.upsertComment(msg.comment)
+      s.pulseComment(msg.comment.parentId ?? msg.comment.id)
+      s.pushNotice(`${msg.comment.from} mentioned you in a comment`)
+      break
+    }
+    case 'access:request':
+      s.bumpAccessRequests()
+      s.pushNotice(`${msg.request.name} asked for access — open Share to answer`)
       break
     case 'presence:join':
       if (msg.presence.clientId !== me) s.upsertPresence(msg.presence)
@@ -151,6 +178,12 @@ function handle(msg: ServerMessage) {
       break
     case 'frame:deleted':
       s.removeFrame(msg.frameId)
+      break
+    case 'note:upsert':
+      s.upsertNote(msg.note)
+      break
+    case 'note:delete':
+      s.removeNote(msg.id)
       break
     case 'canvas:pages':
       s.setPages(msg.pages)

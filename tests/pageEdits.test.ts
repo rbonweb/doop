@@ -290,3 +290,32 @@ it('waits for page deletion to save before undoing it and preserves redo', async
   await redo()
   expect(useStore.getState().canvas!.pages).toEqual([pages[0]])
 })
+
+it('undoes and redoes nesting a page, and deleting a parent that lifts its children', async () => {
+  await savePages(useStore.getState().canvas!, [pages[0]!, { ...pages[1]!, parentId: 'first' }])
+  expect(useStore.getState().canvas!.pages).toEqual([pages[0], { ...pages[1], parentId: 'first' }])
+  await undo()
+  expect(useStore.getState().canvas!.pages).toEqual(pages)
+  await redo()
+  expect(useStore.getState().canvas!.pages).toEqual([pages[0], { ...pages[1], parentId: 'first' }])
+
+  useStore.getState().removeFrame(frame.id)
+  await savePages(useStore.getState().canvas!, [{ ...pages[1]! }])
+  expect(useStore.getState().canvas!.pages).toEqual([pages[1]])
+  await undo()
+  expect(useStore.getState().canvas!.pages).toEqual([pages[0], { ...pages[1], parentId: 'first' }])
+})
+
+it('refuses to undo a nest move after a collaborator moved the page elsewhere', async () => {
+  await savePages(useStore.getState().canvas!, [pages[0]!, { ...pages[1]!, parentId: 'first' }])
+  const third = { id: 'third', name: 'Third' }
+  useStore.getState().setPages([pages[0]!, { ...pages[1]!, parentId: 'third' }, third])
+  const collaborated = structuredClone(useStore.getState().canvas!.pages)
+  vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  await undo()
+  expect(console.error).toHaveBeenCalledWith(
+    'undo failed',
+    expect.objectContaining({ message: 'This page was moved by a collaborator.' }),
+  )
+  expect(useStore.getState().canvas!.pages).toEqual(collaborated)
+})

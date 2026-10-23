@@ -1,0 +1,77 @@
+CREATE TABLE "canvas_access_requests" (
+	"canvas_id" text NOT NULL,
+	"user_id" text NOT NULL,
+	"message" text,
+	"at" bigint NOT NULL,
+	"status" text NOT NULL,
+	CONSTRAINT "canvas_access_requests_canvas_id_user_id_pk" PRIMARY KEY("canvas_id","user_id")
+);
+--> statement-breakpoint
+CREATE TABLE "canvas_domain_grants" (
+	"canvas_id" text NOT NULL,
+	"domain" text NOT NULL,
+	"role" text NOT NULL,
+	"added_by" text NOT NULL,
+	"added_at" bigint NOT NULL,
+	CONSTRAINT "canvas_domain_grants_canvas_id_domain_pk" PRIMARY KEY("canvas_id","domain")
+);
+--> statement-breakpoint
+CREATE TABLE "canvas_notes" (
+	"id" text PRIMARY KEY NOT NULL,
+	"canvas_id" text NOT NULL,
+	"page_id" text,
+	"frame_id" text,
+	"x" double precision NOT NULL,
+	"y" double precision NOT NULL,
+	"width" double precision NOT NULL,
+	"height" double precision NOT NULL,
+	"markdown" text NOT NULL,
+	"color" text NOT NULL,
+	"created_by" text NOT NULL,
+	"created_by_user_id" text,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL,
+	"updated_by" text NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "canvas_visits" (
+	"user_id" text NOT NULL,
+	"canvas_id" text NOT NULL,
+	"baseline_at" bigint NOT NULL,
+	CONSTRAINT "canvas_visits_user_id_canvas_id_pk" PRIMARY KEY("user_id","canvas_id")
+);
+--> statement-breakpoint
+CREATE TABLE "frame_seen" (
+	"user_id" text NOT NULL,
+	"canvas_id" text NOT NULL,
+	"frame_id" text NOT NULL,
+	"seen_updated_at" bigint NOT NULL,
+	CONSTRAINT "frame_seen_user_id_frame_id_pk" PRIMARY KEY("user_id","frame_id")
+);
+--> statement-breakpoint
+CREATE TABLE "frame_versions" (
+	"id" text PRIMARY KEY NOT NULL,
+	"frame_id" text NOT NULL,
+	"canvas_id" text NOT NULL,
+	"name" text NOT NULL,
+	"html" text NOT NULL,
+	"width" double precision NOT NULL,
+	"height" double precision NOT NULL,
+	"saved_at" bigint NOT NULL,
+	"saved_by" text NOT NULL,
+	"reason" text NOT NULL
+);
+--> statement-breakpoint
+ALTER TABLE "canvas_members" ADD COLUMN "role" text DEFAULT 'edit' NOT NULL;--> statement-breakpoint
+ALTER TABLE "canvases" ADD COLUMN "link_audience" text;--> statement-breakpoint
+ALTER TABLE "canvases" ADD COLUMN "link_password_hash" text;--> statement-breakpoint
+ALTER TABLE "comments" ADD COLUMN "anchor" jsonb;--> statement-breakpoint
+ALTER TABLE "comments" ADD COLUMN "from_kind" text;--> statement-breakpoint
+ALTER TABLE "comments" ADD COLUMN "mentions" text;--> statement-breakpoint
+ALTER TABLE "frames" ADD COLUMN "updated_by_user_id" text;--> statement-breakpoint
+ALTER TABLE "frames" ADD COLUMN "updated_by_kind" text;--> statement-breakpoint
+ALTER TABLE "frames" ADD COLUMN "slide" boolean;--> statement-breakpoint
+ALTER TABLE "frames" ADD COLUMN "speaker_notes" text;--> statement-breakpoint
+CREATE INDEX "canvas_notes_canvas_idx" ON "canvas_notes" USING btree ("canvas_id");--> statement-breakpoint
+CREATE INDEX "frame_seen_user_canvas_idx" ON "frame_seen" USING btree ("user_id","canvas_id");--> statement-breakpoint
+CREATE INDEX "frame_versions_frame_idx" ON "frame_versions" USING btree ("frame_id","saved_at");

@@ -1,4 +1,5 @@
 import { FRAME_REPLAY_RUNTIME } from './frameReplayRuntime'
+import { ANCHOR_TOOLS_SOURCE } from '../../shared/commentAnchor'
 
 /**
  * Bootstrap document loaded once per frame iframe. The parent posts HTML in
@@ -10,6 +11,11 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
 <html><head></head><body><script data-v-boot>
 (function () {
   ${FRAME_REPLAY_RUNTIME}
+  /* the comment-anchor matching, embedded from shared/commentAnchor.ts so the
+     app and the tests run one copy. A bundler that keeps function names
+     wraps them in __name(); the identity shim keeps the embedded source valid. */
+  var __name = function (fn) { return fn }
+  var anchorTools = ${ANCHOR_TOOLS_SOURCE}
   /* horizontal overscroll inside a frame must not chain to the parent page,
      where the browser turns it into a history back/forward swipe. Adopted
      sheet, not a <style> tag — the morph would wipe a tag from <head>. */
@@ -18,10 +24,14 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     vSheet.replaceSync('html,body{overscroll-behavior-x:none}')
     document.adoptedStyleSheets = document.adoptedStyleSheets.concat(vSheet)
   } catch (e) {}
+  /* attributes the show puts on <html> and the design never writes: a morph must leave them be */
+  function isShowAttr(name) { return name === 'data-sl-play' || name === 'data-sl-entered' }
+
   function syncAttrs(from, to) {
+    var root = from === document.documentElement
     for (var i = from.attributes.length - 1; i >= 0; i--) {
       var name = from.attributes[i].name
-      if (name === 'data-v-ran') continue
+      if (name === 'data-v-ran' || (root && isShowAttr(name))) continue
       if (!to.hasAttribute(name)) from.removeAttribute(name)
     }
     for (var j = 0; j < to.attributes.length; j++) {
@@ -119,17 +129,139 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     var doc
     try {
       doc = new DOMParser().parseFromString(html, 'text/html')
+      /* the sleep rule sits in the head like any authored node, so the morph would pair it with one of the design's and overwrite it: lift it out first */
+      if (sleeping) dropSleepStyle()
       syncAttrs(document.documentElement, doc.documentElement)
-      /* the incoming html carries no root style, so the sync drops our
-         crisp-render zoom — put it back before the page reflows */
-      if (curZoom !== 1) document.documentElement.style.zoom = String(curZoom)
       morphChildren(document.head, doc.head)
       morphChildren(document.body, doc.body)
       activateScripts()
     } catch (e) {
       if (doc) document.documentElement.innerHTML = doc.documentElement.innerHTML
     }
+    if (sleeping) ensureSleepStyle()
   }
+
+  /* ---- laser mode ----
+     The parent flips it on for every frame. Each nesting level of the document gets its own hue, so the structure
+     reads at a glance; the element under the cursor is drawn heavier with a floating label, and a click sends the
+     element's CSS path to the parent, which copies it. The style, box and label hang off <html> rather than <head> or
+     <body>, where the morph would sweep them away on the next edit, and are stripped again by serialize(). */
+  var laserOn = false
+  var laserBox = null
+  var laserLabel = null
+  var laserHue = ''
+
+  function laserCss() {
+    var css = ''
+    var sel = 'body'
+    for (var d = 1; d <= 12; d++) {
+      sel += ' > *'
+      css += sel + '{--doop-hue:' + ((d % 6) * 60) + ';outline:1px solid hsl(var(--doop-hue) 80% 55%) !important;outline-offset:-1px}'
+    }
+    return css
+  }
+
+  function depthOf(el) {
+    var depth = 0
+    while (el && el !== document.body && el !== document.documentElement) { depth++; el = el.parentElement }
+    return depth
+  }
+
+  function laserEl(el) {
+    return el && el.nodeType === 1 && el !== document.documentElement && el !== document.body ? el : null
+  }
+
+  function laserHide() {
+    if (laserBox) laserBox.style.display = 'none'
+    if (laserLabel) laserLabel.style.display = 'none'
+  }
+
+  /* x, y: the pointer in design px, or null when it left the frame */
+  function laserHover(el, x, y) {
+    el = laserEl(el)
+    if (!el || x === null) { laserHide(); return }
+    laserHue = 'hsl(' + ((depthOf(el) % 6) * 60) + ' 80% 55%'
+    var r = designRect(el)
+    var b = laserBox.style
+    b.display = 'block'
+    b.left = r.x + 'px'
+    b.top = r.y + 'px'
+    b.width = r.width + 'px'
+    b.height = r.height + 'px'
+    b.outline = '2px solid ' + laserHue + ')'
+    b.background = laserHue + ' / 0.08)'
+    var text = (el.textContent || '').replace(/\\s+/g, ' ').trim()
+    laserLabel.textContent = el.tagName.toLowerCase() + (text ? ' · "' + text.slice(0, 40) + '"' : '')
+    var l = laserLabel.style
+    l.display = 'block'
+    l.left = '0px'
+    l.top = '0px'
+    var box = laserLabel.getBoundingClientRect()
+    var w = box.width
+    var h = box.height
+    var vw = window.innerWidth
+    var vh = window.innerHeight
+    /* below-right of the pointer; above it near the bottom edge, shifted left near the right edge */
+    var top = y + 18
+    if (top + h > vh - 4) top = Math.max(4, y - 12 - h)
+    var left = x + 14
+    if (left + w > vw - 4) left = Math.max(4, vw - 4 - w)
+    l.left = left + 'px'
+    l.top = top + 'px'
+  }
+
+  function laserFromPoint(x, y) {
+    if (x === null || x === undefined) { laserHide(); return }
+    laserHover(document.elementFromPoint(x, y), x, y)
+  }
+
+  function laserPick(el) {
+    el = laserEl(el)
+    if (!el) return
+    parent.postMessage({ type: 'doop:laser-copy', selector: cssPath(el) }, '*')
+    if (laserBox && laserHue) {
+      laserBox.style.background = laserHue + ' / 0.3)'
+      setTimeout(function () { if (laserBox) laserBox.style.background = laserHue + ' / 0.08)' }, 160)
+    }
+  }
+
+  function overlayNode(tag, id, css) {
+    var n = document.createElement(tag)
+    n.id = id
+    n.setAttribute('style', css)
+    document.documentElement.appendChild(n)
+    return n
+  }
+
+  function setLaser(on) {
+    if (on === laserOn) return
+    laserOn = on
+    if (on) {
+      var st = document.createElement('style')
+      st.id = 'doop-laser'
+      st.textContent = laserCss()
+      document.documentElement.appendChild(st)
+      laserBox = overlayNode('div', 'doop-laser-box', 'position:fixed;display:none;pointer-events:none;z-index:2147483646;box-sizing:border-box')
+      laserLabel = overlayNode('div', 'doop-laser-label', 'position:fixed;display:none;pointer-events:none;z-index:2147483647;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 7px;border-radius:5px;background:#17171b;color:#f7f7f9;font:600 11px/1.3 ui-monospace,monospace')
+    } else {
+      var nodes = document.querySelectorAll('#doop-laser,#doop-laser-box,#doop-laser-label')
+      for (var i = 0; i < nodes.length; i++) nodes[i].parentNode.removeChild(nodes[i])
+      laserBox = null
+      laserLabel = null
+    }
+  }
+
+  /* real pointer events, for when nothing shields the frame (the parent normally relays the pointer instead) */
+  document.addEventListener('mousemove', function (ev) {
+    if (laserOn) laserHover(ev.target, ev.clientX, ev.clientY)
+  }, true)
+
+  document.addEventListener('click', function (ev) {
+    if (!laserOn) return
+    ev.preventDefault()
+    ev.stopPropagation()
+    laserPick(ev.target)
+  }, true)
 
   /* ---- inline text editing ----
      The parent flips edit mode on. Instead of designMode (which makes the
@@ -225,6 +357,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     }
     var boot = root.querySelector('script[data-v-boot]')
     if (boot && boot.parentNode) boot.parentNode.removeChild(boot)
+    var lasers = root.querySelectorAll('#doop-laser,#doop-laser-box,#doop-laser-label')
+    for (var li = 0; li < lasers.length; li++) lasers[li].parentNode.removeChild(lasers[li])
     var es = root.querySelector('style[data-v-edit]')
     if (es && es.parentNode) es.parentNode.removeChild(es)
     var ran = root.querySelectorAll('[data-v-ran]')
@@ -235,6 +369,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       marked[j].removeAttribute('data-v-active')
       marked[j].removeAttribute('data-v-hover')
     }
+    root.removeAttribute('data-sl-play')
+    root.removeAttribute('data-sl-entered')
     root.style.removeProperty('zoom') // crisp-render zoom is ours, not the design's
     if (!root.getAttribute('style')) root.removeAttribute('style')
     return '<!doctype html>\\n' + root.outerHTML
@@ -266,7 +402,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
 
   /* capture-phase: no link navigation or button handlers while editing */
   document.addEventListener('click', function (ev) {
-    if (!editing) return
+    if (!editing || laserOn) return
     ev.preventDefault()
     ev.stopPropagation()
     var el = candidate(ev.target)
@@ -275,7 +411,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   }, true)
 
   document.addEventListener('mousemove', function (ev) {
-    if (!editing) return
+    if (!editing || laserOn) return
     var el = candidate(ev.target)
     var prev = document.querySelector('[data-v-hover]')
     if (prev && prev !== el) prev.removeAttribute('data-v-hover')
@@ -291,6 +427,14 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   /* Escape pressed with focus inside the frame: the parent never sees the
      key event itself, so relay it (present mode closes on it) */
   document.addEventListener('keydown', function (ev) {
+    if (presenting && !editing && ev.key !== 'Escape') {
+      var typing = ev.target && ev.target.closest && ev.target.closest('input,textarea,select,[contenteditable]')
+      if (!typing && !ev.metaKey && !ev.ctrlKey && !ev.altKey && PRESENT_KEYS.indexOf(ev.key) >= 0) {
+        ev.preventDefault()
+        parent.postMessage({ type: 'doop:key', key: ev.key }, '*')
+      }
+      return
+    }
     if (ev.key !== 'Escape') return
     if (editing) {
       setEdit(false)
@@ -304,9 +448,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
      The parent can't see into this sandboxed document, so it asks: probe
      resolves the element at a point (for the click toolbar), locate finds a
      stored selector again (to place comment pins). Coordinates cross the
-     boundary in design px; the crisp-render zoom is unapplied on both ends. */
-  var curZoom = 1
-
+     boundary in design px, which are this document's own px. */
   function cssPath(el) {
     var parts = []
     while (el && el.nodeType === 1 && el !== document.documentElement) {
@@ -324,14 +466,23 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
 
   function designRect(el) {
     var r = el.getBoundingClientRect()
-    return { x: r.left / curZoom, y: r.top / curZoom, width: r.width / curZoom, height: r.height / curZoom }
+    return { x: r.left, y: r.top, width: r.width, height: r.height }
   }
 
-  function hitInfo(el) {
+  /* x/y: where the click landed, in design px; without one the pin sits mid-element */
+  function hitInfo(el, x, y) {
+    var box = el.getBoundingClientRect()
+    var fx = 0.5
+    var fy = 0.5
+    if (typeof x === 'number' && typeof y === 'number' && box.width > 0 && box.height > 0) {
+      fx = (x - box.left) / box.width
+      fy = (y - box.top) / box.height
+    }
     var snippet = el.outerHTML || ''
     if (snippet.length > 400) snippet = snippet.slice(0, 397) + '...'
     return {
       selector: cssPath(el),
+      anchor: anchorTools.buildAnchor(el, fx, fy),
       tag: el.tagName.toLowerCase(),
       text: (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
       snippet: snippet,
@@ -340,9 +491,9 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   }
 
   function probe(x, y) {
-    var el = document.elementFromPoint(x * curZoom, y * curZoom)
+    var el = document.elementFromPoint(x, y)
     if (!el || el === document.documentElement || el === document.body) return null
-    return hitInfo(el)
+    return hitInfo(el, x, y)
   }
 
   /* the Layers panel selects by selector rather than by point */
@@ -356,7 +507,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   /* hover inspection: like probe but fired on every (throttled) pointer move,
      so it skips the outerHTML/selector work and returns just tag + rect */
   function hoverProbe(x, y) {
-    var el = document.elementFromPoint(x * curZoom, y * curZoom)
+    var el = document.elementFromPoint(x, y)
     if (!el || el === document.documentElement || el === document.body) return null
     return { tag: el.tagName.toLowerCase(), rect: designRect(el) }
   }
@@ -470,6 +621,208 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     return true
   }
 
+  /* ---- sleep ----
+     The parent puts a frame to sleep while the camera moves or the frame is
+     far off screen. Everything the document animates on its own is paused:
+     CSS animations through one style rule, Web Animations and playing videos
+     one by one, remembering exactly which, so waking resumes only what sleep
+     paused and never starts something the design had paused itself.
+     Animations driven from requestAnimationFrame cannot be paused from here. */
+  var sleeping = false
+  var pausedAnimations = []
+  var pausedVideos = []
+  var SLEEP_CSS = '*,*::before,*::after{animation-play-state:paused!important}'
+  var STILL_CSS = '*,*::before,*::after{transition-property:none!important}'
+
+  function ensureSleepStyle() {
+    var st = document.getElementById('doop-sleep')
+    if (st) return
+    st = document.createElement('style')
+    st.id = 'doop-sleep'
+    st.textContent = SLEEP_CSS
+    document.head.appendChild(st)
+  }
+
+  function dropSleepStyle() {
+    var st = document.getElementById('doop-sleep')
+    if (st && st.parentNode) st.parentNode.removeChild(st)
+  }
+
+  /* run a change with every transition switched off, so toggling the pause never makes an authored transition fire. transition-property is not inherited, so the root's inline value covers only the root and a temporary rule covers the rest. The second reflow makes the change take effect while transitions are still off. */
+  function still(change) {
+    var root = document.documentElement
+    var prev = root.style.getPropertyValue('transition-property')
+    var prevPriority = root.style.getPropertyPriority('transition-property')
+    var guard = document.createElement('style')
+    guard.setAttribute('data-v-still', '')
+    guard.textContent = STILL_CSS
+    root.style.setProperty('transition-property', 'none', 'important')
+    document.head.appendChild(guard)
+    void root.offsetHeight
+    try {
+      change()
+      void root.offsetHeight
+    } finally {
+      if (guard.parentNode) guard.parentNode.removeChild(guard)
+      if (prev) root.style.setProperty('transition-property', prev, prevPriority)
+      else root.style.removeProperty('transition-property')
+      if (!root.getAttribute('style')) root.removeAttribute('style')
+    }
+  }
+
+  function setSleep(on) {
+    if (on === sleeping) return
+    sleeping = on
+    still(function () {
+      if (on) {
+        /* collect before the style goes in: afterwards CSS animations already read as paused */
+        var running = typeof document.getAnimations === 'function' ? document.getAnimations() : []
+        for (var i = 0; i < running.length; i++) {
+          if (running[i].playState !== 'running') continue
+          try { running[i].pause(); pausedAnimations.push(running[i]) } catch (e) { /* not pausable */ }
+        }
+        var videos = document.querySelectorAll('video')
+        for (var v = 0; v < videos.length; v++) {
+          if (videos[v].paused || videos[v].ended) continue
+          try { videos[v].pause(); pausedVideos.push(videos[v]) } catch (e) { /* not pausable */ }
+        }
+        ensureSleepStyle()
+      } else {
+        dropSleepStyle()
+        var anims = pausedAnimations
+        var vids = pausedVideos
+        pausedAnimations = []
+        pausedVideos = []
+        for (var a = 0; a < anims.length; a++) {
+          try { if (anims[a].playState === 'paused') anims[a].play() } catch (e) { /* finished or removed */ }
+        }
+        for (var w = 0; w < vids.length; w++) {
+          try {
+            var started = vids[w].isConnected ? vids[w].play() : null
+            if (started && started.catch) started.catch(function () { /* autoplay refused */ })
+          } catch (e) { /* removed */ }
+        }
+      }
+    })
+  }
+
+  /* ---- present ----
+     While the parent presents this frame it sends doop:mode. A click on an element inside [data-goto] then asks the
+     parent to jump to that frame (the prototype link), and in a slide show any other click asks for the next slide. The
+     keys that drive the show are relayed, since a key pressed with focus inside this document never reaches the parent.
+     A show of slides also marks <html>: data-sl-play for the whole show, and data-sl-entered once a slide has arrived,
+     so a design can key its entrance animations to [data-sl-entered]. */
+  var presenting = false
+  var slidesShow = false
+  var presentSheet = null
+  var PRESENT_KEYS = ['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', ' ', 'Backspace', 's', 'S']
+  var CROSSFADE_MS = 250
+
+  function setEntered(on) {
+    var root = document.documentElement
+    if (on) root.setAttribute('data-sl-entered', '')
+    else root.removeAttribute('data-sl-entered')
+  }
+
+  /* the slide is drawn in its resting state first, then arrives: two frames, so the first paint lands in between */
+  function arrive() {
+    setEntered(false)
+    requestAnimationFrame(function () { requestAnimationFrame(function () { setEntered(true) }) })
+  }
+
+  function setPresent(on, slides) {
+    presenting = on
+    slidesShow = on && slides
+    try {
+      if (on && !presentSheet) {
+        presentSheet = new CSSStyleSheet()
+        presentSheet.replaceSync('[data-goto]{cursor:pointer}')
+        document.adoptedStyleSheets = document.adoptedStyleSheets.concat(presentSheet)
+      } else if (!on && presentSheet) {
+        var gone = presentSheet
+        presentSheet = null
+        document.adoptedStyleSheets = document.adoptedStyleSheets.filter(function (sheet) { return sheet !== gone })
+      }
+    } catch (e) { /* no constructable sheets: the cursor stays as authored */ }
+    var root = document.documentElement
+    if (slidesShow) {
+      root.setAttribute('data-sl-play', '')
+      arrive()
+    } else {
+      root.removeAttribute('data-sl-play')
+      root.removeAttribute('data-sl-entered')
+    }
+  }
+
+  /* No view-transition support: dip the document out and back in over CROSSFADE_MS */
+  function crossfade(html) {
+    var root = document.documentElement
+    var swap = function () {
+      if (slidesShow) setEntered(false)
+      render(html)
+    }
+    if (typeof root.animate !== 'function') { swap(); if (slidesShow) arrive(); return }
+    var half = CROSSFADE_MS / 2
+    var out = root.animate([{ opacity: 1 }, { opacity: 0 }], { duration: half, easing: 'ease-in', fill: 'forwards' })
+    var next = function () {
+      swap()
+      var back = root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: half, easing: 'ease-out' })
+      out.cancel()
+      var arrived = function () { if (slidesShow) setEntered(true) }
+      back.finished.then(arrived, arrived)
+    }
+    out.finished.then(next, next)
+  }
+
+  /* A swap while presenting. Where the browser has view transitions, elements sharing a view-transition-name in both
+     documents morph; data-sl-entered goes off inside the update callback and comes back when the transition ends. */
+  function renderSwap(html) {
+    if (typeof document.startViewTransition !== 'function') { crossfade(html); return }
+    var transition = null
+    try {
+      transition = document.startViewTransition(function () {
+        if (slidesShow) setEntered(false)
+        render(html)
+      })
+    } catch (e) { transition = null }
+    if (!transition) { crossfade(html); return }
+    var arrived = function () { if (slidesShow) setEntered(true) }
+    transition.finished.then(arrived, arrived)
+  }
+
+  document.addEventListener('click', function (ev) {
+    if (!presenting || editing || laserOn) return
+    var from = ev.target && ev.target.closest ? ev.target : null
+    var link = from ? from.closest('[data-goto]') : null
+    if (link) {
+      ev.preventDefault()
+      ev.stopPropagation()
+      parent.postMessage({ type: 'doop:goto', target: link.getAttribute('data-goto') || '' }, '*')
+      return
+    }
+    /* a click on something that acts for itself (a link, a field) is not a "next slide" */
+    if (slidesShow && !(from && from.closest('a[href],button,input,textarea,select,summary,label,[contenteditable]'))) {
+      parent.postMessage({ type: 'doop:advance' }, '*')
+    }
+  }, true)
+
+  /* the pointer moving inside this document never reaches the parent, which hides its toolbar when the pointer rests */
+  var lastPointer = 0
+  document.addEventListener('mousemove', function () {
+    if (!presenting) return
+    var now = Date.now()
+    if (now - lastPointer < 120) return
+    lastPointer = now
+    parent.postMessage({ type: 'doop:pointer' }, '*')
+  }, true)
+
+  /* the canvas never follows links on a plain click; ⌥-click asks what sits under the pointer */
+  function gotoAt(x, y) {
+    var el = document.elementFromPoint(x, y)
+    var link = el && el.closest ? el.closest('[data-goto]') : null
+    return link ? link.getAttribute('data-goto') || '' : null
+  }
+
   window.addEventListener('message', function (ev) {
     /* only the parent drives this document — a script inside the frame must
        not be able to pose as the panel and push edits into the save path */
@@ -483,8 +836,23 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       var applied = applyStyle(d.selector, d.styles)
       parent.postMessage({ type: 'doop:style-result', reqId: d.reqId, ok: applied, info: applied ? inspect(d.selector) : null }, '*')
     }
-    if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) render(d.html)
+    if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) {
+      if (d.transition && presenting) renderSwap(d.html)
+      else {
+        render(d.html)
+        /* the first render of a slide show: the slide arrives. A live edit keeps the attribute the morph left alone. */
+        if (slidesShow && !document.documentElement.hasAttribute('data-sl-entered')) arrive()
+      }
+    }
+    if (d.type === 'doop:mode') setPresent(!!d.present, !!d.slides)
+    if (d.type === 'doop:goto-at') {
+      parent.postMessage({ type: 'doop:goto-result', reqId: d.reqId, target: gotoAt(d.x, d.y) }, '*')
+    }
     if (d.type === 'doop:edit') setEdit(!!d.on)
+    if (d.type === 'doop:sleep') setSleep(!!d.on)
+    if (d.type === 'doop:laser') setLaser(!!d.on)
+    if (d.type === 'doop:laser-move' && laserOn) laserFromPoint(d.x, d.y)
+    if (d.type === 'doop:laser-click' && laserOn) laserPick(document.elementFromPoint(d.x, d.y))
     if (d.type === 'doop:probe') {
       parent.postMessage({ type: 'doop:probe-result', reqId: d.reqId, hit: probe(d.x, d.y) }, '*')
     }
@@ -498,18 +866,19 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       parent.postMessage({ type: 'doop:code-result', reqId: d.reqId, html: elementCode(d.selector) }, '*')
     }
     if (d.type === 'doop:locate') {
+      /* the stored path first, then the anchor's fallbacks; how says which one hit */
       var found = null
+      var how = null
+      var currentPath = null
       try {
-        var target = d.selector ? document.querySelector(d.selector) : null
-        if (target) found = designRect(target)
+        var hit = anchorTools.resolveAnchor(document, d.selector, d.anchor)
+        if (hit) {
+          found = designRect(hit.el)
+          how = hit.how
+          currentPath = cssPath(hit.el)
+        }
       } catch (e) { /* bad selector -> null */ }
-      parent.postMessage({ type: 'doop:located', reqId: d.reqId, rect: found }, '*')
-    }
-    /* re-rasterize crisply when the canvas is zoomed in: layout stays identical
-       (viewport is scaled up by the same factor outside) but pixels are k-times denser */
-    if (d.type === 'doop:zoom' && typeof d.zoom === 'number') {
-      curZoom = d.zoom
-      document.documentElement.style.zoom = String(d.zoom)
+      parent.postMessage({ type: 'doop:located', reqId: d.reqId, rect: found, how: how, selector: currentPath }, '*')
     }
   })
   parent.postMessage({ type: 'doop:frame-ready' }, '*')

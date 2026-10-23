@@ -16,7 +16,7 @@ import { XIcon } from './icons'
 const panelVariants = cva('flex min-w-0 flex-col overflow-hidden bg-surface', {
   variants: {
     surface: {
-      floating: 'absolute z-[35] rounded-[14px] border border-line shadow-pop',
+      floating: 'chrome-layer absolute z-[35] rounded-[14px] border border-line shadow-pop',
       /* filling a Sheet: no chrome of its own, the sheet provides it */
       inline: 'h-full w-full rounded-none border-0 shadow-none',
     },

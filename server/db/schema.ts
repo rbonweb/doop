@@ -10,7 +10,7 @@ import {
   primaryKey,
   jsonb,
 } from 'drizzle-orm/pg-core'
-import type { CanvasPageInfo } from '../../shared/types.ts'
+import type { CanvasPageInfo, CommentAnchor } from '../../shared/types.ts'
 import type { Schedule, Step } from '../../shared/automations.ts'
 
 /** ActivityKit tokens are delivery secrets: never return them through read APIs. */
@@ -50,8 +50,12 @@ export const canvases = pgTable('canvases', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   ownerId: text('owner_id'),
-  /** 'edit' | 'none'; null = 'none' (private — link sharing is opt-in) */
+  /** 'edit' | 'comment' | 'view' | 'none'; null = 'none' (private — link sharing is opt-in) */
   linkAccess: text('link_access'),
+  /** who the share link admits: 'signed-in' | 'anyone' | 'password'; null = 'signed-in' */
+  linkAudience: text('link_audience'),
+  /** scrypt/argon hash of the link password (audience 'password'); never leaves the server */
+  linkPasswordHash: text('link_password_hash'),
   /** set when the owner has listed this canvas in the community gallery;
    *  null = private to its collaborators. Publishing grants read-only
    *  previews and copies, never access to the canvas itself. */
@@ -135,14 +139,46 @@ export const workspaceInvites = pgTable(
 )
 
 /** Users invited to collaborate on a canvas (the owner is not listed).
- *  Access = owner ∪ members ∪ (everyone, when link_access = 'edit'). */
+ *  Access = owner ∪ members ∪ (everyone, when link_access is not 'none'). */
 export const canvasMembers = pgTable(
   'canvas_members',
   {
     canvasId: text('canvas_id').notNull(),
     userId: text('user_id').notNull(),
+    /** 'view' | 'comment' | 'edit'; rows from before roles existed read as 'edit' */
+    role: text('role').notNull().default('edit'),
     addedBy: text('added_by').notNull(),
     addedAt: bigint('added_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.canvasId, t.userId] })],
+)
+
+/** Sharing by email domain: anyone signed in with an address on `domain` gets
+ *  `role` on the canvas. Hot path — hydrated with the canvas, server-only. */
+export const canvasDomainGrants = pgTable(
+  'canvas_domain_grants',
+  {
+    canvasId: text('canvas_id').notNull(),
+    domain: text('domain').notNull(),
+    /** 'view' | 'comment' | 'edit' */
+    role: text('role').notNull(),
+    addedBy: text('added_by').notNull(),
+    addedAt: bigint('added_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.canvasId, t.domain] })],
+)
+
+/** "Request access" asks from people the canvas is not shared with. Cold path:
+ *  read on demand by the owner's inbox; pending rows expire after 30 days. */
+export const canvasAccessRequests = pgTable(
+  'canvas_access_requests',
+  {
+    canvasId: text('canvas_id').notNull(),
+    userId: text('user_id').notNull(),
+    message: text('message'),
+    at: bigint('at', { mode: 'number' }).notNull(),
+    /** 'pending' | 'declined' */
+    status: text('status').notNull(),
   },
   (t) => [primaryKey({ columns: [t.canvasId, t.userId] })],
 )
@@ -164,6 +200,13 @@ export const frames = pgTable(
     updatedBy: text('updated_by').notNull(),
     /** product-made onboarding/example content; null = a real user frame */
     demo: boolean('demo'),
+    /** account id of the person behind the last edit (for an agent, whose token it used); null on legacy rows */
+    updatedByUserId: text('updated_by_user_id'),
+    /** 'user' | 'agent' — who made the last edit; null on legacy rows */
+    updatedByKind: text('updated_by_kind'),
+    /** true when the frame is a slide in the canvas's presentation; null = not a slide */
+    slide: boolean('slide'),
+    speakerNotes: text('speaker_notes'),
   },
   (t) => [index('frames_canvas_idx').on(t.canvasId)],
 )
@@ -351,6 +394,12 @@ export const comments = pgTable(
     resolvedBy: text('resolved_by'),
     resolvedAt: bigint('resolved_at', { mode: 'number' }),
     parentId: text('parent_id'),
+    /** structured element anchor that survives DOM edits; null on legacy rows */
+    anchor: jsonb('anchor').$type<CommentAnchor>(),
+    /** 'user' | 'agent' — what kind of actor wrote it; null on legacy rows */
+    fromKind: text('from_kind'),
+    /** comma-joined account ids the text @mentions */
+    mentions: text('mentions'),
   },
   (t) => [index('comments_canvas_idx').on(t.canvasId)],
 )
@@ -441,6 +490,77 @@ export const guidelineVersions = pgTable(
     savedBy: text('saved_by').notNull(),
   },
   (t) => [index('guideline_versions_doc_idx').on(t.canvasId, t.name)],
+)
+
+/** Per user and frame, the frame.updatedAt the user last looked at — the
+ *  "changed since you were here" ledger. Cold path, read on demand; upserts
+ *  only ever move seen_updated_at forward. */
+export const frameSeen = pgTable(
+  'frame_seen',
+  {
+    userId: text('user_id').notNull(),
+    canvasId: text('canvas_id').notNull(),
+    frameId: text('frame_id').notNull(),
+    seenUpdatedAt: bigint('seen_updated_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.frameId] }), index('frame_seen_user_canvas_idx').on(t.userId, t.canvasId)],
+)
+
+/** When a user first opened a canvas: the baseline "changed since" is measured
+ *  against for frames they have no frame_seen row for. Cold path. */
+export const canvasVisits = pgTable(
+  'canvas_visits',
+  {
+    userId: text('user_id').notNull(),
+    canvasId: text('canvas_id').notNull(),
+    baselineAt: bigint('baseline_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.canvasId] })],
+)
+
+/** Append-only snapshots of a frame's HTML and geometry, capped per frame at
+ *  write time. Read on demand (cold path — no in-memory mirror). */
+export const frameVersions = pgTable(
+  'frame_versions',
+  {
+    id: text('id').primaryKey(),
+    frameId: text('frame_id').notNull(),
+    canvasId: text('canvas_id').notNull(),
+    name: text('name').notNull(),
+    html: text('html').notNull(),
+    width: doublePrecision('width').notNull(),
+    height: doublePrecision('height').notNull(),
+    savedAt: bigint('saved_at', { mode: 'number' }).notNull(),
+    savedBy: text('saved_by').notNull(),
+    /** 'agent' | 'human' | 'restore' */
+    reason: text('reason').notNull(),
+  },
+  (t) => [index('frame_versions_frame_idx').on(t.frameId, t.savedAt)],
+)
+
+/** Sticky notes on the canvas: markdown cards pinned to the world, to a page,
+ *  or to a frame. Hot path — hydrated with the canvas. */
+export const canvasNotes = pgTable(
+  'canvas_notes',
+  {
+    id: text('id').primaryKey(),
+    canvasId: text('canvas_id').notNull(),
+    pageId: text('page_id'),
+    /** the frame the note is attached to; null = free-floating */
+    frameId: text('frame_id'),
+    x: doublePrecision('x').notNull(),
+    y: doublePrecision('y').notNull(),
+    width: doublePrecision('width').notNull(),
+    height: doublePrecision('height').notNull(),
+    markdown: text('markdown').notNull(),
+    color: text('color').notNull(),
+    createdBy: text('created_by').notNull(),
+    createdByUserId: text('created_by_user_id'),
+    createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+    updatedBy: text('updated_by').notNull(),
+  },
+  (t) => [index('canvas_notes_canvas_idx').on(t.canvasId)],
 )
 
 /** Frames pinned to Memory as style exemplars: the HTML is a snapshot taken

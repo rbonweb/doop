@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../lib/store'
 import { usePageCanvas, currentPageCanvas } from '../lib/pages'
 import { sendWs } from '../lib/ws'
+import { useCanEdit } from '../lib/role'
 import { throttle } from '../lib/throttle'
 import { FrameView } from './FrameView'
+import { StickyNote } from './StickyNote'
+import { addNote } from '../lib/notes'
+import { notePageId } from '../../shared/notes'
 import { useFrameMountScheduler } from '../lib/frameMounting'
+import { noteCameraMove, setStageSize } from '../lib/frameSleep'
 import { FlowOverlay } from './FlowOverlay'
 import { GhostFrames } from './GhostFrames'
 import { Cursors } from './Cursors'
@@ -12,15 +17,17 @@ import { FollowFrame } from './FollowFrame'
 import { cameraOnCursor, cameraToFollow } from '../lib/follow'
 import { SnapGuides } from './SnapGuides'
 import { MOD_KEY } from '../lib/keys'
+import { MAX_ZOOM, MIN_ZOOM } from '../lib/fit'
 import { cn } from '../lib/utils'
 import { gesture } from '../lib/gesture'
+import { createWorldLayer } from '../lib/cameraLayer'
 import { hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { MenuHint } from './ui/menu'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from './ui/context-menu'
 import { Toolbar, ToolbarButton, ToolbarDivider, ToolbarValue } from './ui/toolbar'
 
-const MIN_ZOOM = 0.08
-const MAX_ZOOM = 3
+/* how long the camera must be still before a zoomed world layer is re-rasterized at its final scale */
+const CAMERA_IDLE_MS = 150
 
 const sendCursor = throttle((x: number, y: number) => sendWs({ type: 'cursor', x, y }), 50)
 /* the camera is shared so others can follow it — same cadence as the cursor */
@@ -38,6 +45,24 @@ const sendViewport = throttle(
   50,
 )
 
+/* the canvas says so while laser or comment mode is on, and how to leave it */
+function ModePill() {
+  const laser = useStore((s) => s.laser)
+  const commentMode = useStore((s) => s.commentMode)
+  if (!laser && !commentMode) return null
+  const label = laser ? 'Laser' : 'Comment mode'
+  return (
+    <div
+      role="status"
+      className="pointer-events-none absolute top-3 left-1/2 z-[35] flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink py-1.5 pr-3.5 pl-3 text-[12px] font-semibold text-paper shadow-pop animate-[chip-in_0.18s_ease]"
+    >
+      <span className="size-1.5 rounded-full bg-brand" aria-hidden />
+      {label}
+      <span className="font-normal text-paper/60">· Esc to exit</span>
+    </div>
+  )
+}
+
 export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   const ref = useRef<HTMLDivElement>(null)
   const worldRef = useRef<HTMLDivElement>(null)
@@ -46,25 +71,55 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   const setViewport = useStore((s) => s.setViewport)
   const canvas = usePageCanvas()
   const activePageId = useStore((s) => s.activePageId)
+  /* sticky notes: the full canvas decides which page an attached note is on */
+  const fullCanvas = useStore((s) => s.canvas)
+  const notesVisible = useStore((s) => s.notesVisible)
+  const pageNotes = useMemo(
+    () => (fullCanvas?.notes ?? []).filter((n) => notePageId(fullCanvas!, n) === activePageId),
+    [fullCanvas, activePageId],
+  )
   const select = useStore((s) => s.select)
   const panMode = useStore((s) => s.panMode)
+  /* the toolbar's "+ Frame" and the background menu's Paste/New frame are edits */
+  const mayEdit = useCanEdit()
   const [panning, setPanning] = useState(false)
   /* the selection rectangle being dragged out, in world coordinates */
   const [marquee, setMarquee] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
   /* where the background menu opened, so Paste drops the frame there */
   const bgAt = useRef({ x: 0, y: 0 })
-  /* iframe oversampling factor — bumped only once the zoom settles */
-  const [raster, setRaster] = useState(1)
   /* frame iframes mount progressively, near the viewport first (lib/frameMounting.ts) */
   useFrameMountScheduler(ref)
   const fitted = useRef(false)
   const deepLinkHandled = useRef(false)
   const focusedPage = useRef<string | null>(null)
 
+  /* the shortcuts (fit, zoom) measure against the stage, which lives here */
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const publish = () => useStore.getState().setStageSize({ width: el.clientWidth, height: el.clientHeight })
+    publish()
+    const ro = new ResizeObserver(publish)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      useStore.getState().setStageSize(null)
+    }
+  }, [])
+
   /* Viewport → DOM without React: no component subscribes to the viewport, so
      pan/zoom never renders anything. A store subscription writes the world
      transform, the grid layer, the --zoom variable (which counter-scales
-     labels/pins/cursors from CSS), and the toolbar % directly. */
+     labels/pins/cursors from CSS), and the toolbar % directly.
+
+     The world layer is promoted to its own compositor layer only while the
+     camera moves (will-change: transform), so a zoom is a pure GPU scale of
+     the last bitmap. Once the camera has been still for a moment after a
+     zoom the hint is dropped and the browser rasterizes every frame again at
+     the final scale: crisp at any zoom, with no iframe resize or relayout,
+     so nothing reflows or flickers. A pan never stretches the bitmap, so it
+     leaves the layer alone instead of freeing and re-allocating every tile
+     (lib/cameraLayer.ts). */
   useLayoutEffect(() => {
     function apply(vp: { x: number; y: number; zoom: number }) {
       const world = worldRef.current
@@ -81,23 +136,28 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       if (zoomLabelRef.current) zoomLabelRef.current.textContent = `${Math.round(vp.zoom * 100)}%`
     }
     apply(useStore.getState().viewport)
-    let settle = 0
+    /* the size the frames judge "off screen" against */
+    const stage = ref.current
+    const publishSize = () => stage && setStageSize(stage.clientWidth, stage.clientHeight)
+    publishSize()
+    const sizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publishSize)
+    if (stage) sizeObserver?.observe(stage)
+    const layer = worldRef.current ? createWorldLayer(worldRef.current, CAMERA_IDLE_MS) : null
     const unsub = useStore.subscribe((s, prev) => {
       /* a (re)connect needs the camera announced afresh — the server only
          knows what this socket has sent */
       if (s.connected && !prev.connected && ref.current) sendViewport(s.viewport, ref.current)
       if (s.viewport === prev.viewport) return
       apply(s.viewport)
+      /* frames pause their animations while the camera moves (lib/frameSleep.ts) */
+      noteCameraMove()
       if (ref.current) sendViewport(s.viewport, ref.current)
-      window.clearTimeout(settle)
-      settle = window.setTimeout(() => {
-        const z = useStore.getState().viewport.zoom
-        setRaster(z <= 1 ? 1 : Math.min(3, Math.ceil(z * 2) / 2))
-      }, 250)
+      layer?.moved(s.viewport.zoom)
     })
     return () => {
       unsub()
-      window.clearTimeout(settle)
+      sizeObserver?.disconnect()
+      layer?.dispose()
     }
   }, [])
 
@@ -246,32 +306,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
     [setViewport, select],
   )
 
-  const fit = useCallback(() => {
-    const el = ref.current
-    const c = currentPageCanvas()
-    if (!el || !c) return
-    const boxes = c.frames.map((f) => ({ x: f.x, y: f.y - 30, w: f.width, h: f.height + 30 }))
-    if (!boxes.length) {
-      setViewport({ x: 80, y: 80, zoom: 1 })
-      return
-    }
-    const minX = Math.min(...boxes.map((b) => b.x))
-    const minY = Math.min(...boxes.map((b) => b.y))
-    const maxX = Math.max(...boxes.map((b) => b.x + b.w))
-    const maxY = Math.max(...boxes.map((b) => b.y + b.h))
-    const pad = 80
-    const w = el.clientWidth
-    const h = el.clientHeight
-    const zoom = Math.min(
-      MAX_ZOOM,
-      Math.max(MIN_ZOOM, Math.min((w - pad * 2) / (maxX - minX), (h - pad * 2) / (maxY - minY), 1.25)),
-    )
-    setViewport({
-      x: (w - (maxX - minX) * zoom) / 2 - minX * zoom,
-      y: (h - (maxY - minY) * zoom) / 2 - minY * zoom,
-      zoom,
-    })
-  }, [setViewport])
+  const fit = useCallback(() => useStore.getState().fitAll(), [])
 
   useEffect(() => {
     fitted.current = focusedPage.current === activePageId
@@ -415,40 +450,6 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
     }
   }, [])
 
-  /* ⌘0 → 100%, ⌘+ / ⌘− → step zoom, all pivoting on the view center —
-     preventDefault keeps the browser's own page zoom out of it */
-  useEffect(() => {
-    function zoomTo(next: number) {
-      const el = ref.current
-      if (!el) return
-      const cx = el.clientWidth / 2
-      const cy = el.clientHeight / 2
-      const vp = useStore.getState().viewport
-      const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next))
-      const scale = zoom / vp.zoom
-      useStore.getState().setViewport({
-        x: cx - (cx - vp.x) * scale,
-        y: cy - (cy - vp.y) * scale,
-        zoom,
-      })
-    }
-    function onKey(e: KeyboardEvent) {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return
-      const t = e.target as HTMLElement
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
-      if (e.key !== '0' && e.key !== '=' && e.key !== '+' && e.key !== '-') return
-      /* '+' arrives as ⇧= on most layouts; any other shifted combo isn't ours */
-      if (e.shiftKey && e.key !== '+') return
-      e.preventDefault()
-      const zoom = useStore.getState().viewport.zoom
-      if (e.key === '0') zoomTo(1)
-      else if (e.key === '-') zoomTo(zoom / 1.25)
-      else zoomTo(zoom * 1.25)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
-
   function toWorld(clientX: number, clientY: number) {
     const rect = ref.current!.getBoundingClientRect()
     const vp = useStore.getState().viewport
@@ -583,7 +584,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
            `.stage` to map screen coordinates into the canvas. No CSS is
            attached to it — everything visual is in the utilities beside it. */
             className={cn(
-              'stage absolute inset-0 touch-none',
+              'stage isolate absolute inset-0 touch-none [contain:layout_paint_style]',
               panning
                 ? 'cursor-grabbing! [&_*]:cursor-grabbing!'
                 : panMode
@@ -612,10 +613,18 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
             />
             {/* `world` is likewise a behaviour hook: pan hit-testing checks
             classList.contains('world') to tell background from frame */}
-            <div className="world absolute left-0 top-0 origin-top-left will-change-transform" ref={worldRef}>
+            <div className="world absolute left-0 top-0 origin-top-left" ref={worldRef}>
               {canvas?.frames.map((f) => (
-                <FrameView key={f.id} frame={f} raster={raster} />
+                <FrameView key={f.id} frame={f} />
               ))}
+              {notesVisible &&
+                pageNotes.map((n) => (
+                  <StickyNote
+                    key={n.id}
+                    note={n}
+                    frameName={n.frameId ? fullCanvas?.frames.find((f) => f.id === n.frameId)?.name : undefined}
+                  />
+                ))}
               <GhostFrames />
               <FlowOverlay />
               <SnapGuides />
@@ -632,8 +641,18 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
         <FollowFrame />
 
         <Toolbar className="absolute bottom-[calc(8px+env(safe-area-inset-bottom))] left-1/2 z-[35] -translate-x-1/2 sm:bottom-4">
-          <ToolbarButton onClick={onAddFrame}>+ Frame</ToolbarButton>
-          <ToolbarDivider />
+          {mayEdit && (
+            <>
+              <ToolbarButton onClick={onAddFrame}>+ Frame</ToolbarButton>
+              <ToolbarButton
+                title="Add a sticky note (N shows or hides all notes)"
+                onClick={() => canvas && void addNote(canvas.id)}
+              >
+                Note
+              </ToolbarButton>
+              <ToolbarDivider />
+            </>
+          )}
           <ToolbarButton
             aria-label="Zoom out"
             onClick={() => {
@@ -656,10 +675,21 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
             +
           </ToolbarButton>
           <ToolbarDivider />
-          <ToolbarButton onClick={fit}>Fit</ToolbarButton>
+          <ToolbarButton onClick={fit} title="Fit every frame (⇧1)">
+            Fit
+          </ToolbarButton>
+          <ToolbarDivider />
+          <ToolbarButton
+            aria-label="Keyboard shortcuts"
+            title="Keyboard shortcuts (?)"
+            onClick={() => useStore.getState().setShortcutsOpen(true)}
+          >
+            ?
+          </ToolbarButton>
         </Toolbar>
+        <ModePill />
 
-        {canvas && (
+        {canvas && mayEdit && (
           <ContextMenuContent>
             <ContextMenuItem
               disabled={!hasFrameClip()}
@@ -669,6 +699,18 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
               <MenuHint>{MOD_KEY}V</MenuHint>
             </ContextMenuItem>
             <ContextMenuItem onSelect={onAddFrame}>New frame</ContextMenuItem>
+            <ContextMenuItem
+              onSelect={() => {
+                const at = toWorld(bgAt.current.x, bgAt.current.y)
+                void addNote(canvas.id, { at: { x: Math.round(at.x), y: Math.round(at.y) } })
+              }}
+            >
+              New note
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => useStore.getState().setShortcutsOpen(true)}>
+              Keyboard shortcuts
+              <MenuHint>?</MenuHint>
+            </ContextMenuItem>
           </ContextMenuContent>
         )}
       </ContextMenu>

@@ -43,6 +43,8 @@ rather than hand-rolling primitives; it writes into `src/components/ui` per the 
   `text-paper`, never `text-white`, so it flips with the theme. `text-white` is for brand and
   accent fills and for dark overlays, which stay dark in both themes.
 
+- `--mark-new` (sky blue) and `--mark-ask` (orange) are the review marks: the dot on a frame that changed since you looked, and on a frame with a thread waiting on you. They stay clear of `--brand` (selection) and `--accent-ink` (failure); use `bg-mark-new` / `bg-mark-ask` or the `MarkDot` component.
+
 ## Aliases (`components.json`)
 
 - `@/components` -> `src/components`, `@/components/ui` -> `src/components/ui`,

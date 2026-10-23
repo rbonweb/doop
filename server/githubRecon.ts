@@ -3,6 +3,7 @@ import type { TurnBlock } from './openaiAgent.ts'
 import { createAsset } from './assets.ts'
 import * as actions from './actions.ts'
 import { store } from './store.ts'
+import { untrustedBlock } from './promptSafety.ts'
 import {
   fetchRepoBinary,
   fetchRepoFile,
@@ -41,6 +42,12 @@ const MAX_REQUEST_ROUNDS = 2
 const REVIEW_ROUNDS = 1
 const MAX_REQUESTED_FILES = 15
 const MAX_REQUESTED_BYTES = 100_000
+/* repo files ride in prompts as fenced untrusted data; the cap only has to clear the byte budgets above */
+const MAX_PROMPT_FILE_CHARS = 120_000
+
+function repoFiles(repo: string, body: string): string {
+  return untrustedBlock(`source files from the repository ${repo}`, body, { max: MAX_PROMPT_FILE_CHARS })
+}
 const MAX_TREE_LINES = 400
 
 const RESOLVE_EXTS = ['', '.tsx', '.ts', '.jsx', '.js', '.css', '/index.tsx', '/index.ts', '/index.jsx', '/index.js']
@@ -277,7 +284,7 @@ export async function extractDesignSystem(conn: GithubConnection, paths: string[
       role: 'user',
       content:
         `Repository ${conn.repo}. File tree (request more files if the system lives elsewhere):\n` +
-        `${treeExcerpt(paths, 'src/x')}\n\n${sections.join('\n\n')}`,
+        `${treeExcerpt(paths, 'src/x')}\n\n${repoFiles(conn.repo, sections.join('\n\n'))}`,
     },
   ]
   const pathSet = new Set(paths)
@@ -316,7 +323,7 @@ export async function extractDesignSystem(conn: GithubConnection, paths: string[
       results.push({
         type: 'tool_result' as const,
         tool_use_id: call.id,
-        content: parts.join('\n\n') || 'none of those paths exist',
+        content: parts.length > 0 ? repoFiles(conn.repo, parts.join('\n\n')) : 'none of those paths exist',
       })
     }
     messages.push({ role: 'user', content: results })
@@ -587,7 +594,7 @@ async function sketchScreen(
     : ''
   const designSystemMd = store.getGuidelines(canvasId).find((g) => g.name === designSystemSlug(conn.repo))?.markdown
   const systemContext = designSystemMd
-    ? `The product's design system, distilled from this repo (follow it exactly):\n${designSystemMd}\n\n`
+    ? `The product's design system, distilled from this repo (follow it exactly):\n${untrustedBlock('canvas style guide', designSystemMd, { max: actions.MAX_GUIDELINE_CHARS })}\n\n`
     : ''
   const messages: Parameters<AgentModel['run']>[0]['messages'] = [
     {
@@ -596,7 +603,7 @@ async function sketchScreen(
         `Screen: ${screen.title} (route ${screen.route}) from ${conn.repo}. The document is exactly ${width}px wide.\n\n` +
         componentBrief +
         systemContext +
-        `Repository file tree (investigate with request_files):\n${treeExcerpt(paths, screen.sourcePath)}\n\n${source}`,
+        `Repository file tree (investigate with request_files):\n${treeExcerpt(paths, screen.sourcePath)}\n\n${repoFiles(conn.repo, source)}`,
     },
   ]
   /* the investigation loop: the model reads the tree and pulls the
@@ -639,7 +646,8 @@ async function sketchScreen(
       results.push({
         type: 'tool_result' as const,
         tool_use_id: call.id,
-        content: sections.join('\n\n') || 'none of those paths exist in the tree',
+        content:
+          sections.length > 0 ? repoFiles(conn.repo, sections.join('\n\n')) : 'none of those paths exist in the tree',
       })
     }
     messages.push({ role: 'user', content: results })

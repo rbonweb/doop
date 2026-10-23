@@ -1,7 +1,40 @@
 import { nanoid } from 'nanoid'
-import { canvasPages, pageFrames } from '../shared/pages.ts'
+import { canvasPages, normalizePageTree, pageFrames } from '../shared/pages.ts'
+import { DEFAULT_NOTE_COLOR, NOTE_DEFAULT_SIZE } from '../shared/notes.ts'
+import { defaultFrameSize } from '../shared/slides.ts'
 import * as persist from './db/persist.ts'
-import type { Canvas, CommunityCategory, Frame, GuidelineDoc, MemoryReference } from '../shared/types.ts'
+import type {
+  Canvas,
+  CanvasNote,
+  CommunityCategory,
+  DomainGrant,
+  Frame,
+  GuidelineDoc,
+  LinkAccess,
+  LinkAudience,
+  MemberRole,
+  MemoryReference,
+} from '../shared/types.ts'
+
+/** Who made an edit, beyond the display name: the account behind it and whether
+ *  it was a person or an agent. For an agent, `userId` is the account whose
+ *  token it connected with. */
+export interface EditorInfo {
+  userId?: string
+  kind?: 'user' | 'agent'
+}
+
+/** What a sticky note is made from; position and size have defaults. */
+export interface NoteInput {
+  pageId?: string
+  frameId?: string
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  markdown?: string
+  color?: string
+}
 
 /**
  * In-memory canvas/frame state — the hot path for reads, reveals and
@@ -11,10 +44,19 @@ import type { Canvas, CommunityCategory, Frame, GuidelineDoc, MemoryReference } 
 class Store {
   canvases = new Map<string, Canvas>()
   private frameIndex = new Map<string, string>() // frameId -> canvasId
+  /* server-only sharing state: kept beside the canvases, never on them,
+     because a Canvas is sent whole to every client in the room */
+  private domainGrants = new Map<string, DomainGrant[]>() // canvasId -> grants
+  private linkPasswordHashes = new Map<string, string>() // canvasId -> hash
 
-  init(canvases: Canvas[]) {
+  init(
+    canvases: Canvas[],
+    serverOnly: { domainGrants?: Map<string, DomainGrant[]>; linkPasswordHashes?: Map<string, string> } = {},
+  ) {
+    for (const [id, grants] of serverOnly.domainGrants ?? []) this.domainGrants.set(id, grants)
+    for (const [id, hash] of serverOnly.linkPasswordHashes ?? []) this.linkPasswordHashes.set(id, hash)
     for (const c of canvases) {
-      c.pages = canvasPages(c)
+      c.pages = normalizePageTree(canvasPages(c))
       this.canvases.set(c.id, c)
       for (const f of c.frames) {
         /* A frame whose page is gone (the server died between a frame move
@@ -117,7 +159,8 @@ class Store {
     const canvasId = nanoid(10)
     const sourceFrames = options.dropDemo ? source.frames.filter((frame) => !frame.demo) : source.frames
     const frameIds = new Map(sourceFrames.map((frame) => [frame.id, nanoid(10)]))
-    const frames = sourceFrames.map((frame) => ({
+    /* slide / speakerNotes ride along with the spread; who edited the source last does not */
+    const frames = sourceFrames.map(({ updatedByUserId: _user, updatedByKind: _kind, ...frame }) => ({
       ...frame,
       id: frameIds.get(frame.id)!,
       canvasId,
@@ -125,6 +168,18 @@ class Store {
       updatedAt: now,
       updatedBy: by,
     }))
+    /* notes follow their frame; a note on a frame the copy dropped (demo) is dropped with it */
+    const notes = source.notes
+      ?.filter((note) => !note.frameId || frameIds.has(note.frameId))
+      .map((note) => ({
+        ...note,
+        id: nanoid(10),
+        canvasId,
+        ...(note.frameId ? { frameId: frameIds.get(note.frameId)! } : {}),
+        createdAt: now,
+        updatedAt: now,
+        updatedBy: by,
+      }))
     const guidelines = source.guidelines?.map((doc) => ({ ...doc, updatedAt: now, updatedBy: by }))
     const references = source.references?.map((ref) => ({
       ...ref,
@@ -144,6 +199,7 @@ class Store {
       ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
       ...(guidelines?.length ? { guidelines } : {}),
       ...(references?.length ? { references } : {}),
+      ...(notes?.length ? { notes } : {}),
     }
     await persist.saveCanvasCopy(canvas)
     this.canvases.set(canvas.id, canvas)
@@ -161,10 +217,11 @@ class Store {
         persist.saveFrame(frame, true)
       }
     }
-    canvas.pages = pages
+    const normalized = normalizePageTree(pages)
+    canvas.pages = normalized
     canvas.updatedAt = Date.now()
     persist.saveCanvas(canvas)
-    return pages
+    return normalized
   }
 
   getCanvas(id: string) {
@@ -177,6 +234,8 @@ class Store {
     if (!c) return undefined
     for (const f of c.frames) this.frameIndex.delete(f.id)
     this.canvases.delete(id)
+    this.domainGrants.delete(id)
+    this.linkPasswordHashes.delete(id)
     persist.deleteCanvas(id)
     return c
   }
@@ -193,13 +252,72 @@ class Store {
   /** Owner-set link policy ('none' is the default and stored as unset).
    *  Deliberately does not bump updatedAt — a privacy toggle is not a
    *  design edit. */
-  setLinkAccess(id: string, mode: 'edit' | 'none'): Canvas | undefined {
+  setLinkAccess(id: string, mode: LinkAccess): Canvas | undefined {
     const c = this.canvases.get(id)
     if (!c) return undefined
-    if (mode === 'edit') c.linkAccess = 'edit'
-    else delete c.linkAccess
+    if (mode === 'none') delete c.linkAccess
+    else c.linkAccess = mode
     persist.saveCanvas(c)
     return c
+  }
+
+  /** Who the share link admits ('signed-in' is the default and stored as unset). */
+  setLinkAudience(id: string, audience: LinkAudience): Canvas | undefined {
+    const c = this.canvases.get(id)
+    if (!c) return undefined
+    if (audience === 'signed-in') delete c.linkAudience
+    else c.linkAudience = audience
+    persist.saveCanvas(c)
+    return c
+  }
+
+  /** Set (a hash) or clear (null) the link password. The hash stays in the
+   *  store's server-only map; the canvas only learns `hasLinkPassword`. */
+  setLinkPasswordHash(id: string, hash: string | null): Canvas | undefined {
+    const c = this.canvases.get(id)
+    if (!c) return undefined
+    if (hash) {
+      this.linkPasswordHashes.set(id, hash)
+      c.hasLinkPassword = true
+    } else {
+      this.linkPasswordHashes.delete(id)
+      delete c.hasLinkPassword
+    }
+    persist.saveLinkPasswordHash(id, hash)
+    return c
+  }
+
+  getLinkPasswordHash(id: string): string | undefined {
+    return this.linkPasswordHashes.get(id)
+  }
+
+  /* ---- sharing by email domain (server-only) ---- */
+
+  getDomainGrants(canvasId: string): DomainGrant[] {
+    return this.domainGrants.get(canvasId) ?? []
+  }
+
+  /** Grant everyone on an email domain a role; re-granting a domain changes its role. */
+  setDomainGrant(canvasId: string, domain: string, role: MemberRole, addedBy: string): DomainGrant | undefined {
+    if (!this.canvases.has(canvasId)) return undefined
+    const clean = domain.trim().toLowerCase().replace(/^@/, '')
+    if (!clean) return undefined
+    const grants = this.domainGrants.get(canvasId) ?? []
+    const grant: DomainGrant = { canvasId, domain: clean, role, addedBy, addedAt: Date.now() }
+    this.domainGrants.set(canvasId, [...grants.filter((g) => g.domain !== clean), grant])
+    void persist.saveDomainGrant(grant)
+    return grant
+  }
+
+  removeDomainGrant(canvasId: string, domain: string): boolean {
+    const clean = domain.trim().toLowerCase().replace(/^@/, '')
+    const grants = this.domainGrants.get(canvasId) ?? []
+    if (!grants.some((g) => g.domain === clean)) return false
+    const rest = grants.filter((g) => g.domain !== clean)
+    if (rest.length) this.domainGrants.set(canvasId, rest)
+    else this.domainGrants.delete(canvasId)
+    void persist.deleteDomainGrant(canvasId, clean)
+    return true
   }
 
   /* ---- workspaces ---- */
@@ -275,15 +393,38 @@ class Store {
     persist.saveCanvas(c)
   }
 
-  /** Invite a user to collaborate. Idempotent; the owner is never listed. */
-  addMember(canvasId: string, userId: string, addedBy: string): Canvas | undefined {
+  /** Invite a user to collaborate. Idempotent; the owner is never listed.
+   *  `role` defaults to 'edit', what every invite meant before roles existed. */
+  addMember(canvasId: string, userId: string, addedBy: string, role: MemberRole = 'edit'): Canvas | undefined {
     const c = this.canvases.get(canvasId)
     if (!c || c.ownerId === userId) return c
     if (!(c.memberIds ??= []).includes(userId)) {
       c.memberIds.push(userId)
-      persist.saveMember(canvasId, userId, addedBy, Date.now())
+      if (role !== 'edit') (c.memberRoles ??= {})[userId] = role
+      persist.saveMember(canvasId, userId, addedBy, Date.now(), role)
     }
     return c
+  }
+
+  /** The role an invited user holds; undefined when they are not a member. */
+  memberRole(canvasId: string, userId: string): MemberRole | undefined {
+    const c = this.canvases.get(canvasId)
+    if (!c?.memberIds?.includes(userId)) return undefined
+    return c.memberRoles?.[userId] ?? 'edit'
+  }
+
+  /** Change an existing member's role. False when they are not a member. */
+  setMemberRole(canvasId: string, userId: string, role: MemberRole): boolean {
+    const c = this.canvases.get(canvasId)
+    if (!c?.memberIds?.includes(userId)) return false
+    if (role === 'edit') {
+      if (c.memberRoles) {
+        delete c.memberRoles[userId]
+        if (Object.keys(c.memberRoles).length === 0) delete c.memberRoles
+      }
+    } else (c.memberRoles ??= {})[userId] = role
+    persist.saveMemberRole(canvasId, userId, role)
+    return true
   }
 
   removeMember(canvasId: string, userId: string): boolean {
@@ -291,6 +432,10 @@ class Store {
     const idx = c?.memberIds?.indexOf(userId) ?? -1
     if (!c || idx === -1) return false
     c.memberIds!.splice(idx, 1)
+    if (c.memberRoles) {
+      delete c.memberRoles[userId]
+      if (Object.keys(c.memberRoles).length === 0) delete c.memberRoles
+    }
     persist.deleteMember(canvasId, userId)
     return true
   }
@@ -425,8 +570,11 @@ class Store {
       height?: number
       html?: string
       demo?: boolean
+      slide?: boolean
+      speakerNotes?: string
     },
     by: string,
+    editor: EditorInfo = {},
   ): Frame | undefined {
     const c = this.canvases.get(canvasId)
     if (!c) return undefined
@@ -449,14 +597,18 @@ class Store {
       name: input.name,
       x,
       y,
-      width: input.width ?? 640,
-      height: input.height ?? 480,
+      width: input.width ?? defaultFrameSize(input.slide).width,
+      height: input.height ?? defaultFrameSize(input.slide).height,
       html: input.html ?? '',
       createdAt: now,
       updatedAt: now,
       updatedBy: by,
     }
+    if (editor.userId) frame.updatedByUserId = editor.userId
+    if (editor.kind) frame.updatedByKind = editor.kind
     if (input.demo) frame.demo = true
+    if (input.slide) frame.slide = true
+    if (input.speakerNotes) frame.speakerNotes = input.speakerNotes
     c.frames.push(frame)
     c.updatedAt = now
     this.frameIndex.set(frame.id, canvasId)
@@ -467,8 +619,9 @@ class Store {
 
   updateFrame(
     frameId: string,
-    patch: Partial<Pick<Frame, 'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html'>>,
+    patch: Partial<Pick<Frame, 'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html' | 'slide' | 'speakerNotes'>>,
     by: string,
+    editor: EditorInfo = {},
   ): Frame | undefined {
     const frame = this.getFrame(frameId)
     if (!frame) return undefined
@@ -480,6 +633,13 @@ class Store {
     Object.assign(frame, patch)
     frame.updatedAt = Date.now()
     frame.updatedBy = by
+    /* attribution always describes the latest edit, so a stale account id never outlives its name */
+    if (editor.userId) frame.updatedByUserId = editor.userId
+    else delete frame.updatedByUserId
+    if (editor.kind) frame.updatedByKind = editor.kind
+    else delete frame.updatedByKind
+    if (frame.slide === false) delete frame.slide
+    if (!frame.speakerNotes) delete frame.speakerNotes
     const c = this.canvases.get(frame.canvasId)!
     c.updatedAt = frame.updatedAt
     persist.saveFrame(frame) // debounced: streaming appends land as one write per burst
@@ -498,8 +658,85 @@ class Store {
     c.updatedAt = Date.now()
     this.frameIndex.delete(frameId)
     persist.deleteFrame(frameId)
+    /* a note attached to the frame goes with it; free-floating notes stay */
+    for (const note of (c.notes ?? []).filter((n) => n.frameId === frameId)) this.deleteNote(canvasId, note.id)
     persist.saveCanvas(c)
     return frame
+  }
+
+  /* ---- sticky notes ---- */
+
+  getNotes(canvasId: string): CanvasNote[] {
+    return this.canvases.get(canvasId)?.notes ?? []
+  }
+
+  /** The note with this id and the canvas it lives on, wherever it is. */
+  findNote(id: string): { note: CanvasNote; canvasId: string } | undefined {
+    for (const c of this.canvases.values()) {
+      const note = c.notes?.find((n) => n.id === id)
+      if (note) return { note, canvasId: c.id }
+    }
+    return undefined
+  }
+
+  createNote(canvasId: string, input: NoteInput, by: string, byUserId?: string): CanvasNote | undefined {
+    const c = this.canvases.get(canvasId)
+    if (!c) return undefined
+    if (input.frameId && this.frameIndex.get(input.frameId) !== canvasId) return undefined
+    if (input.pageId && !canvasPages(c).some((page) => page.id === input.pageId)) return undefined
+    const now = Date.now()
+    const note: CanvasNote = {
+      id: nanoid(10),
+      canvasId,
+      ...(input.pageId ? { pageId: input.pageId } : {}),
+      ...(input.frameId ? { frameId: input.frameId } : {}),
+      x: input.x ?? 120,
+      y: input.y ?? 120,
+      width: input.width ?? NOTE_DEFAULT_SIZE.width,
+      height: input.height ?? NOTE_DEFAULT_SIZE.height,
+      markdown: input.markdown ?? '',
+      color: input.color ?? DEFAULT_NOTE_COLOR,
+      createdBy: by,
+      ...(byUserId ? { createdByUserId: byUserId } : {}),
+      createdAt: now,
+      updatedAt: now,
+      updatedBy: by,
+    }
+    ;(c.notes ??= []).push(note)
+    c.updatedAt = now
+    void persist.saveNote(note)
+    persist.saveCanvas(c)
+    return note
+  }
+
+  updateNote(
+    canvasId: string,
+    id: string,
+    patch: Partial<Pick<CanvasNote, 'x' | 'y' | 'width' | 'height' | 'markdown' | 'color'>>,
+    by: string,
+  ): CanvasNote | undefined {
+    const c = this.canvases.get(canvasId)
+    const note = c?.notes?.find((n) => n.id === id)
+    if (!c || !note) return undefined
+    Object.assign(note, patch)
+    note.updatedAt = Date.now()
+    note.updatedBy = by
+    c.updatedAt = note.updatedAt
+    void persist.saveNote(note)
+    persist.saveCanvas(c)
+    return note
+  }
+
+  deleteNote(canvasId: string, id: string): CanvasNote | undefined {
+    const c = this.canvases.get(canvasId)
+    const idx = c?.notes?.findIndex((n) => n.id === id) ?? -1
+    if (!c || idx === -1) return undefined
+    const [note] = c.notes!.splice(idx, 1)
+    if (c.notes!.length === 0) delete c.notes
+    c.updatedAt = Date.now()
+    void persist.deleteNote(id)
+    persist.saveCanvas(c)
+    return note
   }
 }
 

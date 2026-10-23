@@ -1,9 +1,12 @@
 import { create } from 'zustand'
-import { canvasPages, framePageId } from '../../shared/pages'
+import { canvasPages, framePageId, pageFrames } from '../../shared/pages'
+import { shiftAttachedNotes } from '../../shared/notes'
 import type {
   ActivityItem,
   AgentTask,
   Canvas,
+  CanvasNote,
+  CanvasRole,
   ChatMessage,
   DesignDecision,
   ElementComment,
@@ -16,6 +19,7 @@ import type {
   TaskFeedback,
 } from '../../shared/types'
 import type { SnapGuide } from './snap'
+import { fitViewport, zoomAroundCenter } from './fit'
 
 export interface Viewport {
   x: number
@@ -72,6 +76,8 @@ interface State {
   /** open frame context menu; deferPanel hides the Inspector until it closes
    *  (right-click selecting a frame must not slide a panel in under the menu) */
   ctxMenu: { frameId: string; deferPanel: boolean } | null
+  /** frames the export dialog is open for (null: closed) — set by the frame's Export button, the top bar, and ⌘⇧E */
+  exportIds: string[] | null
   /** the element outlined inside the selected frame — a click on the frame
    *  surface and a click on a Layers row both land here, so the outline in
    *  the frame and the highlighted row stay in step */
@@ -82,7 +88,18 @@ interface State {
   elementPanelOpen: boolean
   /** the Layers rail is showing (desktop); the choice sticks across visits */
   layersOpen: boolean
+  /** the frame whose version history panel is open, if any — it takes the
+   *  Inspector's spot until closed */
+  historyFrameId: string | null
   viewport: Viewport
+  /** the stage's size in screen px, kept current by the Stage — what fit and zoom shortcuts measure against */
+  stageSize: { width: number; height: number } | null
+  /** laser mode: every frame outlines its element tree and the next click copies an element's path */
+  laser: boolean
+  /** comment mode: the next element click in any frame opens the comment composer on it */
+  commentMode: boolean
+  /** the Keyboard shortcuts dialog is showing */
+  shortcutsOpen: boolean
   /** live alignment guide lines while a frame drag is snapped to a neighbour */
   snapGuides: SnapGuide[]
   connected: boolean
@@ -92,6 +109,20 @@ interface State {
   canvasNotFound: boolean
   /** a reconnect revealed a newer client bundle on the server — offer a reload */
   updateReady: boolean
+  /** what this connection may do on the open canvas; null until the join is answered */
+  role: CanvasRole | null
+  /** a signed-out visitor on an anyone-with-the-link canvas */
+  guest: boolean
+  /** the server refused the join (no access, or it was taken away) — CanvasPage
+   *  shows the no-access screen with the request form */
+  noAccess: boolean
+  /** commentId -> when someone @mentioned you in it: the pin pulses for a while */
+  pulses: Record<string, number>
+  /** bumped when someone asks for access, so an open Share dialog re-reads its list */
+  accessRequestTick: number
+  /** a guest is about to comment and has not given a name yet: the prompt that
+   *  asks settles this request */
+  guestNameRequest: { resolve: (name: string) => void; reject: () => void } | null
   /** frameId -> color, set briefly when a remote actor updates a frame */
   flashes: Record<string, { color: string; at: number }>
   /** frameId -> actor currently streaming a design into it */
@@ -109,9 +140,24 @@ interface State {
   /** a request for the Stage to glide the camera to a frame — the prompt bar
    *  raises it so a first deliverable streams in on-screen, never off-canvas */
   flyTo: { frameId: string; at: number } | { point: { x: number; y: number }; at: number } | null
+  /** prototype link arrows (data-goto) are drawn for every frame, not only the selected ones — per viewer, `k` toggles it */
+  flowLinksVisible: boolean
+  setFlowLinksVisible(v: boolean): void
+  /** sticky notes are showing on the stage — per viewer, `n` toggles it */
+  notesVisible: boolean
+  /** notes this viewer has folded down to a corner chip */
+  foldedNotes: Record<string, true>
+  /** the note whose text is open for editing on this client */
+  editingNoteId: string | null
   /** clientId of the peer whose camera this one is tracking (Figma-style
    *  follow); any camera move of our own lets go */
   following: string | null
+  /** the full-screen present mode is open (frames behind it never sleep, see lib/frameSleep.ts) */
+  presenting: boolean
+  setPresenting(v: boolean): void
+  /** the frame a presentation starts on, set by startPresenting() before it opens */
+  presentFrameId: string | null
+  setPresentFrame(id: string | null): void
 
   activePageId: string | null
   setActivePage(id: string): void
@@ -120,6 +166,14 @@ interface State {
   setConnected(v: boolean): void
   setCanvasNotFound(v: boolean): void
   setUpdateReady(v: boolean): void
+  setRole(role: CanvasRole | null): void
+  setGuest(guest: boolean): void
+  setNoAccess(v: boolean): void
+  /** you were @mentioned in this thread: pulse its pin */
+  pulseComment(rootId: string): void
+  bumpAccessRequests(): void
+  clearPulse(rootId: string): void
+  setGuestNameRequest(request: State['guestNameRequest']): void
   setPresences(list: Presence[]): void
   upsertPresence(p: Presence): void
   removePresence(clientId: string): void
@@ -147,6 +201,14 @@ interface State {
   patchFrameLocal(frameId: string, patch: Partial<Frame>): void
   removeFrame(frameId: string): void
   renameCanvasLocal(name: string): void
+  /** insert or replace a sticky note on the open canvas */
+  upsertNote(note: CanvasNote): void
+  removeNote(id: string): void
+  /** move/resize/recolour a note in this client only (a drag in flight, an optimistic save) */
+  patchNoteLocal(id: string, patch: Partial<CanvasNote>): void
+  setNotesVisible(v: boolean): void
+  toggleNoteFolded(id: string): void
+  setEditingNote(id: string | null): void
   /** upsert (doc set) or remove (doc null) a style guide on the open canvas */
   setGuidelineLocal(name: string, doc: GuidelineDoc | null): void
   /** pin (reference set) or unpin (null) a Memory reference on the open canvas */
@@ -171,6 +233,8 @@ interface State {
   selectMany(ids: string[]): void
   setPanMode(v: boolean): void
   setInspectorOpen(v: boolean): void
+  openExport(frameIds: string[]): void
+  closeExport(): void
   openCtxMenu(menu: { frameId: string; deferPanel: boolean }): void
   closeCtxMenu(): void
   setSelectedElement(el: { frameId: string; selector: string } | null): void
@@ -180,13 +244,28 @@ interface State {
   pickElement(el: { frameId: string; selector: string } | null): void
   setElementPanelOpen(v: boolean): void
   setLayersOpen(v: boolean): void
+  openFrameHistory(frameId: string | null): void
   setViewport(v: Viewport): void
+  setStageSize(size: { width: number; height: number } | null): void
+  /** frame every frame on the current page */
+  fitAll(): void
+  /** frame the selected frames; with nothing selected, the whole page */
+  fitSelection(): void
+  /** zoom to a level around the stage center */
+  zoomTo(zoom: number): void
+  /** laser and comment mode are exclusive: turning one on turns the other off */
+  setLaser(on: boolean): void
+  setCommentMode(on: boolean): void
+  setShortcutsOpen(open: boolean): void
   setSnapGuides(guides: SnapGuide[]): void
   flash(frameId: string, color: string): void
   setStream(frameId: string, actor: { name: string; color: string } | null): void
 }
 
 const LAYERS_OPEN_KEY = 'doop:layers-open'
+const NOTES_VISIBLE_KEY = 'doop:notes-visible'
+const NOTES_FOLDED_KEY = 'doop:notes-folded'
+const FLOW_LINKS_KEY = 'doop:flow-links'
 /* longer than the slowest real export (Canva: render + verify, ~3 min) */
 const BUSY_NOTICE_MAX_MS = 5 * 60_000
 
@@ -195,6 +274,41 @@ function readLayersOpen(): boolean {
     return localStorage.getItem(LAYERS_OPEN_KEY) !== '0'
   } catch {
     return true
+  }
+}
+
+function readNotesVisible(): boolean {
+  try {
+    return localStorage.getItem(NOTES_VISIBLE_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function readFlowLinksVisible(): boolean {
+  try {
+    return localStorage.getItem(FLOW_LINKS_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function readFoldedNotes(): Record<string, true> {
+  try {
+    const ids: unknown = JSON.parse(localStorage.getItem(NOTES_FOLDED_KEY) ?? '[]')
+    return Array.isArray(ids)
+      ? Object.fromEntries(ids.filter((id) => typeof id === 'string').map((id) => [id, true]))
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function remember(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    /* private mode: the choice just doesn't stick */
   }
 }
 
@@ -216,19 +330,37 @@ export const useStore = create<State>((set, get) => ({
   allowanceVersion: 0,
   flyTo: null,
   following: null,
+  presenting: false,
+  presentFrameId: null,
   selectedIds: [],
   selectedId: null,
   panMode: false,
   inspectorOpen: false,
   ctxMenu: null,
+  exportIds: null,
   selectedElement: null,
   elementPanelOpen: false,
   layersOpen: readLayersOpen(),
+  historyFrameId: null,
+  notesVisible: readNotesVisible(),
+  flowLinksVisible: readFlowLinksVisible(),
+  foldedNotes: readFoldedNotes(),
+  editingNoteId: null,
   viewport: { x: 0, y: 0, zoom: 1 },
+  stageSize: null,
+  laser: false,
+  commentMode: false,
+  shortcutsOpen: false,
   snapGuides: [],
   connected: false,
   canvasNotFound: false,
   updateReady: false,
+  role: null,
+  guest: false,
+  noAccess: false,
+  pulses: {},
+  accessRequestTick: 0,
+  guestNameRequest: null,
   notice: null,
   flashes: {},
   streams: {},
@@ -283,6 +415,30 @@ export const useStore = create<State>((set, get) => ({
   setConnected: (connected) => set({ connected }),
   setCanvasNotFound: (canvasNotFound) => set({ canvasNotFound }),
   setUpdateReady: (updateReady) => set({ updateReady }),
+  setRole: (role) => set({ role }),
+  setGuest: (guest) => set({ guest }),
+  setNoAccess: (noAccess) => set({ noAccess }),
+  pulseComment: (rootId) => {
+    const at = Date.now()
+    set((s) => ({ pulses: { ...s.pulses, [rootId]: at } }))
+    setTimeout(() => {
+      if (get().pulses[rootId] !== at) return
+      set((s) => {
+        const pulses = { ...s.pulses }
+        delete pulses[rootId]
+        return { pulses }
+      })
+    }, 30_000)
+  },
+  bumpAccessRequests: () => set((s) => ({ accessRequestTick: s.accessRequestTick + 1 })),
+  clearPulse: (rootId) =>
+    set((s) => {
+      if (!(rootId in s.pulses)) return {}
+      const pulses = { ...s.pulses }
+      delete pulses[rootId]
+      return { pulses }
+    }),
+  setGuestNameRequest: (guestNameRequest) => set({ guestNameRequest }),
   setPresences: (list) =>
     set((s) => ({
       presences: Object.fromEntries(list.map((p) => [p.clientId, p])),
@@ -387,13 +543,28 @@ export const useStore = create<State>((set, get) => ({
           : {}),
       }
     }),
+  /* A frame that moves takes its attached notes along by the same delta. This
+     is the one local path every move goes through (a drag, a peer's drag, an
+     undo), so notes never lag behind; the server shifts them by the same
+     arithmetic when the move is saved. */
   patchFrameLocal: (frameId, patch) =>
     set((s) => {
       if (!s.canvas) return {}
+      const before = s.canvas.frames.find((f) => f.id === frameId)
+      const moves = before
+        ? shiftAttachedNotes(
+            s.canvas.notes ?? [],
+            frameId,
+            (patch.x ?? before.x) - before.x,
+            (patch.y ?? before.y) - before.y,
+          )
+        : []
+      const byId = new Map(moves.map((m) => [m.id, m]))
       return {
         canvas: {
           ...s.canvas,
           frames: s.canvas.frames.map((f) => (f.id === frameId ? { ...f, ...patch } : f)),
+          ...(moves.length ? { notes: s.canvas.notes?.map((n) => ({ ...n, ...byId.get(n.id) })) } : {}),
         },
       }
     }),
@@ -401,8 +572,14 @@ export const useStore = create<State>((set, get) => ({
     set((s) => {
       if (!s.canvas) return {}
       const selectedIds = s.selectedIds.filter((id) => id !== frameId)
+      const notes = s.canvas.notes?.filter((n) => n.frameId !== frameId)
       return {
-        canvas: { ...s.canvas, frames: s.canvas.frames.filter((f) => f.id !== frameId) },
+        canvas: {
+          ...s.canvas,
+          frames: s.canvas.frames.filter((f) => f.id !== frameId),
+          /* a note attached to the frame goes with it */
+          ...(notes && notes.length !== s.canvas.notes?.length ? { notes } : {}),
+        },
         selectedIds,
         /* losing the primary promotes the last surviving member, so a group
            never sits selected with nothing driving the Inspector/presence */
@@ -412,6 +589,52 @@ export const useStore = create<State>((set, get) => ({
         ctxMenu: s.ctxMenu?.frameId === frameId ? null : s.ctxMenu,
       }
     }),
+  upsertNote: (note) =>
+    set((s) => {
+      if (!s.canvas || note.canvasId !== s.canvas.id) return {}
+      const notes = s.canvas.notes ?? []
+      return {
+        canvas: {
+          ...s.canvas,
+          notes: notes.some((n) => n.id === note.id)
+            ? notes.map((n) => (n.id === note.id ? note : n))
+            : [...notes, note],
+        },
+      }
+    }),
+  removeNote: (id) =>
+    set((s) => {
+      if (!s.canvas?.notes?.some((n) => n.id === id)) return {}
+      const notes = s.canvas.notes.filter((n) => n.id !== id)
+      const { [id]: _folded, ...foldedNotes } = s.foldedNotes
+      return {
+        canvas: { ...s.canvas, notes },
+        foldedNotes,
+        editingNoteId: s.editingNoteId === id ? null : s.editingNoteId,
+      }
+    }),
+  patchNoteLocal: (id, patch) =>
+    set((s) => {
+      if (!s.canvas?.notes?.some((n) => n.id === id)) return {}
+      return { canvas: { ...s.canvas, notes: s.canvas.notes.map((n) => (n.id === id ? { ...n, ...patch } : n)) } }
+    }),
+  setNotesVisible: (notesVisible) => {
+    remember(NOTES_VISIBLE_KEY, notesVisible ? '1' : '0')
+    set({ notesVisible })
+  },
+  setFlowLinksVisible: (flowLinksVisible) => {
+    remember(FLOW_LINKS_KEY, flowLinksVisible ? '1' : '0')
+    set({ flowLinksVisible })
+  },
+  toggleNoteFolded: (id) =>
+    set((s) => {
+      const foldedNotes = { ...s.foldedNotes }
+      if (foldedNotes[id]) delete foldedNotes[id]
+      else foldedNotes[id] = true
+      remember(NOTES_FOLDED_KEY, JSON.stringify(Object.keys(foldedNotes)))
+      return { foldedNotes }
+    }),
+  setEditingNote: (editingNoteId) => set({ editingNoteId }),
   renameCanvasLocal: (name) => set((s) => (s.canvas ? { canvas: { ...s.canvas, name } } : {})),
   setGuidelineLocal: (name, doc) =>
     set((s) => {
@@ -511,6 +734,8 @@ export const useStore = create<State>((set, get) => ({
   },
   setPanMode: (panMode) => set({ panMode }),
   setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
+  openExport: (exportIds) => set({ exportIds }),
+  closeExport: () => set({ exportIds: null }),
   openCtxMenu: (ctxMenu) => set({ ctxMenu }),
   closeCtxMenu: () => set({ ctxMenu: null }),
   setSelectedElement: (selectedElement) =>
@@ -528,6 +753,7 @@ export const useStore = create<State>((set, get) => ({
       return { selectedElement: same ? s.selectedElement : el, elementPanelOpen: true }
     }),
   setElementPanelOpen: (elementPanelOpen) => set({ elementPanelOpen }),
+  openFrameHistory: (historyFrameId) => set({ historyFrameId }),
   setLayersOpen: (layersOpen) => {
     try {
       localStorage.setItem(LAYERS_OPEN_KEY, layersOpen ? '1' : '0')
@@ -538,8 +764,35 @@ export const useStore = create<State>((set, get) => ({
   },
   /* every ordinary camera move (pan, zoom, fit, fly-to) is ours, so it ends a follow */
   setViewport: (viewport) => set({ viewport, following: null }),
+  setStageSize: (stageSize) =>
+    set((s) =>
+      s.stageSize?.width === stageSize?.width && s.stageSize?.height === stageSize?.height ? s : { stageSize },
+    ),
+  fitAll: () => {
+    const s = get()
+    if (!s.stageSize || !s.canvas) return
+    const frames = pageFrames(s.canvas, s.activePageId ?? canvasPages(s.canvas)[0]!.id)
+    s.setViewport(fitViewport(frames, s.stageSize))
+  },
+  fitSelection: () => {
+    const s = get()
+    if (!s.stageSize || !s.canvas) return
+    const frames = pageFrames(s.canvas, s.activePageId ?? canvasPages(s.canvas)[0]!.id)
+    const picked = frames.filter((f) => s.selectedIds.includes(f.id))
+    s.setViewport(fitViewport(picked.length ? picked : frames, s.stageSize))
+  },
+  zoomTo: (zoom) => {
+    const s = get()
+    if (s.stageSize) s.setViewport(zoomAroundCenter(s.viewport, zoom, s.stageSize))
+  },
+  setLaser: (laser) => set((s) => (laser ? { laser, commentMode: false } : s.laser ? { laser } : s)),
+  setCommentMode: (commentMode) =>
+    set((s) => (commentMode ? { commentMode, laser: false } : s.commentMode ? { commentMode } : s)),
+  setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   /* fires on every pointermove during a drag — skip the no-op transitions
      so unsnapped drags don't render the (empty) guide layer each frame */
+  setPresenting: (presenting) => set({ presenting }),
+  setPresentFrame: (presentFrameId) => set({ presentFrameId }),
   setSnapGuides: (snapGuides) =>
     set((s) => (snapGuides.length === 0 && s.snapGuides.length === 0 ? s : { snapGuides })),
   setStream: (frameId, actor) =>

@@ -1,17 +1,23 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import type { ElementComment, Frame } from '../../shared/types'
+import type { CommentAnchor, ElementComment, Frame } from '../../shared/types'
 import { colorFor } from '../../shared/types'
+import { resolveGoto } from '../../shared/gotoLinks'
 import { useStore } from '../lib/store'
 import { currentPageCanvas } from '../lib/pages'
 import { registerFrameWindow, unregisterFrameWindow } from '../lib/frameBridge'
 import { api } from '../lib/api'
+import { postComment, postReply } from '../lib/commenting'
+import { canCommentNow, useCanComment, useCanEdit } from '../lib/role'
+import { authClient } from '../lib/auth'
+import { MentionTextarea, mentionIds, type MentionTextareaHandle } from './MentionTextarea'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { useFrameMounted } from '../lib/frameMounting'
+import { useFrameSleep } from '../lib/frameSleep'
 import { recordCreate, recordUpdate, recordUpdates, trackSave } from '../lib/history'
-import { snapFrame } from '../lib/snap'
+import { snapDeviceWidth, snapFrame } from '../lib/snap'
 import { gesture } from '../lib/gesture'
 import { FrameContextMenu } from './FrameContextMenu'
 import { CodePanel } from './CodePanel'
@@ -19,11 +25,13 @@ import { ContextMenu, ContextMenuTrigger } from './ui/context-menu'
 import { AGENT_ROLES, DEFAULT_ROLE_ID, mentionedRole, roleName } from '../../shared/agents'
 import { posthog } from '../lib/posthog'
 import { isResidentLimit } from './TeamAllowance'
+import { MarkDot } from './MarkDot'
+import { useFrameMark } from '../lib/marks'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
-import { Textarea } from './ui/textarea'
 import { Tooltip } from './ui/tooltip'
-import { GithubIcon, SyncIcon } from './ui/icons'
+import { DownloadIcon, GithubIcon, SlideIcon, SyncIcon } from './ui/icons'
+import { EXPORT_SHORTCUT } from '../lib/keys'
 import { isSyncedFrame } from '../lib/sync'
 import { isGithubFrame, isGithubPlaceholder } from '../lib/github'
 import { AgentIcon } from './AgentIcon'
@@ -53,6 +61,10 @@ const EL_TOOLBAR_BTN = 'rounded-[7px] px-2 py-1 text-xs'
    front arrow's tip. `copy` is the fallback where custom cursors fail. */
 const DUP_CURSOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M9 8v12.6l3.4-2.9 2 4.6 2.3-1-2-4.5 4.5-.4z" fill="#000" stroke="#fff" stroke-width="1.2"/><path d="M4 3v12.6l3.4-2.9 2 4.6 2.3-1-2-4.5 4.5-.4z" fill="#000" stroke="#fff" stroke-width="1.2"/></svg>`
 const DUP_CURSOR = `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(DUP_CURSOR_SVG)}") 4 3, copy`
+
+/* comment mode's cursor: a speech bubble, hotspot on its tail */
+const COMMENT_CURSOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M4 21V6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H9z" fill="#fff" stroke="#17171b" stroke-width="1.6" stroke-linejoin="round"/></svg>`
+const COMMENT_CURSOR = `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(COMMENT_CURSOR_SVG)}") 4 21, crosshair`
 
 /** True while ⌥⇧ is held. The duplicate cursor must be showing BEFORE the
  *  drag starts: Chromium freezes the effective cursor for the duration of a
@@ -91,11 +103,20 @@ function useThrottledValue<T>(value: T, ms: number): T {
 
 interface ProbeHit {
   selector: string
+  /** how to find the element again once the frame is edited */
+  anchor?: CommentAnchor
   tag: string
   text: string
   snippet: string
   rect: { x: number; y: number; width: number; height: number }
 }
+
+/** where a comment pin sits in frame coords, or 'orphan' when its element
+ *  can no longer be found and the pin parks at the frame's corner */
+type PinSpot = { x: number; y: number } | 'orphan'
+
+/** same scale the pins get, so orphan stacking spaces by the pin's rendered size */
+const PIN_SCALE = 'min(calc(1/var(--zoom,1)),2.4)'
 
 type DragRect = { id: string; x: number; y: number; width: number; height: number }
 
@@ -106,9 +127,18 @@ interface HoverHit {
 
 /* Counter-scaled overlays (labels, pins, popovers) get their scale from the
    `--zoom` CSS variable the Stage sets, so a viewport change never re-renders
-   this component — memo holds as long as the frame and raster are unchanged. */
-export const FrameView = memo(function FrameView({ frame, raster }: { frame: Frame; raster: number }) {
+   this component — memo holds as long as the frame is unchanged. */
+export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   const selected = useStore((s) => s.selectedIds.includes(frame.id))
+  /* the title bar offers Export only when this is the one selected frame: with
+     a group, the top bar's Export acts on all of them */
+  const soleSelected = useStore((s) => s.selectedIds.length === 1 && s.selectedIds[0] === frame.id)
+  const mark = useFrameMark(frame.id)
+  /* below edit a frame can be selected, probed and commented on, never moved */
+  const mayEdit = useCanEdit()
+  const mayComment = useCanComment()
+  const guest = useStore((s) => s.guest)
+  const pulses = useStore((s) => s.pulses)
   /* the document renders once the Stage's scheduler reaches this frame, or at once when someone selects it */
   const scheduled = useFrameMounted(frame.id)
   const [selectedOnce, setSelectedOnce] = useState(false)
@@ -119,6 +149,9 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
   const panMode = useStore((s) => s.panMode)
   const select = useStore((s) => s.select)
   const flash = useStore((s) => s.flashes[frame.id])
+  /* laser and comment mode turn the frame surface from "select" into "inspect" */
+  const laser = useStore((s) => s.laser)
+  const commentMode = useStore((s) => s.commentMode)
   const stream = useStore((s) => s.streams[frame.id])
   /* select the stable presences map, derive in render — a selector that
      builds a fresh array re-renders every frame on EVERY store update
@@ -156,10 +189,35 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     if (useStore.getState().panMode) return
     e.stopPropagation()
     e.preventDefault()
+    if (!mayEdit) {
+      /* read-only: a click selects the frame and picks the element under the
+         cursor (so it can be commented on); there is no drag and no resize */
+      if (mode !== 'move') return
+      select(frame.id)
+      const down = { x: e.clientX, y: e.clientY }
+      const at = { x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }
+      const release = (ev: PointerEvent) => {
+        window.removeEventListener('pointerup', release)
+        if (Math.abs(ev.clientX - down.x) + Math.abs(ev.clientY - down.y) > 4) return
+        if (probeOnClick) {
+          /* laser is for everyone who can look; comment mode needs the comment role */
+          const mode = useStore.getState()
+          if (mode.laser) {
+            iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-click', x: at.x, y: at.y }, '*')
+          } else if (mode.commentMode && canCommentNow()) composeAt(at.x, at.y)
+          else probeAt(at.x, at.y)
+        }
+        if (panelOnClick) useStore.getState().setInspectorOpen(true)
+      }
+      window.addEventListener('pointerup', release)
+      return
+    }
     /* ⌥⇧-drag duplicates: the moment the drag is real, leave a copy of the
        frame at its origin and keep dragging this one — same net effect as
        Figma's "drag off a duplicate", without retargeting the drag */
     const duplicating = mode === 'move' && e.altKey && e.shiftKey
+    /* ⌥-click follows a prototype link under the pointer instead of picking the element */
+    const followLink = mode === 'move' && e.altKey && !e.shiftKey
     /* plain ⇧-click adds to (or drops from) the selection; a dropped frame
        does not start a drag */
     if (mode === 'move' && e.shiftKey && !e.altKey) {
@@ -237,7 +295,12 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
          riding along in the group are not neighbours. */
       const others = currentPageCanvas()?.frames.filter((f) => !groupIds.has(f.id)) ?? []
       const free = ev.altKey && !duplicating
-      const snapped = free ? { ...raw, guides: [] } : snapFrame(mode, raw, others, zoom)
+      let snapped = free ? { ...raw, guides: [] } : snapFrame(mode, raw, others, zoom)
+      /* a resize also locks onto device widths — unless a neighbour's edge already took the width */
+      if (mode === 'resize' && !free && !snapped.guides.some((g) => g.axis === 'v')) {
+        const device = snapDeviceWidth(snapped, zoom)
+        snapped = { ...device, guides: [...snapped.guides, ...device.guides] }
+      }
       useStore.getState().setSnapGuides(snapped.guides)
       if (mode === 'move') {
         /* the snapped delta of the dragged frame moves the whole group */
@@ -275,8 +338,14 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
       else recordUpdates(updates)
       /* a click (no drag) on the frame surface targets the element under
          the cursor: probe it and show the element toolbar */
-      if (!moved && probeOnClick) probeAt(off.x, off.y)
-      else if (moved) closePopovers()
+      if (!moved && probeOnClick) {
+        const mode = useStore.getState()
+        if (followLink && !mode.laser && !mode.commentMode) followLinkAt(off.x, off.y)
+        else if (mode.laser) {
+          iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-click', x: off.x, y: off.y }, '*')
+        } else if (mode.commentMode) composeAt(off.x, off.y)
+        else probeAt(off.x, off.y)
+      } else if (moved) closePopovers()
       /* a click (no drag) on the frame name opens the details panel */
       if (!moved && panelOnClick) useStore.getState().setInspectorOpen(true)
     }
@@ -316,18 +385,50 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:html', html }, '*')
   }, [runtimeReady, html, editing, suspendPost])
 
+  /* laser mode lives in the frame's runtime; a frame that mounts or becomes ready while it is on joins in */
+  useEffect(() => {
+    if (!runtimeReady) return
+    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser', on: laser }, '*')
+  }, [runtimeReady, laser])
+
+  /* "Element path copied" flashes in the title chrome after a laser click */
+  const [pathNote, setPathNote] = useState<string | null>(null)
+  const pathNoteTimer = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (pathNoteTimer.current) window.clearTimeout(pathNoteTimer.current)
+    },
+    [],
+  )
+  function flashPathNote(text: string) {
+    setPathNote(text)
+    if (pathNoteTimer.current) window.clearTimeout(pathNoteTimer.current)
+    pathNoteTimer.current = window.setTimeout(() => setPathNote(null), 1800)
+  }
+
   /* ---- element comments ---- */
   const frameComments = useStore((s) => s.comments).filter((c) => c.frameId === frame.id)
   /* only thread roots get a pin; replies live inside the root's popover */
   const comments = frameComments.filter((c) => !c.parentId && !c.resolvedAt)
+  /* frames at rest pause their animations (lib/frameSleep.ts); one being edited, by anyone, or worked by an agent stays awake */
+  const setHovered = useFrameSleep(iframeRef, {
+    frame,
+    ready: runtimeReady,
+    editing: editing || editors.length > 0,
+    working: frameComments.some((c) => c.forAgent && !c.resolvedAt && !!c.claimedBy && !c.failedAt),
+  })
   const [probe, setProbe] = useState<ProbeHit | null>(null)
   /* element selected for text editing inside the iframe (edit mode only) */
   const [activeHit, setActiveHit] = useState<ProbeHit | null>(null)
   const [composing, setComposing] = useState(false)
   const [openThread, setOpenThread] = useState<string | null>(null)
   const [linkedThread, setLinkedThread] = useState<string | null>(deepLinkedThread)
-  const [pinPos, setPinPos] = useState<Record<string, { x: number; y: number } | null>>({})
+  const [pinPos, setPinPos] = useState<Record<string, PinSpot>>({})
+  /* selectors already reported to the server, so a pin heals once per path */
+  const healed = useRef(new Set<string>())
   const probeReq = useRef(0)
+  /* the probe request a comment-mode click is waiting on: its answer opens the composer */
+  const commentReq = useRef(0)
   const probeTimer = useRef<number | null>(null)
   const activeSelRef = useRef<string | null>(null)
 
@@ -342,6 +443,11 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     const now = Date.now()
     if (now - hoverLast.current < 40) return
     hoverLast.current = now
+    if (useStore.getState().laser) {
+      /* laser: the runtime draws the hover itself, nothing comes back */
+      iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-move', x, y }, '*')
+      return
+    }
     hoverReq.current += 1
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:hover', reqId: hoverReq.current, x, y }, '*')
   }
@@ -386,13 +492,33 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     }, 250)
   }
 
+  /* ⌥-click: ask the document what link sits under the pointer; the answer flies the camera to its frame */
+  const gotoReq = useRef(0)
+  function followLinkAt(x: number, y: number) {
+    if (!frame.html || editing) return
+    gotoReq.current += 1
+    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:goto-at', reqId: gotoReq.current, x, y }, '*')
+  }
+
+  /* comment mode: the click resolves the element at once and opens the composer on it, as the toolbar's Comment button does */
+  function composeAt(x: number, y: number) {
+    if (!frame.html || editing) return
+    closePopovers()
+    probeReq.current += 1
+    commentReq.current = probeReq.current
+    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:probe', reqId: probeReq.current, x, y }, '*')
+  }
+
   /* keep comment pins glued to their elements: re-locate whenever the frame's
      html or the comment set changes */
   const commentKey = comments.map((c) => c.id).join(',')
   useEffect(() => {
     if (!runtimeReady) return
     for (const c of comments) {
-      iframeRef.current?.contentWindow?.postMessage({ type: 'doop:locate', reqId: c.id, selector: c.selector }, '*')
+      iframeRef.current?.contentWindow?.postMessage(
+        { type: 'doop:locate', reqId: c.id, selector: c.selector, anchor: c.anchor },
+        '*',
+      )
     }
   }, [runtimeReady, html, commentKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -455,8 +581,46 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
       if (ev.source !== iframeRef.current?.contentWindow) return
+      if (ev.data?.type === 'doop:goto-result' && ev.data.reqId === gotoReq.current) {
+        const target: unknown = ev.data.target
+        const canvas = useStore.getState().canvas
+        if (typeof target !== 'string' || !canvas) {
+          flashPathNote('No link here. Links are elements with data-goto.')
+          return
+        }
+        const to = resolveGoto(canvas, target)
+        if (!to) {
+          flashPathNote(`No frame matches “${target}”`)
+          return
+        }
+        useStore.getState().select(to.id)
+        useStore.getState().requestFlyTo(to.id)
+        return
+      }
       if (ev.data?.type === 'doop:probe-result' && ev.data.reqId === probeReq.current) {
-        setProbe(ev.data.hit ?? null)
+        const hit = (ev.data.hit ?? null) as ProbeHit | null
+        setProbe(hit)
+        if (commentReq.current === ev.data.reqId) {
+          commentReq.current = 0
+          if (hit) {
+            setComposePrefill('')
+            setComposing(true)
+            useStore.getState().setCommentMode(false)
+          }
+        }
+      }
+      if (ev.data?.type === 'doop:laser-copy' && typeof ev.data.selector === 'string') {
+        /* the frame may have been renamed since this listener was set up, so the name is read fresh */
+        const name = useStore.getState().canvas?.frames.find((f) => f.id === frame.id)?.name ?? 'Frame'
+        navigator.clipboard
+          .writeText(`${name} · ${ev.data.selector}`)
+          .then(() => flashPathNote('Element path copied'))
+          .catch(() => flashPathNote('Couldn’t copy the path'))
+      }
+      /* Esc with focus inside the frame never reaches the window as a key event */
+      if (ev.data?.type === 'doop:esc') {
+        useStore.getState().setLaser(false)
+        useStore.getState().setCommentMode(false)
       }
       if (ev.data?.type === 'doop:select-result' && ev.data.reqId === selectReq.current) {
         /* the answer is only acted on while the asked-for element is still
@@ -495,8 +659,30 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
           setProbe((p) => (p && rect ? { ...p, rect } : rect ? p : null))
           return
         }
-        const rect = ev.data.rect as { x: number; y: number; width: number } | null
-        setPinPos((m) => ({ ...m, [ev.data.reqId]: rect ? { x: rect.x + rect.width, y: rect.y } : null }))
+        const rect = ev.data.rect as { x: number; y: number; width: number; height: number } | null
+        const id = ev.data.reqId as string
+        const comment = useStore.getState().comments.find((c) => c.id === id)
+        const a = comment?.anchor
+        /* an anchored pin sits where it was clicked inside the element; older
+           comments keep the element's top-right corner */
+        const spot: PinSpot = !rect
+          ? 'orphan'
+          : a
+            ? { x: rect.x + a.fx * rect.width, y: rect.y + a.fy * rect.height }
+            : { x: rect.x + rect.width, y: rect.y }
+        setPinPos((m) => ({ ...m, [id]: spot }))
+        /* found by a fallback: tell the server the new path so the next load is a direct hit */
+        const how = ev.data.how as string | null
+        const path = ev.data.selector as string | null
+        /* healing rewrites the stored pin: it takes an account that may comment (guests and viewers just resolve it locally) */
+        const mayHeal = canCommentNow() && !useStore.getState().guest
+        if (mayHeal && comment && rect && how && how !== 'path' && path && path !== comment.selector) {
+          const key = `${id}|${path}`
+          if (!healed.current.has(key)) {
+            healed.current.add(key)
+            api.healCommentAnchor(id, path).catch(() => healed.current.delete(key))
+          }
+        }
       }
     }
     window.addEventListener('message', onMsg)
@@ -522,7 +708,7 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---- inline text editing ---- */
-  const canEdit = !!frame.html && !stream && !/<script/i.test(frame.html)
+  const canEdit = mayEdit && !!frame.html && !stream && !/<script/i.test(frame.html)
 
   function enterEdit() {
     select(frame.id)
@@ -569,15 +755,6 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     if (!selected && editing) exitEdit()
   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* When zoomed past 100%, render the iframe k× larger and counter-scale it,
-     with a matching CSS zoom inside — same layout, k× the raster density, so
-     frames stay crisp instead of looking like scaled-up bitmaps. The factor
-     is computed by the Stage from the settled (gesture-idle) zoom. */
-  useEffect(() => {
-    if (!runtimeReady) return
-    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:zoom', zoom: raster }, '*')
-  }, [runtimeReady, raster])
-
   return (
     <ContextMenu
       onOpenChange={(open) => {
@@ -620,7 +797,8 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
         >
           <div
             className={cn(
-              'absolute -top-[26px] left-0 flex origin-bottom-left cursor-grab select-none items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] font-semibold text-ink-soft',
+              'absolute -top-[26px] left-0 flex origin-bottom-left select-none items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] font-semibold text-ink-soft',
+              mayEdit ? 'cursor-grab' : 'cursor-default',
               /* the label is counter-scaled from its bottom-left corner, so
                  its box must be pre-shrunk by the same factor: a full-width
                  box scaled by 1/zoom would reach far past the frame's right
@@ -658,7 +836,43 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
                 </span>
               </Tooltip>
             )}
+            <MarkDot mark={mark} />
             <span className="overflow-hidden text-ellipsis">{frame.name}</span>
+            {frame.slide && (
+              <Tooltip
+                label="A slide: plays with the other slides on this page in present mode"
+                side="top"
+                align="start"
+              >
+                <span className="flex shrink-0 items-center gap-1 rounded-full bg-ink px-1.5 py-px text-[10px] font-bold text-paper">
+                  <SlideIcon width={10} height={10} aria-hidden />
+                  Slide
+                </span>
+              </Tooltip>
+            )}
+            {soleSelected && !editing && !dragging && (
+              <Button
+                variant="default"
+                size="pill"
+                className="gap-1 border-line bg-surface font-semibold text-ink-soft hover:text-ink"
+                title={`Export this frame as PNG or JPG (${EXPORT_SHORTCUT})`}
+                aria-label={`Export ${frame.name}`}
+                /* a press here is a button press, not the start of a frame drag */
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => useStore.getState().openExport([frame.id])}
+              >
+                <DownloadIcon width={10} height={10} strokeWidth={2.2} aria-hidden />
+                Export
+              </Button>
+            )}
+            {pathNote && (
+              <span
+                role="status"
+                className="inline-flex items-center gap-1 rounded-full bg-ink px-[7px] py-0.5 text-[10px] font-bold text-paper animate-[chip-in_0.25s_ease]"
+              >
+                {pathNote}
+              </span>
+            )}
             <span className="flex gap-1">
               {stream && (
                 <span className={EDITOR_CHIP} style={{ background: stream.color }}>
@@ -679,7 +893,12 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
 
           <div
             className={cn(
-              'absolute inset-0 cursor-grab overflow-hidden rounded-[6px] border border-line bg-white',
+              'absolute inset-0 overflow-hidden rounded-[6px] border border-line',
+              mayEdit ? 'cursor-grab' : 'cursor-default',
+              /* frames far outside the view are not rendered at all, so a large canvas keeps a bounded set of live iframe layers and tiles however far out it is zoomed */
+              '[content-visibility:auto]',
+              /* a frame whose document is still on its way is a quiet placeholder, not a stark white box */
+              frame.html && !runtimeReady ? 'bg-paper-deep' : 'bg-white',
               dragging ? 'shadow-pop' : 'shadow-card',
               selected && 'outline-2 outline-offset-1 outline-brand',
               editing && 'cursor-text outline-2 outline-offset-1 outline-dashed outline-brand',
@@ -689,7 +908,15 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
               stream && 'border-transparent outline-none',
               dragging && 'cursor-grabbing',
             )}
-            style={duping || (dupKeyHeld && !editing) ? { cursor: DUP_CURSOR } : undefined}
+            style={
+              duping || (dupKeyHeld && !editing)
+                ? { cursor: DUP_CURSOR }
+                : laser
+                  ? { cursor: 'crosshair' }
+                  : commentMode
+                    ? { cursor: COMMENT_CURSOR }
+                    : undefined
+            }
             onPointerDown={(e) => startDrag(e, 'move', true)}
             onDoubleClick={() => canEdit && !editing && runtimeReady && enterEdit()}
             onPointerMove={(e) => {
@@ -699,22 +926,27 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
               const zoom = useStore.getState().viewport.zoom
               sendHover((e.clientX - r.left) / zoom, (e.clientY - r.top) / zoom)
             }}
-            onPointerLeave={clearHover}
+            onPointerEnter={() => setHovered(true)}
+            onPointerLeave={() => {
+              clearHover()
+              setHovered(false)
+              if (laser)
+                iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-move', x: null, y: null }, '*')
+            }}
           >
             {mounted && (
               <iframe
                 ref={iframeRef}
-                className="block border-none bg-white"
+                className={cn(
+                  'block border-none bg-white',
+                  /* fade the document in once its runtime answers, so a frame mounting into view never pops */
+                  runtimeReady ? 'opacity-100 transition-opacity duration-150' : 'opacity-0',
+                )}
                 title={frame.name}
                 data-doop-frame=""
                 sandbox="allow-scripts"
                 srcDoc={FRAME_BOOTSTRAP}
-                style={{
-                  width: frame.width * raster,
-                  height: frame.height * raster,
-                  transform: `scale(${1 / raster})`,
-                  transformOrigin: '0 0',
-                }}
+                style={{ width: frame.width, height: frame.height }}
               />
             )}
             {!frame.html && (
@@ -724,8 +956,8 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
             )}
             {/* shield keeps pointer events on the canvas, not the iframe;
             lifted while editing so clicks land in the editable document */}
-            {(!editing || panMode) && <div className="absolute inset-0" />}
-            {hover && !editing && !dragging && (
+            {(!editing || panMode || laser) && <div className="absolute inset-0" />}
+            {hover && !editing && !dragging && !laser && (
               <div
                 className="pointer-events-none absolute z-[3] bg-[rgba(60,130,246,0.06)] shadow-[inset_0_0_0_calc(1.5px/var(--zoom,1))_#3c82f6]"
                 style={{ left: hover.rect.x, top: hover.rect.y, width: hover.rect.width, height: hover.rect.height }}
@@ -785,14 +1017,19 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
             return (
               <div className="pointer-events-none absolute inset-0">
                 {comments.map((c) => {
-                  const pos = pinPos[c.id]
-                  if (!pos) return null
+                  const spot = pinPos[c.id]
+                  if (!spot) return null
+                  const orphan = spot === 'orphan'
+                  /* orphans stack down the frame's top-right edge in thread order */
+                  const orphanIndex = orphan ? comments.filter((o) => pinPos[o.id] === 'orphan').indexOf(c) : 0
                   const open = openThread === c.id
                   const replies = frameComments.filter((r) => r.parentId === c.id).reverse() // store is newest-first
                   const thread = [c, ...replies.sort((a, b) => a.at - b.at)]
                   /* the pin reflects the newest agent request in the thread */
                   const agentItem = [...thread].reverse().find((x) => x.forAgent && !x.resolvedAt)
                   const working = agentItem?.claimedBy && !agentItem.failedAt
+                  /* someone @mentioned you in this thread and you have not opened it yet */
+                  const mentioned = c.id in pulses
                   return (
                     <div
                       key={c.id}
@@ -801,12 +1038,22 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
                         agentItem?.failedAt
                           ? 'bg-accent-ink! font-extrabold shadow-[0_0_0_3px_rgba(208,52,31,0.2),var(--shadow-card)]'
                           : 'shadow-card',
+                        orphan && 'border-dashed border-ink-soft',
+                        orphan && !open && 'opacity-80',
                         working &&
                           "after:absolute after:-inset-1.5 after:rounded-[inherit] after:border-2 after:border-current after:opacity-50 after:content-[''] after:[animation:stream-pulse_1.1s_ease-in-out_infinite]",
+                        mentioned && 'animate-[mention-ring_1.4s_ease-out_infinite]',
                       )}
                       style={{
-                        left: Math.min(Math.max(pos.x, 10), frame.width - 10),
-                        top: Math.min(Math.max(pos.y, 10), frame.height - 10),
+                        ...(orphan
+                          ? {
+                              left: `calc(${frame.width}px - 16px * ${PIN_SCALE})`,
+                              top: `calc(16px * ${PIN_SCALE} + ${orphanIndex} * 32px * ${PIN_SCALE})`,
+                            }
+                          : {
+                              left: Math.min(Math.max(spot.x, 10), frame.width - 10),
+                              top: Math.min(Math.max(spot.y, 10), frame.height - 10),
+                            }),
                         background: colorFor(c.from),
                       }}
                       onPointerDown={(e) => e.stopPropagation()}
@@ -814,16 +1061,21 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
                         setProbe(null)
                         setComposing(false)
                         setOpenThread(open ? null : c.id)
+                        useStore.getState().clearPulse(c.id)
                       }}
-                      title={`${c.from}: ${c.text}${thread.length > 1 ? ` (${thread.length - 1} replies)` : ''}`}
+                      title={`${orphan ? 'The element this was on changed\n' : ''}${c.from}: ${c.text}${thread.length > 1 ? ` (${thread.length - 1} replies)` : ''}`}
                     >
                       {agentItem?.failedAt ? '!' : working ? '✦' : '💬'}
                       {open && (
                         <CommentThread
                           thread={thread}
-                          onReply={(text) =>
-                            api
-                              .replyComment(c.id, text)
+                          alignEnd={orphan}
+                          canvasId={frame.canvasId}
+                          canReply={mayComment}
+                          canResolve={mayComment && !guest}
+                          canRetry={mayEdit}
+                          onReply={(text, mentions) =>
+                            postReply(c.id, text, mentions)
                               .then(() => posthog.capture('element_comment_replied'))
                               .catch((err) => {
                                 /* the wall explains a hit limit; anything else
@@ -866,28 +1118,32 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
                           <span className="rounded-[5px] bg-paper/[0.14] px-[5px] py-px text-[11px] font-bold text-paper [font-family:ui-monospace,monospace]">
                             {anchor.tag}
                           </span>
-                          <Button
-                            variant="inverse"
-                            className={EL_TOOLBAR_BTN}
-                            onClick={() => {
-                              setComposePrefill('')
-                              setComposing(true)
-                            }}
-                          >
-                            💬 Comment
-                          </Button>
-                          <Button
-                            variant="inverse"
-                            className={EL_TOOLBAR_BTN}
-                            onClick={() => {
-                              /* pre-mentioned → the comment dispatches as an agent
+                          {mayComment && (
+                            <Button
+                              variant="inverse"
+                              className={EL_TOOLBAR_BTN}
+                              onClick={() => {
+                                setComposePrefill('')
+                                setComposing(true)
+                              }}
+                            >
+                              💬 Comment
+                            </Button>
+                          )}
+                          {mayEdit && (
+                            <Button
+                              variant="inverse"
+                              className={EL_TOOLBAR_BTN}
+                              onClick={() => {
+                                /* pre-mentioned → the comment dispatches as an agent
                              job scoped to this element's selector + snippet */
-                              setComposePrefill(`@${DEFAULT_ROLE_ID} `)
-                              setComposing(true)
-                            }}
-                          >
-                            ✦ Ask AI
-                          </Button>
+                                setComposePrefill(`@${DEFAULT_ROLE_ID} `)
+                                setComposing(true)
+                              }}
+                            >
+                              ✦ Ask AI
+                            </Button>
+                          )}
                           <Button
                             variant="inverse"
                             className={EL_TOOLBAR_BTN}
@@ -911,10 +1167,14 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
                       </>
                     ) : (
                       <CommentComposer
+                        canvasId={frame.canvasId}
                         initialText={composePrefill}
-                        onSubmit={(text) => {
-                          api
-                            .addComment(frame.id, { selector: anchor.selector, snippet: anchor.snippet, text })
+                        onSubmit={(text, mentions) => {
+                          postComment(
+                            frame.id,
+                            { selector: anchor.selector, snippet: anchor.snippet, text, anchor: anchor.anchor },
+                            mentions,
+                          )
                             .then(() => posthog.capture('element_comment_created'))
                             .catch((err) => {
                               /* an @mention past the free tier raises the wall */
@@ -933,13 +1193,15 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
             )
           })()}
 
-          <div
-            className={cn(
-              'absolute -right-[7px] -bottom-[7px] h-3.5 w-3.5 cursor-nwse-resize rounded-[4px] border-[1.5px] border-ink bg-surface opacity-0 [transition:opacity_0.12s] group-hover:opacity-100',
-              selected && 'opacity-100',
-            )}
-            onPointerDown={(e) => startDrag(e, 'resize')}
-          />
+          {mayEdit && (
+            <div
+              className={cn(
+                'absolute -right-[7px] -bottom-[7px] h-3.5 w-3.5 cursor-nwse-resize rounded-[4px] border-[1.5px] border-ink bg-surface opacity-0 [transition:opacity_0.12s] group-hover:opacity-100',
+                selected && 'opacity-100',
+              )}
+              onPointerDown={(e) => startDrag(e, 'resize')}
+            />
+          )}
         </div>
       </ContextMenuTrigger>
       <FrameContextMenu frame={frame} at={menuAt} />
@@ -950,34 +1212,42 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
 function CommentComposer({
   onSubmit,
   onCancel,
+  canvasId,
   initialText = '',
 }: {
-  onSubmit: (text: string) => void
+  onSubmit: (text: string, mentions: string[]) => void
   onCancel: () => void
+  canvasId: string
   initialText?: string
 }) {
   const [text, setText] = useState(initialText)
-  const taRef = useRef<HTMLTextAreaElement>(null)
+  const taRef = useRef<MentionTextareaHandle>(null)
   useEffect(() => taRef.current?.focus(), [])
-  const send = () => text.trim() && onSubmit(text)
+  const myId = authClient.useSession().data?.user.id
+  const guest = useStore((s) => s.guest)
+  const mayEdit = useCanEdit()
+  const send = () => text.trim() && onSubmit(text, mentionIds(text, taRef.current?.picked() ?? []))
   /* @mention a resident agent to route the comment to it; without one the
      comment is a note for the humans in the room */
-  const mentioned = mentionedRole(text)
+  const mentioned = mayEdit ? mentionedRole(text) : undefined
   return (
     <div className="w-[240px] rounded-[10px] border border-line bg-surface p-2 shadow-pop animate-[chip-in_0.18s_ease]">
-      <Textarea
+      <MentionTextarea
         ref={taRef}
-        variant="bare"
+        canvasId={canvasId}
+        people={!guest}
+        agents={mayEdit}
+        myId={myId}
         className="min-h-[58px] md:text-[13px]"
         value={text}
-        placeholder="Leave a comment on this element…"
-        onChange={(e) => setText(e.target.value)}
+        placeholder={guest ? 'Leave a comment on this element…' : 'Leave a comment… @ to mention someone'}
+        onChange={setText}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send()
           if (e.key === 'Escape') onCancel()
         }}
       />
-      {!mentioned && (
+      {mayEdit && !mentioned && (
         <div className="mb-2 flex flex-wrap gap-1">
           {AGENT_ROLES.map((role) => (
             <Button
@@ -1000,6 +1270,7 @@ function CommentComposer({
             {mentioned.name} will pick this up
           </span>
         )}
+        {guest && <span className="mr-auto text-[11px] text-ink-faint">Posting as a guest</span>}
         <Button variant="solid" size="pill" className="px-3.5 py-[5px] text-xs" disabled={!text.trim()} onClick={send}>
           Post
         </Button>
@@ -1019,17 +1290,35 @@ function agentStatus(c: ElementComment): string | null {
 
 function CommentThread({
   thread,
+  alignEnd = false,
+  canvasId,
+  canReply,
+  canResolve,
+  canRetry,
   onReply,
   onResolve,
   onRetry,
 }: {
   /** root comment first, then its replies oldest → newest */
   thread: ElementComment[]
+  /** open towards the left: the pin sits at the frame's right edge */
+  alignEnd?: boolean
+  canvasId: string
+  /** below comment the thread is read-only */
+  canReply: boolean
+  /** guests can reply but not close a thread */
+  canResolve: boolean
+  /** retrying a stopped agent request is an editor's call */
+  canRetry: boolean
   /** rejects when the reply did not land — the draft is kept for a retry */
-  onReply: (text: string) => Promise<unknown>
+  onReply: (text: string, mentions: string[]) => Promise<unknown>
   onResolve: () => void
   onRetry: (commentId: string) => void
 }) {
+  const replyRef = useRef<MentionTextareaHandle>(null)
+  const myId = authClient.useSession().data?.user.id
+  const guest = useStore((s) => s.guest)
+  const mayEdit = useCanEdit()
   const [reply, setReply] = useState('')
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -1043,16 +1332,19 @@ function CommentThread({
     const submitted = reply
     setSending(true)
     setFailed(false)
-    onReply(submitted)
+    onReply(submitted, mentionIds(submitted, replyRef.current?.picked() ?? []))
       /* only clear what was sent — text typed meanwhile is a new draft */
       .then(() => setReply((current) => (current === submitted ? '' : current)))
       .catch(() => setFailed(true))
       .finally(() => setSending(false))
   }
-  const mentioned = mentionedRole(reply)
+  const mentioned = mayEdit ? mentionedRole(reply) : undefined
   return (
     <div
-      className="absolute top-[calc(100%_+_8px)] left-1/2 w-[250px] -translate-x-1/2 cursor-default rounded-[10px] border border-line bg-surface p-2.5 text-left shadow-pop animate-[chip-in_0.18s_ease]"
+      className={cn(
+        'absolute top-[calc(100%_+_8px)] w-[250px] cursor-default rounded-[10px] border border-line bg-surface p-2.5 text-left shadow-pop animate-[chip-in_0.18s_ease]',
+        alignEnd ? 'right-0' : 'left-1/2 -translate-x-1/2',
+      )}
       onClick={(e) => e.stopPropagation()}
     >
       <div ref={listRef} className="-mx-1 max-h-[240px] overflow-y-auto px-1">
@@ -1068,44 +1360,54 @@ function CommentThread({
               {c.failedAt ? (
                 <div className="mt-1 flex items-center gap-2 text-[11px] leading-[1.4] text-accent-ink">
                   <span>{c.failureReason ?? 'The agent did not finish.'}</span>
-                  <Button
-                    variant="danger-solid"
-                    size="pill"
-                    className="shrink-0 px-[9px] py-[3px] text-[11px]"
-                    onClick={() => onRetry(c.id)}
-                  >
-                    ↻ Retry
-                  </Button>
+                  {canRetry && (
+                    <Button
+                      variant="danger-solid"
+                      size="pill"
+                      className="shrink-0 px-[9px] py-[3px] text-[11px]"
+                      onClick={() => onRetry(c.id)}
+                    >
+                      ↻ Retry
+                    </Button>
+                  )}
                 </div>
               ) : null}
             </div>
           )
         })}
       </div>
-      <Textarea
-        variant="bare"
-        className="mt-2 min-h-[38px] md:text-[13px]"
-        value={reply}
-        placeholder="Reply… (@doop to ask the agent)"
-        onChange={(e) => setReply(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send()
-        }}
-      />
+      {canReply ? (
+        <MentionTextarea
+          ref={replyRef}
+          canvasId={canvasId}
+          people={!guest}
+          agents={mayEdit}
+          myId={myId}
+          className="mt-2 min-h-[38px] md:text-[13px]"
+          value={reply}
+          placeholder={mayEdit ? 'Reply… (@ to mention, @doop to ask the agent)' : 'Reply…'}
+          onChange={setReply}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send()
+          }}
+        />
+      ) : null}
       {failed && (
         <div className="mt-1 text-[11px] leading-[1.4] text-accent-ink">
           That reply did not go through — it may be resolved already. Try again.
         </div>
       )}
       <div className="mt-1.5 flex items-center gap-1.5">
-        <Button
-          variant="ghost"
-          size="pill"
-          className="px-2.5 text-ink-soft hover:border-ink-soft hover:bg-transparent hover:text-ink"
-          onClick={onResolve}
-        >
-          ✓ Resolve
-        </Button>
+        {canResolve && (
+          <Button
+            variant="ghost"
+            size="pill"
+            className="px-2.5 text-ink-soft hover:border-ink-soft hover:bg-transparent hover:text-ink"
+            onClick={onResolve}
+          >
+            ✓ Resolve
+          </Button>
+        )}
         {mentioned && (
           <span
             className="ml-auto inline-flex min-w-0 items-center gap-1 truncate text-[11px] font-semibold text-brand"
@@ -1115,15 +1417,17 @@ function CommentThread({
             <span className="truncate">{mentioned.name}</span>
           </span>
         )}
-        <Button
-          variant="solid"
-          size="pill"
-          className={cn('px-3 py-[4px] text-xs', !mentioned && 'ml-auto')}
-          disabled={!reply.trim() || sending}
-          onClick={send}
-        >
-          {sending ? 'Posting…' : 'Reply'}
-        </Button>
+        {canReply && (
+          <Button
+            variant="solid"
+            size="pill"
+            className={cn('px-3 py-[4px] text-xs', !mentioned && 'ml-auto')}
+            disabled={!reply.trim() || sending}
+            onClick={send}
+          >
+            {sending ? 'Posting…' : 'Reply'}
+          </Button>
+        )}
       </div>
     </div>
   )

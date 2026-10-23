@@ -507,3 +507,34 @@ export async function isBanned(userId: string): Promise<boolean> {
   banStates.set(userId, { banned, at: Date.now() })
   return banned
 }
+
+/* userId -> what the access resolver needs to know about a person (their
+   address and whether it is verified, for domain grants), same short cache.
+   MCP callers and the mention picker hold only an id. */
+const accessProfiles = new Map<string, { profile: AccessProfile | undefined; at: number }>()
+
+export interface AccessProfile {
+  id: string
+  email: string
+  emailVerified: boolean
+  banned: boolean
+}
+
+export async function getAccessProfile(userId: string): Promise<AccessProfile | undefined> {
+  const cached = accessProfiles.get(userId)
+  if (cached && Date.now() - cached.at < NAME_TTL_MS) return cached.profile
+  const [row] = await db
+    .select({
+      id: authSchema.user.id,
+      email: authSchema.user.email,
+      emailVerified: authSchema.user.emailVerified,
+      banned: authSchema.user.banned,
+    })
+    .from(authSchema.user)
+    .where(eq(authSchema.user.id, userId))
+  const profile = row
+    ? { id: row.id, email: row.email, emailVerified: !!row.emailVerified, banned: !!row.banned }
+    : undefined
+  accessProfiles.set(userId, { profile, at: Date.now() })
+  return profile
+}

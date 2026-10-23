@@ -14,3 +14,6 @@ ios/DerivedData*/
 ios/.build/
 ios/BlitzKit/rust/target/
 ios/BlitzKit/lib/
+
+# agent worktrees are full repo copies
+.claude/

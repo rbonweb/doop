@@ -16,7 +16,15 @@ interface ClipFrame {
   y: number
   width: number
   height: number
+  slide?: boolean
+  speakerNotes?: string
 }
+
+/** The deck fields a copy carries, only when set, so a plain frame's payload stays as it was. */
+const deckFields = (f: { slide?: boolean; speakerNotes?: string }) => ({
+  ...(f.slide ? { slide: true } : {}),
+  ...(f.speakerNotes ? { speakerNotes: f.speakerNotes } : {}),
+})
 
 interface FrameClip {
   frames: ClipFrame[]
@@ -34,6 +42,7 @@ export function copyFrames(frames: Frame[]) {
       y: f.y - top,
       width: f.width,
       height: f.height,
+      ...deckFields(f),
     })),
   }
   localStorage.setItem(CLIP_KEY, JSON.stringify(clip))
@@ -93,6 +102,7 @@ function createFromClip(canvasId: string, x: number, y: number) {
         height: f.height,
         x: Math.round(x + f.x),
         y: Math.round(y + f.y),
+        ...deckFields(f),
       },
     })),
   ).then((created) => {
@@ -228,6 +238,7 @@ export function duplicateFrames(frames: Frame[]) {
         y: frame.y + 40,
         width: frame.width,
         height: frame.height,
+        ...deckFields(frame),
       },
     })),
   ).then((created) => {
