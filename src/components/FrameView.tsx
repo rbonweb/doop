@@ -11,7 +11,7 @@ import { getIdentity } from '../lib/identity'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { useFrameMounted } from '../lib/frameMounting'
 import { recordCreate, recordUpdate, recordUpdates, trackSave } from '../lib/history'
-import { snapFrame } from '../lib/snap'
+import { snapDeviceWidth, snapFrame } from '../lib/snap'
 import { gesture } from '../lib/gesture'
 import { FrameContextMenu } from './FrameContextMenu'
 import { CodePanel } from './CodePanel'
@@ -53,6 +53,10 @@ const EL_TOOLBAR_BTN = 'rounded-[7px] px-2 py-1 text-xs'
    front arrow's tip. `copy` is the fallback where custom cursors fail. */
 const DUP_CURSOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M9 8v12.6l3.4-2.9 2 4.6 2.3-1-2-4.5 4.5-.4z" fill="#000" stroke="#fff" stroke-width="1.2"/><path d="M4 3v12.6l3.4-2.9 2 4.6 2.3-1-2-4.5 4.5-.4z" fill="#000" stroke="#fff" stroke-width="1.2"/></svg>`
 const DUP_CURSOR = `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(DUP_CURSOR_SVG)}") 4 3, copy`
+
+/* comment mode's cursor: a speech bubble, hotspot on its tail */
+const COMMENT_CURSOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M4 21V6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H9z" fill="#fff" stroke="#17171b" stroke-width="1.6" stroke-linejoin="round"/></svg>`
+const COMMENT_CURSOR = `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(COMMENT_CURSOR_SVG)}") 4 21, crosshair`
 
 /** True while ⌥⇧ is held. The duplicate cursor must be showing BEFORE the
  *  drag starts: Chromium freezes the effective cursor for the duration of a
@@ -119,6 +123,9 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
   const panMode = useStore((s) => s.panMode)
   const select = useStore((s) => s.select)
   const flash = useStore((s) => s.flashes[frame.id])
+  /* laser and comment mode turn the frame surface from "select" into "inspect" */
+  const laser = useStore((s) => s.laser)
+  const commentMode = useStore((s) => s.commentMode)
   const stream = useStore((s) => s.streams[frame.id])
   /* select the stable presences map, derive in render — a selector that
      builds a fresh array re-renders every frame on EVERY store update
@@ -237,7 +244,12 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
          riding along in the group are not neighbours. */
       const others = currentPageCanvas()?.frames.filter((f) => !groupIds.has(f.id)) ?? []
       const free = ev.altKey && !duplicating
-      const snapped = free ? { ...raw, guides: [] } : snapFrame(mode, raw, others, zoom)
+      let snapped = free ? { ...raw, guides: [] } : snapFrame(mode, raw, others, zoom)
+      /* a resize also locks onto device widths — unless a neighbour's edge already took the width */
+      if (mode === 'resize' && !free && !snapped.guides.some((g) => g.axis === 'v')) {
+        const device = snapDeviceWidth(snapped, zoom)
+        snapped = { ...device, guides: [...snapped.guides, ...device.guides] }
+      }
       useStore.getState().setSnapGuides(snapped.guides)
       if (mode === 'move') {
         /* the snapped delta of the dragged frame moves the whole group */
@@ -275,8 +287,13 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
       else recordUpdates(updates)
       /* a click (no drag) on the frame surface targets the element under
          the cursor: probe it and show the element toolbar */
-      if (!moved && probeOnClick) probeAt(off.x, off.y)
-      else if (moved) closePopovers()
+      if (!moved && probeOnClick) {
+        const mode = useStore.getState()
+        if (mode.laser) {
+          iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-click', x: off.x, y: off.y }, '*')
+        } else if (mode.commentMode) composeAt(off.x, off.y)
+        else probeAt(off.x, off.y)
+      } else if (moved) closePopovers()
       /* a click (no drag) on the frame name opens the details panel */
       if (!moved && panelOnClick) useStore.getState().setInspectorOpen(true)
     }
@@ -316,6 +333,27 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:html', html }, '*')
   }, [runtimeReady, html, editing, suspendPost])
 
+  /* laser mode lives in the frame's runtime; a frame that mounts or becomes ready while it is on joins in */
+  useEffect(() => {
+    if (!runtimeReady) return
+    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser', on: laser }, '*')
+  }, [runtimeReady, laser])
+
+  /* "Element path copied" flashes in the title chrome after a laser click */
+  const [pathNote, setPathNote] = useState<string | null>(null)
+  const pathNoteTimer = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (pathNoteTimer.current) window.clearTimeout(pathNoteTimer.current)
+    },
+    [],
+  )
+  function flashPathNote(text: string) {
+    setPathNote(text)
+    if (pathNoteTimer.current) window.clearTimeout(pathNoteTimer.current)
+    pathNoteTimer.current = window.setTimeout(() => setPathNote(null), 1800)
+  }
+
   /* ---- element comments ---- */
   const frameComments = useStore((s) => s.comments).filter((c) => c.frameId === frame.id)
   /* only thread roots get a pin; replies live inside the root's popover */
@@ -328,6 +366,8 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
   const [linkedThread, setLinkedThread] = useState<string | null>(deepLinkedThread)
   const [pinPos, setPinPos] = useState<Record<string, { x: number; y: number } | null>>({})
   const probeReq = useRef(0)
+  /* the probe request a comment-mode click is waiting on: its answer opens the composer */
+  const commentReq = useRef(0)
   const probeTimer = useRef<number | null>(null)
   const activeSelRef = useRef<string | null>(null)
 
@@ -342,6 +382,11 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     const now = Date.now()
     if (now - hoverLast.current < 40) return
     hoverLast.current = now
+    if (useStore.getState().laser) {
+      /* laser: the runtime draws the hover itself, nothing comes back */
+      iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-move', x, y }, '*')
+      return
+    }
     hoverReq.current += 1
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:hover', reqId: hoverReq.current, x, y }, '*')
   }
@@ -384,6 +429,15 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
       probeReq.current += 1
       iframeRef.current?.contentWindow?.postMessage({ type: 'doop:probe', reqId: probeReq.current, x, y }, '*')
     }, 250)
+  }
+
+  /* comment mode: the click resolves the element at once and opens the composer on it, as the toolbar's Comment button does */
+  function composeAt(x: number, y: number) {
+    if (!frame.html || editing) return
+    closePopovers()
+    probeReq.current += 1
+    commentReq.current = probeReq.current
+    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:probe', reqId: probeReq.current, x, y }, '*')
   }
 
   /* keep comment pins glued to their elements: re-locate whenever the frame's
@@ -456,7 +510,29 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     function onMsg(ev: MessageEvent) {
       if (ev.source !== iframeRef.current?.contentWindow) return
       if (ev.data?.type === 'doop:probe-result' && ev.data.reqId === probeReq.current) {
-        setProbe(ev.data.hit ?? null)
+        const hit = (ev.data.hit ?? null) as ProbeHit | null
+        setProbe(hit)
+        if (commentReq.current === ev.data.reqId) {
+          commentReq.current = 0
+          if (hit) {
+            setComposePrefill('')
+            setComposing(true)
+            useStore.getState().setCommentMode(false)
+          }
+        }
+      }
+      if (ev.data?.type === 'doop:laser-copy' && typeof ev.data.selector === 'string') {
+        /* the frame may have been renamed since this listener was set up, so the name is read fresh */
+        const name = useStore.getState().canvas?.frames.find((f) => f.id === frame.id)?.name ?? 'Frame'
+        navigator.clipboard
+          .writeText(`${name} · ${ev.data.selector}`)
+          .then(() => flashPathNote('Element path copied'))
+          .catch(() => flashPathNote('Couldn’t copy the path'))
+      }
+      /* Esc with focus inside the frame never reaches the window as a key event */
+      if (ev.data?.type === 'doop:esc') {
+        useStore.getState().setLaser(false)
+        useStore.getState().setCommentMode(false)
       }
       if (ev.data?.type === 'doop:select-result' && ev.data.reqId === selectReq.current) {
         /* the answer is only acted on while the asked-for element is still
@@ -659,6 +735,14 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
               </Tooltip>
             )}
             <span className="overflow-hidden text-ellipsis">{frame.name}</span>
+            {pathNote && (
+              <span
+                role="status"
+                className="inline-flex items-center gap-1 rounded-full bg-ink px-[7px] py-0.5 text-[10px] font-bold text-paper animate-[chip-in_0.25s_ease]"
+              >
+                {pathNote}
+              </span>
+            )}
             <span className="flex gap-1">
               {stream && (
                 <span className={EDITOR_CHIP} style={{ background: stream.color }}>
@@ -689,7 +773,15 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
               stream && 'border-transparent outline-none',
               dragging && 'cursor-grabbing',
             )}
-            style={duping || (dupKeyHeld && !editing) ? { cursor: DUP_CURSOR } : undefined}
+            style={
+              duping || (dupKeyHeld && !editing)
+                ? { cursor: DUP_CURSOR }
+                : laser
+                  ? { cursor: 'crosshair' }
+                  : commentMode
+                    ? { cursor: COMMENT_CURSOR }
+                    : undefined
+            }
             onPointerDown={(e) => startDrag(e, 'move', true)}
             onDoubleClick={() => canEdit && !editing && runtimeReady && enterEdit()}
             onPointerMove={(e) => {
@@ -699,7 +791,11 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
               const zoom = useStore.getState().viewport.zoom
               sendHover((e.clientX - r.left) / zoom, (e.clientY - r.top) / zoom)
             }}
-            onPointerLeave={clearHover}
+            onPointerLeave={() => {
+              clearHover()
+              if (laser)
+                iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-move', x: null, y: null }, '*')
+            }}
           >
             {mounted && (
               <iframe
@@ -724,8 +820,8 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
             )}
             {/* shield keeps pointer events on the canvas, not the iframe;
             lifted while editing so clicks land in the editable document */}
-            {(!editing || panMode) && <div className="absolute inset-0" />}
-            {hover && !editing && !dragging && (
+            {(!editing || panMode || laser) && <div className="absolute inset-0" />}
+            {hover && !editing && !dragging && !laser && (
               <div
                 className="pointer-events-none absolute z-[3] bg-[rgba(60,130,246,0.06)] shadow-[inset_0_0_0_calc(1.5px/var(--zoom,1))_#3c82f6]"
                 style={{ left: hover.rect.x, top: hover.rect.y, width: hover.rect.width, height: hover.rect.height }}

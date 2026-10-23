@@ -13,6 +13,7 @@ import { oAuthDiscoveryMetadata } from 'better-auth/plugins'
 import { WebSocketServer, WebSocket } from 'ws'
 import { store } from './store.ts'
 import { getImage } from './previews.ts'
+import { parseImageScale } from '../shared/imageScale.ts'
 import * as actions from './actions.ts'
 import { liveActivitiesRouter, logLiveActivityRequests, startLiveActivityDelivery } from './liveActivities.ts'
 import { onCanvasEvent } from './events.ts'
@@ -351,7 +352,8 @@ app.get('/i/:id.:ext', async (req, res) => {
   try {
     result = await getImage(frame, {
       ext,
-      scale: req.query.scale === '2' ? 2 : 1,
+      /* 1, 2 or 4; previews.ts lowers it for frames too big to render that dense */
+      scale: parseImageScale(req.query.scale),
       quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
       /* ?preview — the dashboard-card variant; see previews.ts */
       preview: req.query.preview !== undefined,

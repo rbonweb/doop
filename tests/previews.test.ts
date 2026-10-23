@@ -77,6 +77,17 @@ describe('getImage', () => {
     expect(mocks.putObject).toHaveBeenCalledWith(`thumb/${f.id}.jpg`, expect.anything(), 'image/jpeg')
   })
 
+  it('renders scale 4 and clamps it so neither side passes 16384 px', async () => {
+    await getImage(frame({ width: 1440, height: 900 }), req({ ext: 'png', scale: 4 }))
+    expect(mocks.renderFrame).toHaveBeenLastCalledWith(expect.anything(), 4, expect.objectContaining({ type: 'png' }))
+
+    await getImage(frame({ width: 1280, height: 6000 }), req({ ext: 'png', scale: 4 }))
+    const scale = mocks.renderFrame.mock.lastCall?.[1] as number
+    expect(scale).toBeGreaterThan(1)
+    expect(scale).toBeLessThan(4)
+    expect(Math.round(6000 * scale)).toBeLessThanOrEqual(16384)
+  })
+
   it('caches per frame version — one render serves repeat requests, an update re-renders', async () => {
     const f = frame()
     const r = req()

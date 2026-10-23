@@ -1,3 +1,4 @@
+import { DEVICE_WIDTHS } from '../../shared/devices'
 import type { Frame } from '../../shared/types'
 
 /**
@@ -9,6 +10,8 @@ import type { Frame } from '../../shared/types'
 
 /* how close (in screen px) an edge must be before it locks on */
 const SNAP_PX = 8
+/* a resize pulls onto a device width (390, 834, 1280, 1440) from this far away */
+const DEVICE_SNAP_PX = 12
 
 export interface SnapGuide {
   /** 'v': vertical line at x=`at` spanning `from`..`to` in y; 'h': the converse */
@@ -80,4 +83,24 @@ export function snapFrame(
       to: Math.max(x + width, gy.other.x + gy.other.width),
     })
   return { x, y, width, height, guides }
+}
+
+/** While resizing, pull the width onto the nearest device preset within 12 screen px. Returns the rect unchanged (and
+ *  no guide) when none is close enough. */
+export function snapDeviceWidth(rect: Rect, zoom: number): Rect & { guides: SnapGuide[] } {
+  const tol = DEVICE_SNAP_PX / zoom
+  let hit: number | null = null
+  for (const width of DEVICE_WIDTHS) {
+    if (
+      Math.abs(width - rect.width) <= tol &&
+      (hit === null || Math.abs(width - rect.width) < Math.abs(hit - rect.width))
+    )
+      hit = width
+  }
+  if (hit === null) return { ...rect, guides: [] }
+  return {
+    ...rect,
+    width: hit,
+    guides: [{ axis: 'v', at: rect.x + hit, from: rect.y, to: rect.y + rect.height }],
+  }
 }
