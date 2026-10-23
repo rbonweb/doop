@@ -19,6 +19,8 @@ export interface CommentPrompt {
   frameName: string
   selector: string
   snippet: string
+  /** the element's own text when the comment was left, so a moved element can still be found */
+  quote?: string
   text: string
   /** earlier messages of the thread this comment replies to, oldest first */
   earlier: { from: string; text: string }[]
@@ -85,6 +87,7 @@ export function commentsSection(comments: CommentPrompt[]): string {
         return (
           `- ${quoted(c.from)} on frame ${inlineCode(c.frameId)} ${quoted(c.frameName)}, element ${inlineCode(c.selector)}\n` +
           `  element HTML at comment time:\n${untrustedBlock('element HTML excerpt', c.snippet)}` +
+          (c.quote ? `\n  text of the element:\n${untrustedBlock('element text', c.quote)}` : '') +
           (earlier ? `\n  earlier in this thread:\n${earlier}` : '') +
           `\n  comment:\n${untrustedBlock(`comment from ${author}`, c.text)}`
         )

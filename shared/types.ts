@@ -491,7 +491,7 @@ export interface CommentAnchor {
   id?: string
   /** data-testid, if it has one */
   testId?: string
-  /** ARIA role, explicit or implicit */
+  /** explicit ARIA role attribute, if it has one */
   role?: string
   /** aria-label, if it has one */
   ariaLabel?: string

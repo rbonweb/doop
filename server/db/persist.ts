@@ -568,6 +568,7 @@ export function saveComment(c: ElementComment) {
       .onConflictDoUpdate({
         target: t.comments.id,
         set: {
+          selector: row.selector,
           claimedBy: row.claimedBy,
           claimedAt: row.claimedAt,
           failedAt: row.failedAt,

@@ -380,6 +380,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
               frameName: store.getFrame(c.frameId)?.name ?? 'unknown frame',
               selector: c.selector,
               snippet: c.snippet,
+              quote: c.anchor?.quote,
               text: c.text,
               earlier: history.slice(
                 0,

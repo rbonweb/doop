@@ -42,7 +42,7 @@ You MUST call get_guide({ topic: "doop-instructions" }) once before using other 
 - Images: real imagery makes designs. search_images finds stock photos (you SEE thumbnails and pick), search_icons finds 200k+ UI icons as hotlinkable SVGs, search_logos finds real company logos by brand name or domain — call it once per brand BEFORE writing any logo wall, integration row, press bar or testimonial, and never ship a placeholder tile, "LOGO" text or an invented wordmark in its place, list_backgrounds shows a page of curated hero/section/bento backgrounds (glows, grainy meshes, aurora, painterly scenes) as thumbnails — browse it when a section wants atmosphere rather than defaulting to a flat CSS gradient, judge by eye whether one fits the frame, and draw your own when none does, upload_asset stores your own file (remote file → source_url; local file → local_file=true, returns a curl command) and returns a permanent URL. generate_image makes a new image from a prompt (a full-bleed hero background in the frame's exact palette, illustration, a product render, brand-specific hero art that stock cannot supply) and stores it as a permanent asset — reach for it when search_images cannot deliver the exact visual, or when the human asks for a generated image; it costs the human money or quota, so one considered prompt beats five drafts. Never inline images as data: URIs.
 - Websites: when a request names an existing site or URL — a redesign of it, or "like acme.com" — call import_webpage FIRST so an editable HTML snapshot lands on the canvas. Leave that source frame unchanged and design in a separate frame. view_website is only for read-only inspection when the page should not be added. If Doop cannot capture the site, do not retry with view_website because it uses the same capture path. Use your own browser or web tool and work only from content you actually observe; if that is unavailable, ask the user for screenshots or an HTML export rather than inventing content.
 ${extensionGuideLines()}- Feedback: humans reply to your tasks; their notes arrive inside your tool results as HUMAN FEEDBACK blocks — address them before continuing.
-- Comments: call get_comments to read element-pinned comments and replies on a canvas, optionally filtered by frame; reply_to_comment answers a thread and resolve_comment closes it. Reading does not claim feedback or comments. A reply that @mentions a resident role is metered like a comment left in the browser.
+- Comments: call get_comments to read element-pinned comments and replies on a canvas, optionally filtered by frame; add_comment starts a new thread pinned to an element (by quote or selector); reply_to_comment answers a thread and resolve_comment closes it. Reading does not claim feedback or comments. A reply that @mentions a resident role is metered like a comment left in the browser.
 - Guidelines: canvases can carry named style guides (brand rules, style recipes). get_canvas lists them with one-line summaries — read the relevant ones with get_guidelines BEFORE designing and follow them.
 - Memory: canvases can also carry pinned style references — exemplar designs humans marked as "more like this". get_canvas lists them; read the relevant one with get_reference and match its look. When your human gives you design feedback in conversation and you address it, record it with save_decision so the canvas remembers their taste.`
 
@@ -611,7 +611,7 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
     'get_comments',
     {
       description:
-        'Read element-pinned comments and replies on a canvas, newest first, including author, text, frame, CSS selector, HTML snippet, parentId thread links, and claim/failure/resolution metadata. Includes resolved comments by default so complete conversations remain readable; set include_resolved to false for unresolved comments only. Returns the retained comment history (up to 100 entries per canvas), not an archive. Reading does not claim feedback or comments, or mark them resolved.',
+        'Read element-pinned comments and replies on a canvas, newest first, including author, text, frame, CSS selector, HTML snippet, the element anchor (its tag, id, aria hints and a `quote` of the text it shows — use it to find the element in the frame HTML if the selector no longer matches), parentId thread links, and claim/failure/resolution metadata. Includes resolved comments by default so complete conversations remain readable; set include_resolved to false for unresolved comments only. Returns the retained comment history (up to 100 entries per canvas), not an archive. Reading does not claim feedback or comments, or mark them resolved.',
       annotations: { readOnlyHint: true },
       inputSchema: {
         canvas_id: z.string(),
@@ -633,6 +633,68 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
         .filter((comment) => include_resolved || comment.resolvedAt === undefined)
       // Deliberately omit withFeedback: inspecting comments must not claim work.
       return text(comments)
+    },
+  )
+
+  server.registerTool(
+    'add_comment',
+    {
+      description:
+        'Start a new element-comment thread on a frame, pinned to an element, to ask a question or leave a note for the people on the canvas. Identify the element by `quote` (a short piece of the text it shows, e.g. the button label or heading — the pin finds the element by that text even after the frame is edited) and/or `selector` (a CSS selector in the frame). At least one is required. The thread appears as a pin on the frame; read answers with get_comments and continue with reply_to_comment. If the text @mentions a resident role (e.g. "@Doop"), it counts as a new resident task against the account’s meter, exactly like a comment left in the browser.',
+      inputSchema: {
+        canvas_id: z.string(),
+        frame_id: z.string().describe('The frame to pin the comment on; it must belong to the canvas'),
+        quote: z
+          .string()
+          .max(200)
+          .optional()
+          .describe('Text shown by the element to pin to, copied from the frame (first ~60 characters are matched)'),
+        selector: z
+          .string()
+          .max(actions.MAX_SELECTOR_LENGTH)
+          .optional()
+          .describe('CSS selector of the element in the frame, e.g. ".hero > h1"'),
+        text: z.string().describe('The comment. Trimmed; empty comments are rejected.'),
+        agent_name: agentName,
+      },
+    },
+    async ({ canvas_id, frame_id, quote, selector, text: body, agent_name }) => {
+      if (!canvasFor(canvas_id)) return noCanvas(canvas_id)
+      const frame = frameFor(frame_id)
+      if (!frame || frame.canvasId !== canvas_id) return noFrame(frame_id)
+      const cleanQuote = quote?.replace(/\s+/g, ' ').trim()
+      const cleanSelector = selector?.trim()
+      if (!cleanQuote && !cleanSelector) return err('add_comment needs a quote or a selector to pin the comment to')
+      if (!body.trim()) return err('empty text')
+      const actor = actorFrom(agent_name)
+      arrive(canvas_id, agent_name)
+      /* same meter rule as a reply: only an @mention of a resident agent costs a task */
+      let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
+      if (mentionedRole(body) && ownerId) {
+        gate = await allowance.consumeResidentTask(ownerId)
+        if (!gate.ok)
+          return err(
+            `resident task limit reached (${gate.used}/${gate.limit}) — connect a model account or retry later`,
+          )
+      }
+      /* with only a quote the tag is unknown: resolution falls through to finding the text */
+      const anchor = cleanQuote ? { v: 1, tag: '', quote: cleanQuote, fx: 0.5, fy: 0.5 } : undefined
+      const comment = actions.addElementComment(
+        frame_id,
+        { selector: cleanSelector ?? '', snippet: '', text: body, anchor },
+        actor.name,
+        ownerId,
+        'agent',
+      )
+      if (!comment) {
+        if (gate && ownerId) {
+          await allowance
+            .refundResidentTask(gate, ownerId)
+            .catch((e) => console.error(`[mcp] could not refund a resident task for ${ownerId}:`, e))
+        }
+        return err('could not add the comment')
+      }
+      return withFeedback(text(comment), canvas_id, actor)
     },
   )
 

@@ -3,6 +3,7 @@ import { store } from './store.ts'
 import * as persist from './db/persist.ts'
 import * as thumbs from './thumbs.ts'
 import { colorFor } from '../shared/types.ts'
+import { sanitizeAnchor } from '../shared/commentAnchor.ts'
 import {
   DEFAULT_ROLE_ID,
   mentionedRole,
@@ -21,6 +22,7 @@ import type {
   AgentTask,
   CardScope,
   ChatMessage,
+  CommentAnchor,
   DesignDecision,
   ElementComment,
   Frame,
@@ -557,18 +559,25 @@ export function findComment(commentId: string): ElementComment | undefined {
 
 export function addElementComment(
   frameId: string,
-  input: { selector: string; snippet: string; text: string },
+  input: { selector: string; snippet: string; text: string; anchor?: unknown },
   from: string,
   fromUserId?: string,
+  kind: ActorKind = 'user',
 ): ElementComment | undefined {
   const frame = store.getFrame(frameId)
   if (!frame) return undefined
+  const anchor = sanitizeAnchor(input.anchor)
   return postComment(
     frame,
-    { selector: String(input.selector ?? '').slice(0, 300), snippet: String(input.snippet ?? '').slice(0, 400) },
+    {
+      selector: String(input.selector ?? '').slice(0, MAX_SELECTOR_LENGTH),
+      snippet: String(input.snippet ?? '').slice(0, 400),
+      ...(anchor ? { anchor } : {}),
+    },
     input.text,
     from,
     fromUserId,
+    kind,
   )
 }
 
@@ -586,7 +595,12 @@ export function replyToComment(
   const { root, frame } = open
   return postComment(
     frame,
-    { selector: root.selector, snippet: root.snippet, parentId: root.id },
+    {
+      selector: root.selector,
+      snippet: root.snippet,
+      parentId: root.id,
+      ...(root.anchor ? { anchor: root.anchor } : {}),
+    },
     text,
     from,
     fromUserId,
@@ -609,7 +623,7 @@ export function openThread(commentId: string): { root: ElementComment; frame: Fr
 
 function postComment(
   frame: Frame,
-  anchor: { selector: string; snippet: string; parentId?: string },
+  anchor: { selector: string; snippet: string; parentId?: string; anchor?: CommentAnchor },
   text: string,
   from: string,
   fromUserId?: string,
@@ -631,8 +645,10 @@ function postComment(
     snippet: anchor.snippet,
     from,
     ...(fromUserId ? { fromUserId } : {}),
+    fromKind: kind,
     text: clean,
     at,
+    ...(anchor.anchor ? { anchor: anchor.anchor } : {}),
     ...(mentioned ? { forAgent: true, targetAgent: mentioned.name } : {}),
     ...(anchor.parentId ? { parentId: anchor.parentId } : {}),
   }
@@ -662,6 +678,45 @@ function postComment(
     actorKind: kind,
   })
   return comment
+}
+
+/** Longest CSS path a comment may carry, from the browser or an agent. */
+export const MAX_SELECTOR_LENGTH = 1000
+const HEAL_BROADCAST_MS = 250
+const pendingHeals = new Map<string, Map<string, ElementComment>>() // canvasId -> comments awaiting broadcast
+const healTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/** Point a thread at the element's new CSS path after the frame was edited.
+ *  The browser that re-found the element sends this, so many pins healing at
+ *  once (an agent rewrote the frame) collapse into one broadcast per canvas
+ *  instead of one message per pin. The stored anchor is left as captured. */
+export function healCommentSelector(commentId: string, selector: string): ElementComment | undefined {
+  const found = findComment(commentId)
+  if (!found) return undefined
+  const rootId = found.parentId ?? found.id
+  const list = commentLog.get(found.canvasId) ?? []
+  const pending = pendingHeals.get(found.canvasId) ?? new Map<string, ElementComment>()
+  for (const c of list) {
+    if ((c.id !== rootId && c.parentId !== rootId) || c.selector === selector) continue
+    c.selector = selector
+    persist.saveComment(c)
+    pending.set(c.id, c)
+  }
+  if (pending.size === 0) return found.parentId ? (findComment(rootId) ?? found) : found
+  const canvasId = found.canvasId
+  pendingHeals.set(canvasId, pending)
+  if (!healTimers.has(canvasId)) {
+    healTimers.set(
+      canvasId,
+      setTimeout(() => {
+        healTimers.delete(canvasId)
+        const batch = pendingHeals.get(canvasId)
+        pendingHeals.delete(canvasId)
+        for (const c of batch?.values() ?? []) broadcast(canvasId, { type: 'comment', comment: c })
+      }, HEAL_BROADCAST_MS),
+    )
+  }
+  return found.parentId ? (findComment(rootId) ?? found) : found
 }
 
 /** The whole conversation a comment belongs to, oldest first. */

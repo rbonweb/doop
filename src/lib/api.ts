@@ -8,6 +8,7 @@ import type {
   Canvas,
   CanvasMeta,
   CardScope,
+  CommentAnchor,
   CommunityCategory,
   CommunityItem,
   Frame,
@@ -464,11 +465,14 @@ export const api = {
     req(`/api/canvases/${canvasId}/cards/${cardId}/retry`, { method: 'POST' }),
   sendChat: (canvasId: string, text: string) =>
     req<ChatMessage>(`/api/canvases/${canvasId}/chat`, { method: 'POST', body: JSON.stringify({ text }) }),
-  addComment: (frameId: string, input: { selector: string; snippet: string; text: string }) =>
+  addComment: (frameId: string, input: { selector: string; snippet: string; text: string; anchor?: CommentAnchor }) =>
     req(`/api/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
   replyComment: (commentId: string, text: string) =>
     req(`/api/comments/${commentId}/replies`, { method: 'POST', body: JSON.stringify({ text }) }),
   resolveComment: (commentId: string) => req(`/api/comments/${commentId}/resolve`, { method: 'POST' }),
+  /** report the element's new CSS path after a pin was re-found by its anchor */
+  healCommentAnchor: (commentId: string, selector: string) =>
+    req(`/api/comments/${commentId}/anchor`, { method: 'PATCH', body: JSON.stringify({ selector }) }),
   retryComment: (commentId: string) => req(`/api/comments/${commentId}/retry`, { method: 'POST' }),
   retryTaskFeedback: (feedbackId: string) => req(`/api/feedback/${feedbackId}/retry`, { method: 'POST' }),
   /* automations: scheduled pulls and agent tasks */

@@ -97,6 +97,12 @@ Add frame_id to focus on one frame. Resolved comments are included by default to
 conversation context; include_resolved: false returns only unresolved entries. The result
 is newest first and covers the retained history (up to 100 entries per canvas).
 
+Start a thread yourself with add_comment({ canvas_id, frame_id, quote, text, agent_name }) —
+quote is a short piece of the text the element shows (a button label, a heading), and the pin
+keeps finding that element after the frame is edited; selector (a CSS selector) works too, and
+one of the two is required. Each comment returned by get_comments carries an anchor with the
+same quote, so you can find the element in the frame's HTML even when its selector went stale.
+
 Answer a thread with reply_to_comment({ canvas_id, comment_id, text, agent_name }) — the
 reply inherits the root's element anchor, so an @mention reaches the resident agent with
 the same context the conversation is about. Close the thread with resolve_comment once the

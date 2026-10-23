@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
-import type { ElementComment, Frame } from '../../shared/types'
+import type { CommentAnchor, ElementComment, Frame } from '../../shared/types'
 import { colorFor } from '../../shared/types'
 import { useStore } from '../lib/store'
 import { currentPageCanvas } from '../lib/pages'
@@ -93,11 +93,20 @@ function useThrottledValue<T>(value: T, ms: number): T {
 
 interface ProbeHit {
   selector: string
+  /** how to find the element again once the frame is edited */
+  anchor?: CommentAnchor
   tag: string
   text: string
   snippet: string
   rect: { x: number; y: number; width: number; height: number }
 }
+
+/** where a comment pin sits in frame coords, or 'orphan' when its element
+ *  can no longer be found and the pin parks at the frame's corner */
+type PinSpot = { x: number; y: number } | 'orphan'
+
+/** same scale the pins get, so orphan stacking spaces by the pin's rendered size */
+const PIN_SCALE = 'min(calc(1/var(--zoom,1)),2.4)'
 
 type DragRect = { id: string; x: number; y: number; width: number; height: number }
 
@@ -338,7 +347,9 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   const [composing, setComposing] = useState(false)
   const [openThread, setOpenThread] = useState<string | null>(null)
   const [linkedThread, setLinkedThread] = useState<string | null>(deepLinkedThread)
-  const [pinPos, setPinPos] = useState<Record<string, { x: number; y: number } | null>>({})
+  const [pinPos, setPinPos] = useState<Record<string, PinSpot>>({})
+  /* selectors already reported to the server, so a pin heals once per path */
+  const healed = useRef(new Set<string>())
   const probeReq = useRef(0)
   const probeTimer = useRef<number | null>(null)
   const activeSelRef = useRef<string | null>(null)
@@ -404,7 +415,10 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   useEffect(() => {
     if (!runtimeReady) return
     for (const c of comments) {
-      iframeRef.current?.contentWindow?.postMessage({ type: 'doop:locate', reqId: c.id, selector: c.selector }, '*')
+      iframeRef.current?.contentWindow?.postMessage(
+        { type: 'doop:locate', reqId: c.id, selector: c.selector, anchor: c.anchor },
+        '*',
+      )
     }
   }, [runtimeReady, html, commentKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -507,8 +521,28 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
           setProbe((p) => (p && rect ? { ...p, rect } : rect ? p : null))
           return
         }
-        const rect = ev.data.rect as { x: number; y: number; width: number } | null
-        setPinPos((m) => ({ ...m, [ev.data.reqId]: rect ? { x: rect.x + rect.width, y: rect.y } : null }))
+        const rect = ev.data.rect as { x: number; y: number; width: number; height: number } | null
+        const id = ev.data.reqId as string
+        const comment = useStore.getState().comments.find((c) => c.id === id)
+        const a = comment?.anchor
+        /* an anchored pin sits where it was clicked inside the element; older
+           comments keep the element's top-right corner */
+        const spot: PinSpot = !rect
+          ? 'orphan'
+          : a
+            ? { x: rect.x + a.fx * rect.width, y: rect.y + a.fy * rect.height }
+            : { x: rect.x + rect.width, y: rect.y }
+        setPinPos((m) => ({ ...m, [id]: spot }))
+        /* found by a fallback: tell the server the new path so the next load is a direct hit */
+        const how = ev.data.how as string | null
+        const path = ev.data.selector as string | null
+        if (comment && rect && how && how !== 'path' && path && path !== comment.selector) {
+          const key = `${id}|${path}`
+          if (!healed.current.has(key)) {
+            healed.current.add(key)
+            api.healCommentAnchor(id, path).catch(() => healed.current.delete(key))
+          }
+        }
       }
     }
     window.addEventListener('message', onMsg)
@@ -808,8 +842,11 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
             return (
               <div className="pointer-events-none absolute inset-0">
                 {comments.map((c) => {
-                  const pos = pinPos[c.id]
-                  if (!pos) return null
+                  const spot = pinPos[c.id]
+                  if (!spot) return null
+                  const orphan = spot === 'orphan'
+                  /* orphans stack down the frame's top-right edge in thread order */
+                  const orphanIndex = orphan ? comments.filter((o) => pinPos[o.id] === 'orphan').indexOf(c) : 0
                   const open = openThread === c.id
                   const replies = frameComments.filter((r) => r.parentId === c.id).reverse() // store is newest-first
                   const thread = [c, ...replies.sort((a, b) => a.at - b.at)]
@@ -824,12 +861,21 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                         agentItem?.failedAt
                           ? 'bg-accent-ink! font-extrabold shadow-[0_0_0_3px_rgba(208,52,31,0.2),var(--shadow-card)]'
                           : 'shadow-card',
+                        orphan && 'border-dashed border-ink-soft',
+                        orphan && !open && 'opacity-80',
                         working &&
                           "after:absolute after:-inset-1.5 after:rounded-[inherit] after:border-2 after:border-current after:opacity-50 after:content-[''] after:[animation:stream-pulse_1.1s_ease-in-out_infinite]",
                       )}
                       style={{
-                        left: Math.min(Math.max(pos.x, 10), frame.width - 10),
-                        top: Math.min(Math.max(pos.y, 10), frame.height - 10),
+                        ...(orphan
+                          ? {
+                              left: `calc(${frame.width}px - 16px * ${PIN_SCALE})`,
+                              top: `calc(16px * ${PIN_SCALE} + ${orphanIndex} * 32px * ${PIN_SCALE})`,
+                            }
+                          : {
+                              left: Math.min(Math.max(spot.x, 10), frame.width - 10),
+                              top: Math.min(Math.max(spot.y, 10), frame.height - 10),
+                            }),
                         background: colorFor(c.from),
                       }}
                       onPointerDown={(e) => e.stopPropagation()}
@@ -838,12 +884,13 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                         setComposing(false)
                         setOpenThread(open ? null : c.id)
                       }}
-                      title={`${c.from}: ${c.text}${thread.length > 1 ? ` (${thread.length - 1} replies)` : ''}`}
+                      title={`${orphan ? 'The element this was on changed\n' : ''}${c.from}: ${c.text}${thread.length > 1 ? ` (${thread.length - 1} replies)` : ''}`}
                     >
                       {agentItem?.failedAt ? '!' : working ? '✦' : '💬'}
                       {open && (
                         <CommentThread
                           thread={thread}
+                          alignEnd={orphan}
                           onReply={(text) =>
                             api
                               .replyComment(c.id, text)
@@ -937,7 +984,12 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                         initialText={composePrefill}
                         onSubmit={(text) => {
                           api
-                            .addComment(frame.id, { selector: anchor.selector, snippet: anchor.snippet, text })
+                            .addComment(frame.id, {
+                              selector: anchor.selector,
+                              snippet: anchor.snippet,
+                              text,
+                              anchor: anchor.anchor,
+                            })
                             .then(() => posthog.capture('element_comment_created'))
                             .catch((err) => {
                               /* an @mention past the free tier raises the wall */
@@ -1042,12 +1094,15 @@ function agentStatus(c: ElementComment): string | null {
 
 function CommentThread({
   thread,
+  alignEnd = false,
   onReply,
   onResolve,
   onRetry,
 }: {
   /** root comment first, then its replies oldest → newest */
   thread: ElementComment[]
+  /** open towards the left: the pin sits at the frame's right edge */
+  alignEnd?: boolean
   /** rejects when the reply did not land — the draft is kept for a retry */
   onReply: (text: string) => Promise<unknown>
   onResolve: () => void
@@ -1075,7 +1130,10 @@ function CommentThread({
   const mentioned = mentionedRole(reply)
   return (
     <div
-      className="absolute top-[calc(100%_+_8px)] left-1/2 w-[250px] -translate-x-1/2 cursor-default rounded-[10px] border border-line bg-surface p-2.5 text-left shadow-pop animate-[chip-in_0.18s_ease]"
+      className={cn(
+        'absolute top-[calc(100%_+_8px)] w-[250px] cursor-default rounded-[10px] border border-line bg-surface p-2.5 text-left shadow-pop animate-[chip-in_0.18s_ease]',
+        alignEnd ? 'right-0' : 'left-1/2 -translate-x-1/2',
+      )}
       onClick={(e) => e.stopPropagation()}
     >
       <div ref={listRef} className="-mx-1 max-h-[240px] overflow-y-auto px-1">
