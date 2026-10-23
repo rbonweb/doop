@@ -9,8 +9,10 @@ import { useStore } from './store'
 
 /* how far past each viewport edge a frame still counts as near, as a share of the viewport */
 const NEAR_MARGIN = 0.5
-/* re-evaluate at most this often while the viewport moves */
+/* a changed frame list is re-evaluated at most this often */
 const REFRESH_MS = 120
+/* a moving viewport is not re-evaluated at all until it has been still this long: frames mounted mid-gesture start as blank documents that fill in later, which reads as flicker, so the whole set is settled once on idle instead */
+const VIEWPORT_IDLE_MS = 150
 
 interface Viewport {
   x: number
@@ -81,7 +83,7 @@ export function resetFrameMounts() {
 }
 
 /**
- * Drives mounting for the Stage: on every settled viewport or frame-list change it recomputes the frames near the view, then mounts them one per step, each step after the browser has painted the last. A long task in a frame's document delays the next animation frame, so the pace follows the main thread.
+ * Drives mounting for the Stage: on every frame-list change, and once the viewport has stopped moving, it recomputes the frames near the view, then mounts them one per step, each step after the browser has painted the last. A long task in a frame's document delays the next animation frame, so the pace follows the main thread.
  */
 export function useFrameMountScheduler(stageRef: RefObject<HTMLElement | null>) {
   useEffect(() => {
@@ -89,10 +91,13 @@ export function useFrameMountScheduler(stageRef: RefObject<HTMLElement | null>) 
     let raf = 0
     let timer = 0
     let refreshTimer = 0
+    let idleTimer = 0
     let lastRefresh = 0
 
     function refresh() {
       refreshTimer = 0
+      window.clearTimeout(idleTimer)
+      idleTimer = 0
       lastRefresh = Date.now()
       const { canvas, viewport } = useStore.getState()
       const stage = stageRef.current
@@ -106,6 +111,15 @@ export function useFrameMountScheduler(stageRef: RefObject<HTMLElement | null>) 
     function scheduleRefresh() {
       if (refreshTimer) return
       refreshTimer = window.setTimeout(refresh, Math.max(0, lastRefresh + REFRESH_MS - Date.now()))
+    }
+
+    /* the camera moved: hold off until it stops, then evaluate once */
+    function refreshWhenIdle() {
+      window.clearTimeout(idleTimer)
+      idleTimer = window.setTimeout(() => {
+        idleTimer = 0
+        if (!refreshTimer) scheduleRefresh()
+      }, VIEWPORT_IDLE_MS)
     }
 
     function step() {
@@ -122,7 +136,8 @@ export function useFrameMountScheduler(stageRef: RefObject<HTMLElement | null>) 
     }
 
     const unsubscribe = useStore.subscribe((s, prev) => {
-      if (s.canvas !== prev.canvas || s.viewport !== prev.viewport) scheduleRefresh()
+      if (s.canvas !== prev.canvas) scheduleRefresh()
+      else if (s.viewport !== prev.viewport) refreshWhenIdle()
     })
     refresh()
     return () => {
@@ -130,6 +145,7 @@ export function useFrameMountScheduler(stageRef: RefObject<HTMLElement | null>) 
       cancelAnimationFrame(raf)
       window.clearTimeout(timer)
       window.clearTimeout(refreshTimer)
+      window.clearTimeout(idleTimer)
     }
   }, [stageRef])
 }

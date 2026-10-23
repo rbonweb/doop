@@ -21,6 +21,8 @@ import { Toolbar, ToolbarButton, ToolbarDivider, ToolbarValue } from './ui/toolb
 
 const MIN_ZOOM = 0.08
 const MAX_ZOOM = 3
+/* how long the camera must be still before the world layer is re-rasterized at its final scale */
+const CAMERA_IDLE_MS = 150
 
 const sendCursor = throttle((x: number, y: number) => sendWs({ type: 'cursor', x, y }), 50)
 /* the camera is shared so others can follow it — same cadence as the cursor */
@@ -53,8 +55,6 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   const [marquee, setMarquee] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
   /* where the background menu opened, so Paste drops the frame there */
   const bgAt = useRef({ x: 0, y: 0 })
-  /* iframe oversampling factor — bumped only once the zoom settles */
-  const [raster, setRaster] = useState(1)
   /* frame iframes mount progressively, near the viewport first (lib/frameMounting.ts) */
   useFrameMountScheduler(ref)
   const fitted = useRef(false)
@@ -64,7 +64,14 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   /* Viewport → DOM without React: no component subscribes to the viewport, so
      pan/zoom never renders anything. A store subscription writes the world
      transform, the grid layer, the --zoom variable (which counter-scales
-     labels/pins/cursors from CSS), and the toolbar % directly. */
+     labels/pins/cursors from CSS), and the toolbar % directly.
+
+     The world layer is promoted to its own compositor layer only while the
+     camera moves (will-change: transform), so a zoom is a pure GPU scale of
+     the last bitmap. Once the camera has been still for a moment the hint is
+     dropped and the browser rasterizes every frame again at the final scale:
+     crisp at any zoom, with no iframe resize or relayout, so nothing reflows
+     or flickers. */
   useLayoutEffect(() => {
     function apply(vp: { x: number; y: number; zoom: number }) {
       const world = worldRef.current
@@ -81,7 +88,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       if (zoomLabelRef.current) zoomLabelRef.current.textContent = `${Math.round(vp.zoom * 100)}%`
     }
     apply(useStore.getState().viewport)
-    let settle = 0
+    let idle = 0
     const unsub = useStore.subscribe((s, prev) => {
       /* a (re)connect needs the camera announced afresh — the server only
          knows what this socket has sent */
@@ -89,15 +96,17 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       if (s.viewport === prev.viewport) return
       apply(s.viewport)
       if (ref.current) sendViewport(s.viewport, ref.current)
-      window.clearTimeout(settle)
-      settle = window.setTimeout(() => {
-        const z = useStore.getState().viewport.zoom
-        setRaster(z <= 1 ? 1 : Math.min(3, Math.ceil(z * 2) / 2))
-      }, 250)
+      const world = worldRef.current
+      if (!world) return
+      world.style.willChange = 'transform'
+      window.clearTimeout(idle)
+      idle = window.setTimeout(() => {
+        world.style.willChange = ''
+      }, CAMERA_IDLE_MS)
     })
     return () => {
       unsub()
-      window.clearTimeout(settle)
+      window.clearTimeout(idle)
     }
   }, [])
 
@@ -612,9 +621,9 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
             />
             {/* `world` is likewise a behaviour hook: pan hit-testing checks
             classList.contains('world') to tell background from frame */}
-            <div className="world absolute left-0 top-0 origin-top-left will-change-transform" ref={worldRef}>
+            <div className="world absolute left-0 top-0 origin-top-left" ref={worldRef}>
               {canvas?.frames.map((f) => (
-                <FrameView key={f.id} frame={f} raster={raster} />
+                <FrameView key={f.id} frame={f} />
               ))}
               <GhostFrames />
               <FlowOverlay />

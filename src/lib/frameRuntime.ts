@@ -120,9 +120,6 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     try {
       doc = new DOMParser().parseFromString(html, 'text/html')
       syncAttrs(document.documentElement, doc.documentElement)
-      /* the incoming html carries no root style, so the sync drops our
-         crisp-render zoom — put it back before the page reflows */
-      if (curZoom !== 1) document.documentElement.style.zoom = String(curZoom)
       morphChildren(document.head, doc.head)
       morphChildren(document.body, doc.body)
       activateScripts()
@@ -304,9 +301,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
      The parent can't see into this sandboxed document, so it asks: probe
      resolves the element at a point (for the click toolbar), locate finds a
      stored selector again (to place comment pins). Coordinates cross the
-     boundary in design px; the crisp-render zoom is unapplied on both ends. */
-  var curZoom = 1
-
+     boundary in design px, which are this document's own px. */
   function cssPath(el) {
     var parts = []
     while (el && el.nodeType === 1 && el !== document.documentElement) {
@@ -324,7 +319,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
 
   function designRect(el) {
     var r = el.getBoundingClientRect()
-    return { x: r.left / curZoom, y: r.top / curZoom, width: r.width / curZoom, height: r.height / curZoom }
+    return { x: r.left, y: r.top, width: r.width, height: r.height }
   }
 
   function hitInfo(el) {
@@ -340,7 +335,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   }
 
   function probe(x, y) {
-    var el = document.elementFromPoint(x * curZoom, y * curZoom)
+    var el = document.elementFromPoint(x, y)
     if (!el || el === document.documentElement || el === document.body) return null
     return hitInfo(el)
   }
@@ -356,7 +351,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   /* hover inspection: like probe but fired on every (throttled) pointer move,
      so it skips the outerHTML/selector work and returns just tag + rect */
   function hoverProbe(x, y) {
-    var el = document.elementFromPoint(x * curZoom, y * curZoom)
+    var el = document.elementFromPoint(x, y)
     if (!el || el === document.documentElement || el === document.body) return null
     return { tag: el.tagName.toLowerCase(), rect: designRect(el) }
   }
@@ -504,12 +499,6 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
         if (target) found = designRect(target)
       } catch (e) { /* bad selector -> null */ }
       parent.postMessage({ type: 'doop:located', reqId: d.reqId, rect: found }, '*')
-    }
-    /* re-rasterize crisply when the canvas is zoomed in: layout stays identical
-       (viewport is scaled up by the same factor outside) but pixels are k-times denser */
-    if (d.type === 'doop:zoom' && typeof d.zoom === 'number') {
-      curZoom = d.zoom
-      document.documentElement.style.zoom = String(d.zoom)
     }
   })
   parent.postMessage({ type: 'doop:frame-ready' }, '*')

@@ -106,8 +106,8 @@ interface HoverHit {
 
 /* Counter-scaled overlays (labels, pins, popovers) get their scale from the
    `--zoom` CSS variable the Stage sets, so a viewport change never re-renders
-   this component — memo holds as long as the frame and raster are unchanged. */
-export const FrameView = memo(function FrameView({ frame, raster }: { frame: Frame; raster: number }) {
+   this component — memo holds as long as the frame is unchanged. */
+export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   const selected = useStore((s) => s.selectedIds.includes(frame.id))
   /* the document renders once the Stage's scheduler reaches this frame, or at once when someone selects it */
   const scheduled = useFrameMounted(frame.id)
@@ -569,15 +569,6 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
     if (!selected && editing) exitEdit()
   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* When zoomed past 100%, render the iframe k× larger and counter-scale it,
-     with a matching CSS zoom inside — same layout, k× the raster density, so
-     frames stay crisp instead of looking like scaled-up bitmaps. The factor
-     is computed by the Stage from the settled (gesture-idle) zoom. */
-  useEffect(() => {
-    if (!runtimeReady) return
-    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:zoom', zoom: raster }, '*')
-  }, [runtimeReady, raster])
-
   return (
     <ContextMenu
       onOpenChange={(open) => {
@@ -679,7 +670,9 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
 
           <div
             className={cn(
-              'absolute inset-0 cursor-grab overflow-hidden rounded-[6px] border border-line bg-white',
+              'absolute inset-0 cursor-grab overflow-hidden rounded-[6px] border border-line',
+              /* a frame whose document is still on its way is a quiet placeholder, not a stark white box */
+              frame.html && !runtimeReady ? 'bg-paper-deep' : 'bg-white',
               dragging ? 'shadow-pop' : 'shadow-card',
               selected && 'outline-2 outline-offset-1 outline-brand',
               editing && 'cursor-text outline-2 outline-offset-1 outline-dashed outline-brand',
@@ -704,17 +697,16 @@ export const FrameView = memo(function FrameView({ frame, raster }: { frame: Fra
             {mounted && (
               <iframe
                 ref={iframeRef}
-                className="block border-none bg-white"
+                className={cn(
+                  'block border-none bg-white',
+                  /* fade the document in once its runtime answers, so a frame mounting into view never pops */
+                  runtimeReady ? 'opacity-100 transition-opacity duration-150' : 'opacity-0',
+                )}
                 title={frame.name}
                 data-doop-frame=""
                 sandbox="allow-scripts"
                 srcDoc={FRAME_BOOTSTRAP}
-                style={{
-                  width: frame.width * raster,
-                  height: frame.height * raster,
-                  transform: `scale(${1 / raster})`,
-                  transformOrigin: '0 0',
-                }}
+                style={{ width: frame.width, height: frame.height }}
               />
             )}
             {!frame.html && (
