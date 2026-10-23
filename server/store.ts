@@ -1,5 +1,5 @@
 import { nanoid } from 'nanoid'
-import { canvasPages, pageFrames } from '../shared/pages.ts'
+import { canvasPages, normalizePageTree, pageFrames } from '../shared/pages.ts'
 import * as persist from './db/persist.ts'
 import type { Canvas, CommunityCategory, Frame, GuidelineDoc, MemoryReference } from '../shared/types.ts'
 
@@ -14,7 +14,7 @@ class Store {
 
   init(canvases: Canvas[]) {
     for (const c of canvases) {
-      c.pages = canvasPages(c)
+      c.pages = normalizePageTree(canvasPages(c))
       this.canvases.set(c.id, c)
       for (const f of c.frames) {
         /* A frame whose page is gone (the server died between a frame move
@@ -161,10 +161,11 @@ class Store {
         persist.saveFrame(frame, true)
       }
     }
-    canvas.pages = pages
+    const normalized = normalizePageTree(pages)
+    canvas.pages = normalized
     canvas.updatedAt = Date.now()
     persist.saveCanvas(canvas)
-    return pages
+    return normalized
   }
 
   getCanvas(id: string) {

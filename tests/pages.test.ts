@@ -113,3 +113,42 @@ it('rejects stale page replacements instead of removing another collaborator’s
     ).status,
   ).toBe(409)
 })
+
+it('validates nested page trees and keeps them through reload and duplication', async () => {
+  const canvas = await (await owner.post('/api/canvases', { name: 'Nested pages' })).json()
+  const [first] = canvas.pages
+  const put = async (pages: unknown, client = owner) => {
+    const current = await (await owner.get(`/api/canvases/${canvas.id}`)).json()
+    return client.req(`/api/canvases/${canvas.id}/pages`, {
+      method: 'PUT',
+      body: JSON.stringify({ pages, expectedPages: current.pages }),
+    })
+  }
+  const a = { id: 'a', name: 'A' }
+  const b = { id: 'b', name: 'B', parentId: 'a' }
+  const c = { id: 'c', name: 'C', parentId: 'b' }
+  const missing = await put([first, { ...a, parentId: 'ghost' }])
+  expect(missing.status).toBe(400)
+  expect((await missing.json()).error).toMatch(/does not exist/)
+  const cycle = await put([first, { ...a, parentId: 'b' }, { ...b, parentId: 'a' }])
+  expect(cycle.status).toBe(400)
+  expect((await cycle.json()).error).toMatch(/own subpages/)
+  const deep = await put([first, a, b, c, { id: 'd', name: 'D', parentId: 'c' }])
+  expect(deep.status).toBe(400)
+  expect((await deep.json()).error).toMatch(/at most 2 levels/)
+  expect((await put([first, { ...a, parentId: 7 }])).status).toBe(400)
+
+  /* children listed ahead of their parent are stored in pre-order */
+  const saved = await put([c, first, b, a])
+  expect(saved.status).toBe(200)
+  const expected = [first, a, b, c]
+  expect(await saved.json()).toEqual(expected)
+  expect((await (await owner.get(`/api/canvases/${canvas.id}`)).json()).pages).toEqual(expected)
+  const copy = await (await owner.post(`/api/canvases/${canvas.id}/duplicate`)).json()
+  expect(copy.pages).toEqual(expected)
+
+  /* a parent that disappears while a child still points at it is refused */
+  expect((await put([first, b, c])).status).toBe(400)
+  /* deleting the parent works once its children are re-pointed to its own parent */
+  expect((await put([first, { id: 'b', name: 'B' }, { id: 'c', name: 'C', parentId: 'b' }])).status).toBe(200)
+}, 60_000)

@@ -79,6 +79,8 @@ export interface CommunityItem {
 export interface CanvasPageInfo {
   id: string
   name: string
+  /** nested pages: the page this one sits under; unset = top level */
+  parentId?: string
 }
 
 export interface Canvas {

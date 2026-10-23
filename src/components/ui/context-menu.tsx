@@ -3,6 +3,7 @@ import * as ContextMenuPrimitive from '@radix-ui/react-context-menu'
 
 import { cn } from '@/lib/utils'
 import { menuItemVariants } from './menu'
+import { ChevronRightIcon } from './icons'
 import type { VariantProps } from 'class-variance-authority'
 
 /* Right-click menus on Radix: it owns the pointer anchor, the collision
@@ -65,4 +66,53 @@ function ContextMenuSeparator({ className, ...props }: React.ComponentProps<type
   )
 }
 
-export { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator }
+const ContextMenuSub = ContextMenuPrimitive.Sub
+
+function ContextMenuSubTrigger({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<typeof ContextMenuPrimitive.SubTrigger>) {
+  return (
+    <ContextMenuPrimitive.SubTrigger
+      data-slot="context-menu-sub-trigger"
+      className={cn(
+        menuItemVariants(),
+        'cursor-pointer outline-none data-[highlighted]:bg-line-soft data-[state=open]:bg-line-soft data-[disabled]:pointer-events-none data-[disabled]:text-ink-faint',
+        className,
+      )}
+      {...props}
+    >
+      {children}
+      <ChevronRightIcon width={12} height={12} className="ml-auto text-ink-faint" />
+    </ContextMenuPrimitive.SubTrigger>
+  )
+}
+
+function ContextMenuSubContent({ className, ...props }: React.ComponentProps<typeof ContextMenuPrimitive.SubContent>) {
+  return (
+    <ContextMenuPrimitive.Portal>
+      <ContextMenuPrimitive.SubContent
+        data-slot="context-menu-sub-content"
+        collisionPadding={8}
+        className={cn(
+          'z-[70] max-h-[min(320px,var(--radix-context-menu-content-available-height))] min-w-[190px] overflow-y-auto rounded-[10px] border border-line bg-surface p-[5px] shadow-pop',
+          'animate-[chip-in_0.18s_ease] data-[state=closed]:animate-none',
+          className,
+        )}
+        {...props}
+      />
+    </ContextMenuPrimitive.Portal>
+  )
+}
+
+export {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubTrigger,
+  ContextMenuSubContent,
+}

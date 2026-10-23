@@ -1,4 +1,4 @@
-import { canvasPages, samePages } from '../shared/pages.ts'
+import { canvasPages, normalizePageTree, samePages, validatePageTree } from '../shared/pages.ts'
 import { localAgentRouter, handleLocalAgentMcp } from './localAgent.ts'
 import { handleGeminiCloudMcp } from './geminiCloudMcp.ts'
 import { geminiCloudWorkerFor } from './geminiCloudRuns.ts'
@@ -68,7 +68,7 @@ import { mentionedRole } from '../shared/agents.ts'
 import { activeAgentTasks } from '../shared/agentActivity.ts'
 import { colorFor } from '../shared/types.ts'
 import { isPeerViewport } from '../shared/viewport.ts'
-import type { ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
+import type { CanvasPageInfo, ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
 
 const PORT = Number(process.env.PORT || 4400)
 
@@ -1433,12 +1433,20 @@ app.put('/api/canvases/:id/pages', (req, res) => {
         p.id.length > 100 ||
         typeof p.name !== 'string' ||
         !p.name.trim() ||
-        p.name.length > 100,
+        p.name.length > 100 ||
+        (p.parentId !== undefined && (typeof p.parentId !== 'string' || !p.parentId || p.parentId.length > 100)),
     ) ||
     new Set(pages.map((p) => p.id)).size !== pages.length
   ) {
     return res.status(400).json({ error: 'Provide 1–100 pages with unique IDs and names of up to 100 characters.' })
   }
+  const requested: CanvasPageInfo[] = pages.map((p) => ({
+    id: p.id,
+    name: p.name.trim(),
+    ...(p.parentId === undefined ? {} : { parentId: p.parentId }),
+  }))
+  const treeError = validatePageTree(requested)
+  if (treeError) return res.status(400).json({ error: treeError })
   if (!samePages(req.body?.expectedPages, canvasPages(canvas)))
     return res
       .status(409)
@@ -1447,7 +1455,7 @@ app.put('/api/canvases/:id/pages', (req, res) => {
   if (canvas.frames.some((f) => !pages.some((p) => p.id === (f.pageId ?? firstId)))) {
     return res.status(400).json({ error: 'Move the frames to another page before deleting this page.' })
   }
-  const clean = pages.map((p) => ({ id: p.id, name: p.name.trim() }))
+  const clean = normalizePageTree(requested)
   store.setPages(canvas.id, clean)
   const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
   broadcast(canvas.id, { type: 'canvas:pages', pages: clean, actor })

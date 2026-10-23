@@ -1,7 +1,13 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { buildMcpServer } from '../server/mcp.ts'
+
+/* saving pages writes through to the database, which these in-memory tests do not open */
+vi.mock('../server/db/persist.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../server/db/persist.ts')>()),
+  saveCanvas: () => undefined,
+}))
 
 interface ToolInputSchema {
   properties?: Record<string, unknown>
@@ -125,6 +131,86 @@ it('requires the original page list and rejects stale agent replacements', async
     expect(result.isError).toBe(true)
     expect(JSON.stringify(result)).toContain('Pages changed')
     expect(canvas.pages).toHaveLength(2)
+  } finally {
+    store.canvases.delete(canvas.id)
+    await client.close()
+    await server.close()
+  }
+})
+
+it('nests pages through parent_id, shows the parent in get_canvas and rejects invalid trees', async () => {
+  const { store } = await import('../server/store.ts')
+  const canvas = {
+    id: 'mcp-page-tree',
+    ownerId: 'test-owner-id',
+    name: 'Pages',
+    pages: [
+      { id: 'first', name: 'Main' },
+      { id: 'second', name: 'Exploration' },
+    ],
+    frames: [],
+    createdAt: 0,
+    updatedAt: 0,
+  }
+  store.canvases.set(canvas.id, canvas)
+  const server = buildMcpServer('Test Owner', 'test-owner-id')
+  const client = new Client({ name: 'pages-tree-test', version: '1.0.0' })
+  const [a, b] = InMemoryTransport.createLinkedPair()
+  await server.connect(b)
+  await client.connect(a)
+  const call = (args: Record<string, unknown>) =>
+    client.callTool({ name: 'set_canvas_pages', arguments: { canvas_id: canvas.id, agent_name: 'Agent', ...args } })
+  try {
+    const tool = (await client.listTools()).tools.find((tool) => tool.name === 'set_canvas_pages')!
+    expect(JSON.stringify(tool.inputSchema)).toContain('parent_id')
+    const expectedPages = [
+      { id: 'first', name: 'Main' },
+      { id: 'second', name: 'Exploration' },
+    ]
+    const bad = await call({
+      expectedPages,
+      pages: [
+        { id: 'first', name: 'Main', parent_id: 'second' },
+        { id: 'second', name: 'Exploration', parent_id: 'first' },
+      ],
+    })
+    expect(bad.isError).toBe(true)
+    expect(JSON.stringify(bad)).toContain('own subpages')
+    const missing = await call({ expectedPages, pages: [{ id: 'first', name: 'Main', parent_id: 'ghost' }] })
+    expect(missing.isError).toBe(true)
+    expect(canvas.pages).toEqual(expectedPages)
+
+    const ok = await call({
+      expectedPages,
+      pages: [
+        { id: 'second', name: 'Exploration', parent_id: 'first' },
+        { id: 'first', name: 'Main' },
+      ],
+    })
+    expect(JSON.stringify(ok)).not.toContain('error')
+    expect(canvas.pages).toEqual([
+      { id: 'first', name: 'Main' },
+      { id: 'second', name: 'Exploration', parentId: 'first' },
+    ])
+    const read = await client.callTool({ name: 'get_canvas', arguments: { canvas_id: canvas.id } })
+    const [part] = read.content as { text: string }[]
+    expect(JSON.parse(part!.text).pages).toEqual([
+      { id: 'first', name: 'Main' },
+      { id: 'second', name: 'Exploration', parent_id: 'first' },
+    ])
+    /* the parent_id read from get_canvas is the expectedPages shape */
+    const again = await call({
+      expectedPages: [
+        { id: 'first', name: 'Main' },
+        { id: 'second', name: 'Exploration', parent_id: 'first' },
+      ],
+      pages: [
+        { id: 'first', name: 'Main' },
+        { id: 'second', name: 'Exploration' },
+      ],
+    })
+    expect(again.isError).toBeFalsy()
+    expect(canvas.pages).toEqual(expectedPages)
   } finally {
     store.canvases.delete(canvas.id)
     await client.close()
