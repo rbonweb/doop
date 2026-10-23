@@ -18,7 +18,7 @@ export function TopBar({ className, ...props }: React.ComponentProps<'div'>) {
     <div
       data-slot="top-bar"
       className={cn(
-        'z-40 flex h-14 flex-none items-center gap-4 border-b border-line bg-surface px-4 max-md:gap-2.5 max-md:px-3 max-xs:h-[100px] max-xs:flex-wrap max-xs:content-center max-xs:gap-y-2 max-xs:py-2',
+        'chrome-layer z-40 flex h-14 flex-none items-center gap-4 border-b border-line bg-surface px-4 max-md:gap-2.5 max-md:px-3 max-xs:h-[100px] max-xs:flex-wrap max-xs:content-center max-xs:gap-y-2 max-xs:py-2',
         className,
       )}
       {...props}

@@ -690,6 +690,8 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
           <div
             className={cn(
               'absolute inset-0 cursor-grab overflow-hidden rounded-[6px] border border-line',
+              /* frames far outside the view are not rendered at all, so a large canvas keeps a bounded set of live iframe layers and tiles however far out it is zoomed */
+              '[content-visibility:auto]',
               /* a frame whose document is still on its way is a quiet placeholder, not a stark white box */
               frame.html && !runtimeReady ? 'bg-paper-deep' : 'bg-white',
               dragging ? 'shadow-pop' : 'shadow-card',
