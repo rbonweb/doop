@@ -10,6 +10,7 @@ import { applyDevice, restoreDevices, tidyFrames } from './layoutEdits'
 import { reviewNext } from './marks'
 import { canCommentNow, canEditNow } from './role'
 import { isOverlayOpen, type Shortcut } from './shortcuts'
+import { startPresenting } from './present'
 import { useStore } from './store'
 
 /* The canvas's own keys. Existing ones (delete, esc, undo/redo, copy, duplicate, zoom) behave exactly as they did when
@@ -265,6 +266,14 @@ export const canvasShortcuts: Shortcut[] = [
     run: () => state().setCommentMode(!state().commentMode),
   },
   {
+    id: 'present',
+    key: 'p',
+    label: 'Present: from the selected frame, or the first frame of the page',
+    group: 'Modes',
+    when: () => onCanvas() && !!state().canvas?.frames.length,
+    run: () => startPresenting(),
+  },
+  {
     id: 'notes',
     key: 'n',
     label: 'Show or hide sticky notes',
@@ -283,6 +292,18 @@ export const canvasShortcuts: Shortcut[] = [
     group: 'View',
     when: onCanvas,
     run: () => reviewNext(),
+  },
+  {
+    id: 'flow-links',
+    key: 'k',
+    label: 'Show or hide prototype link arrows on every frame',
+    group: 'View',
+    when: onCanvas,
+    run: () => {
+      const s = state()
+      s.setFlowLinksVisible(!s.flowLinksVisible)
+      s.pushNotice(s.flowLinksVisible ? 'Link arrows hidden. Press K to show them.' : 'Link arrows shown')
+    },
   },
   {
     id: 'export',

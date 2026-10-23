@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import type { CommentAnchor, ElementComment, Frame } from '../../shared/types'
 import { colorFor } from '../../shared/types'
+import { resolveGoto } from '../../shared/gotoLinks'
 import { useStore } from '../lib/store'
 import { currentPageCanvas } from '../lib/pages'
 import { registerFrameWindow, unregisterFrameWindow } from '../lib/frameBridge'
@@ -29,7 +30,7 @@ import { useFrameMark } from '../lib/marks'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Tooltip } from './ui/tooltip'
-import { DownloadIcon, GithubIcon, SyncIcon } from './ui/icons'
+import { DownloadIcon, GithubIcon, SlideIcon, SyncIcon } from './ui/icons'
 import { EXPORT_SHORTCUT } from '../lib/keys'
 import { isSyncedFrame } from '../lib/sync'
 import { isGithubFrame, isGithubPlaceholder } from '../lib/github'
@@ -215,6 +216,8 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
        frame at its origin and keep dragging this one — same net effect as
        Figma's "drag off a duplicate", without retargeting the drag */
     const duplicating = mode === 'move' && e.altKey && e.shiftKey
+    /* ⌥-click follows a prototype link under the pointer instead of picking the element */
+    const followLink = mode === 'move' && e.altKey && !e.shiftKey
     /* plain ⇧-click adds to (or drops from) the selection; a dropped frame
        does not start a drag */
     if (mode === 'move' && e.shiftKey && !e.altKey) {
@@ -337,7 +340,8 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
          the cursor: probe it and show the element toolbar */
       if (!moved && probeOnClick) {
         const mode = useStore.getState()
-        if (mode.laser) {
+        if (followLink && !mode.laser && !mode.commentMode) followLinkAt(off.x, off.y)
+        else if (mode.laser) {
           iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-click', x: off.x, y: off.y }, '*')
         } else if (mode.commentMode) composeAt(off.x, off.y)
         else probeAt(off.x, off.y)
@@ -488,6 +492,14 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     }, 250)
   }
 
+  /* ⌥-click: ask the document what link sits under the pointer; the answer flies the camera to its frame */
+  const gotoReq = useRef(0)
+  function followLinkAt(x: number, y: number) {
+    if (!frame.html || editing) return
+    gotoReq.current += 1
+    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:goto-at', reqId: gotoReq.current, x, y }, '*')
+  }
+
   /* comment mode: the click resolves the element at once and opens the composer on it, as the toolbar's Comment button does */
   function composeAt(x: number, y: number) {
     if (!frame.html || editing) return
@@ -569,6 +581,22 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
       if (ev.source !== iframeRef.current?.contentWindow) return
+      if (ev.data?.type === 'doop:goto-result' && ev.data.reqId === gotoReq.current) {
+        const target: unknown = ev.data.target
+        const canvas = useStore.getState().canvas
+        if (typeof target !== 'string' || !canvas) {
+          flashPathNote('No link here. Links are elements with data-goto.')
+          return
+        }
+        const to = resolveGoto(canvas, target)
+        if (!to) {
+          flashPathNote(`No frame matches “${target}”`)
+          return
+        }
+        useStore.getState().select(to.id)
+        useStore.getState().requestFlyTo(to.id)
+        return
+      }
       if (ev.data?.type === 'doop:probe-result' && ev.data.reqId === probeReq.current) {
         const hit = (ev.data.hit ?? null) as ProbeHit | null
         setProbe(hit)
@@ -810,6 +838,18 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
             )}
             <MarkDot mark={mark} />
             <span className="overflow-hidden text-ellipsis">{frame.name}</span>
+            {frame.slide && (
+              <Tooltip
+                label="A slide: plays with the other slides on this page in present mode"
+                side="top"
+                align="start"
+              >
+                <span className="flex shrink-0 items-center gap-1 rounded-full bg-ink px-1.5 py-px text-[10px] font-bold text-paper">
+                  <SlideIcon width={10} height={10} aria-hidden />
+                  Slide
+                </span>
+              </Tooltip>
+            )}
             {soleSelected && !editing && !dragging && (
               <Button
                 variant="default"

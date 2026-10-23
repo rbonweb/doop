@@ -32,7 +32,7 @@ async function failureOf(res: Response, format: FrameExportFormat): Promise<stri
    desktop shell's webview ignores Content-Disposition for types it can
    display (PNG and JPG) and would show the file
    in the window instead; with the attribute it opens the native save panel. */
-function saveBlob(blob: Blob, fileName: string) {
+export function saveBlob(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
@@ -97,9 +97,14 @@ async function exportOutcome(frame: Frame, format: FrameExportFormat): Promise<s
  *  then the outcome. Fired from surfaces that close on click, so the
  *  toast in the store is the only place the result can land. */
 export async function downloadFrameExport(frame: Frame, format: FrameExportFormat): Promise<void> {
+  await runExportJob(`Exporting ${FORMAT_LABEL[format]}…`, () => exportOutcome(frame, format))
+}
+
+/** Run one export under the shared toast: `busy` while it works, then the outcome the job returns (null: nothing to say). */
+export async function runExportJob(busy: string, job: () => Promise<string | null>): Promise<void> {
   inFlight += 1
-  useStore.getState().pushNotice(`Exporting ${FORMAT_LABEL[format]}…`, { busy: true })
-  const outcome = await exportOutcome(frame, format)
+  useStore.getState().pushNotice(busy, { busy: true })
+  const outcome = await job()
   inFlight -= 1
   report(outcome)
 }

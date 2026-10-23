@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
+import { MAX_SPEAKER_NOTES_CHARS } from '../../shared/slides'
 import type { Frame } from '../../shared/types'
 import { useStore } from '../lib/store'
 import { api } from '../lib/api'
 import { downloadFrameExport } from '../lib/frameExport'
 import { deleteFrameTracked, recordUpdate } from '../lib/history'
+import { setFrameDeckFields } from '../lib/slideEdits'
 import { cn } from '@/lib/utils'
 import { Panel, PanelClose, PanelDisclosure, PanelHeader } from './ui/panel'
 import { Collapsible, CollapsibleContent } from './ui/collapsible'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Field } from './ui/field'
+import { Checkbox } from './ui/checkbox'
 import { Textarea } from './ui/textarea'
 
 const HTML_OPEN_KEY = 'doop:inspector-html'
@@ -130,6 +133,14 @@ export function Inspector({
           <NumInput value={frame.height} onCommit={(v) => commitMeta({ height: Math.max(80, v) })} />
         </Field>
       </div>
+      <div className="grid gap-2.5 border-b border-line-soft px-4 py-3">
+        <label className="relative flex cursor-pointer items-center gap-2.5 text-[13px] font-semibold text-ink">
+          <Checkbox checked={!!frame.slide} onChange={(e) => setFrameDeckFields(frame, { slide: e.target.checked })} />
+          Slide
+          <span className="ml-auto text-[11.5px] font-normal text-ink-faint">plays in the deck</span>
+        </label>
+        {frame.slide && <SpeakerNotes frame={frame} />}
+      </div>
       <div className="flex flex-wrap items-center gap-2 border-b border-line-soft px-3.5 py-2.5">
         <span className="mr-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">Export</span>
         <Button
@@ -219,6 +230,30 @@ export function Inspector({
         </Button>
       </footer>
     </Panel>
+  )
+}
+
+/* The notes the presenter reads while this slide is on screen. Saved when the field loses focus. */
+function SpeakerNotes({ frame }: { frame: Frame }) {
+  const value = frame.speakerNotes ?? ''
+  const [draft, setDraft] = useState(value)
+  /* a remote or committed value replaces whatever was being typed */
+  const [seen, setSeen] = useState({ id: frame.id, value })
+  if (seen.id !== frame.id || seen.value !== value) {
+    setSeen({ id: frame.id, value })
+    setDraft(value)
+  }
+  return (
+    <Field label="Speaker notes" hint="Markdown. Shown in the presenter view, never on the slide.">
+      <Textarea
+        className="h-[96px] max-md:min-h-24"
+        value={draft}
+        maxLength={MAX_SPEAKER_NOTES_CHARS}
+        placeholder="What to say on this slide…"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => draft !== value && setFrameDeckFields(frame, { speakerNotes: draft })}
+      />
+    </Field>
   )
 }
 

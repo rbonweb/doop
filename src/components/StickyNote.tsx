@@ -189,6 +189,12 @@ function Blocks({ blocks }: { blocks: Block[] }) {
   )
 }
 
+/** Markdown as the notes render it, for other surfaces that show markdown (the presenter's speaker notes). */
+export function MarkdownText({ markdown }: { markdown: string }) {
+  const blocks = useMemo(() => parseMarkdown(markdown), [markdown])
+  return <Blocks blocks={blocks} />
+}
+
 function NoteBody({ markdown, mayEdit }: { markdown: string; mayEdit: boolean }) {
   const blocks = useMemo(() => parseMarkdown(markdown), [markdown])
   if (!blocks.length) return <p className="text-ink-faint">{mayEdit ? 'Double-click to write…' : 'Empty note'}</p>

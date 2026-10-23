@@ -1,5 +1,6 @@
 import { canvasPages, normalizePageTree, samePages, validatePageTree } from '../shared/pages.ts'
 import { MAX_NOTE_CHARS, NOTE_COLORS, noteExcerpt } from '../shared/notes.ts'
+import { MAX_SPEAKER_NOTES_CHARS } from '../shared/slides.ts'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { Request, Response } from 'express'
@@ -191,12 +192,14 @@ function frameSummary(f: {
   updatedBy: string
   html: string
   demo?: boolean
+  slide?: boolean
 }) {
   return {
     id: f.id,
     pageId: f.pageId,
     name: f.name,
     ...(f.demo ? { demo: true } : {}),
+    ...(f.slide ? { slide: true } : {}),
     x: f.x,
     y: f.y,
     width: f.width,
@@ -946,14 +949,29 @@ export function buildMcpServer(
           ),
         x: z.number().optional(),
         y: z.number().optional(),
-        width: z.number().optional().describe('Default 640'),
-        height: z.number().optional().describe('Default 480'),
+        width: z.number().optional().describe('Default 640 (1280 for a slide)'),
+        height: z.number().optional().describe('Default 480 (720 for a slide)'),
+        slide: z
+          .boolean()
+          .optional()
+          .describe(
+            'Make this frame a slide: the slides of a page play as a deck in present mode. Defaults to 1280×720.',
+          ),
+        speaker_notes: z
+          .string()
+          .max(MAX_SPEAKER_NOTES_CHARS)
+          .optional()
+          .describe('Presenter notes for a slide (markdown); shown in the presenter view, never on the slide.'),
         agent_name: agentName,
       },
     },
-    async ({ canvas_id, pageId, name, html, x, y, width, height, agent_name }) => {
+    async ({ canvas_id, pageId, name, html, x, y, width, height, slide, speaker_notes, agent_name }) => {
       if (!canvasFor(canvas_id, 'edit')) return noCanvas(canvas_id, 'edit')
-      const frame = actions.createFrame(canvas_id, { name, pageId, html, x, y, width, height }, actorFrom(agent_name))
+      const frame = actions.createFrame(
+        canvas_id,
+        { name, pageId, html, x, y, width, height, slide, speakerNotes: speaker_notes },
+        actorFrom(agent_name),
+      )
       if (!frame) return noCanvas(canvas_id, 'edit')
       const result = withEscapeNote(
         frame.html.length > 0
@@ -980,7 +998,7 @@ export function buildMcpServer(
       if (!f) return noFrame(frame_id)
       arrive(f.canvasId, agent_name)
       return withFeedback(
-        text({ ...frameSummary(f), html: f.html }),
+        text({ ...frameSummary(f), ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}), html: f.html }),
         f.canvasId,
         agent_name ? actorFrom(agent_name) : undefined,
       )
@@ -1641,7 +1659,8 @@ export function buildMcpServer(
   server.registerTool(
     'update_frame',
     {
-      description: 'Update frame metadata: rename it, move/resize it, or move it to another page using pageId.',
+      description:
+        'Update frame metadata: rename it, move/resize it, move it to another page using pageId, make it a slide (slide) or set its presenter notes (speaker_notes; an empty string clears them).',
       inputSchema: {
         frame_id: z.string(),
         pageId: z.string().optional(),
@@ -1650,10 +1669,13 @@ export function buildMcpServer(
         y: z.number().optional(),
         width: z.number().optional(),
         height: z.number().optional(),
+        slide: z.boolean().optional().describe('true makes the frame a slide, false makes it an ordinary frame again'),
+        speaker_notes: z.string().max(MAX_SPEAKER_NOTES_CHARS).optional(),
         agent_name: agentName,
       },
     },
-    async ({ frame_id, agent_name, ...patch }) => {
+    async ({ frame_id, agent_name, speaker_notes, ...rest }) => {
+      const patch = { ...rest, ...(speaker_notes === undefined ? {} : { speakerNotes: speaker_notes }) }
       const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined))
       if (!Object.keys(clean).length) return err('nothing to update')
       if (!frameFor(frame_id, 'edit')) return noFrame(frame_id, 'edit')

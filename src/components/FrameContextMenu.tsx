@@ -4,7 +4,9 @@ import { api, errorMessage } from '../lib/api'
 import { copyFrames, duplicateFrames, hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { deleteFramesTracked } from '../lib/history'
 import { addNote } from '../lib/notes'
+import { startPresenting } from '../lib/present'
 import { useStore } from '../lib/store'
+import { toggleSlide } from '../lib/slideEdits'
 import { EXPORT_SHORTCUT, MOD_KEY } from '../lib/keys'
 import { useCanEdit, useIsGuest } from '../lib/role'
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from './ui/context-menu'
@@ -26,7 +28,7 @@ async function copyImageUrl(frame: Frame) {
 export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefObject<{ x: number; y: number }> }) {
   /* the frames the open export dialog is for, fixed when Export is chosen */
   const [exportTargets, setExportTargets] = useState<Frame[] | null>(null)
-  /* below edit the menu only reads: copy, share, export and history, no paste, duplicate, notes, memory or delete */
+  /* below edit the menu only reads: copy, present, share and export; no paste, duplicate, notes, slides, history, memory or delete */
   const mayEdit = useCanEdit()
   /* history is a signed-in route; a signed-out guest has no account to read it with */
   const guest = useIsGuest()
@@ -69,6 +71,15 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
               Add note
             </ContextMenuItem>
           </>
+        )}
+        <ContextMenuItem onSelect={() => startPresenting(frame.id)}>
+          Present
+          <MenuHint>P</MenuHint>
+        </ContextMenuItem>
+        {mayEdit && (
+          <ContextMenuItem onSelect={() => toggleSlide(frame)}>
+            {frame.slide ? 'Remove from deck' : 'Make a slide'}
+          </ContextMenuItem>
         )}
         <ContextMenuSeparator />
         <ContextMenuItem

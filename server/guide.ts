@@ -389,6 +389,24 @@ ${DESIGN_QUALITY}
   you actually observe; otherwise ask the user for screenshots or an HTML export instead
   of inventing the page.
 
+## Prototypes — screens that link
+
+- Put data-goto="<frameId>" on any element that should take the viewer to another screen: a button, a card, a nav item. create_frame returns the id, so make the target frames first (or create them empty) and link by id. A frame name also works (a case-insensitive exact match, the first frame in reading order wins), but ids do not break when someone renames a frame.
+- Links do nothing on the canvas, where a click selects the element; ⌥-click follows one. In present mode (P) a click follows the link, → and ← walk the page in reading order, and Backspace goes back.
+- Give an element that appears on both screens the same view-transition-name (for example view-transition-name: hero-card) in both frames, and it morphs between them. Names must be unique within a frame.
+- Every interactive element in a flow must lead somewhere or be clearly disabled. Check each data-goto before you finish: it must point at a frame that exists.
+
+## Decks — slides on a page
+
+- Make a frame a slide with slide: true on create_frame or update_frame. A slide with no size is 1280×720; keep every slide of a deck the same size. The slides of a page play as one deck in present mode, in reading order (rows top to bottom, left to right), so place them in a row or a grid in that order.
+- Build the deck kit first, as one frame or a shared style block you paste into every slide: a master layout, tones as CSS-variable swaps (light, dark, accent), the brand's type, one accent colour.
+- Write the answer in one paragraph, then a slide list of sentences that tells the argument on its own. Put every slide on the canvas early, as its sentence, then fill them in.
+- One idea per slide, and the headline is a full sentence that states the point ("Revenue doubled once onboarding got shorter"), not a topic ("Revenue"). Use space instead of boxes. Use real images, and use them big. Numbers must be honest.
+- While a deck plays, <html> carries data-sl-play for the whole show, and data-sl-entered once a slide has arrived. Key entrance animations to [data-sl-entered] (hide in [data-sl-play], reveal in [data-sl-entered]) so they run each time a slide arrives, and never hide anything outside [data-sl-play]: on the canvas and in exports a slide must show everything.
+- speaker_notes on create_frame and update_frame holds what the presenter says on that slide (markdown, up to 10000 characters). It shows in the presenter view (S while presenting), never on the slide. get_frame returns it.
+- Review a deck twice: read only the headlines in order (a cold read, does the argument hold?), then look at all the slides at once and squint (does the rhythm and hierarchy hold?).
+- People export the deck as a PDF from the present toolbar or the page menu: one page per slide, each at the slide's own size.
+
 ## Sticky notes — say why, not just what
 
 A sticky note is a short markdown card pinned to the canvas. create_note attaches it beside a frame (pass frame_id: it sits left of the frame and moves with it) or leaves it free-floating. Use one to explain the intent of a frame, how two variants differ, or an open question the team should see at a glance, and link to a frame with [label](goto:<frame_id>). Keep notes to a few lines. A question that needs a decision from someone is still a comment, not a note, because comments can be answered and resolved. get_canvas lists existing notes (id, frame, text excerpt): update_note revises one instead of adding a second, and delete_note removes one that went stale.

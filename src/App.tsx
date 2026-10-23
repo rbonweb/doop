@@ -5,6 +5,7 @@ import { Community } from './pages/Community'
 import { Settings } from './pages/Settings'
 import { CanvasPage } from './pages/CanvasPage'
 import { GuestCanvas } from './pages/GuestCanvas'
+import { PresenterWindow } from './components/PresenterView'
 import { AuthPage } from './pages/AuthPage'
 import { DesktopHandoff } from './pages/DesktopHandoff'
 import { DesktopSignIn } from './pages/DesktopSignIn'
@@ -143,8 +144,14 @@ export function App() {
   if (path.startsWith('/admin') && (!me || returningToAdmin)) return <div className="auth-page" />
 
   const canvasId = path.match(/^\/c\/([^/]+)/)?.[1]
+  /* /c/<id>?presenter=1 is the presenter's own window: notes and the next slide, driven by the presentation (src/components/PresenterView.tsx) */
+  const presenterWindow = !!canvasId && new URLSearchParams(location.search).has('presenter')
   const page = canvasId ? (
-    <CanvasPage canvasId={canvasId} key={canvasId} />
+    presenterWindow ? (
+      <PresenterWindow canvasId={canvasId} key={canvasId} />
+    ) : (
+      <CanvasPage canvasId={canvasId} key={canvasId} />
+    )
   ) : path === DESKTOP_HANDOFF_PATH ? (
     <DesktopHandoff />
   ) : path.startsWith('/admin') ? (

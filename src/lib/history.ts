@@ -8,8 +8,11 @@ import { posthog } from './posthog'
  *  inverse through the normal API, so every collaborator sees it live —
  *  remote actors' work is never undone from here. */
 
-type Patch = Partial<Pick<Frame, 'name' | 'pageId' | 'html' | 'x' | 'y' | 'width' | 'height'>>
-type Snapshot = Pick<Frame, 'canvasId' | 'pageId' | 'name' | 'html' | 'x' | 'y' | 'width' | 'height'>
+type Patch = Partial<
+  Pick<Frame, 'name' | 'pageId' | 'html' | 'x' | 'y' | 'width' | 'height' | 'slide' | 'speakerNotes'>
+>
+type Snapshot = Pick<Frame, 'canvasId' | 'pageId' | 'name' | 'html' | 'x' | 'y' | 'width' | 'height'> &
+  Partial<Pick<Frame, 'slide' | 'speakerNotes'>>
 
 type Entry =
   | {
@@ -68,6 +71,8 @@ function snapshot(f: Frame): Snapshot {
     y: f.y,
     width: f.width,
     height: f.height,
+    ...(f.slide ? { slide: true } : {}),
+    ...(f.speakerNotes ? { speakerNotes: f.speakerNotes } : {}),
   }
 }
 
