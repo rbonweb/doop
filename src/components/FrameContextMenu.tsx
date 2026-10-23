@@ -3,6 +3,7 @@ import type { Frame } from '../../shared/types'
 import { api, errorMessage } from '../lib/api'
 import { copyFrames, duplicateFrames, hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { deleteFramesTracked } from '../lib/history'
+import { addNote } from '../lib/notes'
 import { useStore } from '../lib/store'
 import { EXPORT_SHORTCUT, MOD_KEY } from '../lib/keys'
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from './ui/context-menu'
@@ -57,6 +58,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
           {groupSize > 1 ? `Duplicate ${groupSize} frames` : 'Duplicate'}
           <MenuHint>{MOD_KEY}D</MenuHint>
         </ContextMenuItem>
+        <ContextMenuItem onSelect={() => void addNote(frame.canvasId, { frameId: frame.id })}>Add note</ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
           onSelect={() => navigator.clipboard.writeText(`${location.origin}/c/${frame.canvasId}?frame=${frame.id}`)}

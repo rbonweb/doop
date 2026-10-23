@@ -1,6 +1,6 @@
 import { applyPageChanges, canvasPages, samePages } from '../../shared/pages'
-import type { CanvasPageInfo, Frame } from '../../shared/types'
-import { api } from './api'
+import type { CanvasNote, CanvasPageInfo, Frame } from '../../shared/types'
+import { api, type NoteDraft, type NotePatch } from './api'
 import { useStore } from './store'
 import { posthog } from './posthog'
 
@@ -23,6 +23,10 @@ type Entry =
   | { type: 'update'; frameId: string; before: Patch; after: Patch; at: number }
   | { type: 'create'; frameId: string; snapshot: Snapshot }
   | { type: 'delete'; frameId: string; snapshot: Snapshot }
+  /* sticky notes: a note is recreated under a fresh id like a frame is */
+  | { type: 'note-update'; noteId: string; before: NotePatch; after: NotePatch }
+  | { type: 'note-create'; noteId: string; canvasId: string; draft: NoteDraft }
+  | { type: 'note-delete'; noteId: string; canvasId: string; draft: NoteDraft }
   /* one multi-frame action (a group move, a group delete): undone and
      redone as a unit */
   | { type: 'group'; entries: Entry[] }
@@ -109,6 +113,41 @@ export function recordUpdates(items: { frameId: string; before: Patch; after: Pa
   push(rest.length ? { type: 'group', entries } : first)
 }
 
+/* a note's id changes when undo recreates it, so entries address it by id and follow remaps */
+function noteDraft(n: CanvasNote): NoteDraft {
+  const { pageId, frameId, x, y, width, height, markdown, color } = n
+  return { pageId, frameId, x, y, width, height, markdown, color }
+}
+
+/** A note moved, resized, recoloured or rewritten: one undo step. */
+export function recordNoteUpdate(noteId: string, before: NotePatch, after: NotePatch) {
+  const keys = (Object.keys(after) as (keyof NotePatch)[]).filter((k) => before[k] !== after[k])
+  if (!keys.length) return
+  const b: NotePatch = {}
+  const a: NotePatch = {}
+  for (const k of keys) {
+    b[k] = before[k] as never
+    a[k] = after[k] as never
+  }
+  push({ type: 'note-update', noteId, before: b, after: a })
+}
+
+export function recordNoteCreate(note: CanvasNote) {
+  push({ type: 'note-create', noteId: note.id, canvasId: note.canvasId, draft: noteDraft(note) })
+}
+
+/** Take back the undo entry for a note that was discarded before it held anything. */
+export function forgetNoteCreate(noteId: string) {
+  const top = undoStack[undoStack.length - 1]
+  if (top?.type === 'note-create' && top.noteId === noteId) undoStack.pop()
+}
+
+/** Delete a note through the API, remembering enough to bring it back. */
+export function deleteNoteTracked(note: CanvasNote) {
+  push({ type: 'note-delete', noteId: note.id, canvasId: note.canvasId, draft: noteDraft(note) })
+  api.deleteNote(note.id).catch(console.error)
+}
+
 export function recordPages(
   canvasId: string,
   before: CanvasPageInfo[],
@@ -158,7 +197,12 @@ export function deleteFramesTracked(frames: Frame[]) {
 function remapId(oldId: string, newId: string) {
   const visit = (e: Entry) => {
     if (e.type === 'group') e.entries.forEach(visit)
-    else if (e.type !== 'pages' && e.frameId === oldId) e.frameId = newId
+    else if (e.type === 'pages') return
+    else if (e.type === 'note-update' || e.type === 'note-create' || e.type === 'note-delete') {
+      if (e.noteId === oldId) e.noteId = newId
+      /* an attached note's draft names its frame, which may itself have been recreated */
+      if (e.type !== 'note-update' && e.draft.frameId === oldId) e.draft.frameId = newId
+    } else if (e.frameId === oldId) e.frameId = newId
   }
   for (const e of [...undoStack, ...redoStack]) visit(e)
 }
@@ -179,7 +223,7 @@ async function recreate(e: { frameId: string; snapshot: Snapshot }) {
    so undo/redo displays the page where the affected designs now live. */
 function selectionIds(e: Entry, direction: 'undo' | 'redo'): string[] {
   if (e.type === 'group') return e.entries.flatMap((child) => selectionIds(child, direction))
-  if (e.type === 'pages') return []
+  if (e.type === 'pages' || e.type === 'note-update' || e.type === 'note-create' || e.type === 'note-delete') return []
   if (e.type === 'update' && 'pageId' in (direction === 'redo' ? e.after : e.before)) return [e.frameId]
   const recreated = e.type === (direction === 'redo' ? 'create' : 'delete')
   return recreated ? [e.frameId] : []
@@ -214,6 +258,30 @@ async function apply(e: Entry, direction: 'undo' | 'redo'): Promise<Entry | null
       current.setPages(saved, canvas.id)
       const active = forward ? e.activeAfter : e.activeBefore
       if (active) current.setActivePage(active)
+    }
+  } else if (e.type === 'note-update') {
+    const patch = forward ? e.after : e.before
+    const note = useStore.getState().canvas?.notes?.find((n) => n.id === e.noteId)
+    const rollback = note
+      ? (Object.fromEntries(Object.keys(patch).map((key) => [key, note[key as keyof CanvasNote]])) as NotePatch)
+      : patch
+    useStore.getState().patchNoteLocal(e.noteId, patch)
+    try {
+      await api.updateNote(e.noteId, patch)
+    } catch (err) {
+      useStore.getState().patchNoteLocal(e.noteId, rollback)
+      throw err
+    }
+  } else if (e.type === 'note-create' || e.type === 'note-delete') {
+    if ((e.type === 'note-create') === forward) {
+      const canvas = useStore.getState().canvas
+      if (!canvas || canvas.id !== e.canvasId) throw new Error('Canvas changed')
+      const note = await api.createNote(e.canvasId, e.draft)
+      useStore.getState().upsertNote(note)
+      remapId(e.noteId, note.id)
+      e.noteId = note.id
+    } else {
+      await api.deleteNote(e.noteId)
     }
   } else if (e.type === 'update') {
     const patch = { ...(forward ? e.after : e.before) }

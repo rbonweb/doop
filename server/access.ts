@@ -34,6 +34,13 @@ export function canAccessCanvas(userId: string | undefined, canvas: Canvas): boo
   return canvas.linkAccess === 'edit'
 }
 
+/** Who may change what is on a canvas (frames, notes). Today everyone who can
+ *  open a canvas can edit it; every mutating surface routes through here so a
+ *  roles branch can tighten it in one place. */
+export function canEditCanvas(userId: string | undefined, canvas: Canvas): boolean {
+  return canAccessCanvas(userId, canvas)
+}
+
 /** Durable access only: the owner and invited members — NOT link-edit
  *  visitors. Gates anything that would outlive the visit itself, like
  *  design-sync keys: a bearer secret minted or read through a share link

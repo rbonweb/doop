@@ -152,6 +152,12 @@ function handle(msg: ServerMessage) {
     case 'frame:deleted':
       s.removeFrame(msg.frameId)
       break
+    case 'note:upsert':
+      s.upsertNote(msg.note)
+      break
+    case 'note:delete':
+      s.removeNote(msg.id)
+      break
     case 'canvas:pages':
       s.setPages(msg.pages)
       break

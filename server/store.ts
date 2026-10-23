@@ -1,5 +1,6 @@
 import { nanoid } from 'nanoid'
 import { canvasPages, normalizePageTree, pageFrames } from '../shared/pages.ts'
+import { DEFAULT_NOTE_COLOR, NOTE_DEFAULT_SIZE } from '../shared/notes.ts'
 import * as persist from './db/persist.ts'
 import type {
   Canvas,
@@ -33,9 +34,6 @@ export interface NoteInput {
   markdown?: string
   color?: string
 }
-
-export const DEFAULT_NOTE_COLOR = '#fde68a'
-const NOTE_DEFAULT_SIZE = { width: 240, height: 180 }
 
 /**
  * In-memory canvas/frame state — the hot path for reads, reveals and
@@ -669,6 +667,15 @@ class Store {
 
   getNotes(canvasId: string): CanvasNote[] {
     return this.canvases.get(canvasId)?.notes ?? []
+  }
+
+  /** The note with this id and the canvas it lives on, wherever it is. */
+  findNote(id: string): { note: CanvasNote; canvasId: string } | undefined {
+    for (const c of this.canvases.values()) {
+      const note = c.notes?.find((n) => n.id === id)
+      if (note) return { note, canvasId: c.id }
+    }
+    return undefined
   }
 
   createNote(canvasId: string, input: NoteInput, by: string, byUserId?: string): CanvasNote | undefined {

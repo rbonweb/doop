@@ -21,7 +21,14 @@ import { notificationsRouter } from './notifications.ts'
 import * as webhooks from './webhooks.ts'
 import { webhooksRouter } from './webhookRoutes.ts'
 import { commentAnchorRouter } from './commentRoutes.ts'
-import { canAccessCanvas, canEditFrame, canManageCanvas, hasDurableCanvasAccess, isAdmin } from './access.ts'
+import {
+  canAccessCanvas,
+  canEditCanvas,
+  canEditFrame,
+  canManageCanvas,
+  hasDurableCanvasAccess,
+  isAdmin,
+} from './access.ts'
 import { auth, initAuth, syncAdmins, getUserName, PUBLIC_ORIGIN, loginProvidersConfig } from './auth.ts'
 import { inviteFor, inviteOnly } from './instanceSettings.ts'
 import { adminRouter } from './admin.ts'
@@ -1556,6 +1563,53 @@ app.delete('/api/frames/:id', (req, res) => {
   const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const frame = actions.deleteFrame(req.params.id, actor)
   if (!frame) return res.status(404).json({ error: 'frame not found' })
+  res.json({ ok: true })
+})
+
+/* ---- sticky notes ---- */
+
+/* Changing a canvas goes through canEditCanvas, not canAccessCanvas, so the
+   day viewers and editors diverge only that one helper has to change. Like
+   requireCanvas, this writes the error response itself and returns null. */
+function requireEditableCanvas(req: express.Request, res: express.Response, canvasId: string) {
+  const c = requireCanvas(req, res, canvasId)
+  if (!c) return null
+  if (!canEditCanvas(req.user!.id, c)) {
+    res.status(403).json({ error: 'you can view this canvas but not edit it' })
+    return null
+  }
+  return c
+}
+
+function sendNoteResult(res: express.Response, result: actions.NoteResult) {
+  if (!result.ok) return res.status(result.status).json({ error: result.error })
+  res.json(result.note)
+}
+
+app.post('/api/canvases/:id/notes', (req, res) => {
+  if (!requireEditableCanvas(req, res, req.params.id)) return
+  const { actor: _ignored, frameId, pageId, ...fields } = req.body ?? {}
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  sendNoteResult(res, actions.createNote(req.params.id, { ...fields, frameId, pageId }, actor))
+})
+
+app.patch('/api/notes/:id', (req, res) => {
+  const found = store.findNote(req.params.id)
+  if (!found) return res.status(404).json({ error: 'note not found' })
+  if (!requireEditableCanvas(req, res, found.canvasId)) return
+  /* position, size, text and colour only: a note never changes its frame or page */
+  const { x, y, width, height, markdown, color } = req.body ?? {}
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  sendNoteResult(res, actions.updateNote(req.params.id, { x, y, width, height, markdown, color }, actor))
+})
+
+app.delete('/api/notes/:id', (req, res) => {
+  const found = store.findNote(req.params.id)
+  if (!found) return res.status(404).json({ error: 'note not found' })
+  if (!requireEditableCanvas(req, res, found.canvasId)) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  const result = actions.deleteNote(req.params.id, actor)
+  if (!result.ok) return res.status(result.status).json({ error: result.error })
   res.json({ ok: true })
 })
 

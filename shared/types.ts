@@ -626,6 +626,10 @@ export type ServerMessage =
   | { type: 'frame:streaming'; frameId: string; active: boolean; actor: Actor }
   | { type: 'canvas:renamed'; name: string; actor: Actor }
   | { type: 'canvas:pages'; pages: CanvasPageInfo[]; actor: Actor }
+  /** a sticky note was created or changed (position, size, text, colour) */
+  | { type: 'note:upsert'; note: CanvasNote; actor: Actor }
+  /** a sticky note was removed */
+  | { type: 'note:delete'; id: string; actor: Actor }
   /** a style-guide doc was written, moved (doc set) or deleted (doc null) */
   | { type: 'guidelines'; name: string; doc: GuidelineDoc | null; actor: Actor }
   /** a frame was pinned to (reference set) or unpinned from (null) Memory */
