@@ -198,7 +198,8 @@ function frameSummary(f: {
  *  their user id — canvases the agent creates or lists are scoped to it, the
  *  same isolation the web UI gets. */
 export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
-  const actorFrom = (agent_name?: string) => actions.resolveActor({ name: agent_name, kind: 'agent', owner })
+  const actorFrom = (agent_name?: string) =>
+    actions.resolveActor({ name: agent_name, kind: 'agent', owner, userId: ownerId })
   /* Canvas access for agents mirrors the web UI: the OAuth user's id runs
      through the same canAccessCanvas gate as browser sessions. Every tool
      that takes a canvas or frame id resolves it through these. */

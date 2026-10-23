@@ -141,12 +141,17 @@ function logActivity(canvasId: string, actor: Actor, message: string, frameId?: 
   broadcast(canvasId, { type: 'activity', item })
 }
 
+/** The account and kind store.createFrame / updateFrame record as the editor. */
+function editorOf(actor: Actor): { userId?: string; kind: Actor['kind'] } {
+  return { userId: actor.userId, kind: actor.kind }
+}
+
 export function resolveActor(
-  raw: { name?: string; kind?: string; clientId?: string; owner?: string } | undefined,
+  raw: { name?: string; kind?: string; clientId?: string; owner?: string; userId?: string } | undefined,
 ): Actor {
   const kind = raw?.kind === 'agent' ? 'agent' : raw?.kind === 'user' ? 'user' : 'agent'
   const name = raw?.name?.trim() || (kind === 'agent' ? 'AI Agent' : 'Anonymous')
-  return { name, kind, color: colorFor(name), clientId: raw?.clientId, owner: raw?.owner }
+  return { name, kind, color: colorFor(name), clientId: raw?.clientId, owner: raw?.owner, userId: raw?.userId }
 }
 
 function touch(canvasId: string, actor: Actor, frameId?: string | null) {
@@ -1242,7 +1247,7 @@ export function appendFrameHtml(
   const escaped = starting ? looksEscapedHtml(chunk) : (streams.get(frameId)?.escaped ?? false)
   const piece = escaped ? decodeEscapedHtml(chunk) : chunk
   const html = opts.start ? piece : before.html + piece
-  const frame = store.updateFrame(frameId, { html }, actor.name)!
+  const frame = store.updateFrame(frameId, { html }, actor.name, editorOf(actor))!
 
   if (starting) {
     finishReveal(frameId) /* a live stream overrides any one-shot playback in flight */
@@ -1285,11 +1290,13 @@ export function createFrame(
     height?: number
     html?: string
     demo?: boolean
+    slide?: boolean
+    speakerNotes?: string
   },
   actor: Actor,
 ): Frame | undefined {
   if (input.html !== undefined) input = { ...input, html: repairEscapedHtml(input.html) }
-  const frame = store.createFrame(canvasId, input, actor.name)
+  const frame = store.createFrame(canvasId, input, actor.name, editorOf(actor))
   if (!frame) return undefined
   if (actor.kind === 'agent' && frame.html.length > 0) {
     /* agent one-shot creation still plays back as a reveal */
@@ -1307,7 +1314,7 @@ export function createFrame(
 
 export function updateFrame(
   frameId: string,
-  patch: Partial<Pick<Frame, 'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html'>>,
+  patch: Partial<Pick<Frame, 'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html' | 'slide' | 'speakerNotes'>>,
   actor: Actor,
 ): Frame | undefined {
   const before = store.getFrame(frameId)
@@ -1315,7 +1322,7 @@ export function updateFrame(
   if (patch.html !== undefined) patch = { ...patch, html: repairEscapedHtml(patch.html) }
   const prevName = before.name
   const prevHtml = before.html
-  const frame = store.updateFrame(frameId, patch, actor.name)
+  const frame = store.updateFrame(frameId, patch, actor.name, editorOf(actor))
   if (!frame) return undefined
 
   const htmlChanged = patch.html !== undefined && patch.html !== prevHtml

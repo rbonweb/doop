@@ -1,22 +1,30 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { nanoid } from 'nanoid'
-import { and, desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm'
 import { db } from './index.ts'
 import * as t from './schema.ts'
 import { extractAssetIds } from '../assets.ts'
 import { roleByAgentName } from '../../shared/agents.ts'
 import { isCommunityCategory } from '../../shared/types.ts'
 import type {
+  AccessRequest,
   ActivityItem,
+  ActorKind,
   AgentTask,
+  CanvasNote,
   CardScope,
   Canvas,
   ChatMessage,
   DesignDecision,
+  DomainGrant,
   ElementComment,
   Frame,
+  FrameVersion,
+  FrameVersionInfo,
   GuidelineDoc,
+  LinkAccess,
+  MemberRole,
   MemoryProposal,
   MemoryReference,
   RepoCardKind,
@@ -34,6 +42,19 @@ function swallow(p: Promise<unknown>) {
   p.catch((err) => console.error('[db] write failed', err))
 }
 
+/** Like swallow, but hands back a promise that settles once the write is done
+ *  and never rejects — for the cold-path writes whose callers (or tests) want
+ *  to know the row landed. Callers that don't care `void` it. */
+function settled(p: Promise<unknown>): Promise<void> {
+  return p.then(
+    () => undefined,
+    (err) => console.error('[db] write failed', err),
+  )
+}
+
+const isMemberRole = (value: unknown): value is MemberRole =>
+  value === 'view' || value === 'comment' || value === 'edit'
+
 /** every mutable canvas column, so insert and upsert can't drift apart */
 function canvasColumns(c: Canvas) {
   return {
@@ -41,6 +62,7 @@ function canvasColumns(c: Canvas) {
     pages: c.pages ?? null,
     ownerId: c.ownerId ?? null,
     linkAccess: c.linkAccess ?? null,
+    linkAudience: c.linkAudience ?? null,
     publishedAt: c.publishedAt ?? null,
     description: c.description ?? null,
     category: c.category ?? null,
@@ -81,9 +103,15 @@ export async function saveCanvasCopy(c: Canvas): Promise<void> {
           updatedAt: frame.updatedAt,
           updatedBy: frame.updatedBy,
           demo: frame.demo ?? null,
+          updatedByUserId: frame.updatedByUserId ?? null,
+          updatedByKind: frame.updatedByKind ?? null,
+          slide: frame.slide ?? null,
+          speakerNotes: frame.speakerNotes ?? null,
         })),
       )
     }
+
+    if (c.notes?.length) await tx.insert(t.canvasNotes).values(c.notes.map(noteRow))
 
     if (c.guidelines?.length) {
       await tx.insert(t.guidelines).values(
@@ -123,8 +151,30 @@ export async function saveCanvasCopy(c: Canvas): Promise<void> {
   })
 }
 
-export function saveMember(canvasId: string, userId: string, addedBy: string, addedAt: number) {
-  swallow(db.insert(t.canvasMembers).values({ canvasId, userId, addedBy, addedAt }).onConflictDoNothing())
+export function saveMember(
+  canvasId: string,
+  userId: string,
+  addedBy: string,
+  addedAt: number,
+  role: MemberRole = 'edit',
+) {
+  swallow(db.insert(t.canvasMembers).values({ canvasId, userId, role, addedBy, addedAt }).onConflictDoNothing())
+}
+
+export function saveMemberRole(canvasId: string, userId: string, role: MemberRole) {
+  swallow(
+    db
+      .update(t.canvasMembers)
+      .set({ role })
+      .where(and(eq(t.canvasMembers.canvasId, canvasId), eq(t.canvasMembers.userId, userId))),
+  )
+}
+
+/** The link password hash is a server-only secret, so it never rides in
+ *  canvasColumns (which is built from the client-visible Canvas): it has its own
+ *  write, and saveCanvas never touches the column. null clears it. */
+export function saveLinkPasswordHash(canvasId: string, hash: string | null) {
+  swallow(db.update(t.canvases).set({ linkPasswordHash: hash }).where(eq(t.canvases.id, canvasId)))
 }
 
 export function deleteMember(canvasId: string, userId: string) {
@@ -308,6 +358,10 @@ async function writeFrame(f: Frame) {
     updatedAt: f.updatedAt,
     updatedBy: f.updatedBy,
     demo: f.demo ?? null,
+    updatedByUserId: f.updatedByUserId ?? null,
+    updatedByKind: f.updatedByKind ?? null,
+    slide: f.slide ?? null,
+    speakerNotes: f.speakerNotes ?? null,
   }
   const { id, createdAt, ...set } = row
   await db.insert(t.frames).values(row).onConflictDoUpdate({ target: t.frames.id, set })
@@ -352,6 +406,12 @@ export function deleteCanvas(canvasId: string) {
   swallow(db.delete(t.decisions).where(eq(t.decisions.canvasId, canvasId)))
   swallow(db.delete(t.memoryProposals).where(eq(t.memoryProposals.canvasId, canvasId)))
   swallow(db.delete(t.canvasMembers).where(eq(t.canvasMembers.canvasId, canvasId)))
+  swallow(db.delete(t.frameVersions).where(eq(t.frameVersions.canvasId, canvasId)))
+  swallow(db.delete(t.frameSeen).where(eq(t.frameSeen.canvasId, canvasId)))
+  swallow(db.delete(t.canvasVisits).where(eq(t.canvasVisits.canvasId, canvasId)))
+  swallow(db.delete(t.canvasDomainGrants).where(eq(t.canvasDomainGrants.canvasId, canvasId)))
+  swallow(db.delete(t.canvasAccessRequests).where(eq(t.canvasAccessRequests.canvasId, canvasId)))
+  swallow(db.delete(t.canvasNotes).where(eq(t.canvasNotes.canvasId, canvasId)))
   swallow(db.delete(t.canvases).where(eq(t.canvases.id, canvasId)))
 }
 
@@ -363,6 +423,8 @@ export function deleteFrame(frameId: string) {
   }
   swallow(db.delete(t.frames).where(eq(t.frames.id, frameId)))
   swallow(db.delete(t.assetRefs).where(eq(t.assetRefs.frameId, frameId)))
+  swallow(db.delete(t.frameVersions).where(eq(t.frameVersions.frameId, frameId)))
+  swallow(db.delete(t.frameSeen).where(eq(t.frameSeen.frameId, frameId)))
 }
 
 /** The frame/element a prompt card was scoped to, or nothing when the row
@@ -495,6 +557,9 @@ export function saveComment(c: ElementComment) {
     resolvedBy: c.resolvedBy ?? null,
     resolvedAt: c.resolvedAt ?? null,
     parentId: c.parentId ?? null,
+    anchor: c.anchor ?? null,
+    fromKind: c.fromKind ?? null,
+    mentions: c.mentions?.length ? c.mentions.join(',') : null,
   }
   swallow(
     db
@@ -554,6 +619,219 @@ export function saveActivity(canvasId: string, item: ActivityItem) {
   )
 }
 
+/* ------------------------------------------------------------------ */
+/* Review state, frame history, sharing grants and notes               */
+/* ------------------------------------------------------------------ */
+
+/** "Changed since you were here": record that a user has seen a frame at
+ *  `seenUpdatedAt`. The stored value only ever moves forward, so a stale tab
+ *  reporting an older view cannot hide a newer change. */
+export function saveFrameSeen(userId: string, canvasId: string, frameId: string, seenUpdatedAt: number): Promise<void> {
+  return settled(
+    db
+      .insert(t.frameSeen)
+      .values({ userId, canvasId, frameId, seenUpdatedAt })
+      .onConflictDoUpdate({
+        target: [t.frameSeen.userId, t.frameSeen.frameId],
+        set: { seenUpdatedAt: sql`GREATEST(${t.frameSeen.seenUpdatedAt}, excluded.seen_updated_at)` },
+      }),
+  )
+}
+
+/** Cold path — read on demand. */
+export function listFrameSeen(userId: string, canvasId: string): Promise<{ frameId: string; seenUpdatedAt: number }[]> {
+  return db
+    .select({ frameId: t.frameSeen.frameId, seenUpdatedAt: t.frameSeen.seenUpdatedAt })
+    .from(t.frameSeen)
+    .where(and(eq(t.frameSeen.userId, userId), eq(t.frameSeen.canvasId, canvasId)))
+}
+
+/** The moment the user first opened the canvas, or undefined if they never have. */
+export async function getCanvasVisit(userId: string, canvasId: string): Promise<number | undefined> {
+  const [row] = await db
+    .select({ baselineAt: t.canvasVisits.baselineAt })
+    .from(t.canvasVisits)
+    .where(and(eq(t.canvasVisits.userId, userId), eq(t.canvasVisits.canvasId, canvasId)))
+  return row?.baselineAt
+}
+
+/** Record the first visit (insert-if-absent) and return the baseline: `now`
+ *  on a first visit, the original time on every later one. */
+export async function ensureCanvasVisit(userId: string, canvasId: string, now: number): Promise<number> {
+  await db.insert(t.canvasVisits).values({ userId, canvasId, baselineAt: now }).onConflictDoNothing()
+  return (await getCanvasVisit(userId, canvasId)) ?? now
+}
+
+/* Append-only frame history, capped per frame like the guideline history. */
+export const MAX_FRAME_VERSIONS = 50
+
+export function saveFrameVersion(v: FrameVersion): Promise<void> {
+  return settled(appendFrameVersion(v))
+}
+
+async function appendFrameVersion(v: FrameVersion) {
+  await db.insert(t.frameVersions).values(v)
+  const excess = await db
+    .select({ id: t.frameVersions.id })
+    .from(t.frameVersions)
+    .where(eq(t.frameVersions.frameId, v.frameId))
+    .orderBy(desc(t.frameVersions.savedAt))
+    .offset(MAX_FRAME_VERSIONS)
+  if (excess.length) {
+    await db.delete(t.frameVersions).where(
+      inArray(
+        t.frameVersions.id,
+        excess.map((e) => e.id),
+      ),
+    )
+  }
+}
+
+/** Newest first, without the HTML. Cold path — read straight from the database on demand. */
+export async function listFrameVersions(frameId: string): Promise<FrameVersionInfo[]> {
+  const rows = await db
+    .select({
+      id: t.frameVersions.id,
+      frameId: t.frameVersions.frameId,
+      canvasId: t.frameVersions.canvasId,
+      name: t.frameVersions.name,
+      width: t.frameVersions.width,
+      height: t.frameVersions.height,
+      savedAt: t.frameVersions.savedAt,
+      savedBy: t.frameVersions.savedBy,
+      reason: t.frameVersions.reason,
+    })
+    .from(t.frameVersions)
+    .where(eq(t.frameVersions.frameId, frameId))
+    .orderBy(desc(t.frameVersions.savedAt))
+  return rows.map((row) => ({ ...row, reason: row.reason as FrameVersion['reason'] }))
+}
+
+export async function getFrameVersion(id: string): Promise<FrameVersion | undefined> {
+  const [row] = await db.select().from(t.frameVersions).where(eq(t.frameVersions.id, id))
+  return row && { ...row, reason: row.reason as FrameVersion['reason'] }
+}
+
+export function deleteFrameVersions(frameId: string): Promise<void> {
+  return settled(db.delete(t.frameVersions).where(eq(t.frameVersions.frameId, frameId)))
+}
+
+/* Sharing by email domain. Hot path: hydrated into the store at boot. */
+export function saveDomainGrant(g: DomainGrant): Promise<void> {
+  return settled(
+    db
+      .insert(t.canvasDomainGrants)
+      .values(g)
+      .onConflictDoUpdate({
+        target: [t.canvasDomainGrants.canvasId, t.canvasDomainGrants.domain],
+        set: { role: g.role, addedBy: g.addedBy, addedAt: g.addedAt },
+      }),
+  )
+}
+
+export function deleteDomainGrant(canvasId: string, domain: string): Promise<void> {
+  return settled(
+    db
+      .delete(t.canvasDomainGrants)
+      .where(and(eq(t.canvasDomainGrants.canvasId, canvasId), eq(t.canvasDomainGrants.domain, domain))),
+  )
+}
+
+function domainGrantFromRow(row: typeof t.canvasDomainGrants.$inferSelect): DomainGrant {
+  return { ...row, role: isMemberRole(row.role) ? row.role : 'view' }
+}
+
+export async function listDomainGrants(canvasId: string): Promise<DomainGrant[]> {
+  const rows = await db
+    .select()
+    .from(t.canvasDomainGrants)
+    .where(eq(t.canvasDomainGrants.canvasId, canvasId))
+    .orderBy(t.canvasDomainGrants.addedAt)
+  return rows.map(domainGrantFromRow)
+}
+
+/* "Request access" asks. Cold path, read on demand. */
+export const ACCESS_REQUEST_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+export function saveAccessRequest(r: AccessRequest): Promise<void> {
+  const row = { canvasId: r.canvasId, userId: r.userId, message: r.message ?? null, at: r.at, status: r.status }
+  return settled(
+    db
+      .insert(t.canvasAccessRequests)
+      .values(row)
+      .onConflictDoUpdate({
+        target: [t.canvasAccessRequests.canvasId, t.canvasAccessRequests.userId],
+        set: { message: row.message, at: row.at, status: row.status },
+      }),
+  )
+}
+
+export function deleteAccessRequest(canvasId: string, userId: string): Promise<void> {
+  return settled(
+    db
+      .delete(t.canvasAccessRequests)
+      .where(and(eq(t.canvasAccessRequests.canvasId, canvasId), eq(t.canvasAccessRequests.userId, userId))),
+  )
+}
+
+/** Newest first. */
+export async function listAccessRequests(canvasId: string): Promise<AccessRequest[]> {
+  const rows = await db
+    .select()
+    .from(t.canvasAccessRequests)
+    .where(eq(t.canvasAccessRequests.canvasId, canvasId))
+    .orderBy(desc(t.canvasAccessRequests.at))
+  return rows.map((row) => ({
+    canvasId: row.canvasId,
+    userId: row.userId,
+    ...(row.message != null ? { message: row.message } : {}),
+    at: row.at,
+    status: row.status === 'declined' ? 'declined' : 'pending',
+  }))
+}
+
+/** Pending asks nobody answered in 30 days go away; declined ones stay so the
+ *  same person cannot re-ask the moment they are turned down. */
+export function expireAccessRequests(now: number): Promise<void> {
+  return settled(
+    db
+      .delete(t.canvasAccessRequests)
+      .where(
+        and(eq(t.canvasAccessRequests.status, 'pending'), lt(t.canvasAccessRequests.at, now - ACCESS_REQUEST_TTL_MS)),
+      ),
+  )
+}
+
+/* Sticky notes: single-shot writes (one save per explicit edit or drag end), like guidelines. */
+function noteRow(n: CanvasNote) {
+  return {
+    id: n.id,
+    canvasId: n.canvasId,
+    pageId: n.pageId ?? null,
+    frameId: n.frameId ?? null,
+    x: n.x,
+    y: n.y,
+    width: n.width,
+    height: n.height,
+    markdown: n.markdown,
+    color: n.color,
+    createdBy: n.createdBy,
+    createdByUserId: n.createdByUserId ?? null,
+    createdAt: n.createdAt,
+    updatedAt: n.updatedAt,
+    updatedBy: n.updatedBy,
+  }
+}
+
+export function saveNote(n: CanvasNote): Promise<void> {
+  const { id, canvasId, createdBy, createdByUserId, createdAt, ...set } = noteRow(n)
+  return settled(db.insert(t.canvasNotes).values(noteRow(n)).onConflictDoUpdate({ target: t.canvasNotes.id, set }))
+}
+
+export function deleteNote(id: string): Promise<void> {
+  return settled(db.delete(t.canvasNotes).where(eq(t.canvasNotes.id, id)))
+}
+
 /** Flush pending debounced frame writes (called on shutdown). */
 export async function flush(getFrame: (id: string) => Frame | undefined): Promise<void> {
   const ids = [...frameTimers.keys()]
@@ -580,11 +858,62 @@ export interface Hydrated {
   activity: Map<string, ActivityItem[]>
   decisions: Map<string, DesignDecision[]>
   proposals: Map<string, MemoryProposal[]>
+  /** server-only: sharing-by-domain grants per canvas (never sent to clients) */
+  domainGrants: Map<string, DomainGrant[]>
+  /** server-only: canvas id -> link password hash (never sent to clients) */
+  linkPasswordHashes: Map<string, string>
 }
 
 const LOG_CAP = 100
 /** the chat keeps more history than the other logs — it is the conversation */
 export const CHAT_LOG_CAP = 300
+
+/** 'none' and anything unrecognised read as unset: private is the default. */
+function linkAccessFromColumn(value: string | null): LinkAccess | undefined {
+  return value === 'edit' || value === 'comment' || value === 'view' ? value : undefined
+}
+
+function frameFromRow(f: typeof t.frames.$inferSelect): Frame {
+  return {
+    id: f.id,
+    canvasId: f.canvasId,
+    ...(f.pageId != null ? { pageId: f.pageId } : {}),
+    name: f.name,
+    x: f.x,
+    y: f.y,
+    width: f.width,
+    height: f.height,
+    html: f.html,
+    createdAt: f.createdAt,
+    updatedAt: f.updatedAt,
+    updatedBy: f.updatedBy,
+    ...(f.updatedByUserId != null ? { updatedByUserId: f.updatedByUserId } : {}),
+    ...(f.updatedByKind === 'user' || f.updatedByKind === 'agent' ? { updatedByKind: f.updatedByKind } : {}),
+    ...(f.demo != null ? { demo: f.demo } : {}),
+    ...(f.slide != null ? { slide: f.slide } : {}),
+    ...(f.speakerNotes != null ? { speakerNotes: f.speakerNotes } : {}),
+  }
+}
+
+function noteFromRow(n: typeof t.canvasNotes.$inferSelect): CanvasNote {
+  return {
+    id: n.id,
+    canvasId: n.canvasId,
+    ...(n.pageId != null ? { pageId: n.pageId } : {}),
+    ...(n.frameId != null ? { frameId: n.frameId } : {}),
+    x: n.x,
+    y: n.y,
+    width: n.width,
+    height: n.height,
+    markdown: n.markdown,
+    color: n.color,
+    createdBy: n.createdBy,
+    ...(n.createdByUserId != null ? { createdByUserId: n.createdByUserId } : {}),
+    createdAt: n.createdAt,
+    updatedAt: n.updatedAt,
+    updatedBy: n.updatedBy,
+  }
+}
 
 export async function hydrate(): Promise<Hydrated> {
   const [
@@ -600,6 +929,8 @@ export async function hydrate(): Promise<Hydrated> {
     decisionRows,
     proposalRows,
     memberRows,
+    domainGrantRows,
+    noteRows,
   ] = await Promise.all([
     db.select().from(t.canvases),
     db.select().from(t.frames),
@@ -613,6 +944,8 @@ export async function hydrate(): Promise<Hydrated> {
     db.select().from(t.decisions).orderBy(desc(t.decisions.at)),
     db.select().from(t.memoryProposals).orderBy(desc(t.memoryProposals.at)),
     db.select().from(t.canvasMembers).orderBy(t.canvasMembers.addedAt),
+    db.select().from(t.canvasDomainGrants).orderBy(t.canvasDomainGrants.addedAt),
+    db.select().from(t.canvasNotes).orderBy(t.canvasNotes.createdAt),
   ])
 
   const canvases: Canvas[] = canvasRows.map((c) => ({
@@ -620,7 +953,9 @@ export async function hydrate(): Promise<Hydrated> {
     name: c.name,
     pages: c.pages ?? undefined,
     ownerId: c.ownerId ?? undefined,
-    linkAccess: c.linkAccess === 'edit' ? 'edit' : undefined,
+    linkAccess: linkAccessFromColumn(c.linkAccess),
+    ...(c.linkAudience === 'anyone' || c.linkAudience === 'password' ? { linkAudience: c.linkAudience } : {}),
+    ...(c.linkPasswordHash ? { hasLinkPassword: true } : {}),
     ...(c.publishedAt != null ? { publishedAt: c.publishedAt } : {}),
     ...(c.description ? { description: c.description } : {}),
     ...(isCommunityCategory(c.category) ? { category: c.category } : {}),
@@ -631,12 +966,27 @@ export async function hydrate(): Promise<Hydrated> {
     frames: [],
   }))
   const byId = new Map(canvases.map((c) => [c.id, c]))
+  const linkPasswordHashes = new Map<string, string>()
+  for (const c of canvasRows) if (c.linkPasswordHash) linkPasswordHashes.set(c.id, c.linkPasswordHash)
   for (const m of memberRows) {
     const c = byId.get(m.canvasId)
-    if (c) (c.memberIds ??= []).push(m.userId)
+    if (!c) continue
+    ;(c.memberIds ??= []).push(m.userId)
+    /* roles are stored sparsely: editing is the default, so only restrictions take space */
+    if (isMemberRole(m.role) && m.role !== 'edit') (c.memberRoles ??= {})[m.userId] = m.role
   }
-  for (const f of frameRows)
-    byId.get(f.canvasId)?.frames.push({ ...f, pageId: f.pageId ?? undefined, demo: f.demo ?? undefined })
+  for (const f of frameRows) byId.get(f.canvasId)?.frames.push(frameFromRow(f))
+  for (const n of noteRows) {
+    const c = byId.get(n.canvasId)
+    if (c) (c.notes ??= []).push(noteFromRow(n))
+  }
+  const domainGrants = new Map<string, DomainGrant[]>()
+  for (const g of domainGrantRows) {
+    if (!byId.has(g.canvasId)) continue
+    const list = domainGrants.get(g.canvasId) ?? []
+    list.push(domainGrantFromRow(g))
+    domainGrants.set(g.canvasId, list)
+  }
   for (const c of canvases) c.frames.sort((a, b) => a.createdAt - b.createdAt)
   for (const r of referenceRows) {
     const c = byId.get(r.canvasId)
@@ -771,6 +1121,9 @@ export async function hydrate(): Promise<Hydrated> {
       ...(row.resolvedBy != null ? { resolvedBy: row.resolvedBy } : {}),
       ...(row.resolvedAt != null ? { resolvedAt: row.resolvedAt } : {}),
       ...(row.parentId != null ? { parentId: row.parentId } : {}),
+      ...(row.anchor != null ? { anchor: row.anchor } : {}),
+      ...(row.fromKind === 'user' || row.fromKind === 'agent' ? { fromKind: row.fromKind as ActorKind } : {}),
+      ...(row.mentions ? { mentions: row.mentions.split(',').filter(Boolean) } : {}),
     })
     comments.set(row.canvasId, list)
   }
@@ -848,7 +1201,7 @@ export async function hydrate(): Promise<Hydrated> {
     proposals.set(row.canvasId, list)
   }
 
-  return { canvases, tasks, feedback, comments, chat, activity, decisions, proposals }
+  return { canvases, tasks, feedback, comments, chat, activity, decisions, proposals, domainGrants, linkPasswordHashes }
 }
 
 /** One-time import of the pre-DB data/store.json so existing canvases survive. */

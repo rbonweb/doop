@@ -96,7 +96,7 @@ let data = await persist.hydrate()
 if (data.canvases.length === 0 && (await persist.importLegacyJson())) {
   data = await persist.hydrate()
 }
-store.init(data.canvases)
+store.init(data.canvases, data)
 await workspaces.hydrateWorkspaces() // before the first request: canAccessCanvas reads membership
 await webhooks.hydrateWebhooks()
 billing.reportBillingConfig()
@@ -1024,7 +1024,7 @@ app.patch('/api/canvases/:id', (req, res) => {
     store.setLinkAccess(c.id, linkAccess)
   }
   if (typeof name === 'string' && name.trim()) {
-    const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+    const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
     actions.renameCanvas(c.id, name.trim(), actor)
   }
   res.json({ ok: true })
@@ -1337,7 +1337,7 @@ app.get('/api/canvases/:id/guidelines/:name/history', async (req, res) => {
 
 app.put('/api/canvases/:id/guidelines/:name', (req, res) => {
   if (!requireCanvas(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const { markdown, x, y, title } = req.body ?? {}
   /* no markdown = metadata patch (position/title): content and history untouched */
   if (markdown === undefined) {
@@ -1369,7 +1369,7 @@ app.put('/api/canvases/:id/guidelines/:name', (req, res) => {
 /* design memory: pin/unpin reference frames, accept/dismiss rule proposals */
 app.post('/api/canvases/:id/references', (req, res) => {
   if (!requireCanvas(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   try {
     const ref = actions.pinReference(req.params.id, String(req.body?.frameId ?? ''), actor)
     if (!ref) return res.status(404).json({ error: 'canvas or frame not found' })
@@ -1381,7 +1381,7 @@ app.post('/api/canvases/:id/references', (req, res) => {
 
 app.delete('/api/canvases/:id/references/:refId', (req, res) => {
   if (!requireCanvas(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   if (!actions.unpinReference(req.params.id, req.params.refId, actor))
     return res.status(404).json({ error: 'reference not found' })
   res.json({ ok: true })
@@ -1389,7 +1389,7 @@ app.delete('/api/canvases/:id/references/:refId', (req, res) => {
 
 app.post('/api/canvases/:id/proposals/:pid', (req, res) => {
   if (!requireCanvas(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const proposal = actions.resolveProposal(req.params.id, req.params.pid, !!req.body?.accept, actor)
   if (!proposal) return res.status(404).json({ error: 'proposal not found' })
   res.json(proposal)
@@ -1449,7 +1449,7 @@ app.put('/api/canvases/:id/pages', (req, res) => {
   }
   const clean = pages.map((p) => ({ id: p.id, name: p.name.trim() }))
   store.setPages(canvas.id, clean)
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   broadcast(canvas.id, { type: 'canvas:pages', pages: clean, actor })
   res.json(clean)
 })
@@ -1459,7 +1459,7 @@ app.post('/api/canvases/:id/frames', (req, res) => {
   const { name, pageId, x, y, width, height, html } = req.body ?? {}
   if (pageId !== undefined && !store.getCanvas(req.params.id)?.pages?.some((p) => p.id === pageId))
     return res.status(400).json({ error: 'page not found' })
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const frame = actions.createFrame(
     req.params.id,
     { name: String(name || 'Frame'), pageId, x, y, width, height, html },
@@ -1472,7 +1472,7 @@ app.post('/api/canvases/:id/frames', (req, res) => {
 app.patch('/api/frames/:id', (req, res) => {
   if (!requireFrame(req, res, req.params.id)) return
   const { actor: _ignored, ...patch } = req.body ?? {}
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   if (
     patch.pageId !== undefined &&
     !store.getCanvas(store.getFrame(req.params.id)!.canvasId)?.pages?.some((p) => p.id === patch.pageId)
@@ -1489,7 +1489,7 @@ app.patch('/api/frames/:id', (req, res) => {
 app.post('/api/frames/:id/append', (req, res) => {
   if (!requireFrame(req, res, req.params.id)) return
   const { html_chunk, start, done } = req.body ?? {}
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const frame = actions.appendFrameHtml(req.params.id, String(html_chunk ?? ''), actor, {
     start: !!start,
     done: !!done,
@@ -1500,7 +1500,7 @@ app.post('/api/frames/:id/append', (req, res) => {
 
 app.delete('/api/frames/:id', (req, res) => {
   if (!requireFrame(req, res, req.params.id)) return
-  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const frame = actions.deleteFrame(req.params.id, actor)
   if (!frame) return res.status(404).json({ error: 'frame not found' })
   res.json({ ok: true })
@@ -1626,7 +1626,7 @@ app.post('/api/canvases/:id/import', async (req, res) => {
       if (!takeImportSlot(req.user!.id)) return res.status(429).json({ error: 'too many imports — wait a minute' })
 
       const captures = await importSitePages(urls)
-      const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+      const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
       const frames = []
       const failures: { url: string; error: string }[] = []
       const rightmost = canvas.frames.reduce((right, frame) => Math.max(right, frame.x + frame.width), 0)
@@ -1675,7 +1675,7 @@ app.post('/api/canvases/:id/import', async (req, res) => {
     assertPublicHttpUrl(url)
     if (!takeImportSlot(req.user!.id)) return res.status(429).json({ error: 'too many imports — wait a minute' })
     const imported = await importPage(url)
-    const actor = actions.resolveActor({ name: req.user!.name, kind: 'user' })
+    const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
     const frame = actions.createFrame(
       canvas.id,
       { name: imported.title.slice(0, 80), width: imported.width, height: imported.height, html: imported.html },

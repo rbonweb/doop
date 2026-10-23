@@ -14,9 +14,17 @@ export interface Frame {
   createdAt: number
   updatedAt: number
   updatedBy: string
+  /** account id of the person behind the last edit (for an agent, whose token it used); unset on legacy frames */
+  updatedByUserId?: string
+  /** who made the last edit; unset on legacy frames */
+  updatedByKind?: 'user' | 'agent'
   /** product-made onboarding/example content (welcome demo, seeded frames) —
    *  not the user's work; agents must never read it as the canvas's style */
   demo?: boolean
+  /** true when the frame is a slide in the canvas's presentation */
+  slide?: boolean
+  /** presenter notes for the slide, markdown */
+  speakerNotes?: string
 }
 
 export interface CanvasMeta {
@@ -79,18 +87,43 @@ export interface CommunityItem {
 export interface CanvasPageInfo {
   id: string
   name: string
+  /** nested pages: the page this one sits under; unset = top level */
+  parentId?: string
 }
+
+/** What a person may do on a canvas, from least to most. 'owner' is never
+ *  granted through sharing — it is the canvas's creator. */
+export type CanvasRole = 'view' | 'comment' | 'edit' | 'owner'
+
+/** The roles sharing can hand out (invites, domain grants). */
+export type MemberRole = 'view' | 'comment' | 'edit'
+
+/** What the share link grants people who are not the owner or invited. */
+export type LinkAccess = 'none' | 'view' | 'comment' | 'edit'
+
+/** Who the share link admits: any signed-in account (the default), anyone
+ *  including signed-out visitors, or anyone who knows the link password. */
+export type LinkAudience = 'signed-in' | 'anyone' | 'password'
 
 export interface Canvas {
   id: string
   name: string
   ownerId?: string
   /** what the share link grants people who are not the owner or invited:
-   *  'edit' (anyone with the link collaborates) or 'none' (private — the
-   *  default; unset means 'none'). */
-  linkAccess?: 'edit' | 'none'
+   *  'edit' (anyone with the link collaborates), 'comment', 'view', or
+   *  'none' (private — the default; unset means 'none'). */
+  linkAccess?: LinkAccess
+  /** who the share link admits; unset = 'signed-in' */
+  linkAudience?: LinkAudience
+  /** true while a link password is set. The hash itself is server-only (the
+   *  store keeps it beside the canvas, never on it) because a Canvas is sent
+   *  to every client in the room. */
+  hasLinkPassword?: boolean
   /** user ids invited to collaborate (the owner is not listed) */
   memberIds?: string[]
+  /** role per invited user id; a member without an entry can edit (the only
+   *  role invites had before roles existed) */
+  memberRoles?: Record<string, MemberRole>
   /** the shared workspace this canvas belongs to — every workspace member
    *  can open it, on top of the owner and invited members. Unset = the
    *  owner's personal space. */
@@ -113,6 +146,67 @@ export interface Canvas {
   guidelines?: GuidelineDoc[]
   /** frames pinned to Memory as style exemplars — HTML snapshotted at pin time */
   references?: MemoryReference[]
+  /** sticky notes pinned to the canvas, a page or a frame */
+  notes?: CanvasNote[]
+}
+
+/** A sticky note: a markdown card on the canvas. Free-floating, or attached
+ *  to a frame (then it travels with the frame). */
+export interface CanvasNote {
+  id: string
+  canvasId: string
+  pageId?: string
+  /** the frame it is attached to; unset = free-floating */
+  frameId?: string
+  x: number
+  y: number
+  width: number
+  height: number
+  markdown: string
+  color: string
+  createdBy: string
+  /** account id of the human who made it */
+  createdByUserId?: string
+  createdAt: number
+  updatedAt: number
+  updatedBy: string
+}
+
+/** One saved state of a frame, kept so a design can be rolled back. */
+export interface FrameVersion {
+  id: string
+  frameId: string
+  canvasId: string
+  name: string
+  html: string
+  width: number
+  height: number
+  savedAt: number
+  savedBy: string
+  /** an agent edit, a human edit, or the snapshot taken before a restore */
+  reason: 'agent' | 'human' | 'restore'
+}
+
+/** A version as listed: everything but the (large) HTML. */
+export type FrameVersionInfo = Omit<FrameVersion, 'html'>
+
+/** Everyone signed in with an address on `domain` gets `role` on the canvas. */
+export interface DomainGrant {
+  canvasId: string
+  /** lower-case email domain, without the @ */
+  domain: string
+  role: MemberRole
+  addedBy: string
+  addedAt: number
+}
+
+/** Someone asked the owner for access to a canvas they cannot open. */
+export interface AccessRequest {
+  canvasId: string
+  userId: string
+  message?: string
+  at: number
+  status: 'pending' | 'declined'
 }
 
 /* ---- workspaces ---- */
@@ -263,6 +357,9 @@ export interface Actor {
   clientId?: string
   /** for agents: display name of the user whose OAuth token authorized it */
   owner?: string
+  /** account id of the person behind this actor — for an agent, the account
+   *  whose token it connected with. Unset for anonymous and server-side actors. */
+  userId?: string
 }
 
 export interface Presence {
@@ -382,6 +479,30 @@ export interface TaskFeedback {
   failureReason?: string
 }
 
+/** Everything needed to find a commented element again after the frame's HTML
+ *  was edited: identity hints strongest first, then where inside the element
+ *  the pin sat. */
+export interface CommentAnchor {
+  /** anchor format version */
+  v: 1
+  /** lower-case tag name */
+  tag: string
+  /** element id, if it has one */
+  id?: string
+  /** data-testid, if it has one */
+  testId?: string
+  /** ARIA role, explicit or implicit */
+  role?: string
+  /** aria-label, if it has one */
+  ariaLabel?: string
+  /** leading slice of the element's own text, to re-find it by content */
+  quote?: string
+  /** pin position inside the element's box, 0..1 from the left */
+  fx: number
+  /** pin position inside the element's box, 0..1 from the top */
+  fy: number
+}
+
 /** A comment pinned to a specific element inside a frame. Comments that
  *  mention @Doop are routed to the resident agent; others are notes for
  *  the humans in the room. */
@@ -398,6 +519,13 @@ export interface ElementComment {
   fromUserId?: string
   text: string
   at: number
+  /** structured anchor used to re-find the element after edits; unset on
+   *  comments from before anchors existed (they fall back to `selector`) */
+  anchor?: CommentAnchor
+  /** what kind of actor wrote it; unset on legacy comments */
+  fromKind?: ActorKind
+  /** account ids of the people the text @mentions */
+  mentions?: string[]
   /** true when the text @mentions a resident agent — that agent picks it up */
   forAgent?: boolean
   /** which resident agent was mentioned; defaults to Doop */
