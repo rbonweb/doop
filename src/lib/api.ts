@@ -492,6 +492,16 @@ export const api = {
   /** report the element's new CSS path after a pin was re-found by its anchor */
   healCommentAnchor: (commentId: string, selector: string) =>
     req(`/api/comments/${commentId}/anchor`, { method: 'PATCH', body: JSON.stringify({ selector }) }),
+  /** what this person has seen on a canvas, and when they first opened it (the first call starts that baseline) */
+  getSeen: (canvasId: string) =>
+    req<{ seen: Record<string, number>; baselineAt: number }>(`/api/canvases/${canvasId}/seen`),
+  /** report the frame versions this person has now seen; `keepalive` lets it finish while the page unloads */
+  postSeen: (canvasId: string, frames: Record<string, number>, keepalive = false) =>
+    req<{ ok: boolean }>(`/api/canvases/${canvasId}/seen`, {
+      method: 'POST',
+      body: JSON.stringify({ frames }),
+      keepalive,
+    }),
   retryComment: (commentId: string) => req(`/api/comments/${commentId}/retry`, { method: 'POST' }),
   retryTaskFeedback: (feedbackId: string) => req(`/api/feedback/${feedbackId}/retry`, { method: 'POST' }),
   /* automations: scheduled pulls and agent tasks */

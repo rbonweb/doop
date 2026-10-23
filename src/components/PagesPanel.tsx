@@ -17,6 +17,9 @@ import {
 import type { CanvasPageInfo } from '../../shared/types'
 import { useStore } from '../lib/store'
 import { savePages, moveFramesToPage } from '../lib/pageEdits'
+import { strongerMark, type Mark } from '../../shared/marks'
+import { useMarks } from '../lib/marks'
+import { MarkDot } from './MarkDot'
 import { loadCollapsedPages, saveCollapsedPages } from '../lib/pageCollapse'
 import { ApiError } from '../lib/api'
 import { Button } from './ui/button'
@@ -79,6 +82,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   const canvas = useStore((s) => s.canvas)
   const activePageId = useStore((s) => s.activePageId)
   const selectedIds = useStore((s) => s.selectedIds)
+  const marksByPage = useMarks((s) => s.pageMarks)
   const canvasId = canvas?.id
   const [busy, setBusy] = useState(false)
   const [renaming, setRenaming] = useState<string | null>(null)
@@ -294,6 +298,13 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
             (target) => target.id !== page.parentId && canNestPage(pages, page.id, target.id),
           )
           const atMaxDepth = depth >= MAX_PAGE_DEPTH
+          /* a collapsed page speaks for the subpages it hides */
+          const pageMark: Mark | undefined = collapsed
+            ? pageDescendants(pages, page.id).reduce<Mark | undefined>(
+                (mark, sub) => strongerMark(mark, marksByPage[sub.id]),
+                marksByPage[page.id],
+              )
+            : marksByPage[page.id]
           return (
             <ContextMenu key={page.id}>
               <ContextMenuTrigger asChild>
@@ -392,6 +403,9 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                     >
                       {page.name}
                     </button>
+                  )}
+                  {renaming !== page.id && (
+                    <MarkDot mark={pageMark} className={cn('mr-2', active && 'shadow-[0_0_0_1.5px_var(--surface)]')} />
                   )}
                   {collapsed && renaming !== page.id && (
                     <span

@@ -26,6 +26,7 @@ import { LimitWall, isResidentLimit } from '../components/TeamAllowance'
 import { PromptBar } from '../components/PromptBar'
 import { WorkingNow } from '../components/WorkingNow'
 import { SideRail } from '../components/SideRail'
+import { MarksChip, MarksController } from '../components/MarksChip'
 import { LayersPanel, LayersRailToggle } from '../components/LayersPanel'
 import { PagesPanel } from '../components/PagesPanel'
 import { Onboarding } from '../components/Onboarding'
@@ -293,6 +294,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
     /* --app-inset is 0 normally; the impersonation shell raises it so this
        fixed layer starts below the banner instead of under it */
     <div className="fixed inset-x-0 bottom-0 top-[var(--app-inset,0px)] flex flex-col">
+      <MarksController canvasId={canvasId} />
       {/* Three tiers. Desktop (≥ md): one row with the full action set. Tablet
           (xs..md): still one row — the id badge and the text actions fold
           into the ••• sheet so the name and the view switch keep their room.
@@ -321,6 +323,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
           <SegmentedItem value="board">Board</SegmentedItem>
         </Segmented>
         <div className="ml-auto flex items-center gap-2.5 max-md:hidden">
+          <MarksChip />
           <Button
             variant="bare"
             className="h-8 px-2.5 text-[12.5px] font-medium"

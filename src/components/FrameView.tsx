@@ -20,6 +20,8 @@ import { ContextMenu, ContextMenuTrigger } from './ui/context-menu'
 import { AGENT_ROLES, DEFAULT_ROLE_ID, mentionedRole, roleName } from '../../shared/agents'
 import { posthog } from '../lib/posthog'
 import { isResidentLimit } from './TeamAllowance'
+import { MarkDot } from './MarkDot'
+import { useFrameMark } from '../lib/marks'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
@@ -127,6 +129,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   /* the title bar offers Export only when this is the one selected frame: with
      a group, the top bar's Export acts on all of them */
   const soleSelected = useStore((s) => s.selectedIds.length === 1 && s.selectedIds[0] === frame.id)
+  const mark = useFrameMark(frame.id)
   /* the document renders once the Stage's scheduler reaches this frame, or at once when someone selects it */
   const scheduled = useFrameMounted(frame.id)
   const [selectedOnce, setSelectedOnce] = useState(false)
@@ -771,6 +774,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                 </span>
               </Tooltip>
             )}
+            <MarkDot mark={mark} />
             <span className="overflow-hidden text-ellipsis">{frame.name}</span>
             {soleSelected && !editing && !dragging && (
               <Button
