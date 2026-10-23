@@ -111,6 +111,14 @@
   --success-ink: #1e7a4c;
   --warning: #ffb800;
   --warning-ink: #8a5b00;
+  /* Sticky-note hues: each card mixes its hue into --surface, so the tint
+     follows the theme. Yellow and green borrow the status fills. */
+  --note-yellow: var(--warning);
+  --note-pink: #ec6b9e;
+  --note-blue: #4f8df5;
+  --note-green: var(--success);
+  --note-purple: #9174f0;
+  --note-gray: #8b8880;
   --font-ui: 'Instrument Sans', sans-serif;
   /* Display is the SAME sans as the UI — the chrome is quiet by design.
      Editorial serif is opt-in per element via `font-serif`, reserved for
@@ -282,6 +290,10 @@
   --success-ink: #6fd08e;
   --warning: #ffb800;
   --warning-ink: #e6b04a;
+  --note-pink: #f07fae;
+  --note-blue: #6da0ff;
+  --note-purple: #a68cff;
+  --note-gray: #a09d95;
   /* Dark surfaces cannot lift on shadow alone: each tier keeps a half-pixel
      light-catch ring on top of a deeper ambient drop. */
   --shadow-card:

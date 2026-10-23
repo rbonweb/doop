@@ -12,6 +12,17 @@ import {
   roleName,
   stripMentions,
 } from '../shared/agents.ts'
+import { canvasPages, framePageId } from '../shared/pages.ts'
+import {
+  attachedNotePlacement,
+  clampNoteHeight,
+  clampNoteWidth,
+  isNoteColor,
+  MAX_NOTE_CHARS,
+  NOTE_COLORS,
+  NOTE_DEFAULT_SIZE,
+  shiftAttachedNotes,
+} from '../shared/notes.ts'
 import { decodeEscapedHtml, looksEscapedHtml, repairEscapedHtml } from './escapedHtml.ts'
 import { emitCanvasEvent } from './events.ts'
 import type {
@@ -19,6 +30,7 @@ import type {
   ActorKind,
   ActivityItem,
   AgentTask,
+  CanvasNote,
   CardScope,
   ChatMessage,
   DesignDecision,
@@ -1322,8 +1334,10 @@ export function updateFrame(
   if (patch.html !== undefined) patch = { ...patch, html: repairEscapedHtml(patch.html) }
   const prevName = before.name
   const prevHtml = before.html
+  const prevPos = { x: before.x, y: before.y }
   const frame = store.updateFrame(frameId, patch, actor.name, editorOf(actor))
   if (!frame) return undefined
+  carryNotesWithFrame(frame, prevPos, actor)
 
   const htmlChanged = patch.html !== undefined && patch.html !== prevHtml
   if (htmlChanged && actor.kind === 'agent') {
@@ -1378,6 +1392,115 @@ export function deleteFrame(frameId: string, actor: Actor): Frame | undefined {
   logActivity(frame.canvasId, actor, `deleted frame “${frame.name}”`, frame.id)
   touch(frame.canvasId, actor, null)
   return frame
+}
+
+/* ------------------------------------------------------------------ */
+/* Sticky notes: markdown cards on the canvas, free-floating or       */
+/* attached beside a frame. Validated here so REST and MCP agree.     */
+/* ------------------------------------------------------------------ */
+
+export type NoteResult = { ok: true; note: CanvasNote } | { ok: false; error: string; status: 400 | 404 }
+
+const noteFail = (error: string, status: 400 | 404 = 400): NoteResult => ({ ok: false, error, status })
+
+type NoteFields = Pick<CanvasNote, 'x' | 'y' | 'width' | 'height' | 'markdown' | 'color'>
+
+/** Check the editable fields of a note request. Sizes are clamped into range
+ *  rather than refused (an agent asking for 5000 px gets the largest allowed);
+ *  everything else that is wrong is an error naming the field. */
+function parseNoteFields(raw: Record<string, unknown>): { fields: Partial<NoteFields> } | { error: string } {
+  const fields: Partial<NoteFields> = {}
+  if (raw.markdown !== undefined) {
+    if (typeof raw.markdown !== 'string') return { error: 'markdown must be a string' }
+    if (raw.markdown.length > MAX_NOTE_CHARS) return { error: `markdown is limited to ${MAX_NOTE_CHARS} characters` }
+    fields.markdown = raw.markdown
+  }
+  if (raw.color !== undefined) {
+    if (!isNoteColor(raw.color)) return { error: `color must be one of ${NOTE_COLORS.join(', ')}` }
+    fields.color = raw.color
+  }
+  for (const key of ['x', 'y', 'width', 'height'] as const) {
+    const value = raw[key]
+    if (value === undefined) continue
+    if (typeof value !== 'number' || !Number.isFinite(value)) return { error: `${key} must be a finite number` }
+    if (key === 'width') fields.width = clampNoteWidth(value)
+    else if (key === 'height') fields.height = clampNoteHeight(value)
+    else fields[key] = Math.round(value)
+  }
+  return { fields }
+}
+
+export function createNote(canvasId: string, raw: Record<string, unknown>, actor: Actor): NoteResult {
+  const canvas = store.getCanvas(canvasId)
+  if (!canvas) return noteFail('canvas not found', 404)
+  const parsed = parseNoteFields(raw)
+  if ('error' in parsed) return noteFail(parsed.error)
+  const { frameId, pageId } = raw
+  if (frameId !== undefined && typeof frameId !== 'string') return noteFail('frame_id must be a string')
+  if (pageId !== undefined && typeof pageId !== 'string') return noteFail('page_id must be a string')
+  const frame = frameId ? canvas.frames.find((f) => f.id === frameId) : undefined
+  if (frameId && !frame) return noteFail(`no frame with id ${frameId} on this canvas`)
+  if (pageId && !canvasPages(canvas).some((p) => p.id === pageId)) return noteFail(`no page with id ${pageId}`)
+
+  const width = parsed.fields.width ?? NOTE_DEFAULT_SIZE.width
+  /* attached with no spot given: beside the frame, like a margin note */
+  const spot = frame ? attachedNotePlacement(frame, width) : undefined
+  const note = store.createNote(
+    canvasId,
+    {
+      ...parsed.fields,
+      width,
+      x: parsed.fields.x ?? spot?.x,
+      y: parsed.fields.y ?? spot?.y,
+      /* an attached note lives on its frame's page */
+      pageId: frame ? framePageId(canvas, frame) : pageId,
+      frameId: frame?.id,
+    },
+    actor.name,
+    actor.userId,
+  )
+  if (!note) return noteFail('could not create the note')
+  broadcast(canvasId, { type: 'note:upsert', note, actor })
+  logActivity(canvasId, actor, frame ? `added a sticky note beside “${frame.name}”` : 'added a sticky note', frame?.id)
+  touch(canvasId, actor, frame?.id)
+  return { ok: true, note }
+}
+
+export function updateNote(noteId: string, raw: Record<string, unknown>, actor: Actor): NoteResult {
+  const found = store.findNote(noteId)
+  if (!found) return noteFail('note not found', 404)
+  const parsed = parseNoteFields(raw)
+  if ('error' in parsed) return noteFail(parsed.error)
+  const textChanged = parsed.fields.markdown !== undefined && parsed.fields.markdown !== found.note.markdown
+  const note = store.updateNote(found.canvasId, noteId, parsed.fields, actor.name)
+  if (!note) return noteFail('note not found', 404)
+  broadcast(found.canvasId, { type: 'note:upsert', note, actor })
+  /* moving and resizing are not worth an activity line each; the words are */
+  if (textChanged) logActivity(found.canvasId, actor, 'edited a sticky note', note.frameId)
+  touch(found.canvasId, actor, note.frameId)
+  return { ok: true, note }
+}
+
+export function deleteNote(noteId: string, actor: Actor): NoteResult {
+  const found = store.findNote(noteId)
+  if (!found) return noteFail('note not found', 404)
+  const note = store.deleteNote(found.canvasId, noteId)
+  if (!note) return noteFail('note not found', 404)
+  broadcast(found.canvasId, { type: 'note:delete', id: noteId, actor })
+  logActivity(found.canvasId, actor, 'removed a sticky note', note.frameId)
+  touch(found.canvasId, actor, null)
+  return { ok: true, note }
+}
+
+/** A frame that moved takes the notes attached to it along: same delta, same
+ *  update path, so an Inspector edit, an agent's update_frame and an undo all
+ *  carry them without every caller remembering to. */
+function carryNotesWithFrame(frame: Frame, prev: { x: number; y: number }, actor: Actor) {
+  const moves = shiftAttachedNotes(store.getNotes(frame.canvasId), frame.id, frame.x - prev.x, frame.y - prev.y)
+  for (const move of moves) {
+    const note = store.updateNote(frame.canvasId, move.id, { x: move.x, y: move.y }, actor.name)
+    if (note) broadcast(frame.canvasId, { type: 'note:upsert', note, actor })
+  }
 }
 
 /** Remove a canvas with everything attached to it; viewers are told to leave. */

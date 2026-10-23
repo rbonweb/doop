@@ -7,6 +7,7 @@ import type {
   ChatMessage,
   Canvas,
   CanvasMeta,
+  CanvasNote,
   CardScope,
   CommunityCategory,
   CommunityItem,
@@ -222,6 +223,19 @@ export interface PlansResponse {
  *  once; an unknown email waits (and was emailed, when SMTP is set up). */
 export type WorkspaceInviteResult = { member: WorkspaceMember } | { invite: WorkspaceInvite; emailed: boolean }
 
+/** What a new sticky note is made of; the server fills in the rest. */
+export interface NoteDraft {
+  pageId?: string
+  frameId?: string
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  markdown?: string
+  color?: string
+}
+export type NotePatch = Partial<Pick<CanvasNote, 'x' | 'y' | 'width' | 'height' | 'markdown' | 'color'>>
+
 function actor() {
   const { clientId, name } = getIdentity()
   return { clientId, name, kind: 'user' as const }
@@ -409,6 +423,11 @@ export const api = {
     req<Frame>('/api/frames/' + frameId, { method: 'PATCH', body: JSON.stringify({ ...patch, actor: actor() }) }),
   deleteFrame: (frameId: string) =>
     req('/api/frames/' + frameId, { method: 'DELETE', body: JSON.stringify({ actor: actor() }) }),
+  createNote: (canvasId: string, input: NoteDraft) =>
+    req<CanvasNote>(`/api/canvases/${canvasId}/notes`, { method: 'POST', body: JSON.stringify(input) }),
+  updateNote: (noteId: string, patch: NotePatch) =>
+    req<CanvasNote>(`/api/notes/${noteId}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteNote: (noteId: string) => req('/api/notes/' + noteId, { method: 'DELETE' }),
   sendTaskFeedback: (taskId: string, text: string) =>
     req(`/api/tasks/${taskId}/feedback`, { method: 'POST', body: JSON.stringify({ text, from: getIdentity().name }) }),
   importPage: (canvasId: string, url: string) =>

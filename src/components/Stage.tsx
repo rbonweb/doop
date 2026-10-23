@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../lib/store'
 import { usePageCanvas, currentPageCanvas } from '../lib/pages'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { FrameView } from './FrameView'
+import { StickyNote } from './StickyNote'
+import { addNote } from '../lib/notes'
+import { notePageId } from '../../shared/notes'
 import { useFrameMountScheduler } from '../lib/frameMounting'
 import { FlowOverlay } from './FlowOverlay'
 import { GhostFrames } from './GhostFrames'
@@ -46,6 +49,13 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   const setViewport = useStore((s) => s.setViewport)
   const canvas = usePageCanvas()
   const activePageId = useStore((s) => s.activePageId)
+  /* sticky notes: the full canvas decides which page an attached note is on */
+  const fullCanvas = useStore((s) => s.canvas)
+  const notesVisible = useStore((s) => s.notesVisible)
+  const pageNotes = useMemo(
+    () => (fullCanvas?.notes ?? []).filter((n) => notePageId(fullCanvas!, n) === activePageId),
+    [fullCanvas, activePageId],
+  )
   const select = useStore((s) => s.select)
   const panMode = useStore((s) => s.panMode)
   const [panning, setPanning] = useState(false)
@@ -616,6 +626,14 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
               {canvas?.frames.map((f) => (
                 <FrameView key={f.id} frame={f} raster={raster} />
               ))}
+              {notesVisible &&
+                pageNotes.map((n) => (
+                  <StickyNote
+                    key={n.id}
+                    note={n}
+                    frameName={n.frameId ? fullCanvas?.frames.find((f) => f.id === n.frameId)?.name : undefined}
+                  />
+                ))}
               <GhostFrames />
               <FlowOverlay />
               <SnapGuides />
@@ -633,6 +651,12 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
 
         <Toolbar className="absolute bottom-[calc(8px+env(safe-area-inset-bottom))] left-1/2 z-[35] -translate-x-1/2 sm:bottom-4">
           <ToolbarButton onClick={onAddFrame}>+ Frame</ToolbarButton>
+          <ToolbarButton
+            title="Add a sticky note (N shows or hides all notes)"
+            onClick={() => canvas && void addNote(canvas.id)}
+          >
+            Note
+          </ToolbarButton>
           <ToolbarDivider />
           <ToolbarButton
             aria-label="Zoom out"
@@ -669,6 +693,14 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
               <MenuHint>{MOD_KEY}V</MenuHint>
             </ContextMenuItem>
             <ContextMenuItem onSelect={onAddFrame}>New frame</ContextMenuItem>
+            <ContextMenuItem
+              onSelect={() => {
+                const at = toWorld(bgAt.current.x, bgAt.current.y)
+                void addNote(canvas.id, { at: { x: Math.round(at.x), y: Math.round(at.y) } })
+              }}
+            >
+              New note
+            </ContextMenuItem>
           </ContextMenuContent>
         )}
       </ContextMenu>

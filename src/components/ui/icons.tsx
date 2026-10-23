@@ -48,6 +48,7 @@ import {
   NavArrowRight,
   PlaySolid,
   Plus,
+  Post,
   RefreshDouble,
   Search,
   ShareAndroid,
@@ -97,6 +98,8 @@ export const PanelCollapseRightIcon = icon(SidebarCollapse, mirrored)
 export const PanelExpandRightIcon = icon(SidebarExpand, mirrored)
 export const LayersIcon = icon(ViewStructureUp)
 export const FrameIcon = icon(FrameAltEmpty)
+/** a sticky note */
+export const NoteIcon = icon(Post)
 export const BoxIcon = icon(Square)
 export const TextIcon = icon(Text)
 export const ImageIcon = icon(MediaImage)

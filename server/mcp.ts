@@ -1,4 +1,5 @@
 import { canvasPages, samePages } from '../shared/pages.ts'
+import { MAX_NOTE_CHARS, NOTE_COLORS, noteExcerpt } from '../shared/notes.ts'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { Request, Response } from 'express'
@@ -6,7 +7,7 @@ import { fromNodeHeaders } from 'better-auth/node'
 import { z } from 'zod'
 import { store } from './store.ts'
 import * as actions from './actions.ts'
-import { canAccessCanvas } from './access.ts'
+import { canAccessCanvas, canEditCanvas } from './access.ts'
 import { isAgentKeySecret, verifyAgentKey } from './agentKeys.ts'
 import * as workspaces from './workspaces.ts'
 import { auth, getUserName, isBanned, PUBLIC_ORIGIN } from './auth.ts'
@@ -194,6 +195,37 @@ function frameSummary(f: {
   }
 }
 
+const NOTE_EXCERPT_CHARS = 400
+
+function noteSummary(n: {
+  id: string
+  frameId?: string
+  pageId?: string
+  x: number
+  y: number
+  width: number
+  height: number
+  color: string
+  markdown: string
+  createdBy: string
+  updatedAt: number
+}) {
+  return {
+    id: n.id,
+    ...(n.frameId ? { frame_id: n.frameId } : {}),
+    ...(n.pageId ? { page_id: n.pageId } : {}),
+    x: n.x,
+    y: n.y,
+    width: n.width,
+    height: n.height,
+    color: n.color,
+    text: noteExcerpt(n.markdown, NOTE_EXCERPT_CHARS),
+    ...(n.markdown.length > NOTE_EXCERPT_CHARS ? { chars: n.markdown.length } : {}),
+    createdBy: n.createdBy,
+    updatedAt: new Date(n.updatedAt).toISOString(),
+  }
+}
+
 /** owner is the connecting user's display name (for attribution); ownerId is
  *  their user id — canvases the agent creates or lists are scoped to it, the
  *  same isolation the web UI gets. */
@@ -211,6 +243,11 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
     const f = store.getFrame(frameId)
     if (!f) return undefined
     return canvasFor(f.canvasId) ? f : undefined
+  }
+  /* notes change the canvas, so they ask the edit question, not the view one */
+  const editableCanvasFor = (canvasId: string) => {
+    const c = canvasFor(canvasId)
+    return c && canEditCanvas(ownerId, c) ? c : undefined
   }
   const noCanvas = (id: string) => err(`no canvas with id ${id} accessible to this account`)
   const noFrame = (id: string) => err(`no frame with id ${id} accessible to this account`)
@@ -372,6 +409,7 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
              content, not user work — hidden so agents never mistake them for
              the canvas's established style */
           frames: c.frames.filter((f) => !f.demo).map(frameSummary),
+          ...(c.notes?.length ? { notes: c.notes.map(noteSummary) } : {}),
           guidelines: docs.map((d) => ({
             name: d.name,
             title: actions.guidelineTitle(d),
@@ -1501,6 +1539,79 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
       const frame = actions.deleteFrame(frame_id, actorFrom(agent_name))
       if (!frame) return noFrame(frame_id)
       return text({ ok: true, deleted: frame.name })
+    },
+  )
+
+  server.registerTool(
+    'create_note',
+    {
+      description:
+        'Pin a sticky note (markdown) to the canvas. Pass frame_id to attach it beside a frame — it lands to the left of the frame, level with its top, and travels with the frame when someone moves it. Omit frame_id for a free-floating note (set x/y, or it is placed near the origin). Use notes to explain the intent of a frame, how variants differ, or an open question. A question that needs a decision should still be a comment. Link to a frame from the text with [label](goto:<frame_id>).',
+      inputSchema: {
+        canvas_id: z.string(),
+        text: z.string().describe(`Markdown, at most ${MAX_NOTE_CHARS} characters`),
+        frame_id: z.string().optional().describe('Attach the note to this frame'),
+        page_id: z
+          .string()
+          .optional()
+          .describe("Page for a free-floating note (attached notes use their frame's page)"),
+        color: z.enum(NOTE_COLORS).optional().describe('Default yellow'),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        agent_name: agentName,
+      },
+    },
+    async ({ canvas_id, text: markdown, frame_id, page_id, color, x, y, agent_name }) => {
+      if (!editableCanvasFor(canvas_id)) return noCanvas(canvas_id)
+      const actor = actorFrom(agent_name)
+      const result = actions.createNote(canvas_id, { markdown, frameId: frame_id, pageId: page_id, color, x, y }, actor)
+      if (!result.ok) return err(result.error)
+      return withFeedback(text({ ok: true, note: noteSummary(result.note) }), canvas_id, actor)
+    },
+  )
+
+  server.registerTool(
+    'update_note',
+    {
+      description:
+        'Change a sticky note: rewrite its text, recolour it, move it or resize it. Only the fields you pass change.',
+      inputSchema: {
+        note_id: z.string(),
+        text: z.string().optional().describe(`Replacement markdown, at most ${MAX_NOTE_CHARS} characters`),
+        color: z.enum(NOTE_COLORS).optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        width: z.number().optional(),
+        height: z.number().optional(),
+        agent_name: agentName,
+      },
+    },
+    async ({ note_id, text: markdown, agent_name, ...rest }) => {
+      const found = store.findNote(note_id)
+      if (!found || !editableCanvasFor(found.canvasId))
+        return err(`no note with id ${note_id} accessible to this account`)
+      const patch = Object.fromEntries(Object.entries({ markdown, ...rest }).filter(([, v]) => v !== undefined))
+      if (!Object.keys(patch).length) return err('nothing to update')
+      const actor = actorFrom(agent_name)
+      const result = actions.updateNote(note_id, patch, actor)
+      if (!result.ok) return err(result.error)
+      return withFeedback(text({ ok: true, note: noteSummary(result.note) }), found.canvasId, actor)
+    },
+  )
+
+  server.registerTool(
+    'delete_note',
+    {
+      description: 'Remove a sticky note from its canvas.',
+      inputSchema: { note_id: z.string(), agent_name: agentName },
+    },
+    async ({ note_id, agent_name }) => {
+      const found = store.findNote(note_id)
+      if (!found || !editableCanvasFor(found.canvasId))
+        return err(`no note with id ${note_id} accessible to this account`)
+      const result = actions.deleteNote(note_id, actorFrom(agent_name))
+      if (!result.ok) return err(result.error)
+      return text({ ok: true })
     },
   )
 

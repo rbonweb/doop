@@ -176,6 +176,13 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
         select(null)
         useStore.getState().setFollowing(null)
       }
+      /* N shows or hides every sticky note, for this viewer only */
+      if (e.key.toLowerCase() === 'n' && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        const s = useStore.getState()
+        s.setNotesVisible(!s.notesVisible)
+        s.pushNotice(s.notesVisible ? 'Notes hidden. Press N to show them.' : 'Notes shown')
+        return
+      }
       if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
         e.preventDefault()
         if (e.shiftKey) void redo()

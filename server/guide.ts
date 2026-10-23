@@ -368,6 +368,10 @@ ${DESIGN_QUALITY}
   you actually observe; otherwise ask the user for screenshots or an HTML export instead
   of inventing the page.
 
+## Sticky notes — say why, not just what
+
+A sticky note is a short markdown card pinned to the canvas. create_note attaches it beside a frame (pass frame_id: it sits left of the frame and moves with it) or leaves it free-floating. Use one to explain the intent of a frame, how two variants differ, or an open question the team should see at a glance, and link to a frame with [label](goto:<frame_id>). Keep notes to a few lines. A question that needs a decision from someone is still a comment, not a note, because comments can be answered and resolved. get_canvas lists existing notes (id, frame, text excerpt): update_note revises one instead of adding a second, and delete_note removes one that went stale.
+
 ## Exporting frames as images
 
 Every frame response includes an image_url — a public, hotlinkable render of the frame's

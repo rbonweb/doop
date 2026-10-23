@@ -1,9 +1,11 @@
 import { create } from 'zustand'
 import { canvasPages, framePageId } from '../../shared/pages'
+import { shiftAttachedNotes } from '../../shared/notes'
 import type {
   ActivityItem,
   AgentTask,
   Canvas,
+  CanvasNote,
   ChatMessage,
   DesignDecision,
   ElementComment,
@@ -109,6 +111,12 @@ interface State {
   /** a request for the Stage to glide the camera to a frame — the prompt bar
    *  raises it so a first deliverable streams in on-screen, never off-canvas */
   flyTo: { frameId: string; at: number } | { point: { x: number; y: number }; at: number } | null
+  /** sticky notes are showing on the stage — per viewer, `n` toggles it */
+  notesVisible: boolean
+  /** notes this viewer has folded down to a corner chip */
+  foldedNotes: Record<string, true>
+  /** the note whose text is open for editing on this client */
+  editingNoteId: string | null
   /** clientId of the peer whose camera this one is tracking (Figma-style
    *  follow); any camera move of our own lets go */
   following: string | null
@@ -147,6 +155,14 @@ interface State {
   patchFrameLocal(frameId: string, patch: Partial<Frame>): void
   removeFrame(frameId: string): void
   renameCanvasLocal(name: string): void
+  /** insert or replace a sticky note on the open canvas */
+  upsertNote(note: CanvasNote): void
+  removeNote(id: string): void
+  /** move/resize/recolour a note in this client only (a drag in flight, an optimistic save) */
+  patchNoteLocal(id: string, patch: Partial<CanvasNote>): void
+  setNotesVisible(v: boolean): void
+  toggleNoteFolded(id: string): void
+  setEditingNote(id: string | null): void
   /** upsert (doc set) or remove (doc null) a style guide on the open canvas */
   setGuidelineLocal(name: string, doc: GuidelineDoc | null): void
   /** pin (reference set) or unpin (null) a Memory reference on the open canvas */
@@ -187,6 +203,8 @@ interface State {
 }
 
 const LAYERS_OPEN_KEY = 'doop:layers-open'
+const NOTES_VISIBLE_KEY = 'doop:notes-visible'
+const NOTES_FOLDED_KEY = 'doop:notes-folded'
 /* longer than the slowest real export (Canva: render + verify, ~3 min) */
 const BUSY_NOTICE_MAX_MS = 5 * 60_000
 
@@ -195,6 +213,33 @@ function readLayersOpen(): boolean {
     return localStorage.getItem(LAYERS_OPEN_KEY) !== '0'
   } catch {
     return true
+  }
+}
+
+function readNotesVisible(): boolean {
+  try {
+    return localStorage.getItem(NOTES_VISIBLE_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function readFoldedNotes(): Record<string, true> {
+  try {
+    const ids: unknown = JSON.parse(localStorage.getItem(NOTES_FOLDED_KEY) ?? '[]')
+    return Array.isArray(ids)
+      ? Object.fromEntries(ids.filter((id) => typeof id === 'string').map((id) => [id, true]))
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function remember(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    /* private mode: the choice just doesn't stick */
   }
 }
 
@@ -224,6 +269,9 @@ export const useStore = create<State>((set, get) => ({
   selectedElement: null,
   elementPanelOpen: false,
   layersOpen: readLayersOpen(),
+  notesVisible: readNotesVisible(),
+  foldedNotes: readFoldedNotes(),
+  editingNoteId: null,
   viewport: { x: 0, y: 0, zoom: 1 },
   snapGuides: [],
   connected: false,
@@ -387,13 +435,28 @@ export const useStore = create<State>((set, get) => ({
           : {}),
       }
     }),
+  /* A frame that moves takes its attached notes along by the same delta. This
+     is the one local path every move goes through (a drag, a peer's drag, an
+     undo), so notes never lag behind; the server shifts them by the same
+     arithmetic when the move is saved. */
   patchFrameLocal: (frameId, patch) =>
     set((s) => {
       if (!s.canvas) return {}
+      const before = s.canvas.frames.find((f) => f.id === frameId)
+      const moves = before
+        ? shiftAttachedNotes(
+            s.canvas.notes ?? [],
+            frameId,
+            (patch.x ?? before.x) - before.x,
+            (patch.y ?? before.y) - before.y,
+          )
+        : []
+      const byId = new Map(moves.map((m) => [m.id, m]))
       return {
         canvas: {
           ...s.canvas,
           frames: s.canvas.frames.map((f) => (f.id === frameId ? { ...f, ...patch } : f)),
+          ...(moves.length ? { notes: s.canvas.notes?.map((n) => ({ ...n, ...byId.get(n.id) })) } : {}),
         },
       }
     }),
@@ -401,8 +464,14 @@ export const useStore = create<State>((set, get) => ({
     set((s) => {
       if (!s.canvas) return {}
       const selectedIds = s.selectedIds.filter((id) => id !== frameId)
+      const notes = s.canvas.notes?.filter((n) => n.frameId !== frameId)
       return {
-        canvas: { ...s.canvas, frames: s.canvas.frames.filter((f) => f.id !== frameId) },
+        canvas: {
+          ...s.canvas,
+          frames: s.canvas.frames.filter((f) => f.id !== frameId),
+          /* a note attached to the frame goes with it */
+          ...(notes && notes.length !== s.canvas.notes?.length ? { notes } : {}),
+        },
         selectedIds,
         /* losing the primary promotes the last surviving member, so a group
            never sits selected with nothing driving the Inspector/presence */
@@ -412,6 +481,48 @@ export const useStore = create<State>((set, get) => ({
         ctxMenu: s.ctxMenu?.frameId === frameId ? null : s.ctxMenu,
       }
     }),
+  upsertNote: (note) =>
+    set((s) => {
+      if (!s.canvas || note.canvasId !== s.canvas.id) return {}
+      const notes = s.canvas.notes ?? []
+      return {
+        canvas: {
+          ...s.canvas,
+          notes: notes.some((n) => n.id === note.id)
+            ? notes.map((n) => (n.id === note.id ? note : n))
+            : [...notes, note],
+        },
+      }
+    }),
+  removeNote: (id) =>
+    set((s) => {
+      if (!s.canvas?.notes?.some((n) => n.id === id)) return {}
+      const notes = s.canvas.notes.filter((n) => n.id !== id)
+      const { [id]: _folded, ...foldedNotes } = s.foldedNotes
+      return {
+        canvas: { ...s.canvas, notes },
+        foldedNotes,
+        editingNoteId: s.editingNoteId === id ? null : s.editingNoteId,
+      }
+    }),
+  patchNoteLocal: (id, patch) =>
+    set((s) => {
+      if (!s.canvas?.notes?.some((n) => n.id === id)) return {}
+      return { canvas: { ...s.canvas, notes: s.canvas.notes.map((n) => (n.id === id ? { ...n, ...patch } : n)) } }
+    }),
+  setNotesVisible: (notesVisible) => {
+    remember(NOTES_VISIBLE_KEY, notesVisible ? '1' : '0')
+    set({ notesVisible })
+  },
+  toggleNoteFolded: (id) =>
+    set((s) => {
+      const foldedNotes = { ...s.foldedNotes }
+      if (foldedNotes[id]) delete foldedNotes[id]
+      else foldedNotes[id] = true
+      remember(NOTES_FOLDED_KEY, JSON.stringify(Object.keys(foldedNotes)))
+      return { foldedNotes }
+    }),
+  setEditingNote: (editingNoteId) => set({ editingNoteId }),
   renameCanvasLocal: (name) => set((s) => (s.canvas ? { canvas: { ...s.canvas, name } } : {})),
   setGuidelineLocal: (name, doc) =>
     set((s) => {
