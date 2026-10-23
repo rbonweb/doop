@@ -37,6 +37,8 @@ import { Panel, PanelBody, PanelHeader, PanelTabsRoot, PanelTabs, PanelTab, Pane
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Tooltip } from './ui/tooltip'
+import { MarkDot } from './MarkDot'
+import { useFrameMark } from '../lib/marks'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -629,6 +631,7 @@ function FrameRow({
 }) {
   const { frame } = row
   const stream = useStore((s) => s.streams[frame.id])
+  const mark = useFrameMark(frame.id)
   const presences = useStore((s) => s.presences)
   const me = getIdentity().clientId
   const editors = Object.values(presences).filter(
@@ -658,6 +661,7 @@ function FrameRow({
             }}
             trailing={
               <>
+                <MarkDot mark={mark} />
                 {stream && (
                   <span className={editorChip} style={{ background: stream.color }}>
                     <AgentIcon name={stream.name} size={8} color="#fff" />

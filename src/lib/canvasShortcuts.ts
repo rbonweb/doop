@@ -7,6 +7,7 @@ import { copyFrames, duplicateFrames } from './frameClipboard'
 import { redo, undo } from './history'
 import { deleteSelection } from './layerEdits'
 import { applyDevice, restoreDevices, tidyFrames } from './layoutEdits'
+import { reviewNext } from './marks'
 import { isOverlayOpen, type Shortcut } from './shortcuts'
 import { useStore } from './store'
 
@@ -256,6 +257,14 @@ export const canvasShortcuts: Shortcut[] = [
       s.setNotesVisible(!s.notesVisible)
       s.pushNotice(s.notesVisible ? 'Notes hidden. Press N to show them.' : 'Notes shown')
     },
+  },
+  {
+    id: 'next-marked',
+    key: 'u',
+    label: 'Jump to the next frame that needs you, then the next new one',
+    group: 'View',
+    when: onCanvas,
+    run: () => reviewNext(),
   },
   {
     id: 'export',

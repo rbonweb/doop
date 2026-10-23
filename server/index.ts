@@ -22,6 +22,7 @@ import { notificationsRouter } from './notifications.ts'
 import * as webhooks from './webhooks.ts'
 import { webhooksRouter } from './webhookRoutes.ts'
 import { commentAnchorRouter } from './commentRoutes.ts'
+import { seenRouter } from './seenRoutes.ts'
 import {
   canAccessCanvas,
   canEditCanvas,
@@ -703,6 +704,7 @@ app.use('/api/local-agent', localAgentRouter)
 app.use('/api/notifications', notificationsRouter)
 app.use('/api/webhooks', webhooksRouter)
 app.use('/api/comments', commentAnchorRouter)
+app.use('/api/canvases', seenRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/community', communityRouter)
 app.use('/api/automations', automationsRouter)
