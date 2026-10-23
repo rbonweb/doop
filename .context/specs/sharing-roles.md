@@ -19,9 +19,9 @@ Roles bound what a person, and the agents acting as them, can do.
 
 ## Enforcement
 
-- REST: every route in `server/index.ts` resolves a minimum role through `requireCanvas(req, res, id, min)` and `requireFrame`. Reads need view, comments, replies, resolve and chat need comment, everything that changes the design or its settings needs edit. Renaming needs edit; sharing settings need the owner.
+- REST: every route in `server/index.ts` resolves a minimum role through `requireCanvas(req, res, id, min)` and `requireFrame`. Reads need view (version history is the exception: it needs edit), comments, replies, resolve and chat need comment, everything that changes the design or its settings needs edit. Renaming needs edit; sharing settings need the owner.
 - WebSocket: the join resolves the role and the `init` payload carries it. View-only sockets get a reduced payload (no chat or task log) and only whitelisted broadcasts. `frame:drag` re-resolves edit on every message and answers a refused one with `{type:'error'}` to that socket only, never a broadcast. When sharing changes `refreshRoomAccess` re-resolves every socket: it sends `{type:'role'}` on change or closes with 4403 when access is lost.
-- MCP: every tool resolves the role of the account behind the key through `canvasFor` and `frameFor`. Reads need view, comment tools need comment, writes need edit. A stranger gets the same answer as a missing canvas. Password links never admit agents.
+- MCP: every tool resolves the role of the account behind the key through `canvasFor` and `frameFor`. Reads need view (`list_frame_versions` needs edit), comment tools need comment, writes need edit. A stranger gets the same answer as a missing canvas. Password links never admit agents.
 - Resident agents: an `@agent` mention from a person below edit stores a plain comment and returns "Only editors can ask agents to make changes."; the agent is never queued. Local-agent and Gemini cloud runs need edit.
 
 ## Access requests
@@ -42,12 +42,13 @@ The owner sets a password of 8 to 200 characters. It is stored as `scrypt$N$salt
 
 ## History, notes, anchors, marks and pages
 
-Version history, sticky notes, comment anchors, review marks and nested pages follow the same ladder, through the resolver (`canEditCanvas` and `canEditFrame` in `server/access.ts` are `canEdit` under another name).
+Version history, sticky notes, comment anchors, review marks, nested pages, slides and decks follow the same ladder, through the resolver (`canEditCanvas` and `canEditFrame` in `server/access.ts` are `canEdit` under another name).
 
-- View: `GET /api/frames/:id/versions` and `/versions/:versionId`, `GET` and `POST /api/canvases/:id/seen` (signed-in only, guests get 401), `list_frame_versions`, the notes in `get_canvas`, and the `note:upsert` and `note:delete` broadcasts, which view-only sockets receive.
+- View: `GET` and `POST /api/canvases/:id/seen` (signed-in only, guests get 401), the notes in `get_canvas`, the `note:upsert` and `note:delete` broadcasts, which view-only sockets receive, the slide flag and speaker notes (in the canvas payload, the socket `init` and `get_frame`), and `GET /api/canvases/:id/pages/:pageId/deck.pdf` (the same `requireCanvas(..., 'view')` gate as every read route, so a signed-in visitor on a password link needs the unlock cookie; it keeps its own rate limit of 4 a minute per account; a signed-out guest gets 401 like any `/api` route).
 - Comment: `PATCH /api/comments/:id/anchor` and the MCP `add_comment`. Below edit an `@agent` mention in `add_comment` is kept as plain text, as in the browser.
-- Edit: `POST /api/frames/:id/versions/:versionId/restore`, `restore_frame_version`, note create, update and delete (REST and MCP), `PUT /api/canvases/:id/pages` and `set_canvas_pages`. Device sizes and tidy go through the frame update route.
-- The canvas UI hides the matching controls below edit: sticky note drag, colours, delete and resize, the page tree's add, rename, nest and move, Restore in the history panel, and the keys for delete, duplicate, undo, redo, tidy and device sizes (`when` guards in `src/lib/canvasShortcuts.ts`). Comment mode needs the comment role; laser, export and fit stay open to everyone.
+- Edit: version history, to read or to restore (`GET /api/frames/:id/versions`, `/versions/:versionId`, `POST .../restore`, `list_frame_versions`, `restore_frame_version`), note create, update and delete (REST and MCP), `PUT /api/canvases/:id/pages` and `set_canvas_pages`, and the slide flag and speaker notes (`slide` and `speakerNotes` on frame create and update, `slide` and `speaker_notes` on `create_frame` and `update_frame`). Device sizes and tidy go through the frame update route.
+- Open to every role, guests included, with no server call: present mode (`P`), the presenter strip and window (speaker notes read-only), prototype link arrows (`K`) and following a `data-goto` link. The signed-out guest's presenter window opens through the same gate as the canvas.
+- The canvas UI hides the matching controls below edit: sticky note drag, colours, delete and resize, the page tree's add, rename, nest and move, "Version history…" in the frame menu, the Inspector's History button, "Make a slide" in the frame menu, the Inspector's Slide checkbox and speaker notes, and the keys for delete, duplicate, undo, redo, tidy and device sizes (`when` guards in `src/lib/canvasShortcuts.ts`). A role that drops below edit closes an open history panel. A signed-out guest is not offered the deck PDF. Comment mode needs the comment role; laser, export, fit and present stay open to everyone.
 
 ## Tradeoffs
 
@@ -55,4 +56,4 @@ Version history, sticky notes, comment anchors, review marks and nested pages fo
 - Member addresses are hidden from non-owners.
 - Sync keys minted before a role downgrade stay valid until revoked.
 - Rate limits are per process and reset on restart.
-- Version history is readable by anyone who can view the canvas, including versions the editors have since overwritten.
+- Version history needs edit, because an old version can hold content the editors have since removed. A viewer sees only the current design.

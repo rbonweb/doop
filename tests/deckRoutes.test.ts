@@ -9,6 +9,7 @@ const renderDeckPdf = vi.fn<(slides: readonly Frame[]) => Promise<Buffer>>()
 vi.mock('../server/deckPdf.ts', () => ({ renderDeckPdf: (slides: readonly Frame[]) => renderDeckPdf(slides) }))
 
 const { store } = await import('../server/store.ts')
+const { signUnlockToken, unlockCookieName } = await import('../server/linkAccess.ts')
 const { deckRouter, deckFileName, resetDeckBudget } = await import('../server/deckRoutes.ts')
 const { deckDocument } = await vi.importActual<typeof import('../server/deckPdf.ts')>('../server/deckPdf.ts')
 
@@ -34,7 +35,7 @@ const PAGES = [
   { id: 'p-empty', name: 'No slides here' },
 ]
 
-const CANVAS: Canvas = {
+const BASE_CANVAS: Canvas = {
   id: 'deck',
   name: 'Deck',
   ownerId: 'owner',
@@ -50,6 +51,9 @@ const CANVAS: Canvas = {
   ],
 }
 
+/* the canvas the route sees: tests change its sharing (members, link, password) by replacing this */
+let CANVAS: Canvas = BASE_CANVAS
+let cookie: string | undefined
 let userId: string | undefined = 'owner'
 let server: Server
 let origin: string
@@ -71,12 +75,17 @@ afterAll(async () => {
 })
 
 beforeEach(() => {
+  vi.restoreAllMocks()
   userId = 'owner'
+  CANVAS = BASE_CANVAS
+  cookie = undefined
   resetDeckBudget()
   renderDeckPdf.mockReset()
   renderDeckPdf.mockResolvedValue(Buffer.from('%PDF-1.4 fake'))
   vi.spyOn(store, 'getCanvas').mockImplementation((id) => (id === CANVAS.id ? CANVAS : undefined))
 })
+
+const get = (pageId = 'p-pitch') => fetch(url('deck', pageId), cookie ? { headers: { cookie } } : undefined)
 
 const url = (canvasId: string, pageId: string) =>
   `${origin}/api/canvases/${canvasId}/pages/${encodeURIComponent(pageId)}/deck.pdf`
@@ -138,6 +147,59 @@ describe('GET /api/canvases/:id/pages/:pageId/deck.pdf', () => {
     const res = await fetch(url('deck', 'p-pitch'))
     expect(res.status).toBe(500)
     expect(await res.json()).toEqual({ error: 'No Chrome/Chromium found.' })
+  })
+})
+
+describe('deck PDF roles', () => {
+  const shared = (extra: Partial<Canvas>): Canvas => ({ ...BASE_CANVAS, ...extra })
+
+  it('lets every role that can view the canvas download, and renders each time', async () => {
+    CANVAS = shared({
+      memberIds: ['viewer', 'commenter', 'editor'],
+      memberRoles: { viewer: 'view', commenter: 'comment', editor: 'edit' },
+    })
+    for (const who of ['viewer', 'commenter', 'editor', 'owner']) {
+      resetDeckBudget()
+      userId = who
+      expect((await get()).status, who).toBe(200)
+    }
+    expect(renderDeckPdf).toHaveBeenCalledTimes(4)
+  })
+
+  it('treats a stranger like every other view route does: 403, nothing rendered', async () => {
+    CANVAS = shared({ memberIds: ['viewer'], memberRoles: { viewer: 'view' } })
+    userId = 'stranger'
+    const res = await get()
+    expect(res.status).toBe(403)
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining('private') })
+    expect(renderDeckPdf).not.toHaveBeenCalled()
+  })
+
+  it('admits a signed-in visitor through the link floor, but only at view or above', async () => {
+    userId = 'stranger'
+    CANVAS = shared({ linkAccess: 'view', linkAudience: 'anyone' })
+    expect((await get()).status).toBe(200)
+    CANVAS = shared({ linkAccess: 'none' })
+    expect((await get()).status).toBe(403)
+  })
+
+  it('keeps a password link shut until the visitor holds a valid unlock cookie', async () => {
+    userId = 'stranger'
+    CANVAS = shared({ linkAccess: 'view', linkAudience: 'password' })
+    vi.spyOn(store, 'getLinkPasswordHash').mockReturnValue('scrypt$hash')
+    expect((await get()).status).toBe(403)
+    cookie = `${unlockCookieName('deck')}=${signUnlockToken('deck', 'scrypt$hash')}`
+    expect((await get()).status).toBe(200)
+    /* a cookie minted for another password does not open it */
+    cookie = `${unlockCookieName('deck')}=${signUnlockToken('deck', 'scrypt$other')}`
+    expect((await get()).status).toBe(403)
+  })
+
+  it('keeps the rate limit for a viewer', async () => {
+    CANVAS = shared({ memberIds: ['viewer'], memberRoles: { viewer: 'view' } })
+    userId = 'viewer'
+    for (let i = 0; i < 4; i++) expect((await get()).status).toBe(200)
+    expect((await get()).status).toBe(429)
   })
 })
 

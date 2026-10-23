@@ -20,6 +20,11 @@ import { MarkdownText } from './StickyNote'
    they are in the deck. It is one panel in two places: a strip along the bottom of the presentation (the `s` key), and
    a window of its own that follows the presentation over a BroadcastChannel. */
 
+/* The show is dark in both themes, like any dark overlay: a fixed near-black ground and white text instead of the
+   ink/paper tokens, which swap sides in the dark theme. `show-dark` (src/styles.css) pins the ink tokens light so the
+   speaker notes' markdown, which reads them, stays legible on it. */
+export const SHOW_SURFACE = 'show-dark bg-[#0b0b0d] text-white'
+
 /** A small live copy of a frame: the same sandboxed document the canvas renders, scaled down and inert. */
 export function FrameThumb({ frame, width, className }: { frame: Frame; width: number; className?: string }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -37,7 +42,7 @@ export function FrameThumb({ frame, width, className }: { frame: Frame; width: n
   const scale = width / frame.width
   return (
     <div
-      className={cn('relative shrink-0 overflow-hidden rounded-[6px] bg-white ring-1 ring-paper/20', className)}
+      className={cn('relative shrink-0 overflow-hidden rounded-[6px] bg-white ring-1 ring-white/20', className)}
       style={{ width, height: Math.round(frame.height * scale) }}
     >
       <iframe
@@ -84,7 +89,7 @@ export function PresenterPanel({ frame, next, index, total, startedAt, variant, 
   return (
     <div
       className={cn(
-        'flex gap-5 text-paper',
+        'flex gap-5 text-white',
         big ? 'h-full flex-col p-6 md:flex-row' : 'h-full items-stretch px-5 py-3',
       )}
       data-testid="presenter-panel"
@@ -97,19 +102,19 @@ export function PresenterPanel({ frame, next, index, total, startedAt, variant, 
           big ? 'text-[22px] leading-[1.45]' : 'text-[15px] leading-[1.5]',
         )}
       >
-        <h2 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-paper/55">
+        <h2 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/55">
           {frame.name || 'Slide'}
         </h2>
-        {notes ? <MarkdownText markdown={notes} /> : <p className="text-paper/55">No notes for this slide.</p>}
+        {notes ? <MarkdownText markdown={notes} /> : <p className="text-white/55">No notes for this slide.</p>}
       </section>
       <aside className={cn('flex shrink-0 gap-4', big ? 'flex-col md:w-[360px]' : 'items-stretch')}>
         <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-paper/55">Next</span>
+          <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/55">Next</span>
           {next ? (
             <FrameThumb frame={next} width={big ? 360 : 192} />
           ) : (
             <div
-              className="grid place-items-center rounded-[6px] text-[12px] text-paper/55 ring-1 ring-paper/20"
+              className="grid place-items-center rounded-[6px] text-[12px] text-white/55 ring-1 ring-white/20"
               style={{ width: big ? 360 : 192, height: big ? 202 : 108 }}
             >
               End of the deck
@@ -121,7 +126,7 @@ export function PresenterPanel({ frame, next, index, total, startedAt, variant, 
             <div className="font-mono text-[28px] font-semibold leading-none tabular-nums" aria-label="Elapsed time">
               {elapsed}
             </div>
-            <div className="mt-1.5 text-[12px] text-paper/70" aria-label="Slide number">
+            <div className="mt-1.5 text-[12px] text-white/70" aria-label="Slide number">
               Slide {index} / {total}
             </div>
           </div>
@@ -129,7 +134,7 @@ export function PresenterPanel({ frame, next, index, total, startedAt, variant, 
             <Button
               variant="inverse"
               size="icon-sm"
-              className="border border-paper/25"
+              className="border border-white/25 text-white hover:bg-white/15"
               aria-label="Previous slide"
               title="Previous slide (←)"
               disabled={index <= 1}
@@ -140,7 +145,7 @@ export function PresenterPanel({ frame, next, index, total, startedAt, variant, 
             <Button
               variant="inverse"
               size="icon-sm"
-              className="border border-paper/25"
+              className="border border-white/25 text-white hover:bg-white/15"
               aria-label="Next slide"
               title="Next slide (→)"
               disabled={index >= total}
@@ -212,7 +217,7 @@ export function PresenterWindow({ canvasId }: { canvasId: string }) {
   }, [])
 
   return (
-    <main className="fixed inset-0 bg-ink" aria-label="Presenter view">
+    <main className={cn('fixed inset-0', SHOW_SURFACE)} aria-label="Presenter view">
       {view.live && frame ? (
         <PresenterPanel
           frame={frame}
@@ -225,9 +230,9 @@ export function PresenterWindow({ canvasId }: { canvasId: string }) {
           onNext={() => command('next')}
         />
       ) : (
-        <div className="grid h-full place-items-center px-6 text-center text-paper/70">
+        <div className="grid h-full place-items-center px-6 text-center text-white/70">
           <div>
-            <p className="text-[18px] font-semibold text-paper">
+            <p className="text-[18px] font-semibold text-white">
               {canvas ? 'Waiting for the presentation' : 'Connecting…'}
             </p>
             <p className="mt-1.5 text-[14px]">

@@ -6,13 +6,14 @@ import { downloadDeckPdf } from '../lib/deckExport'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { backNav, jumpNav, presentOrder, pruneNav, startNav, stepNav } from '../lib/presentNav'
 import { parsePresenterMessage, presenterChannelName, type PresenterMessage } from '../lib/presenterSync'
+import { useIsGuest } from '../lib/role'
 import { useStore } from '../lib/store'
 import { cn } from '../lib/utils'
-import { PresenterPanel } from './PresenterView'
+import { PresenterPanel, SHOW_SURFACE } from './PresenterView'
 import { Button } from './ui/button'
 import { ChevronLeftIcon, ChevronRightIcon, DownloadIcon, NoteIcon, OpenWindowIcon, UndoIcon, XIcon } from './ui/icons'
 
-/* Full-screen presentation of a canvas page: it fills the viewport (letterboxed on ink) with one frame at native
+/* Full-screen presentation of a canvas page: it fills the viewport (letterboxed on near-black, in both themes) with one frame at native
    resolution scaled to fit, still connected to the room so edits streaming in render live. ← → walk the page in reading
    order, a prototype link (data-goto) jumps and Backspace comes back, Esc closes.
    When the frame is a slide it is a deck over the slides of the page: Space and a click advance, `s` opens the
@@ -25,11 +26,13 @@ const STRIP_HEIGHT = 176
 const CHROME_HIDE_MS = 2000
 const NOTICE_MS = 2600
 
-const toolbarBtn = 'text-paper border border-transparent hover:border-paper/25'
+const toolbarBtn = 'text-white border border-transparent hover:border-white/25 hover:bg-white/15'
 
 export function PresentMode({ startId, onClose }: { startId: string; onClose: () => void }) {
   const canvas = useStore((s) => s.canvas)
   const storeNotice = useStore((s) => s.notice)
+  /* the deck PDF is a signed-in route; presenting itself is open to every role, guests included */
+  const guest = useIsGuest()
   const [nav, setNav] = useState(() => startNav(startId))
   const [startedAt] = useState(() => Date.now())
   const [ready, setReady] = useState(false)
@@ -290,7 +293,7 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
 
   return (
     <div
-      className={cn('fixed inset-0 z-[80] bg-ink', !chromeVisible && 'cursor-none')}
+      className={cn('fixed inset-0 z-[80]', SHOW_SURFACE, !chromeVisible && 'cursor-none')}
       role="dialog"
       aria-modal="true"
       aria-label={`Presenting ${frame.name}`}
@@ -314,7 +317,7 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
 
       {showStrip && (
         <div
-          className="absolute inset-x-0 bottom-0 border-t border-paper/15 bg-ink"
+          className="absolute inset-x-0 bottom-0 border-t border-white/15 bg-[#0b0b0d]"
           style={{ height: STRIP_HEIGHT }}
           role="region"
           aria-label="Presenter view"
@@ -335,7 +338,7 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
       {shownNotice && (
         <div
           role="status"
-          className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-paper px-3.5 py-1.5 text-[12.5px] font-semibold text-ink shadow-pop animate-[chip-in_0.25s_ease]"
+          className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-white px-3.5 py-1.5 text-[12.5px] font-semibold text-[#17171b] shadow-pop animate-[chip-in_0.25s_ease]"
         >
           {shownNotice}
         </div>
@@ -345,7 +348,7 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
         role="toolbar"
         aria-label="Presentation controls"
         className={cn(
-          'absolute left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-paper/20 bg-ink/85 px-2 py-1.5 text-paper shadow-pop backdrop-blur transition-[opacity,translate] duration-200',
+          'absolute left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-white/20 bg-[#0b0b0d]/85 px-2 py-1.5 text-white shadow-pop backdrop-blur transition-[opacity,translate] duration-200',
           chromeVisible ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-2 opacity-0',
         )}
         style={{ bottom: (showStrip ? STRIP_HEIGHT : 0) + 16 }}
@@ -382,7 +385,7 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
         </Button>
         <div className="flex min-w-[8.5rem] max-w-[18rem] flex-col items-center px-2 leading-tight">
           <span className="max-w-full truncate text-[12.5px] font-semibold">{frame.name}</span>
-          <span className="font-mono text-[10.5px] tabular-nums text-paper/65" aria-label="Position">
+          <span className="font-mono text-[10.5px] tabular-nums text-white/65" aria-label="Position">
             {index > 0 ? `${index} / ${total}` : `– / ${total}`}
           </span>
         </div>
@@ -399,11 +402,11 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
         </Button>
         {deckPage && (
           <>
-            <span className="mx-1 h-5 w-px bg-paper/20" aria-hidden />
+            <span className="mx-1 h-5 w-px bg-white/20" aria-hidden />
             <Button
               variant="inverse"
               size="icon-sm"
-              className={cn(toolbarBtn, showStrip && 'bg-paper/15')}
+              className={cn(toolbarBtn, showStrip && 'bg-white/15')}
               aria-label="Presenter view"
               aria-pressed={showStrip}
               title="Presenter view: notes, next slide, timer (S)"
@@ -421,19 +424,21 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
             >
               <OpenWindowIcon />
             </Button>
-            <Button
-              variant="inverse"
-              size="icon-sm"
-              className={toolbarBtn}
-              aria-label="Export deck as PDF"
-              title="Export deck as PDF"
-              onClick={() => void downloadDeckPdf(deckPage.canvasId, deckPage.pageId, deckPage.name, deckPage.slides)}
-            >
-              <DownloadIcon />
-            </Button>
+            {!guest && (
+              <Button
+                variant="inverse"
+                size="icon-sm"
+                className={toolbarBtn}
+                aria-label="Export deck as PDF"
+                title="Export deck as PDF"
+                onClick={() => void downloadDeckPdf(deckPage.canvasId, deckPage.pageId, deckPage.name, deckPage.slides)}
+              >
+                <DownloadIcon />
+              </Button>
+            )}
           </>
         )}
-        <span className="mx-1 h-5 w-px bg-paper/20" aria-hidden />
+        <span className="mx-1 h-5 w-px bg-white/20" aria-hidden />
         <Button
           variant="inverse"
           size="icon-sm"

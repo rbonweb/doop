@@ -1,8 +1,7 @@
 import { Router } from 'express'
 import { canvasPages, pageFrames } from '../shared/pages.ts'
 import { deckOf, MAX_DECK_SLIDES } from '../shared/slides.ts'
-import { canAccessCanvas } from './access.ts'
-import { store } from './store.ts'
+import { requireCanvas } from './sharing.ts'
 
 /** /api/canvases/:id/pages/:pageId/deck.pdf — a page's slides as one PDF. Lives apart from the main server file so it can be tested on its own. */
 export const deckRouter = Router()
@@ -39,11 +38,9 @@ export function deckFileName(pageName: string): string {
 }
 
 deckRouter.get('/:id/pages/:pageId/deck.pdf', async (req, res) => {
-  const canvas = store.getCanvas(String(req.params.id))
-  if (!canvas) return res.status(404).json({ error: 'not found' })
-  if (!canAccessCanvas(req.user?.id, canvas)) {
-    return res.status(403).json({ error: 'this canvas is private — ask the owner for access' })
-  }
+  /* the same view gate as every read route: the role resolver, including a password link's unlock cookie */
+  const canvas = requireCanvas(req, res, String(req.params.id), 'view')
+  if (!canvas) return
   const pageId = String(req.params.pageId)
   const page = canvasPages(canvas).find((p) => p.id === pageId)
   if (!page) return res.status(404).json({ error: 'page not found' })

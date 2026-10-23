@@ -1590,15 +1590,15 @@ app.post('/api/frames/:id/append', (req, res) => {
   res.json({ ok: true, htmlBytes: frame.html.length })
 })
 
-/* Frame history: reading the list or one version needs view (it is content the
-   visitor can already see); restoring one rewrites the frame, so it needs edit. */
+/* Frame history needs edit, to read or to restore: an old version can hold
+   content the editors have since removed, which a viewer was never shown. */
 app.get('/api/frames/:id/versions', async (req, res) => {
-  if (!requireFrame(req, res, req.params.id, 'view')) return
+  if (!requireFrame(req, res, req.params.id, 'edit')) return
   res.json(await persist.listFrameVersions(req.params.id))
 })
 
 app.get('/api/frames/:id/versions/:versionId', async (req, res) => {
-  if (!requireFrame(req, res, req.params.id, 'view')) return
+  if (!requireFrame(req, res, req.params.id, 'edit')) return
   const version = await requireFrameVersion(res, req.params.id, req.params.versionId)
   if (version) res.json(version)
 })

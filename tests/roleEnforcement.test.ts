@@ -130,10 +130,21 @@ const frameNow = async () =>
   (await json<{ frames: Frame[] }>(await owner.get(`/api/canvases/${canvasId}`))).frames.find((f) => f.id === frameId)!
 
 describe('frame history', () => {
-  it('lets view, comment and edit read the version list and a version', async () => {
-    for (const who of [viewer, commenter, editor, owner]) {
+  it('lets edit and owner read the version list and a version', async () => {
+    for (const who of [editor, owner]) {
       expect((await who.get(`/api/frames/${frameId}/versions`)).status).toBe(200)
       expect((await who.get(`/api/frames/${frameId}/versions/${versionId}`)).status).toBe(200)
+    }
+  })
+
+  it('keeps old versions from view and comment: an old version can hold what editors removed', async () => {
+    for (const who of [viewer, commenter]) {
+      const list = await who.get(`/api/frames/${frameId}/versions`)
+      expect(list.status).toBe(403)
+      expect(await list.text()).not.toContain(versionId)
+      const one = await who.get(`/api/frames/${frameId}/versions/${versionId}`)
+      expect(one.status).toBe(403)
+      expect(await one.text()).not.toContain('<h1>v0</h1>')
     }
   })
 
@@ -160,6 +171,94 @@ describe('frame history', () => {
     const res = await editor.post(`/api/frames/${frameId}/versions/${versionId}/restore`)
     expect(res.status).toBe(200)
     expect((await frameNow()).html).toBe('<h1>v0</h1>')
+  })
+})
+
+describe('slides, speaker notes and the deck PDF', () => {
+  let slideId: string
+  const pageId = () => `${canvasId}:page1`
+  const deck = (who: Client) => who.get(`/api/canvases/${canvasId}/pages/${encodeURIComponent(pageId())}/deck.pdf`)
+
+  beforeAll(async () => {
+    const slide = await json<Frame>(
+      await owner.post(`/api/canvases/${canvasId}/frames`, {
+        name: 'Opening',
+        html: '<h1>Hello</h1>',
+        slide: true,
+        speakerNotes: 'pause here',
+      }),
+    )
+    slideId = slide.id
+  })
+
+  const slideNow = async () =>
+    (await json<{ frames: Frame[] }>(await owner.get(`/api/canvases/${canvasId}`))).frames.find(
+      (f) => f.id === slideId,
+    )!
+
+  it('refuses the slide flag and speaker notes to view and comment, and leaves the frame as it was', async () => {
+    for (const who of [viewer, commenter]) {
+      expect((await who.patch(`/api/frames/${slideId}`, { slide: false })).status).toBe(403)
+      expect((await who.patch(`/api/frames/${slideId}`, { speakerNotes: 'rewritten' })).status).toBe(403)
+      expect((await who.patch(`/api/frames/${frameId}`, { slide: true })).status).toBe(403)
+      const created = await who.post(`/api/canvases/${canvasId}/frames`, {
+        name: 'Mine',
+        slide: true,
+        speakerNotes: 'x',
+      })
+      expect(created.status).toBe(403)
+    }
+    const now = await slideNow()
+    expect(now.slide).toBe(true)
+    expect(now.speakerNotes).toBe('pause here')
+    const frames = (await json<{ frames: Frame[] }>(await owner.get(`/api/canvases/${canvasId}`))).frames
+    expect(frames.find((f) => f.id === frameId)?.slide).toBeUndefined()
+    expect(frames.some((f) => f.name === 'Mine')).toBe(false)
+  })
+
+  it('refuses a stranger and a signed-out caller the same way', async () => {
+    expect((await stranger.patch(`/api/frames/${slideId}`, { speakerNotes: 'x' })).status).toBe(403)
+    expect((await anonymous.patch(`/api/frames/${slideId}`, { speakerNotes: 'x' })).status).toBe(401)
+    expect((await slideNow()).speakerNotes).toBe('pause here')
+  })
+
+  it('shows the speaker notes to everyone who can view, with the canvas', async () => {
+    for (const who of [viewer, commenter, editor]) {
+      const canvas = await json<{ frames: Frame[] }>(await who.get(`/api/canvases/${canvasId}`))
+      expect(canvas.frames.find((f) => f.id === slideId)?.speakerNotes).toBe('pause here')
+    }
+  })
+
+  it('shows the speaker notes to a view-only socket, which cannot change them', async () => {
+    const asViewer = new Room(canvasId, viewer.header())
+    try {
+      await asViewer.joined()
+      const frames = (asViewer.init?.canvas as { frames?: Frame[] } | undefined)?.frames
+      expect(frames?.find((f) => f.id === slideId)?.speakerNotes).toBe('pause here')
+    } finally {
+      asViewer.close()
+    }
+  })
+
+  it('lets an editor change both, and the owner too', async () => {
+    expect((await editor.patch(`/api/frames/${slideId}`, { speakerNotes: 'edited' })).status).toBe(200)
+    expect((await slideNow()).speakerNotes).toBe('edited')
+    expect((await owner.patch(`/api/frames/${slideId}`, { speakerNotes: 'pause here' })).status).toBe(200)
+  })
+
+  it('treats the deck PDF like a view route: refuses a stranger (403) and a signed-out caller (401)', async () => {
+    const stranded = await deck(stranger)
+    expect(stranded.status).toBe(403)
+    expect(stranded.headers.get('content-type')).not.toContain('application/pdf')
+    expect((await deck(anonymous)).status).toBe(401)
+  })
+
+  it('does not turn a viewer or commenter away from the deck PDF', async () => {
+    /* the render itself needs Chrome, which a test machine may not have: what matters is that the role gate lets them through */
+    for (const who of [viewer, commenter, editor, owner]) {
+      const res = await deck(who)
+      expect([200, 500, 429]).toContain(res.status)
+    }
   })
 })
 

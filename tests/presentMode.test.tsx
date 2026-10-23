@@ -381,3 +381,62 @@ describe('the presenter window link', () => {
     }
   })
 })
+
+describe('every role may present', () => {
+  const DECK = () => [
+    frame('s1', 0, 0, { slide: true, speakerNotes: 'Open with the story' }),
+    frame('s2', 500, 0, { slide: true }),
+  ]
+
+  afterEach(() => useStore.setState({ role: null, guest: false }))
+
+  it.each([
+    ['view', false],
+    ['comment', false],
+    ['edit', false],
+    ['owner', false],
+    ['comment', true],
+    ['view', true],
+  ] as const)('walks the deck and reads the notes, never editing them, as %s (guest: %s)', async (role, guest) => {
+    useStore.setState({ role, guest })
+    await mount(DECK(), 's1')
+    await press('s')
+    const strip = container.querySelector('[role="region"][aria-label="Presenter view"]')!
+    expect(strip.textContent).toContain('Open with the story')
+    expect(strip.querySelector('textarea, input, [contenteditable]')).toBeNull()
+    await press(' ')
+    expect(title()).toBe('Presenting Frame s2')
+    expect(container.querySelector('[aria-label="Open presenter window"]')).not.toBeNull()
+    /* the deck PDF is a signed-in route: a guest is not offered a button that would be turned down */
+    expect(container.querySelector('[aria-label="Export deck as PDF"]') !== null).toBe(!guest)
+  })
+})
+
+describe('the show stays dark in both themes', () => {
+  const DECK = () => [
+    frame('s1', 0, 0, { slide: true, speakerNotes: '**Open** with the story\n\n- one\n- two' }),
+    frame('s2', 500, 0, { slide: true }),
+  ]
+  /* ink and paper swap sides in the dark theme, so none of them may colour the show's own chrome */
+  const THEMED =
+    /^(?:[a-z-]+:)*(?:bg|text|border|ring|divide|from|to|via|fill|stroke)-(?:ink|paper)(?:-[a-z]+)?(?:\/\d+)?$/
+
+  afterEach(() => document.documentElement.classList.remove('dark'))
+
+  it.each(['light', 'dark'])('has a fixed near-black ground and white chrome in the %s theme', async (theme) => {
+    document.documentElement.classList.toggle('dark', theme === 'dark')
+    await mount(DECK(), 's1')
+    await press('s')
+    const dialog = container.querySelector('[role="dialog"]')!
+    expect(dialog.classList).toContain('bg-[#0b0b0d]')
+    expect(dialog.classList).toContain('show-dark')
+    expect(container.querySelector('[role="region"][aria-label="Presenter view"]')!.classList).toContain('bg-[#0b0b0d]')
+    expect(container.querySelector('[role="toolbar"]')!.className).toContain('text-white')
+    /* the speaker notes' markdown reads the ink tokens, which .show-dark pins light; the chrome reads none */
+    const outsideNotes = [dialog, ...dialog.querySelectorAll('[class]')]
+      .filter((el) => !el.closest('[aria-label="Speaker notes"]'))
+      .flatMap((el) => (el.getAttribute('class') ?? '').split(/\s+/))
+      .filter((token) => THEMED.test(token))
+    expect(outsideNotes).toEqual([])
+  })
+})

@@ -8,7 +8,7 @@ import { startPresenting } from '../lib/present'
 import { useStore } from '../lib/store'
 import { toggleSlide } from '../lib/slideEdits'
 import { EXPORT_SHORTCUT, MOD_KEY } from '../lib/keys'
-import { useCanEdit, useIsGuest } from '../lib/role'
+import { useCanEdit } from '../lib/role'
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from './ui/context-menu'
 import { MenuHint } from './ui/menu'
 import { FrameExportModal } from './FrameExportModal'
@@ -30,8 +30,6 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
   const [exportTargets, setExportTargets] = useState<Frame[] | null>(null)
   /* below edit the menu only reads: copy, present, share and export; no paste, duplicate, notes, slides, history, memory or delete */
   const mayEdit = useCanEdit()
-  /* history is a signed-in route; a signed-out guest has no account to read it with */
-  const guest = useIsGuest()
   /* a right-click inside a multi-selection acts on the whole group */
   const groupSize = useStore((s) => (s.selectedIds.includes(frame.id) ? s.selectedIds.length : 1))
   function groupFrames(): Frame[] {
@@ -92,7 +90,7 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
           {groupSize > 1 ? `Export ${groupSize} frames…` : 'Export…'}
           <MenuHint>{EXPORT_SHORTCUT}</MenuHint>
         </ContextMenuItem>
-        {!guest && (
+        {mayEdit && (
           <ContextMenuItem onSelect={() => useStore.getState().openFrameHistory(frame.id)}>
             Version history…
           </ContextMenuItem>

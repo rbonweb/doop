@@ -3,6 +3,7 @@ import { MAX_SPEAKER_NOTES_CHARS } from '../../shared/slides'
 import type { Frame } from '../../shared/types'
 import { useStore } from '../lib/store'
 import { api } from '../lib/api'
+import { useCanEdit } from '../lib/role'
 import { downloadFrameExport } from '../lib/frameExport'
 import { deleteFrameTracked, recordUpdate } from '../lib/history'
 import { setFrameDeckFields } from '../lib/slideEdits'
@@ -93,6 +94,9 @@ export function Inspector({
     }
   }
 
+  /* the Inspector belongs to editors; the slide, notes and history controls also check, so none can show below edit */
+  const mayEdit = useCanEdit()
+
   function commitMeta(patch: Partial<Frame>) {
     recordUpdate(frame.id, frame, patch)
     useStore.getState().patchFrameLocal(frame.id, patch)
@@ -133,14 +137,19 @@ export function Inspector({
           <NumInput value={frame.height} onCommit={(v) => commitMeta({ height: Math.max(80, v) })} />
         </Field>
       </div>
-      <div className="grid gap-2.5 border-b border-line-soft px-4 py-3">
-        <label className="relative flex cursor-pointer items-center gap-2.5 text-[13px] font-semibold text-ink">
-          <Checkbox checked={!!frame.slide} onChange={(e) => setFrameDeckFields(frame, { slide: e.target.checked })} />
-          Slide
-          <span className="ml-auto text-[11.5px] font-normal text-ink-faint">plays in the deck</span>
-        </label>
-        {frame.slide && <SpeakerNotes frame={frame} />}
-      </div>
+      {mayEdit && (
+        <div className="grid gap-2.5 border-b border-line-soft px-4 py-3">
+          <label className="relative flex cursor-pointer items-center gap-2.5 text-[13px] font-semibold text-ink">
+            <Checkbox
+              checked={!!frame.slide}
+              onChange={(e) => setFrameDeckFields(frame, { slide: e.target.checked })}
+            />
+            Slide
+            <span className="ml-auto text-[11.5px] font-normal text-ink-faint">plays in the deck</span>
+          </label>
+          {frame.slide && <SpeakerNotes frame={frame} />}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2 border-b border-line-soft px-3.5 py-2.5">
         <span className="mr-0.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-faint">Export</span>
         <Button
@@ -164,13 +173,15 @@ export function Inspector({
         >
           ☆ Pin
         </Button>
-        <Button
-          className={exportBtn}
-          title="Every earlier version of this frame — preview one, or restore it"
-          onClick={() => useStore.getState().openFrameHistory(frame.id)}
-        >
-          History
-        </Button>
+        {mayEdit && (
+          <Button
+            className={exportBtn}
+            title="Every earlier version of this frame — preview one, or restore it"
+            onClick={() => useStore.getState().openFrameHistory(frame.id)}
+          >
+            History
+          </Button>
+        )}
         <Button
           className={exportBtn}
           title="Public image URL — always renders the current design; paste it as og:image or a blog featured image"

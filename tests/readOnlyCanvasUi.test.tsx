@@ -5,7 +5,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { Canvas, CanvasNote, Frame } from '../shared/types'
 
 /* Below the edit role the canvas UI offers no control that would be turned down by the server: sticky notes cannot be
-   dragged, recoloured, deleted or resized, the page tree only navigates, and version history opens without Restore. */
+   dragged, recoloured, deleted or resized, the page tree only navigates, version history stays shut (it needs edit,
+   since an old version can hold what editors removed), and the slide flag and speaker notes cannot be edited. */
 const api = vi.hoisted(() => ({
   frameVersions: vi.fn(async () => [
     {
@@ -37,6 +38,7 @@ const api = vi.hoisted(() => ({
   deleteNote: vi.fn(),
   createNote: vi.fn(),
   updatePages: vi.fn(),
+  updateFrame: vi.fn(async () => ({})),
 }))
 vi.mock('../src/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/lib/api')>()),
@@ -48,6 +50,7 @@ const { useStore } = await import('../src/lib/store')
 const { StickyNote } = await import('../src/components/StickyNote')
 const { PagesPanel } = await import('../src/components/PagesPanel')
 const { FrameHistoryPanel } = await import('../src/components/FrameHistoryPanel')
+const { Inspector } = await import('../src/components/Inspector')
 const { TooltipProvider } = await import('../src/components/ui/tooltip')
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -153,15 +156,46 @@ describe.each(['view', 'comment'] as const)('with the %s role', (role) => {
     expect(api.updatePages).not.toHaveBeenCalled()
   })
 
-  it('opens version history for reading, with no Restore button', async () => {
+  it('keeps version history shut: the panel asks the server for nothing and says who it is for', async () => {
     await mount(<FrameHistoryPanel frame={frame} onClose={() => {}} />)
-    expect(container.textContent).toContain('alice')
+    expect(container.textContent).toContain('Version history is for people who can edit')
+    expect(container.textContent).not.toContain('alice')
     expect(container.textContent).not.toContain('Restore this version')
+    expect(api.frameVersions).not.toHaveBeenCalled()
+    expect(api.frameVersion).not.toHaveBeenCalled()
+  })
+
+  it('hides the slide, speaker notes and History controls in the Inspector', async () => {
+    useStore.setState({
+      canvas: { ...useStore.getState().canvas!, frames: [{ ...frame, slide: true, speakerNotes: 'say hi' }] },
+    })
+    await mount(<Inspector frame={{ ...frame, slide: true, speakerNotes: 'say hi' }} />)
+    expect(container.textContent).not.toContain('Slide')
+    expect(container.textContent).not.toContain('Speaker notes')
+    expect(container.querySelector('textarea[placeholder^="What to say"]')).toBeNull()
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'History')).toBe(false)
+  })
+
+  it('does not change the deck fields even when called', async () => {
+    const { setFrameDeckFields } = await import('../src/lib/slideEdits')
+    setFrameDeckFields(frame, { slide: true, speakerNotes: 'x' })
+    expect(api.updateFrame).not.toHaveBeenCalled()
   })
 })
 
 describe('with the edit role', () => {
   beforeEach(() => useStore.setState({ role: 'edit' }))
+
+  it('offers the slide checkbox, speaker notes and History in the Inspector, and reads history', async () => {
+    const slide = { ...frame, slide: true, speakerNotes: 'say hi' }
+    await mount(<Inspector frame={slide} />)
+    expect(container.textContent).toContain('Slide')
+    expect(container.querySelector<HTMLTextAreaElement>('textarea[placeholder^="What to say"]')?.value).toBe('say hi')
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'History')).toBe(true)
+    await mount(<FrameHistoryPanel frame={frame} onClose={() => {}} />)
+    expect(container.textContent).toContain('alice')
+    expect(api.frameVersions).toHaveBeenCalled()
+  })
 
   it('offers the note controls, the page controls and Restore', async () => {
     await mount(<StickyNote note={note} />)

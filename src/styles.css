@@ -331,6 +331,17 @@
     0 32px 64px -18px rgba(0, 0, 0, 0.8);
 }
 
+/* A dark surface that stays dark in either theme (the present show): the ink tokens read light inside it, so shared
+   components that use them (markdown, for one) stay legible on a fixed near-black ground. */
+.show-dark {
+  color-scheme: dark;
+  --ink: #f4f3ef;
+  --ink-soft: #b4b1a9;
+  --ink-faint: #8a8780;
+  --line: rgba(255, 255, 255, 0.12);
+  --line-soft: rgba(255, 255, 255, 0.07);
+}
+
 /* Keyframes: the one thing utilities cannot express. Components reference
    these by name (`animate-[chip-in_0.18s_ease]`), so the names are API —
    renaming one means updating its callers. */

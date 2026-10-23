@@ -59,7 +59,8 @@ export function FrameHistoryPanel({
   className?: string
   onClose: () => void
 }) {
-  /* anyone who can see the canvas can browse its versions; only editors can restore one */
+  /* history needs edit, to read or to restore: an old version can hold content the editors have since removed. The
+     server refuses the reads below edit, so the panel does not ask. */
   const mayEdit = useCanEdit()
   const [list, setList] = useState<ListState | null>(null)
   const [reloads, setReloads] = useState(0)
@@ -75,6 +76,7 @@ export function FrameHistoryPanel({
   /* load on open, then again (debounced) whenever the frame changes: doop
      saves a version before every change, so the list grows while we watch */
   useEffect(() => {
+    if (!mayEdit) return
     let live = true
     const delay = loadedFor.current === frame.id ? REFRESH_DELAY_MS : 0
     const timer = window.setTimeout(() => {
@@ -99,7 +101,7 @@ export function FrameHistoryPanel({
       live = false
       window.clearTimeout(timer)
     }
-  }, [frame.id, frame.updatedAt, reloads])
+  }, [frame.id, frame.updatedAt, reloads, mayEdit])
 
   const versions = list && list.frameId === frame.id && 'versions' in list ? list.versions : null
   const listError = list && list.frameId === frame.id && 'error' in list ? list.error : null
@@ -110,7 +112,7 @@ export function FrameHistoryPanel({
   const version = selectedId ? (loaded[selectedId] ?? null) : null
   const detailError = selectedId && !version ? (failed[selectedId] ?? null) : null
   useEffect(() => {
-    if (!selectedId || version) return
+    if (!mayEdit || !selectedId || version) return
     let live = true
     api.frameVersion(frame.id, selectedId).then(
       (full) => live && setLoaded((prev) => ({ ...prev, [selectedId]: full })),
@@ -120,7 +122,7 @@ export function FrameHistoryPanel({
     return () => {
       live = false
     }
-  }, [frame.id, selectedId, version])
+  }, [frame.id, selectedId, version, mayEdit])
 
   async function restore() {
     if (!mayEdit) return
@@ -164,9 +166,15 @@ export function FrameHistoryPanel({
         <PanelClose onClick={onClose} />
       </PanelHeader>
 
-      {versions === null && !listError && <HistorySkeleton />}
+      {!mayEdit && (
+        <p className="px-4 py-8 text-center text-[13px] leading-[1.5] text-ink-soft" role="note">
+          Version history is for people who can edit this canvas.
+        </p>
+      )}
 
-      {listError && (
+      {mayEdit && versions === null && !listError && <HistorySkeleton />}
+
+      {mayEdit && listError && (
         <div className="grid gap-3 px-4 py-8 text-center" role="alert">
           <p className="text-[13px] leading-[1.5] text-accent-ink">{listError}</p>
           <div>

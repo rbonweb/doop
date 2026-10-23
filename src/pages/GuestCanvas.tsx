@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, type PublicGate } from '../lib/api'
 import { AuthPage } from './AuthPage'
 import { CanvasPage } from './CanvasPage'
+import { PresenterWindow } from '../components/PresenterView'
 import { PasswordGate } from '../components/AccessScreens'
 import { AuthScreen } from '../components/ui/screen'
 
@@ -35,5 +36,7 @@ export function GuestCanvas({ canvasId }: { canvasId: string }) {
       <PasswordGate canvasId={canvasId} onUnlocked={() => setAttempt((n) => n + 1)} onSignIn={() => setSignIn(true)} />
     )
   }
+  /* the presenter's own window (opened from a presentation) is open to guests as well, once the gate has let them in */
+  if (new URLSearchParams(location.search).has('presenter')) return <PresenterWindow canvasId={canvasId} />
   return <CanvasPage canvasId={canvasId} guestEntry />
 }

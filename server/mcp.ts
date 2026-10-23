@@ -1693,8 +1693,8 @@ export function buildMcpServer(
       inputSchema: { frame_id: z.string(), agent_name: agentName.optional() },
     },
     async ({ frame_id, agent_name }) => {
-      const f = frameFor(frame_id)
-      if (!f) return noFrame(frame_id)
+      const f = frameFor(frame_id, 'edit')
+      if (!f) return noFrame(frame_id, 'edit')
       arrive(f.canvasId, agent_name)
       const versions = await persist.listFrameVersions(frame_id)
       return withFeedback(text({ frame_id, versions }), f.canvasId, agent_name ? actorFrom(agent_name) : undefined)

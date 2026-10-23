@@ -16,7 +16,7 @@ import {
   type PageNode,
 } from '../../shared/pages'
 import type { CanvasPageInfo } from '../../shared/types'
-import { useCanEdit } from '../lib/role'
+import { useCanEdit, useIsGuest } from '../lib/role'
 import { useStore } from '../lib/store'
 import { downloadDeckPdf } from '../lib/deckExport'
 import { deckOf } from '../../shared/slides'
@@ -89,6 +89,8 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   const marksByPage = useMarks((s) => s.pageMarks)
   /* below edit the tree only navigates: no add, rename, nest, move, reorder or delete (the server refuses them too) */
   const mayEdit = useCanEdit()
+  /* the deck PDF is a signed-in route, like every other read behind /api; a signed-out guest has no account for it */
+  const guest = useIsGuest()
   const canvasId = canvas?.id
   /* how many slides a page's deck has: the page menu offers the PDF only when there are some */
   const slideCount = (pageId: string) =>
@@ -473,7 +475,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                     </ContextMenuSubContent>
                   </ContextMenuSub>
                 )}
-                {slideCount(page.id) > 0 && (
+                {!guest && slideCount(page.id) > 0 && (
                   <>
                     <ContextMenuSeparator />
                     <ContextMenuItem

@@ -272,7 +272,8 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
   /* the version history rail takes the Inspector's spot while a frame's
      history is open; it follows that frame, not the selection */
   const historyFrameId = useStore((s) => s.historyFrameId)
-  const historyFrame = canvas?.frames.find((f) => f.id === historyFrameId) ?? null
+  /* history needs edit, so a role that drops below it closes the rail */
+  const historyFrame = canEdit ? (canvas?.frames.find((f) => f.id === historyFrameId) ?? null) : null
   const closeHistory = () => useStore.getState().openFrameHistory(null)
   /* the element panel takes the frame inspector's spot while a Layers row
      has it open; it follows the element selection until it is closed */

@@ -6,9 +6,10 @@ import { buildMcpServer } from '../server/mcp.ts'
 import { store } from '../server/store.ts'
 import type { Canvas, CanvasNote, ElementComment, Frame, FrameVersion } from '../shared/types.ts'
 
-/* The tools the history, sticky-note and comment-anchor features added, held to the same role rules as the rest:
-   reads need view, commenting needs comment, anything that changes the design needs edit, and an account with no
-   access at all gets the answer a missing canvas gets. */
+/* The tools the history, sticky-note, comment-anchor and slide features added, held to the same role rules as the rest:
+   reads need view (version history needs edit, since an old version can hold what editors removed), commenting needs
+   comment, anything that changes the design needs edit, and an account with no access at all gets the answer a
+   missing canvas gets. */
 const persistMock = vi.hoisted(() => ({
   listFrameVersions: vi.fn(async () => [] as unknown[]),
   getFrameVersion: vi.fn(async () => undefined as unknown),
@@ -64,6 +65,15 @@ const FRAME: Frame = {
   updatedAt: 0,
   updatedBy: 'alice',
 }
+const SLIDE: Frame = {
+  ...FRAME,
+  id: 's1',
+  name: 'Opening',
+  slide: true,
+  speakerNotes: 'Say hello, then pause.',
+  width: 1280,
+  height: 720,
+}
 const VERSION: FrameVersion = {
   id: 'v1',
   frameId: FRAME.id,
@@ -115,12 +125,24 @@ const EDITOR_ONLY: [string, Record<string, unknown>][] = [
   ['set_canvas_pages', { ...base, canvas_id: CANVAS.id, pages: [{ id: 'p1', name: 'One' }], expectedPages: [] }],
 ]
 
+/* the slide flag and speaker notes are design: they change what the deck plays and says */
+const SLIDE_EDITS: [string, Record<string, unknown>][] = [
+  ['update_frame', { ...base, frame_id: FRAME.id, slide: true }],
+  ['update_frame', { ...base, frame_id: SLIDE.id, slide: false }],
+  ['update_frame', { ...base, frame_id: SLIDE.id, speaker_notes: 'rewritten' }],
+  ['update_frame', { ...base, frame_id: SLIDE.id, speaker_notes: '' }],
+  ['create_frame', { ...base, canvas_id: CANVAS.id, name: 'New', html: '<p>hi</p>', slide: true }],
+  ['create_frame', { ...base, canvas_id: CANVAS.id, name: 'New', html: '<p>hi</p>', speaker_notes: 'sneaky' }],
+]
+
 beforeEach(() => {
   vi.restoreAllMocks()
   persistMock.listFrameVersions.mockResolvedValue([{ ...VERSION, html: undefined }])
   persistMock.getFrameVersion.mockResolvedValue(VERSION)
   vi.spyOn(store, 'getCanvas').mockImplementation((id: string) => (id === CANVAS.id ? CANVAS : undefined))
-  vi.spyOn(store, 'getFrame').mockImplementation((id: string) => (id === FRAME.id ? FRAME : undefined))
+  vi.spyOn(store, 'getFrame').mockImplementation((id: string) =>
+    id === FRAME.id ? FRAME : id === SLIDE.id ? SLIDE : undefined,
+  )
   vi.spyOn(store, 'findNote').mockImplementation((id: string) =>
     id === NOTE.id ? { note: NOTE, canvasId: CANVAS.id } : undefined,
   )
@@ -173,8 +195,8 @@ describe('history, notes and pages over MCP', () => {
     }
   })
 
-  it('lets every role who can see the canvas list frame versions', async () => {
-    for (const userId of ['viewer', 'commenter', 'editor', 'owner']) {
+  it('lets only editors and the owner list frame versions', async () => {
+    for (const userId of ['editor', 'owner']) {
       const { client, close } = await as(userId)
       try {
         const { text, isError } = await call(client, 'list_frame_versions', { ...base, frame_id: FRAME.id })
@@ -185,6 +207,23 @@ describe('history, notes and pages over MCP', () => {
       }
     }
   })
+
+  it.each(['viewer', 'commenter'])(
+    'refuses list_frame_versions to a %s-role key without reading history',
+    async (userId) => {
+      persistMock.listFrameVersions.mockClear()
+      const { client, close } = await as(userId)
+      try {
+        const { text, isError } = await call(client, 'list_frame_versions', { ...base, frame_id: FRAME.id })
+        expect(isError).toBe(true)
+        expect(text).toMatch(/needs edit access/)
+        expect(text).not.toContain(VERSION.id)
+        expect(persistMock.listFrameVersions).not.toHaveBeenCalled()
+      } finally {
+        await close()
+      }
+    },
+  )
 
   it('shows the notes in get_canvas to a view-only key', async () => {
     const { client, close } = await as('viewer')
@@ -213,6 +252,73 @@ describe('history, notes and pages over MCP', () => {
         expect(isError, tool).toBe(true)
         expect(text, tool).toMatch(expected)
       }
+    } finally {
+      await close()
+    }
+  })
+})
+
+describe('slides over MCP', () => {
+  it.each(['viewer', 'commenter'])('refuses the slide flag and speaker notes to a %s-role key', async (userId) => {
+    const updated = vi.spyOn(actions, 'updateFrame')
+    const created = vi.spyOn(actions, 'createFrame')
+    const { client, close } = await as(userId)
+    try {
+      for (const [tool, args] of SLIDE_EDITS) {
+        const { text, isError } = await call(client, tool, args)
+        expect(isError, `${tool} ${JSON.stringify(args)} should be refused: ${text}`).toBe(true)
+        expect(text).toMatch(/needs edit access/)
+      }
+      expect(updated).not.toHaveBeenCalled()
+      expect(created).not.toHaveBeenCalled()
+    } finally {
+      await close()
+    }
+  })
+
+  it('lets an editor key set the slide flag and speaker notes', async () => {
+    const updated = vi.spyOn(actions, 'updateFrame').mockReturnValue(SLIDE)
+    const created = vi.spyOn(actions, 'createFrame').mockReturnValue(SLIDE)
+    const { client, close } = await as('editor')
+    try {
+      for (const [tool, args] of SLIDE_EDITS) {
+        const { text, isError } = await call(client, tool, args)
+        expect(isError, `${tool}: ${text}`).toBeFalsy()
+      }
+      expect(updated).toHaveBeenCalledWith(SLIDE.id, { speakerNotes: 'rewritten' }, expect.anything())
+      expect(updated).toHaveBeenCalledWith(SLIDE.id, { speakerNotes: '' }, expect.anything())
+      expect(created).toHaveBeenCalledWith(
+        CANVAS.id,
+        expect.objectContaining({ speakerNotes: 'sneaky' }),
+        expect.anything(),
+      )
+    } finally {
+      await close()
+    }
+  })
+
+  it.each(['viewer', 'commenter', 'editor', 'owner'])(
+    'shows the speaker notes in get_frame to a %s-role key',
+    async (userId) => {
+      const { client, close } = await as(userId)
+      try {
+        const { text, isError } = await call(client, 'get_frame', { ...base, frame_id: SLIDE.id })
+        expect(isError, text).toBeFalsy()
+        expect(text).toContain('Say hello, then pause.')
+        expect(text).toMatch(/"slide":\s*true/)
+      } finally {
+        await close()
+      }
+    },
+  )
+
+  it('answers a stranger about a slide like a missing frame, notes included', async () => {
+    const { client, close } = await as('stranger')
+    try {
+      const { text, isError } = await call(client, 'get_frame', { ...base, frame_id: SLIDE.id })
+      expect(isError).toBe(true)
+      expect(text).toMatch(/no frame with id s1 accessible/)
+      expect(text).not.toContain('Say hello')
     } finally {
       await close()
     }
