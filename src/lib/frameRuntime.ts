@@ -119,6 +119,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     var doc
     try {
       doc = new DOMParser().parseFromString(html, 'text/html')
+      /* the sleep rule sits in the head like any authored node, so the morph would pair it with one of the design's and overwrite it: lift it out first */
+      if (sleeping) dropSleepStyle()
       syncAttrs(document.documentElement, doc.documentElement)
       morphChildren(document.head, doc.head)
       morphChildren(document.body, doc.body)
@@ -126,6 +128,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     } catch (e) {
       if (doc) document.documentElement.innerHTML = doc.documentElement.innerHTML
     }
+    if (sleeping) ensureSleepStyle()
   }
 
   /* ---- inline text editing ----
@@ -465,6 +468,91 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     return true
   }
 
+  /* ---- sleep ----
+     The parent puts a frame to sleep while the camera moves or the frame is
+     far off screen. Everything the document animates on its own is paused:
+     CSS animations through one style rule, Web Animations and playing videos
+     one by one, remembering exactly which, so waking resumes only what sleep
+     paused and never starts something the design had paused itself.
+     Animations driven from requestAnimationFrame cannot be paused from here. */
+  var sleeping = false
+  var pausedAnimations = []
+  var pausedVideos = []
+  var SLEEP_CSS = '*,*::before,*::after{animation-play-state:paused!important}'
+  var STILL_CSS = '*,*::before,*::after{transition-property:none!important}'
+
+  function ensureSleepStyle() {
+    var st = document.getElementById('doop-sleep')
+    if (st) return
+    st = document.createElement('style')
+    st.id = 'doop-sleep'
+    st.textContent = SLEEP_CSS
+    document.head.appendChild(st)
+  }
+
+  function dropSleepStyle() {
+    var st = document.getElementById('doop-sleep')
+    if (st && st.parentNode) st.parentNode.removeChild(st)
+  }
+
+  /* run a change with every transition switched off, so toggling the pause never makes an authored transition fire. transition-property is not inherited, so the root's inline value covers only the root and a temporary rule covers the rest. The second reflow makes the change take effect while transitions are still off. */
+  function still(change) {
+    var root = document.documentElement
+    var prev = root.style.getPropertyValue('transition-property')
+    var prevPriority = root.style.getPropertyPriority('transition-property')
+    var guard = document.createElement('style')
+    guard.setAttribute('data-v-still', '')
+    guard.textContent = STILL_CSS
+    root.style.setProperty('transition-property', 'none', 'important')
+    document.head.appendChild(guard)
+    void root.offsetHeight
+    try {
+      change()
+      void root.offsetHeight
+    } finally {
+      if (guard.parentNode) guard.parentNode.removeChild(guard)
+      if (prev) root.style.setProperty('transition-property', prev, prevPriority)
+      else root.style.removeProperty('transition-property')
+      if (!root.getAttribute('style')) root.removeAttribute('style')
+    }
+  }
+
+  function setSleep(on) {
+    if (on === sleeping) return
+    sleeping = on
+    still(function () {
+      if (on) {
+        /* collect before the style goes in: afterwards CSS animations already read as paused */
+        var running = typeof document.getAnimations === 'function' ? document.getAnimations() : []
+        for (var i = 0; i < running.length; i++) {
+          if (running[i].playState !== 'running') continue
+          try { running[i].pause(); pausedAnimations.push(running[i]) } catch (e) { /* not pausable */ }
+        }
+        var videos = document.querySelectorAll('video')
+        for (var v = 0; v < videos.length; v++) {
+          if (videos[v].paused || videos[v].ended) continue
+          try { videos[v].pause(); pausedVideos.push(videos[v]) } catch (e) { /* not pausable */ }
+        }
+        ensureSleepStyle()
+      } else {
+        dropSleepStyle()
+        var anims = pausedAnimations
+        var vids = pausedVideos
+        pausedAnimations = []
+        pausedVideos = []
+        for (var a = 0; a < anims.length; a++) {
+          try { if (anims[a].playState === 'paused') anims[a].play() } catch (e) { /* finished or removed */ }
+        }
+        for (var w = 0; w < vids.length; w++) {
+          try {
+            var started = vids[w].isConnected ? vids[w].play() : null
+            if (started && started.catch) started.catch(function () { /* autoplay refused */ })
+          } catch (e) { /* removed */ }
+        }
+      }
+    })
+  }
+
   window.addEventListener('message', function (ev) {
     /* only the parent drives this document — a script inside the frame must
        not be able to pose as the panel and push edits into the save path */
@@ -480,6 +568,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     }
     if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) render(d.html)
     if (d.type === 'doop:edit') setEdit(!!d.on)
+    if (d.type === 'doop:sleep') setSleep(!!d.on)
     if (d.type === 'doop:probe') {
       parent.postMessage({ type: 'doop:probe-result', reqId: d.reqId, hit: probe(d.x, d.y) }, '*')
     }
