@@ -581,6 +581,12 @@ export const api = {
       body: JSON.stringify({ frames }),
       keepalive,
     }),
+  /** put the seen state of these frames back exactly as given (`null` forgets a frame): the undo of "Mark all as seen" */
+  replaceSeen: (canvasId: string, frames: Record<string, number | null>) =>
+    req<{ ok: boolean }>(`/api/canvases/${canvasId}/seen`, {
+      method: 'POST',
+      body: JSON.stringify({ frames, replace: true }),
+    }),
   retryComment: (commentId: string) => req(`/api/comments/${commentId}/retry`, { method: 'POST' }),
   retryTaskFeedback: (feedbackId: string) => req(`/api/feedback/${feedbackId}/retry`, { method: 'POST' }),
   /* automations: scheduled pulls and agent tasks */

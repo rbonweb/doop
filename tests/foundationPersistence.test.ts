@@ -30,7 +30,7 @@ async function until<T>(read: () => Promise<T | undefined>, timeoutMs = 5000): P
 }
 
 it('gives canvas_members rows that predate roles the edit role, and applies on a fresh database', async () => {
-  const tags = journalTags()
+  const tags = journalTags().slice(0, journalTags().indexOf('0028_marver_upgrades') + 1)
   expect(tags.at(-1)).toBe('0028_marver_upgrades')
   const dir = mkdtempSync(join(tmpdir(), 'doop-foundation-migration-'))
   const pg = new PGlite(dir)
@@ -263,3 +263,71 @@ it('hydrates frame attribution, slides, notes, roles, grants and keeps the link 
     createdByUserId: 'u-ada',
   })
 })
+
+it('adds the frame design stamp as a nullable column, so rows written before it stay valid', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'doop-stamp-migration-'))
+  const pg = new PGlite(dir)
+  try {
+    const tags = journalTags()
+    expect(tags.at(-1)).toBe('0029_frame_content_stamp')
+    for (const tag of tags.slice(0, -1)) await pg.exec(migrationSql(tag))
+    await pg.exec(
+      `INSERT INTO frames (id, canvas_id, name, x, y, width, height, html, created_at, updated_at, updated_by) VALUES ('f1', 'c1', 'F', 0, 0, 1, 1, '', 1, 2, 'a')`,
+    )
+    await pg.exec(migrationSql('0029_frame_content_stamp'))
+    expect((await pg.query(`SELECT content_updated_at FROM frames`)).rows).toEqual([{ content_updated_at: null }])
+  } finally {
+    await pg.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 60_000)
+
+it('keeps the design stamp through a save and hydrate, and two boots in a row change no frame', async () => {
+  const { store } = await import('../server/store.ts')
+  const frame = (id: string, over: Partial<Frame> = {}): Frame => ({
+    id,
+    canvasId: 'c-boot',
+    pageId: 'c-boot:page1',
+    name: id,
+    x: 0,
+    y: 0,
+    width: 10,
+    height: 10,
+    html: '<p></p>',
+    createdAt: 10,
+    updatedAt: 500,
+    updatedBy: 'Ada',
+    ...over,
+  })
+  const canvas: Canvas = {
+    id: 'c-boot',
+    name: 'Boot',
+    ownerId: 'u1',
+    createdAt: 10,
+    updatedAt: 500,
+    frames: [frame('stamped', { contentUpdatedAt: 300 }), frame('legacy')],
+  }
+  await persist.saveCanvasCopy(canvas)
+
+  const boot = async () => {
+    const data = await persist.hydrate()
+    store.canvases.clear()
+    store.init(data.canvases, data)
+    return structuredClone(data.canvases.find((c) => c.id === 'c-boot')!.frames)
+  }
+  const first = await boot()
+  expect(first.find((f) => f.id === 'stamped')?.contentUpdatedAt).toBe(300)
+  expect(first.find((f) => f.id === 'legacy')?.contentUpdatedAt).toBeUndefined()
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(await boot()).toEqual(first)
+}, 60_000)
+
+it('replaces frame_seen exactly, or forgets a row, where the plain upsert only grows', async () => {
+  await persist.saveFrameSeen('u-undo', 'c1', 'f1', 300)
+  await persist.saveFrameSeen('u-undo', 'c1', 'f2', 400)
+  await persist.replaceFrameSeen('u-undo', 'c1', 'f1', 100)
+  await persist.replaceFrameSeen('u-undo', 'c1', 'f2', null)
+  await persist.replaceFrameSeen('u-undo', 'c1', 'f3', 50)
+  const rows = await persist.listFrameSeen('u-undo', 'c1')
+  expect(Object.fromEntries(rows.map((r) => [r.frameId, r.seenUpdatedAt]))).toEqual({ f1: 100, f3: 50 })
+}, 60_000)

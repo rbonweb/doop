@@ -197,6 +197,8 @@ export const frames = pgTable(
     html: text('html').notNull(),
     createdAt: bigint('created_at', { mode: 'number' }).notNull(),
     updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+    /** when the design (html or name) last changed; null on rows written before this existed, where updated_at stands in */
+    contentUpdatedAt: bigint('content_updated_at', { mode: 'number' }),
     updatedBy: text('updated_by').notNull(),
     /** product-made onboarding/example content; null = a real user frame */
     demo: boolean('demo'),

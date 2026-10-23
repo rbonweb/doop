@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   computeMarks,
+  contentStamp,
   isBeingViewed,
   marksSummary,
   nextMarked,
@@ -103,6 +104,24 @@ describe('new (blue)', () => {
   it("counts an agent edit made with the viewer's own key as new", () => {
     const agent = frame('f1', { updatedBy: 'Claude', updatedByUserId: ME, updatedByKind: 'agent' })
     expect(computeMarks([agent], [], input())).toEqual({ f1: 'new' })
+  })
+})
+
+describe('the design stamp', () => {
+  it('falls back to updatedAt on a frame written before the stamp existed', () => {
+    expect(contentStamp(frame('a', { updatedAt: 300 }))).toBe(300)
+    expect(contentStamp(frame('a', { updatedAt: 300, contentUpdatedAt: 250 }))).toBe(250)
+  })
+
+  it('does not call a frame new because it was moved or resized after the baseline', () => {
+    const moved = frame('a', { updatedAt: 900, contentUpdatedAt: 50, updatedByKind: 'agent' })
+    expect(computeMarks([moved], [], input({ baselineAt: 500 }))).toEqual({})
+  })
+
+  it('calls a frame new when its design changed after the baseline, and clears it once that version is seen', () => {
+    const edited = frame('a', { updatedAt: 900, contentUpdatedAt: 800 })
+    expect(computeMarks([edited], [], input({ baselineAt: 500 }))).toEqual({ a: 'new' })
+    expect(computeMarks([edited], [], input({ baselineAt: 500, seen: { a: 800 } }))).toEqual({})
   })
 })
 

@@ -7,6 +7,7 @@ import { throttle } from '../lib/throttle'
 import { FrameView } from './FrameView'
 import { StickyNote } from './StickyNote'
 import { addNote } from '../lib/notes'
+import { markAllSeen, useMarks } from '../lib/marks'
 import { notePageId } from '../../shared/notes'
 import { useFrameMountScheduler } from '../lib/frameMounting'
 import { noteCameraMove, setStageSize } from '../lib/frameSleep'
@@ -71,6 +72,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   const setViewport = useStore((s) => s.setViewport)
   const canvas = usePageCanvas()
   const activePageId = useStore((s) => s.activePageId)
+  const hasNewMarks = useMarks((s) => Object.values(s.marks).includes('new'))
   /* sticky notes: the full canvas decides which page an attached note is on */
   const fullCanvas = useStore((s) => s.canvas)
   const notesVisible = useStore((s) => s.notesVisible)
@@ -707,6 +709,12 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
             >
               New note
             </ContextMenuItem>
+            {hasNewMarks && (
+              <ContextMenuItem onSelect={() => void markAllSeen()}>
+                Mark all as seen
+                <MenuHint>⇧U</MenuHint>
+              </ContextMenuItem>
+            )}
             <ContextMenuItem onSelect={() => useStore.getState().setShortcutsOpen(true)}>
               Keyboard shortcuts
               <MenuHint>?</MenuHint>

@@ -13,6 +13,11 @@ vi.mock('../server/db/persist.ts', () => ({
     const key = `${userId}|${canvasId}|${frameId}`
     seenRows.set(key, Math.max(seenRows.get(key) ?? 0, at))
   },
+  replaceFrameSeen: async (userId: string, canvasId: string, frameId: string, at: number | null) => {
+    const key = `${userId}|${canvasId}|${frameId}`
+    if (at === null) seenRows.delete(key)
+    else seenRows.set(key, at)
+  },
   listFrameSeen: async (userId: string, canvasId: string) =>
     [...seenRows]
       .filter(([key]) => key.startsWith(`${userId}|${canvasId}|`))
@@ -46,6 +51,8 @@ const FRAMES = new Map([
   ['f1', frame('f1', 'c1', 500)],
   ['f2', frame('f2', 'c1', 900)],
   ['elsewhere', frame('elsewhere', 'c2', 500)],
+  /* moved at 900 after its design last changed at 600: 600 is the version people review */
+  ['moved', { ...frame('moved', 'c1', 900), contentUpdatedAt: 600 }],
 ])
 
 let userId: string | undefined = 'owner'
@@ -108,6 +115,11 @@ describe('POST /api/canvases/:id/seen', () => {
     expect((await (await get()).json()).seen).toEqual({ f1: 500 })
   })
 
+  it('clamps to the design stamp, so a frame that was only moved cannot be claimed as seen at its move time', async () => {
+    await post({ frames: { moved: 900 } })
+    expect((await (await get()).json()).seen).toEqual({ moved: 600 })
+  })
+
   it('ignores frames that belong to another canvas or do not exist', async () => {
     const res = await post({ frames: { elsewhere: 500, nope: 1, f1: 100 } })
     expect(await res.json()).toEqual({ ok: true, saved: 1 })
@@ -148,6 +160,46 @@ describe('POST /api/canvases/:id/seen', () => {
     const many = Object.fromEntries(Array.from({ length: MAX_SEEN_PER_REQUEST + 1 }, (_, i) => [`x${i}`, 1]))
     expect((await post({ frames: many })).status).toBe(400)
     expect(seenRows.size).toBe(0)
+  })
+})
+
+describe('POST /api/canvases/:id/seen with replace', () => {
+  it('sets the value exactly, even backwards, where a plain write keeps the larger one', async () => {
+    await post({ frames: { f1: 500, f2: 900 } })
+    await post({ frames: { f1: 100 } })
+    expect((await (await get()).json()).seen).toEqual({ f1: 500, f2: 900 })
+    const res = await post({ frames: { f1: 100 }, replace: true })
+    expect(await res.json()).toEqual({ ok: true, saved: 1 })
+    expect((await (await get()).json()).seen).toEqual({ f1: 100, f2: 900 })
+  })
+
+  it('forgets a frame given null, and only with replace', async () => {
+    await post({ frames: { f1: 500, f2: 900 } })
+    expect((await post({ frames: { f1: null } })).status).toBe(400)
+    expect((await (await get()).json()).seen).toEqual({ f1: 500, f2: 900 })
+    await post({ frames: { f1: null }, replace: true })
+    expect((await (await get()).json()).seen).toEqual({ f2: 900 })
+  })
+
+  it('still clamps to the frame and ignores other canvases', async () => {
+    await post({ frames: { f1: 99999, elsewhere: null, nope: null }, replace: true })
+    expect((await (await get()).json()).seen).toEqual({ f1: 500 })
+  })
+
+  it('has the same access check as the plain write: a stranger or a guest changes nothing', async () => {
+    await post({ frames: { f1: 500 } })
+    userId = 'stranger'
+    expect((await post({ frames: { f1: null }, replace: true })).status).toBe(403)
+    userId = undefined
+    expect((await post({ frames: { f1: 1 }, replace: true })).status).toBe(401)
+    userId = 'owner'
+    expect((await post({ frames: { f1: null }, replace: true }, 'missing')).status).toBe(404)
+    expect([...seenRows.values()]).toEqual([500])
+  })
+
+  it('shares the request size limit', async () => {
+    const many = Object.fromEntries(Array.from({ length: MAX_SEEN_PER_REQUEST + 1 }, (_, i) => [`x${i}`, null]))
+    expect((await post({ frames: many, replace: true })).status).toBe(400)
   })
 })
 

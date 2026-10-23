@@ -7,7 +7,7 @@ import { copyFrames, duplicateFrames } from './frameClipboard'
 import { redo, undo } from './history'
 import { deleteSelection } from './layerEdits'
 import { applyDevice, restoreDevices, tidyFrames } from './layoutEdits'
-import { reviewNext } from './marks'
+import { markAllSeen, reviewNext } from './marks'
 import { canCommentNow, canEditNow } from './role'
 import { isOverlayOpen, type Shortcut } from './shortcuts'
 import { startPresenting } from './present'
@@ -292,6 +292,15 @@ export const canvasShortcuts: Shortcut[] = [
     group: 'View',
     when: onCanvas,
     run: () => reviewNext(),
+  },
+  {
+    id: 'mark-all-seen',
+    key: 'u',
+    mods: ['shift'],
+    label: 'Mark every new frame as seen',
+    group: 'View',
+    when: onCanvas,
+    run: () => void markAllSeen(),
   },
   {
     id: 'flow-links',

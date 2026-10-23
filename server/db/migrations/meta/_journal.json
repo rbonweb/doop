@@ -197,6 +197,13 @@
       "when": 1792728515839,
       "tag": "0028_marver_upgrades",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1792744609262,
+      "tag": "0029_frame_content_stamp",
+      "breakpoints": true
     }
   ]
 }

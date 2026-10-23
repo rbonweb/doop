@@ -1,7 +1,9 @@
 import { create } from 'zustand'
 import {
   DWELL_MS,
+  MAX_SEEN_PER_REQUEST,
   computeMarks,
+  contentStamp,
   isBeingViewed,
   isNewFrame,
   nextMarked,
@@ -74,12 +76,16 @@ function send(s: Session, keepalive = false) {
   if (s.timer !== null) window.clearTimeout(s.timer)
   s.timer = null
   if (s.pending.size === 0) return
-  const frames = Object.fromEntries(s.pending)
+  const all = [...s.pending]
   s.pending.clear()
-  api.postSeen(s.canvasId, frames, keepalive).catch(() => {
-    /* kept for the next send; the person's own screen already shows the frame as seen */
-    for (const [id, at] of Object.entries(frames)) s.pending.set(id, Math.max(at, s.pending.get(id) ?? 0))
-  })
+  /* a request takes at most MAX_SEEN_PER_REQUEST frames; "mark all as seen" on a big canvas is a few of them */
+  for (let from = 0; from < all.length; from += MAX_SEEN_PER_REQUEST) {
+    const frames = Object.fromEntries(all.slice(from, from + MAX_SEEN_PER_REQUEST))
+    api.postSeen(s.canvasId, frames, keepalive).catch(() => {
+      /* kept for the next send; the person's own screen already shows the frame as seen */
+      for (const [id, at] of Object.entries(frames)) s.pending.set(id, Math.max(at, s.pending.get(id) ?? 0))
+    })
+  }
 }
 
 /** Record that this person has now seen the frame as it is. Does nothing for a frame that is not new to them. */
@@ -89,10 +95,66 @@ export function markFrameSeen(frameId: string) {
   if (!s || !input) return
   const frame = useStore.getState().canvas?.frames.find((f) => f.id === frameId)
   if (!frame || !isNewFrame(frame, input)) return
-  useMarks.setState({ seen: { ...input.seen, [frameId]: frame.updatedAt } })
-  s.pending.set(frameId, frame.updatedAt)
+  const stamp = contentStamp(frame)
+  useMarks.setState({ seen: { ...input.seen, [frameId]: stamp } })
+  s.pending.set(frameId, stamp)
   if (s.timer !== null) window.clearTimeout(s.timer)
   s.timer = window.setTimeout(() => send(s), FLUSH_MS)
+}
+
+/**
+ * Mark every new frame on the canvas as seen, in one batched report, and offer to undo it with a toast. The
+ * needs-you (orange) marks are left alone: those clear only when the person replies. Returns how many frames it marked.
+ */
+export function markAllSeen(): number {
+  const s = session
+  const input = s && markInput(s)
+  const { canvas, pushNotice } = useStore.getState()
+  if (!s || !input || !canvas) return 0
+  const { marks } = useMarks.getState()
+  const fresh = canvas.frames.filter((frame) => marks[frame.id] === 'new')
+  if (fresh.length === 0) {
+    pushNotice('Nothing new to mark as seen')
+    return 0
+  }
+  const seen = { ...input.seen }
+  const reported: Record<string, number> = {}
+  const previous: Record<string, number | null> = {}
+  for (const frame of fresh) {
+    previous[frame.id] = input.seen[frame.id] ?? null
+    reported[frame.id] = seen[frame.id] = contentStamp(frame)
+  }
+  useMarks.setState({ seen })
+  for (const [id, at] of Object.entries(reported)) s.pending.set(id, at)
+  send(s)
+
+  pushNotice(`Marked ${fresh.length} ${fresh.length === 1 ? 'frame' : 'frames'} as seen`, {
+    action: {
+      label: 'Undo',
+      run: () => {
+        if (session !== s) return
+        /* put back only what this action changed: a frame viewed since is still seen */
+        const now = useMarks.getState().seen
+        const restored = { ...now }
+        const restore: Record<string, number | null> = {}
+        for (const [id, before] of Object.entries(previous)) {
+          if (now[id] !== reported[id]) continue
+          restore[id] = before
+          if (before === null) delete restored[id]
+          else restored[id] = before
+          s.pending.delete(id)
+        }
+        useMarks.setState({ seen: restored })
+        for (let from = 0; from < Object.keys(restore).length; from += MAX_SEEN_PER_REQUEST) {
+          const batch = Object.fromEntries(Object.entries(restore).slice(from, from + MAX_SEEN_PER_REQUEST))
+          api
+            .replaceSeen(s.canvasId, batch)
+            .catch(() => useStore.getState().pushNotice('Couldn’t undo that. Try again.'))
+        }
+      },
+    },
+  })
+  return fresh.length
 }
 
 /**
@@ -193,7 +255,8 @@ export function bindMarks(canvasId: string, viewer: { userId: string; name?: str
       if (!frame || framePageId(canvas, frame) !== pageId || !isBeingViewed(frame, viewport, stageSize)) continue
       inView.add(id)
       const entry = dwell.get(id)
-      if (!entry || entry.updatedAt !== frame.updatedAt) dwell.set(id, { updatedAt: frame.updatedAt, since: now })
+      if (!entry || entry.updatedAt !== contentStamp(frame))
+        dwell.set(id, { updatedAt: contentStamp(frame), since: now })
       else if (now - entry.since >= DWELL_MS) {
         dwell.delete(id)
         markFrameSeen(id)
