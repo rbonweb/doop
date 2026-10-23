@@ -64,6 +64,9 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
         </ContextMenuItem>
         <ContextMenuItem onSelect={() => void copyImageUrl(frame)}>Copy image URL</ContextMenuItem>
         <ContextMenuItem onSelect={() => setShowExport(true)}>Export…</ContextMenuItem>
+        <ContextMenuItem onSelect={() => useStore.getState().openFrameHistory(frame.id)}>
+          Version history…
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
           title="Will be used as reference — agents copy its style in new designs"

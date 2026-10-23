@@ -82,6 +82,9 @@ interface State {
   elementPanelOpen: boolean
   /** the Layers rail is showing (desktop); the choice sticks across visits */
   layersOpen: boolean
+  /** the frame whose version history panel is open, if any — it takes the
+   *  Inspector's spot until closed */
+  historyFrameId: string | null
   viewport: Viewport
   /** live alignment guide lines while a frame drag is snapped to a neighbour */
   snapGuides: SnapGuide[]
@@ -180,6 +183,7 @@ interface State {
   pickElement(el: { frameId: string; selector: string } | null): void
   setElementPanelOpen(v: boolean): void
   setLayersOpen(v: boolean): void
+  openFrameHistory(frameId: string | null): void
   setViewport(v: Viewport): void
   setSnapGuides(guides: SnapGuide[]): void
   flash(frameId: string, color: string): void
@@ -224,6 +228,7 @@ export const useStore = create<State>((set, get) => ({
   selectedElement: null,
   elementPanelOpen: false,
   layersOpen: readLayersOpen(),
+  historyFrameId: null,
   viewport: { x: 0, y: 0, zoom: 1 },
   snapGuides: [],
   connected: false,
@@ -528,6 +533,7 @@ export const useStore = create<State>((set, get) => ({
       return { selectedElement: same ? s.selectedElement : el, elementPanelOpen: true }
     }),
   setElementPanelOpen: (elementPanelOpen) => set({ elementPanelOpen }),
+  openFrameHistory: (historyFrameId) => set({ historyFrameId }),
   setLayersOpen: (layersOpen) => {
     try {
       localStorage.setItem(LAYERS_OPEN_KEY, layersOpen ? '1' : '0')

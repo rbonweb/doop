@@ -6,7 +6,8 @@ import { fromNodeHeaders } from 'better-auth/node'
 import { z } from 'zod'
 import { store } from './store.ts'
 import * as actions from './actions.ts'
-import { canAccessCanvas } from './access.ts'
+import * as persist from './db/persist.ts'
+import { canAccessCanvas, canEditFrame } from './access.ts'
 import { isAgentKeySecret, verifyAgentKey } from './agentKeys.ts'
 import * as workspaces from './workspaces.ts'
 import { auth, getUserName, isBanned, PUBLIC_ORIGIN } from './auth.ts'
@@ -211,6 +212,11 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
     const f = store.getFrame(frameId)
     if (!f) return undefined
     return canvasFor(f.canvasId) ? f : undefined
+  }
+  /* history reads and restores need the right to edit the frame (see canEditFrame) */
+  const editableFrameFor = (frameId: string) => {
+    const f = store.getFrame(frameId)
+    return f && canEditFrame(ownerId, f) ? f : undefined
   }
   const noCanvas = (id: string) => err(`no canvas with id ${id} accessible to this account`)
   const noFrame = (id: string) => err(`no frame with id ${id} accessible to this account`)
@@ -1487,6 +1493,47 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
       const frame = actions.updateFrame(frame_id, clean, actorFrom(agent_name))
       if (!frame) return noFrame(frame_id)
       return withFeedback(text({ ok: true, frame: frameSummary(frame) }), frame.canvasId, actorFrom(agent_name))
+    },
+  )
+
+  server.registerTool(
+    'list_frame_versions',
+    {
+      description:
+        'List the saved earlier versions of a frame, newest first (id, savedAt in ms, savedBy, reason, name, width, height — no HTML). Doop saves a version before every change, so a design an agent or person overwrote can be rolled back with restore_frame_version.',
+      inputSchema: { frame_id: z.string(), agent_name: agentName.optional() },
+    },
+    async ({ frame_id, agent_name }) => {
+      const f = editableFrameFor(frame_id)
+      if (!f) return noFrame(frame_id)
+      arrive(f.canvasId, agent_name)
+      const versions = await persist.listFrameVersions(frame_id)
+      return withFeedback(text({ frame_id, versions }), f.canvasId, agent_name ? actorFrom(agent_name) : undefined)
+    },
+  )
+
+  server.registerTool(
+    'restore_frame_version',
+    {
+      description:
+        'Roll a frame back to one of its saved versions (get the ids from list_frame_versions). The current design is saved as a version first, so the restore itself can be undone. Restores the HTML, size and name.',
+      inputSchema: { frame_id: z.string(), version_id: z.string(), agent_name: agentName },
+    },
+    async ({ frame_id, version_id, agent_name }) => {
+      if (!editableFrameFor(frame_id)) return noFrame(frame_id)
+      const version = await persist.getFrameVersion(version_id)
+      if (!version || version.frameId !== frame_id) return err(`no version with id ${version_id} on this frame`)
+      const frame = actions.restoreFrameVersion(version, actorFrom(agent_name))
+      if (!frame) return noFrame(frame_id)
+      return withStatusNudge(
+        withFeedback(
+          textWithNudge({ ok: true, frame: frameSummary(frame) }, REVIEW_NUDGE),
+          frame.canvasId,
+          actorFrom(agent_name),
+        ),
+        frame.canvasId,
+        actorFrom(agent_name),
+      )
     },
   )
 

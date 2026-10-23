@@ -18,6 +18,7 @@ import { ensureTab } from '../lib/desktop'
 import { Stage } from '../components/Stage'
 import { Board } from '../components/Board'
 import { Inspector } from '../components/Inspector'
+import { FrameHistoryPanel } from '../components/FrameHistoryPanel'
 import { ElementPanel } from '../components/ElementPanel'
 import { ActivityPanel } from '../components/ActivityPanel'
 import { ConnectModal } from '../components/ConnectModal'
@@ -276,6 +277,11 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
      context menu closes — it would slide in right under the open menu */
   const deferPanel = useStore((s) => !!s.ctxMenu?.deferPanel)
   const layersOpen = useStore((s) => s.layersOpen)
+  /* the version history rail takes the Inspector's spot while a frame's
+     history is open; it follows that frame, not the selection */
+  const historyFrameId = useStore((s) => s.historyFrameId)
+  const historyFrame = canvas?.frames.find((f) => f.id === historyFrameId) ?? null
+  const closeHistory = () => useStore.getState().openFrameHistory(null)
   /* the element panel takes the frame inspector's spot while a Layers row
      has it open; it follows the element selection until it is closed */
   const selectedElement = useStore((s) => s.selectedElement)
@@ -483,7 +489,15 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
             <PromptBar canvasId={canvasId} />
             <Onboarding canvasId={canvasId} />
             {!isMobile && (layersOpen ? <LayersPanel onAddFrame={addFrame} /> : <LayersRailToggle />)}
-            {!isMobile && selectedFrame && panelElement && !deferPanel && (
+            {!isMobile && historyFrame && (
+              <FrameHistoryPanel
+                key={historyFrame.id}
+                frame={historyFrame}
+                className={propertiesPanelCls}
+                onClose={closeHistory}
+              />
+            )}
+            {!isMobile && !historyFrame && selectedFrame && panelElement && !deferPanel && (
               <ElementPanel
                 key={`${selectedFrame.id}|${panelElement.selector}`}
                 frame={selectedFrame}
@@ -491,7 +505,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
                 className={propertiesPanelCls}
               />
             )}
-            {!isMobile && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
+            {!isMobile && !historyFrame && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
               <Inspector frame={selectedFrame} className={propertiesPanelCls} />
             )}
             {!isMobile && !showActivity && <SideRail onOpen={() => setShowActivity(true)} />}
@@ -556,7 +570,24 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
             </SheetContent>
           </Sheet>
           <Sheet
-            open={!!selectedFrame && inspectorOpen && !deferPanel}
+            open={!!historyFrame}
+            onOpenChange={(open) => {
+              if (!open) closeHistory()
+            }}
+          >
+            <SheetContent
+              side="bottom"
+              showCloseButton={false}
+              className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
+            >
+              <SheetTitle className="sr-only">Version history</SheetTitle>
+              {historyFrame && (
+                <FrameHistoryPanel key={historyFrame.id} frame={historyFrame} surface="inline" onClose={closeHistory} />
+              )}
+            </SheetContent>
+          </Sheet>
+          <Sheet
+            open={!!selectedFrame && inspectorOpen && !deferPanel && !historyFrame}
             onOpenChange={(open) => {
               if (!open) select(null)
             }}

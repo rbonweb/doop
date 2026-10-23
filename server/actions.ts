@@ -24,6 +24,7 @@ import type {
   DesignDecision,
   ElementComment,
   Frame,
+  FrameVersion,
   GuidelineDoc,
   MemoryProposal,
   MemoryReference,
@@ -1112,6 +1113,101 @@ export function retryCard(canvasId: string, cardId: string, by: string): AgentTa
 }
 
 /* ------------------------------------------------------------------ */
+/* Frame version history.                                              */
+/*                                                                     */
+/* A snapshot saves a frame's state BEFORE a change, so a design can be*/
+/* rolled back later. A burst of edits by one actor becomes one version*/
+/* (2 minutes), and identical html is never saved twice. Streaming     */
+/* chunks never snapshot — only the start of a stream does.            */
+/* ------------------------------------------------------------------ */
+
+export const SNAPSHOT_COALESCE_MS = 2 * 60_000
+
+interface LastSnapshot {
+  at: number
+  /** who took it: kind plus account (people) or name (agents) */
+  by: string
+  /** the html it saved, so an unchanged frame is never saved twice */
+  html: string
+}
+
+const lastSnapshots = new Map<string, LastSnapshot>() // frameId -> latest snapshot taken by this process
+
+function snapshotReason(actor: Actor): FrameVersion['reason'] {
+  return actor.kind === 'agent' ? 'agent' : 'human'
+}
+
+function snapshotKey(actor: Actor): string {
+  return actor.kind === 'agent' ? `agent:${actor.name}` : `user:${actor.userId ?? actor.name}`
+}
+
+async function saveSnapshot(version: FrameVersion, checkLatest: boolean) {
+  if (checkLatest) {
+    /* first snapshot since the process started: the memory of the last one
+       is gone, so compare against what the database holds */
+    const [latest] = await persist.listFrameVersions(version.frameId)
+    const full = latest && (await persist.getFrameVersion(latest.id))
+    if (full?.html === version.html) return
+  }
+  await persist.saveFrameVersion(version)
+}
+
+/** Save the frame's current state as a version, unless that adds nothing: the
+ *  frame is empty, its html matches the latest version, or this actor already
+ *  snapshotted it within the last 2 minutes. A restore skips only the time
+ *  check. Returns whether a version was saved. */
+export function snapshotFrame(frame: Frame, actor: Actor, reason: FrameVersion['reason']): boolean {
+  if (!frame.html) return false
+  const last = lastSnapshots.get(frame.id)
+  const now = Date.now()
+  const by = snapshotKey(actor)
+  if (last?.html === frame.html) return false
+  if (reason !== 'restore' && last && last.by === by && now - last.at < SNAPSHOT_COALESCE_MS) return false
+  lastSnapshots.set(frame.id, { at: now, by, html: frame.html })
+  const version: FrameVersion = {
+    id: nanoid(12),
+    frameId: frame.id,
+    canvasId: frame.canvasId,
+    name: frame.name,
+    html: frame.html,
+    width: frame.width,
+    height: frame.height,
+    savedAt: now,
+    savedBy: actor.name,
+    reason,
+  }
+  saveSnapshot(version, !last).catch((err) => console.error('[frame-history] snapshot failed', err))
+  return true
+}
+
+function describeVersionTime(savedAt: number): string {
+  return new Date(savedAt).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+}
+
+/** Roll a frame back to a saved version. The current state is snapshotted
+ *  first (reason 'restore'), then html, size and name are applied through the
+ *  normal update path, so viewers get the change live. */
+export function restoreFrameVersion(version: FrameVersion, actor: Actor): Frame | undefined {
+  const before = store.getFrame(version.frameId)
+  if (!before) return undefined
+  snapshotFrame(before, actor, 'restore')
+  const frame = updateFrame(
+    before.id,
+    { html: version.html, width: version.width, height: version.height, name: version.name },
+    actor,
+    { restoring: true },
+  )
+  if (!frame) return undefined
+  logActivity(
+    frame.canvasId,
+    actor,
+    `restored “${frame.name}” to the version from ${describeVersionTime(version.savedAt)}`,
+    frame.id,
+  )
+  return frame
+}
+
+/* ------------------------------------------------------------------ */
 /* Live rendering of agent writes.                                     */
 /*                                                                     */
 /* Streams (append_frame_html): every chunk broadcasts the moment it   */
@@ -1241,6 +1337,9 @@ export function appendFrameHtml(
   if (!before) return undefined
 
   const starting = opts.start || !streams.has(frameId)
+  /* the design as it stood before this stream rewrites it — once per stream,
+     never per chunk */
+  if (starting) snapshotFrame(before, actor, snapshotReason(actor))
   /* an agent that escapes its opening chunk escapes the whole stream, so latch
      the verdict there: a chunk mid-design can hold a legitimate `&lt;` (a code
      sample) and must never be sniffed on its own */
@@ -1316,12 +1415,18 @@ export function updateFrame(
   frameId: string,
   patch: Partial<Pick<Frame, 'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html' | 'slide' | 'speakerNotes'>>,
   actor: Actor,
+  /** restoring: a version restore already snapshotted and logs its own activity line */
+  opts: { restoring?: boolean } = {},
 ): Frame | undefined {
   const before = store.getFrame(frameId)
   if (!before) return undefined
   if (patch.html !== undefined) patch = { ...patch, html: repairEscapedHtml(patch.html) }
   const prevName = before.name
   const prevHtml = before.html
+  /* a live stream's frame holds a half-written design: not worth keeping */
+  if (!opts.restoring && patch.html !== undefined && patch.html !== prevHtml && !streams.has(frameId)) {
+    snapshotFrame(before, actor, snapshotReason(actor))
+  }
   const frame = store.updateFrame(frameId, patch, actor.name, editorOf(actor))
   if (!frame) return undefined
 
@@ -1341,11 +1446,11 @@ export function updateFrame(
       trackTaskFrame(frame.canvasId, actor, frameId)
     } else if (smallTweak) {
       broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
-      logActivity(frame.canvasId, actor, `tweaked the design of “${frame.name}”`, frame.id)
+      if (!opts.restoring) logActivity(frame.canvasId, actor, `tweaked the design of “${frame.name}”`, frame.id)
       autoTask(frame.canvasId, actor, `Tweaking “${frame.name}”`, frameId)
     } else {
       startReveal(frame, actor, prefix)
-      logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
+      if (!opts.restoring) logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
       autoTask(frame.canvasId, actor, `Redesigning “${frame.name}”`, frameId)
     }
   } else {
@@ -1356,7 +1461,7 @@ export function updateFrame(
     }
     broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
     if (htmlChanged) {
-      logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
+      if (!opts.restoring) logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
     } else if (patch.name !== undefined && patch.name !== prevName) {
       logActivity(frame.canvasId, actor, `renamed “${prevName}” to “${frame.name}”`, frame.id)
     }
@@ -1373,6 +1478,7 @@ export function deleteFrame(frameId: string, actor: Actor): Frame | undefined {
   finishReveal(frameId)
   const frame = store.deleteFrame(frameId)
   if (!frame) return undefined
+  lastSnapshots.delete(frameId)
   thumbs.purge(frameId)
   broadcast(frame.canvasId, { type: 'frame:deleted', frameId, actor })
   logActivity(frame.canvasId, actor, `deleted frame “${frame.name}”`, frame.id)
@@ -1384,7 +1490,10 @@ export function deleteFrame(frameId: string, actor: Actor): Frame | undefined {
 export function deleteCanvas(canvasId: string): boolean {
   const c = store.deleteCanvas(canvasId)
   if (!c) return false
-  for (const f of c.frames) thumbs.purge(f.id)
+  for (const f of c.frames) {
+    thumbs.purge(f.id)
+    lastSnapshots.delete(f.id)
+  }
   broadcast(canvasId, { type: 'canvas:deleted' })
   taskLog.delete(canvasId)
   feedbackLog.delete(canvasId)
