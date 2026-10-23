@@ -784,6 +784,17 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
           <Toast>
             {storeNotice.busy && <ToastSpinner />}
             {storeNotice.text}
+            {storeNotice.action && (
+              <ToastAction
+                onClick={() => {
+                  const { action } = storeNotice
+                  useStore.setState({ notice: null })
+                  action?.run()
+                }}
+              >
+                {storeNotice.action.label}
+              </ToastAction>
+            )}
           </Toast>
         )
       )}

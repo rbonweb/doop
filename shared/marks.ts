@@ -4,7 +4,7 @@ import type { Canvas, ElementComment, Frame } from './types.ts'
 
 /**
  * The review marks on a frame: 'ask' (orange, "needs you") when a thread is waiting on the viewer, 'new' (blue) when
- * someone else changed the frame since the viewer last looked. Orange beats blue. Pure rules, shared by the client
+ * someone else changed the frame's design since the viewer last looked. Orange beats blue. Pure rules, shared by the client
  * (dots, the `u` key) and tests.
  */
 export type Mark = 'new' | 'ask'
@@ -26,11 +26,26 @@ export interface MarkInput {
   baselineAt: number
 }
 
-type MarkFrame = Pick<Frame, 'id' | 'updatedAt' | 'updatedBy' | 'updatedByUserId' | 'updatedByKind'>
+type MarkFrame = Pick<
+  Frame,
+  'id' | 'updatedAt' | 'contentUpdatedAt' | 'updatedBy' | 'updatedByUserId' | 'updatedByKind'
+>
 type MarkComment = Pick<
   ElementComment,
   'id' | 'frameId' | 'parentId' | 'resolvedAt' | 'at' | 'from' | 'fromUserId' | 'fromKind' | 'mentions'
 >
+
+/** Most frames one seen request may report; the client batches a second of views, so a real one is far smaller. */
+export const MAX_SEEN_PER_REQUEST = 500
+
+/**
+ * The version of a frame that marks and seen state compare: when its design last changed. A move, resize or page move
+ * bumps `updatedAt` but is not something to review, so it does not move this. Frames written before the stamp existed
+ * fall back to `updatedAt`.
+ */
+export function contentStamp(frame: Pick<Frame, 'updatedAt' | 'contentUpdatedAt'>): number {
+  return frame.contentUpdatedAt ?? frame.updatedAt
+}
 
 /** Whether the last edit on the frame was the viewer's own hand. An agent's edit is never the viewer's, even with the viewer's key. */
 function editedByViewer(frame: MarkFrame, viewer: MarkViewer): boolean {
@@ -39,9 +54,9 @@ function editedByViewer(frame: MarkFrame, viewer: MarkViewer): boolean {
   return !!viewer.name && frame.updatedBy === viewer.name
 }
 
-/** New: changed by someone other than the viewer, after the later of what they saw and when they first arrived. */
+/** New: its design changed by someone other than the viewer, after the later of what they saw and when they first arrived. */
 export function isNewFrame(frame: MarkFrame, input: MarkInput): boolean {
-  if (frame.updatedAt <= Math.max(input.seen[frame.id] ?? 0, input.baselineAt)) return false
+  if (contentStamp(frame) <= Math.max(input.seen[frame.id] ?? 0, input.baselineAt)) return false
   return !editedByViewer(frame, input.viewer)
 }
 

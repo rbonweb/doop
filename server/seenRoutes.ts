@@ -1,13 +1,13 @@
 import { Router, type Request, type Response } from 'express'
 import * as persist from './db/persist.ts'
+import { MAX_SEEN_PER_REQUEST, contentStamp } from '../shared/marks.ts'
 import { store } from './store.ts'
 import { requireCanvas } from './sharing.ts'
 
 /** /api/canvases/:id/seen: what each person has already looked at on a canvas, behind the "new" marks. */
 export const seenRouter = Router()
 
-/** Most frames one request may report; the client batches a second of views, so a real one is far smaller. */
-export const MAX_SEEN_PER_REQUEST = 500
+export { MAX_SEEN_PER_REQUEST }
 
 /** The caller and canvas, when this caller may view it (any role); otherwise the response is already sent. */
 function canvasFor(req: Request, res: Response) {
@@ -36,9 +36,13 @@ seenRouter.get('/:id/seen', async (req, res) => {
 })
 
 /**
- * Record `{ frames: { [frameId]: updatedAt } }`: the version of each frame the caller saw. The store keeps the larger
- * value, so a stale tab cannot roll a frame back to "new". A value is clamped to the frame's own updatedAt, so a
- * client can never mark a change that has not happened yet as seen. Frames from other canvases are ignored.
+ * Record `{ frames: { [frameId]: version } }`: the version of each frame the caller saw, where a version is the frame's
+ * design stamp (`contentStamp`). The store keeps the larger value, so a stale tab cannot roll a frame back to "new". A
+ * value is clamped to the frame's own stamp, so a client can never mark a change that has not happened yet as seen.
+ * Frames from other canvases are ignored.
+ *
+ * With `replace: true` each value is set exactly instead (still clamped), and `null` forgets the frame; this is how
+ * "Mark all as seen" is undone, putting the previous state back. Same access check as the plain write.
  */
 seenRouter.post('/:id/seen', async (req, res) => {
   const found = canvasFor(req, res)
@@ -47,19 +51,28 @@ seenRouter.post('/:id/seen', async (req, res) => {
   if (!frames || typeof frames !== 'object' || Array.isArray(frames)) {
     return res.status(400).json({ error: 'frames must be an object of frame id to updatedAt' })
   }
+  const replace = req.body?.replace === true
   const entries = Object.entries(frames)
   if (entries.length > MAX_SEEN_PER_REQUEST) {
     return res.status(400).json({ error: `report at most ${MAX_SEEN_PER_REQUEST} frames at a time` })
   }
   const writes: Promise<void>[] = []
   for (const [frameId, value] of entries) {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    const forget = replace && value === null
+    if (!forget && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
       return res.status(400).json({ error: 'every updatedAt must be a non-negative number' })
     }
     const frame = store.getFrame(frameId)
     if (!frame || frame.canvasId !== found.canvas.id) continue
+    if (forget) {
+      writes.push(persist.replaceFrameSeen(found.userId, found.canvas.id, frameId, null))
+      continue
+    }
+    const at = Math.min(Math.floor(value as number), contentStamp(frame))
     writes.push(
-      persist.saveFrameSeen(found.userId, found.canvas.id, frameId, Math.min(Math.floor(value), frame.updatedAt)),
+      replace
+        ? persist.replaceFrameSeen(found.userId, found.canvas.id, frameId, at)
+        : persist.saveFrameSeen(found.userId, found.canvas.id, frameId, at),
     )
   }
   try {

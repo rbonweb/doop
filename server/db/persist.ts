@@ -101,6 +101,7 @@ export async function saveCanvasCopy(c: Canvas): Promise<void> {
           html: frame.html,
           createdAt: frame.createdAt,
           updatedAt: frame.updatedAt,
+          contentUpdatedAt: frame.contentUpdatedAt ?? null,
           updatedBy: frame.updatedBy,
           demo: frame.demo ?? null,
           updatedByUserId: frame.updatedByUserId ?? null,
@@ -356,6 +357,7 @@ async function writeFrame(f: Frame) {
     html: f.html,
     createdAt: f.createdAt,
     updatedAt: f.updatedAt,
+    contentUpdatedAt: f.contentUpdatedAt ?? null,
     updatedBy: f.updatedBy,
     demo: f.demo ?? null,
     updatedByUserId: f.updatedByUserId ?? null,
@@ -639,6 +641,24 @@ export function saveFrameSeen(userId: string, canvasId: string, frameId: string,
   )
 }
 
+/** Set the seen version exactly, even backwards, or forget the frame with `null`: the undo of "Mark all as seen". */
+export function replaceFrameSeen(
+  userId: string,
+  canvasId: string,
+  frameId: string,
+  seenUpdatedAt: number | null,
+): Promise<void> {
+  if (seenUpdatedAt === null) {
+    return settled(db.delete(t.frameSeen).where(and(eq(t.frameSeen.userId, userId), eq(t.frameSeen.frameId, frameId))))
+  }
+  return settled(
+    db
+      .insert(t.frameSeen)
+      .values({ userId, canvasId, frameId, seenUpdatedAt })
+      .onConflictDoUpdate({ target: [t.frameSeen.userId, t.frameSeen.frameId], set: { seenUpdatedAt } }),
+  )
+}
+
 /** Cold path — read on demand. */
 export function listFrameSeen(userId: string, canvasId: string): Promise<{ frameId: string; seenUpdatedAt: number }[]> {
   return db
@@ -887,6 +907,7 @@ function frameFromRow(f: typeof t.frames.$inferSelect): Frame {
     html: f.html,
     createdAt: f.createdAt,
     updatedAt: f.updatedAt,
+    ...(f.contentUpdatedAt != null ? { contentUpdatedAt: f.contentUpdatedAt } : {}),
     updatedBy: f.updatedBy,
     ...(f.updatedByUserId != null ? { updatedByUserId: f.updatedByUserId } : {}),
     ...(f.updatedByKind === 'user' || f.updatedByKind === 'agent' ? { updatedByKind: f.updatedByKind } : {}),

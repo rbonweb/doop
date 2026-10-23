@@ -13,10 +13,12 @@ export interface Frame {
   html: string
   createdAt: number
   updatedAt: number
+  /** when the design last changed (html or name): a move, resize or page move bumps `updatedAt` but not this. Unset on frames written before it existed; read it through `contentStamp`. */
+  contentUpdatedAt?: number
   updatedBy: string
-  /** account id of the person behind the last edit (for an agent, whose token it used); unset on legacy frames */
+  /** account id of the person behind the last design edit (for an agent, whose token it used); unset on legacy frames */
   updatedByUserId?: string
-  /** who made the last edit; unset on legacy frames */
+  /** who made the last design edit; unset on legacy frames */
   updatedByKind?: 'user' | 'agent'
   /** product-made onboarding/example content (welcome demo, seeded frames) —
    *  not the user's work; agents must never read it as the canvas's style */

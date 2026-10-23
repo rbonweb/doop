@@ -166,6 +166,7 @@ class Store {
       canvasId,
       createdAt: now,
       updatedAt: now,
+      contentUpdatedAt: now,
       updatedBy: by,
     }))
     /* notes follow their frame; a note on a frame the copy dropped (demo) is dropped with it */
@@ -602,6 +603,7 @@ class Store {
       html: input.html ?? '',
       createdAt: now,
       updatedAt: now,
+      contentUpdatedAt: now,
       updatedBy: by,
     }
     if (editor.userId) frame.updatedByUserId = editor.userId
@@ -630,14 +632,23 @@ class Store {
       !canvasPages(this.canvases.get(frame.canvasId)!).some((p) => p.id === patch.pageId)
     )
       return undefined
+    /* a design change is html or the name; a move, resize or page move touches updatedAt only. The review marks follow
+       the design stamp, so shuffling frames around never reads as someone having changed them. */
+    const designChanged =
+      (patch.html !== undefined && patch.html !== frame.html) || (patch.name !== undefined && patch.name !== frame.name)
+    /* a frame from before the stamp existed keeps the time it last changed as its design time, frozen before this bump */
+    if (!designChanged) frame.contentUpdatedAt ??= frame.updatedAt
     Object.assign(frame, patch)
     frame.updatedAt = Date.now()
-    frame.updatedBy = by
-    /* attribution always describes the latest edit, so a stale account id never outlives its name */
-    if (editor.userId) frame.updatedByUserId = editor.userId
-    else delete frame.updatedByUserId
-    if (editor.kind) frame.updatedByKind = editor.kind
-    else delete frame.updatedByKind
+    if (designChanged) {
+      frame.contentUpdatedAt = frame.updatedAt
+      frame.updatedBy = by
+      /* attribution describes the latest design edit, so a stale account id never outlives its name */
+      if (editor.userId) frame.updatedByUserId = editor.userId
+      else delete frame.updatedByUserId
+      if (editor.kind) frame.updatedByKind = editor.kind
+      else delete frame.updatedByKind
+    }
     if (frame.slide === false) delete frame.slide
     if (!frame.speakerNotes) delete frame.speakerNotes
     const c = this.canvases.get(frame.canvasId)!

@@ -21,6 +21,12 @@ import type {
 import type { SnapGuide } from './snap'
 import { fitViewport, zoomAroundCenter } from './fit'
 
+/** A button on a toast: Undo after a bulk change. */
+export interface NoticeAction {
+  label: string
+  run: () => void
+}
+
 export interface Viewport {
   x: number
   y: number
@@ -129,8 +135,9 @@ interface State {
   streams: Record<string, { name: string; color: string }>
   /** a transient toast — in the store so long actions fired from surfaces
    *  that close at once (a context menu) can still report back. A `busy`
-   *  notice (an export in flight) stays up until the next notice replaces it. */
-  notice: { text: string; at: number; busy?: boolean } | null
+   *  notice (an export in flight) stays up until the next notice replaces it.
+   *  An `action` adds a button to the toast (Undo). */
+  notice: { text: string; at: number; busy?: boolean; action?: NoticeAction } | null
   /** the free-tier wall is showing — in the store so any surface that hits
    *  the resident-task limit (board, prompt bar, element comment) can raise it */
   limitWall: boolean
@@ -220,7 +227,7 @@ interface State {
   setPanelTab(tab: PanelTab): void
   /** show `text` as a toast for a few seconds — or, with `busy`, with a
    *  spinner until the next notice replaces it */
-  pushNotice(text: string, options?: { busy?: boolean }): void
+  pushNotice(text: string, options?: { busy?: boolean; action?: NoticeAction }): void
   setLimitWall(v: boolean): void
   allowanceChanged(): void
   requestFlyTo(frameId: string): void
@@ -675,7 +682,7 @@ export const useStore = create<State>((set, get) => ({
   pushNotice: (text, options) => {
     const busy = options?.busy === true
     const at = Date.now()
-    set({ notice: { text, at, busy } })
+    set({ notice: { text, at, busy, ...(options?.action ? { action: options.action } : {}) } })
     if (busy) {
       /* a backstop for a request that never settles (a stalled Canva
          export) — normally the outcome replaces a busy notice long before */
@@ -684,11 +691,13 @@ export const useStore = create<State>((set, get) => ({
       }, BUSY_NOTICE_MAX_MS)
       return
     }
+    /* a toast with a button stays a little longer, so there is time to reach it */
+    const stay = options?.action ? 8000 : 5000
     setTimeout(() => {
       const cur = get().notice
       /* only clear our own notice — a newer one restarts the clock */
-      if (cur && !cur.busy && Date.now() - cur.at >= 4900) set({ notice: null })
-    }, 5000)
+      if (cur && !cur.busy && Date.now() - cur.at >= stay - 100) set({ notice: null })
+    }, stay)
   },
   setLimitWall: (limitWall) => set({ limitWall }),
   allowanceChanged: () => set((s) => ({ allowanceVersion: s.allowanceVersion + 1 })),
