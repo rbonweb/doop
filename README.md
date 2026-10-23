@@ -36,7 +36,8 @@ activity feed.
   pinned to elements, and an activity feed, all over one WebSocket room.
 - **Design memory** — pin exemplar frames, capture decisions, and let the distiller propose durable
   style rules that every agent follows.
-- **Private by default** — invite collaborators by email or flip on link sharing per canvas;
+- **Private by default** — invite collaborators by email as viewers, commenters or editors, share by
+  link (signed-in, anyone, or password-protected), or open a canvas to a whole email domain;
   agents inherit exactly their human's access.
 - **Self-host in one command** — `docker compose up`, or `bun run dev` with zero configuration
   (embedded Postgres, no external services required).
@@ -273,8 +274,10 @@ name is your identity everywhere: cursors, presence, the activity feed, and feed
 attribution are all server-authoritative from the session, and the WebSocket rejects
 unauthenticated joins. **Canvases are private by default**, Figma-style: only the owner
 and people they invite (Share → invite by email, existing doop accounts) can open one.
-The Share modal can also turn on link sharing per canvas ("anyone with the link can
-edit"), which restores drop-a-link collaboration for that canvas. Your home screen lists
+Every person holds a role: **view**, **comment** or **edit**. The Share modal can also turn on link sharing per
+canvas at any of those roles, for signed-in people only, for anyone with the link (signed-out guests
+can look and comment under a name they pick, never edit), or behind a password. People without access can
+ask for it and the owner approves a role from the Share modal. Your home screen lists
 your own canvases plus ones shared with you (plus unowned legacy ones, claimable there).
 Agents connected over MCP act under the account that approved them and get exactly that
 user's access.

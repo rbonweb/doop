@@ -4,6 +4,7 @@ import { api, errorMessage } from '../lib/api'
 import { copyFrames, duplicateFrames, hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { deleteFramesTracked } from '../lib/history'
 import { useStore } from '../lib/store'
+import { useCanEdit } from '../lib/role'
 import { MOD_KEY } from '../lib/keys'
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from './ui/context-menu'
 import { MenuHint } from './ui/menu'
@@ -23,6 +24,8 @@ async function copyImageUrl(frame: Frame) {
  *  point the right-click happened at — Paste lands there. */
 export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefObject<{ x: number; y: number }> }) {
   const [showExport, setShowExport] = useState(false)
+  /* below edit the menu only reads: share and export, no paste, duplicate, memory or delete */
+  const mayEdit = useCanEdit()
   /* a right-click inside a multi-selection acts on the whole group */
   const groupSize = useStore((s) => (s.selectedIds.includes(frame.id) ? s.selectedIds.length : 1))
   function groupFrames(): Frame[] {
@@ -45,17 +48,21 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
           {groupSize > 1 ? `Copy ${groupSize} frames` : 'Copy'}
           <MenuHint>{MOD_KEY}C</MenuHint>
         </ContextMenuItem>
-        <ContextMenuItem
-          disabled={!hasFrameClip()}
-          onSelect={() => pasteFrameAtScreen(frame.canvasId, at.current.x, at.current.y)}
-        >
-          Paste
-          <MenuHint>{MOD_KEY}V</MenuHint>
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={() => duplicateFrames(groupFrames())}>
-          {groupSize > 1 ? `Duplicate ${groupSize} frames` : 'Duplicate'}
-          <MenuHint>{MOD_KEY}D</MenuHint>
-        </ContextMenuItem>
+        {mayEdit && (
+          <>
+            <ContextMenuItem
+              disabled={!hasFrameClip()}
+              onSelect={() => pasteFrameAtScreen(frame.canvasId, at.current.x, at.current.y)}
+            >
+              Paste
+              <MenuHint>{MOD_KEY}V</MenuHint>
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => duplicateFrames(groupFrames())}>
+              {groupSize > 1 ? `Duplicate ${groupSize} frames` : 'Duplicate'}
+              <MenuHint>{MOD_KEY}D</MenuHint>
+            </ContextMenuItem>
+          </>
+        )}
         <ContextMenuSeparator />
         <ContextMenuItem
           onSelect={() => navigator.clipboard.writeText(`${location.origin}/c/${frame.canvasId}?frame=${frame.id}`)}
@@ -64,18 +71,22 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
         </ContextMenuItem>
         <ContextMenuItem onSelect={() => void copyImageUrl(frame)}>Copy image URL</ContextMenuItem>
         <ContextMenuItem onSelect={() => setShowExport(true)}>Export…</ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem
-          title="Will be used as reference — agents copy its style in new designs"
-          onSelect={() => api.pinReference(frame.canvasId, frame.id).catch(console.error)}
-        >
-          Add to design memory
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem tone="danger" onSelect={deleteSelection}>
-          {groupSize > 1 ? `Delete ${groupSize} frames` : 'Delete frame'}
-          <MenuHint>⌫</MenuHint>
-        </ContextMenuItem>
+        {mayEdit && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              title="Will be used as reference — agents copy its style in new designs"
+              onSelect={() => api.pinReference(frame.canvasId, frame.id).catch(console.error)}
+            >
+              Add to design memory
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem tone="danger" onSelect={deleteSelection}>
+              {groupSize > 1 ? `Delete ${groupSize} frames` : 'Delete frame'}
+              <MenuHint>⌫</MenuHint>
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenuContent>
       {showExport && <FrameExportModal frame={frame} onClose={() => setShowExport(false)} />}
     </>

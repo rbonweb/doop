@@ -380,6 +380,28 @@
   }
 }
 
+@keyframes gate-shake {
+  20% {
+    transform: translateX(-5px);
+  }
+  45% {
+    transform: translateX(4px);
+  }
+  70% {
+    transform: translateX(-2px);
+  }
+}
+
+/* a comment pin that mentions you: a ring that breathes out until you open it */
+@keyframes mention-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 14px color-mix(in srgb, var(--brand) 0%, transparent);
+  }
+}
+
 @keyframes fade-in {
   from {
     opacity: 0;

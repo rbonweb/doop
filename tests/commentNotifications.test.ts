@@ -124,6 +124,47 @@ describe('who is told', () => {
     expect(sentTo()).toContain('dave@example.com')
   })
 
+  it('adds an @mentioned person who is not otherwise a recipient, and says so in the subject', async () => {
+    /* dave reaches the canvas through the share link and never wrote in the thread */
+    const mentioned = actions.addElementComment(
+      FRAME.id,
+      { selector: 'h1', snippet: '<h1/>', text: 'Can @dave check this?' },
+      'alice',
+      'alice',
+      { mentions: ['dave'] },
+    )!
+    expect(mentioned.mentions).toEqual(['dave'])
+    await deliver()
+    expect(sentTo()).toEqual(['bob@example.com', 'carol@example.com', 'dave@example.com'])
+    const toDave = mocks.sendMail.mock.calls.map(([m]) => m).find((m) => m.to === 'dave@example.com')!
+    expect(toDave.subject).toBe('alice mentioned you on “Landing”')
+    const toBob = mocks.sendMail.mock.calls.map(([m]) => m).find((m) => m.to === 'bob@example.com')!
+    expect(toBob.subject).toBe('alice commented on “Landing”')
+  })
+
+  it('respects the opt-out of a mentioned person', async () => {
+    mocks.mailable.mockImplementation(async (ids: string[]) =>
+      ids.filter((id) => id !== 'dave').map((id) => ({ id, name: id, email: `${id}@example.com` })),
+    )
+    actions.addElementComment(FRAME.id, { selector: 'h1', snippet: '<h1/>', text: '@dave' }, 'alice', 'alice', {
+      mentions: ['dave'],
+    })
+    await deliver()
+    mocks.mailable.mockImplementation(async (ids: string[]) =>
+      ids.map((id) => ({ id, name: id, email: `${id}@example.com` })),
+    )
+    expect(sentTo()).toEqual(['bob@example.com', 'carol@example.com'])
+  })
+
+  it('never mails a mentioned person who cannot view the canvas', async () => {
+    vi.spyOn(store, 'getCanvas').mockReturnValue({ ...CANVAS, linkAccess: 'none' })
+    actions.addElementComment(FRAME.id, { selector: 'h1', snippet: '<h1/>', text: '@mallory' }, 'alice', 'alice', {
+      mentions: ['mallory'],
+    })
+    await deliver()
+    expect(sentTo()).toEqual(['bob@example.com', 'carol@example.com'])
+  })
+
   it('sends nothing when the recipient opted out, was banned, or is gone', async () => {
     mocks.workspaceMembers.mockReturnValue([]) // bob is the only recipient left
     mocks.mailable.mockResolvedValueOnce([])

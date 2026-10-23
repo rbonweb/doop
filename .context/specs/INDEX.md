@@ -14,3 +14,4 @@ lists every file in this folder.
   per-user opt-out, and the `?frame=&comment=` deep link.
 - [workspaces-billing.md](workspaces-billing.md) - Shared workspaces (org-level canvas access with
   roles) and the per-seat Team plan on Stripe: data model, entitlement rules, API, webhook flow.
+- [sharing-roles.md](sharing-roles.md) - View, comment and edit roles on a canvas: the `canvasRole` resolver, per-surface enforcement (REST, WebSocket, MCP, resident agents), domain grants, access requests, people @mentions, and the anonymous and password-protected share links.

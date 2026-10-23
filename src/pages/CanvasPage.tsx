@@ -38,6 +38,8 @@ import {
 } from '../components/ImportSources'
 import { PresentMode } from '../components/PresentMode'
 import { getIdentity, setName } from '../lib/identity'
+import { canEditNow, roleBadge, useCanEdit } from '../lib/role'
+import { GuestNamePrompt, NoAccess } from '../components/AccessScreens'
 import {
   copyFrames,
   duplicateFrames,
@@ -102,8 +104,16 @@ const STARTER_HTML = `<!doctype html>
 const importNoteCls = 'mt-2.5 text-[11.5px] leading-[1.4] text-ink-faint'
 const errorNoteCls = 'mt-2.5 text-[13px] text-accent-ink'
 
-export function CanvasPage({ canvasId }: { canvasId: string }) {
+export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string; guestEntry?: boolean }) {
   const canvas = useStore((s) => s.canvas)
+  /* what this connection may do: only editors get the toolbar, inspector,
+     prompt bar, board and shortcuts; the server refuses the rest regardless */
+  const role = useStore((s) => s.role)
+  const canEdit = useCanEdit()
+  const guest = useStore((s) => s.guest) || guestEntry
+  const noAccess = useStore((s) => s.noAccess)
+  const guestNameRequest = useStore((s) => s.guestNameRequest)
+  const badge = roleBadge(role, guest)
   const connected = useStore((s) => s.connected)
   const presences = useStore((s) => s.presences)
   const selectedId = useStore((s) => s.selectedId)
@@ -166,6 +176,14 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement
       if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
+      if (!canEditNow()) {
+        /* below edit there is nothing to delete, paste, duplicate or undo */
+        if (e.key === 'Escape') {
+          select(null)
+          useStore.getState().setFollowing(null)
+        }
+        return
+      }
       const selectedIds = useStore.getState().selectedIds
       /* a picked element (from the canvas or the layers tree) is what ⌫
          removes — the frame it lives in only goes when nothing inside it is
@@ -210,6 +228,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
     function onPaste(e: ClipboardEvent) {
       const t = e.target as HTMLElement
       if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
+      if (!canEditNow()) return
       const images = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'))
       if (images.length) {
         e.preventDefault()
@@ -306,6 +325,9 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
     )
   }
 
+  /* turned away at the join (never had access, or it was taken away) */
+  if (noAccess && !guest) return <NoAccess canvasId={canvasId} />
+
   return (
     /* --app-inset is 0 normally; the impersonation shell raises it so this
        fixed layer starts below the banner instead of under it */
@@ -317,37 +339,64 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
           below it, each at its natural width. */}
       <TopBar>
         <div className="flex min-w-0 items-center gap-1.5 max-xs:basis-full">
-          <TopBarHome label="All canvases" to="/" />
+          {guest ? (
+            <span className="grid size-9 place-items-center">
+              <DoopMark size={22} />
+            </span>
+          ) : (
+            <TopBarHome label="All canvases" to="/" />
+          )}
           <CanvasName />
-          <Badge className="max-md:hidden" title="Canvas id — agents use this with the MCP tools">
-            {canvasId}
-          </Badge>
+          {canEdit && (
+            <Badge className="max-md:hidden" title="Canvas id — agents use this with the MCP tools">
+              {canvasId}
+            </Badge>
+          )}
+          {badge && (
+            <Badge
+              tone="outline"
+              className="shrink-0 animate-[chip-in_0.25s_ease]"
+              title={
+                role === 'view'
+                  ? 'You can look around and present, but not change anything'
+                  : 'You can leave comments, but not change the design'
+              }
+            >
+              {badge}
+            </Badge>
+          )}
           {!connected && (
             <Badge tone="accent" className="max-md:ml-auto">
               reconnecting…
             </Badge>
           )}
         </div>
-        <Segmented
-          className="shrink-0 max-xs:order-2"
-          aria-label="View"
-          value={view}
-          onValueChange={(next) => setView(next as 'canvas' | 'board')}
-        >
-          <SegmentedItem value="canvas">Canvas</SegmentedItem>
-          <SegmentedItem value="board">Board</SegmentedItem>
-        </Segmented>
-        <div className="ml-auto flex items-center gap-2.5 max-md:hidden">
-          <Button
-            variant="bare"
-            className="h-8 px-2.5 text-[12.5px] font-medium"
-            onClick={() => setShowImport(true)}
-            title="Import from a website, live app or GitHub repo"
+        {canEdit && (
+          <Segmented
+            className="shrink-0 max-xs:order-2"
+            aria-label="View"
+            value={view}
+            onValueChange={(next) => setView(next as 'canvas' | 'board')}
           >
-            <ImportIcon className="size-[13px]" />
-            Import
-          </Button>
-          <BarDivider />
+            <SegmentedItem value="canvas">Canvas</SegmentedItem>
+            <SegmentedItem value="board">Board</SegmentedItem>
+          </Segmented>
+        )}
+        <div className="ml-auto flex items-center gap-2.5 max-md:hidden">
+          {canEdit && (
+            <>
+              <Button
+                variant="bare"
+                className="h-8 px-2.5 text-[12.5px] font-medium"
+                onClick={() => setShowImport(true)}
+                title="Import from a website, live app or GitHub repo"
+              >
+                <ImportIcon className="size-[13px]" />
+                Import
+              </Button>
+              <BarDivider />
+            </>
+          )}
           <div className="flex items-center px-0.5" title={others.map((p) => p.name).join(', ') || 'Just you here'}>
             <Button
               variant="bare"
@@ -372,24 +421,36 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
               <PlayIcon className="size-3.5" />
             </Button>
           </Tooltip>
-          <Button
-            variant="ghost"
-            className="h-[34px] rounded-[7px] bg-surface px-[17px] text-[12.5px] font-semibold hover:border-ink-faint hover:bg-paper-deep"
-            onClick={() => setShowShare(true)}
-          >
-            Share
-          </Button>
-          <Button
-            variant="primary"
-            className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
-            onClick={() => {
-              posthog.capture('agent_connection_opened')
-              setShowConnect(true)
-            }}
-          >
-            <SparkIcon className="size-3" />
-            Connect AI
-          </Button>
+          {guest ? (
+            <Button
+              variant="primary"
+              className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
+              onClick={() => location.assign(`/c/${canvasId}?signin=1`)}
+            >
+              Sign in
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              className="h-[34px] rounded-[7px] bg-surface px-[17px] text-[12.5px] font-semibold hover:border-ink-faint hover:bg-paper-deep"
+              onClick={() => setShowShare(true)}
+            >
+              Share
+            </Button>
+          )}
+          {canEdit && (
+            <Button
+              variant="primary"
+              className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
+              onClick={() => {
+                posthog.capture('agent_connection_opened')
+                setShowConnect(true)
+              }}
+            >
+              <SparkIcon className="size-3" />
+              Connect AI
+            </Button>
+          )}
         </div>
         <div className="ml-auto hidden items-center gap-1.5 max-md:flex max-xs:order-3">
           <div
@@ -399,18 +460,20 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
             <Avatar name={me.name} kind="user" stacked />
             <PeerAvatars others={others} />
           </div>
-          <Button
-            variant="primary"
-            className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
-            onClick={() => {
-              posthog.capture('agent_connection_opened')
-              setShowConnect(true)
-            }}
-          >
-            <SparkIcon className="size-3" />
-            <span className="max-sm:hidden">Connect AI</span>
-            <span className="sm:hidden">AI</span>
-          </Button>
+          {canEdit && (
+            <Button
+              variant="primary"
+              className="h-[34px] rounded-[7px] px-[13px] text-[12.5px]"
+              onClick={() => {
+                posthog.capture('agent_connection_opened')
+                setShowConnect(true)
+              }}
+            >
+              <SparkIcon className="size-3" />
+              <span className="max-sm:hidden">Connect AI</span>
+              <span className="sm:hidden">AI</span>
+            </Button>
+          )}
           <Tooltip label="Canvas actions" side="bottom" align="end">
             <Button
               variant="ghost"
@@ -426,7 +489,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
       </TopBar>
 
       <div className="relative flex-1 overflow-hidden">
-        {view === 'board' ? (
+        {view === 'board' && canEdit ? (
           <Board canvasId={canvasId} />
         ) : (
           <>
@@ -480,10 +543,10 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
               )}
             </div>
             <WorkingNow />
-            <PromptBar canvasId={canvasId} />
-            <Onboarding canvasId={canvasId} />
-            {!isMobile && (layersOpen ? <LayersPanel onAddFrame={addFrame} /> : <LayersRailToggle />)}
-            {!isMobile && selectedFrame && panelElement && !deferPanel && (
+            {canEdit && <PromptBar canvasId={canvasId} />}
+            {canEdit && <Onboarding canvasId={canvasId} />}
+            {!isMobile && canEdit && (layersOpen ? <LayersPanel onAddFrame={addFrame} /> : <LayersRailToggle />)}
+            {!isMobile && canEdit && selectedFrame && panelElement && !deferPanel && (
               <ElementPanel
                 key={`${selectedFrame.id}|${panelElement.selector}`}
                 frame={selectedFrame}
@@ -491,11 +554,11 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
                 className={propertiesPanelCls}
               />
             )}
-            {!isMobile && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
+            {!isMobile && canEdit && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
               <Inspector frame={selectedFrame} className={propertiesPanelCls} />
             )}
-            {!isMobile && !showActivity && <SideRail onOpen={() => setShowActivity(true)} />}
-            {!isMobile && showActivity && <ActivityPanel onClose={() => setShowActivity(false)} />}
+            {!isMobile && canEdit && !showActivity && <SideRail onOpen={() => setShowActivity(true)} />}
+            {!isMobile && canEdit && showActivity && <ActivityPanel onClose={() => setShowActivity(false)} />}
           </>
         )}
       </div>
@@ -515,48 +578,56 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
               </div>
               <PagesPanel />
               <div className="grid gap-2 p-4">
-                <Button
-                  variant="ghost"
-                  className="h-11 justify-start border-line bg-surface px-4"
-                  onClick={() => {
-                    setShowMobileActions(false)
-                    setShowImport(true)
-                  }}
-                >
-                  Import website
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-11 justify-start border-line bg-surface px-4"
-                  onClick={() => {
-                    setShowMobileActions(false)
-                    setShowShare(true)
-                  }}
-                >
-                  Share canvas
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-11 justify-start border-line bg-surface px-4"
-                  onClick={() => {
-                    setShowMobileActions(false)
-                    setShowActivity(true)
-                  }}
-                >
-                  <PulseIcon /> Chat, agents & activity
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-11 justify-start px-4 text-ink-soft"
-                  onClick={() => navigate('/settings')}
-                >
-                  Settings
-                </Button>
+                {canEdit && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start border-line bg-surface px-4"
+                    onClick={() => {
+                      setShowMobileActions(false)
+                      setShowImport(true)
+                    }}
+                  >
+                    Import website
+                  </Button>
+                )}
+                {!guest && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start border-line bg-surface px-4"
+                    onClick={() => {
+                      setShowMobileActions(false)
+                      setShowShare(true)
+                    }}
+                  >
+                    Share canvas
+                  </Button>
+                )}
+                {canEdit && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start border-line bg-surface px-4"
+                    onClick={() => {
+                      setShowMobileActions(false)
+                      setShowActivity(true)
+                    }}
+                  >
+                    <PulseIcon /> Chat, agents & activity
+                  </Button>
+                )}
+                {!guest && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start px-4 text-ink-soft"
+                    onClick={() => navigate('/settings')}
+                  >
+                    Settings
+                  </Button>
+                )}
               </div>
             </SheetContent>
           </Sheet>
           <Sheet
-            open={!!selectedFrame && inspectorOpen && !deferPanel}
+            open={canEdit && !!selectedFrame && inspectorOpen && !deferPanel}
             onOpenChange={(open) => {
               if (!open) select(null)
             }}
@@ -570,7 +641,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
               {selectedFrame && <Inspector frame={selectedFrame} surface="inline" />}
             </SheetContent>
           </Sheet>
-          <Sheet open={showActivity} onOpenChange={setShowActivity}>
+          <Sheet open={canEdit && showActivity} onOpenChange={setShowActivity}>
             <SheetContent
               side="bottom"
               showCloseButton={false}
@@ -583,8 +654,20 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
         </>
       )}
 
+      {guestNameRequest && (
+        <GuestNamePrompt
+          onDone={(name) => {
+            guestNameRequest.resolve(name)
+            useStore.getState().setGuestNameRequest(null)
+          }}
+          onCancel={() => {
+            guestNameRequest.reject()
+            useStore.getState().setGuestNameRequest(null)
+          }}
+        />
+      )}
       {renaming && <RenameSelfModal current={me.name} onClose={() => setRenaming(false)} />}
-      {showConnect && <ConnectModal canvasId={canvasId} onClose={() => setShowConnect(false)} />}
+      {showConnect && canEdit && <ConnectModal canvasId={canvasId} onClose={() => setShowConnect(false)} />}
       {presenting && selectedId && <PresentMode frameId={selectedId} onClose={() => setPresenting(false)} />}
       {showShare && canvas && (
         <ShareModal
@@ -612,7 +695,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
           }}
         />
       )}
-      {showImport && (
+      {showImport && canEdit && (
         <ImportModal
           canvasId={canvasId}
           installPass={ghInstallPass}
@@ -1658,6 +1741,14 @@ function GithubSection({
 /* The canvas title doubles as its rename field. */
 function CanvasName() {
   const canvas = useStore((s) => s.canvas)
+  const canEdit = useCanEdit()
+  /* renaming is a design edit: below edit the name is just a label */
+  if (!canEdit && canvas)
+    return (
+      <span className="min-w-0 max-w-[240px] truncate px-2 font-display text-[15px] font-semibold sm:max-w-[320px]">
+        {canvas.name}
+      </span>
+    )
   return (
     <TopBarTitle
       loading={!canvas}

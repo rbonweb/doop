@@ -209,6 +209,27 @@ export interface AccessRequest {
   status: 'pending' | 'declined'
 }
 
+/** A pending or declined access request as the owner sees it: the requester's
+ *  name and address are resolved from the account. */
+export interface AccessRequestInfo extends AccessRequest {
+  name: string
+  email: string
+}
+
+/** Rank of each role, for "at least this role" checks. */
+export const ROLE_RANK: Record<CanvasRole, number> = { view: 1, comment: 2, edit: 3, owner: 4 }
+
+export function isMemberRole(value: unknown): value is MemberRole {
+  return value === 'view' || value === 'comment' || value === 'edit'
+}
+
+export function roleAtLeast(role: CanvasRole | null | undefined, min: CanvasRole): boolean {
+  return !!role && ROLE_RANK[role] >= ROLE_RANK[min]
+}
+
+/** The notice shown when a person below edit @mentions a resident agent. */
+export const AGENT_REQUEST_NOTICE = 'Only editors can ask agents to make changes.'
+
 /* ---- workspaces ---- */
 
 export const WORKSPACE_ROLES = ['owner', 'admin', 'member'] as const
@@ -376,6 +397,8 @@ export interface Presence {
   status?: string
   /** for agents: whose token they connected with */
   owner?: string
+  /** a signed-out visitor on an anyone-with-the-link canvas */
+  guest?: boolean
 }
 
 /** A unit of work an agent announced via set_status. A new status completes the previous task.
@@ -608,7 +631,19 @@ export type ServerMessage =
       selfColor: string
       /** id of the client bundle the server is serving; 'dev' outside production */
       serverBuild: string
+      /** what this connection may do on the canvas */
+      role: CanvasRole
+      /** a signed-out visitor: capped at comment, sees frames, comments and presence only */
+      guest?: boolean
     }
+  /** this connection's role changed (the owner edited sharing) */
+  | { type: 'role'; role: CanvasRole }
+  /** a message of this connection was refused; it was not broadcast */
+  | { type: 'error'; message: string }
+  /** someone @mentioned you in a comment (sent to you alone) */
+  | { type: 'mention'; comment: ElementComment }
+  /** someone asked for access to the canvas (sent to the people who can answer) */
+  | { type: 'access:request'; request: AccessRequestInfo }
   | { type: 'presence:join'; presence: Presence }
   | { type: 'presence:leave'; clientId: string }
   | { type: 'cursor'; clientId: string; x: number; y: number }
