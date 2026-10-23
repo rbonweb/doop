@@ -5,6 +5,7 @@ import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { FrameView } from './FrameView'
 import { useFrameMountScheduler } from '../lib/frameMounting'
+import { noteCameraMove, setStageSize } from '../lib/frameSleep'
 import { FlowOverlay } from './FlowOverlay'
 import { GhostFrames } from './GhostFrames'
 import { Cursors } from './Cursors'
@@ -88,6 +89,12 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       if (zoomLabelRef.current) zoomLabelRef.current.textContent = `${Math.round(vp.zoom * 100)}%`
     }
     apply(useStore.getState().viewport)
+    /* the size the frames judge "off screen" against */
+    const stage = ref.current
+    const publishSize = () => stage && setStageSize(stage.clientWidth, stage.clientHeight)
+    publishSize()
+    const sizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publishSize)
+    if (stage) sizeObserver?.observe(stage)
     let idle = 0
     const unsub = useStore.subscribe((s, prev) => {
       /* a (re)connect needs the camera announced afresh — the server only
@@ -95,6 +102,8 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       if (s.connected && !prev.connected && ref.current) sendViewport(s.viewport, ref.current)
       if (s.viewport === prev.viewport) return
       apply(s.viewport)
+      /* frames pause their animations while the camera moves (lib/frameSleep.ts) */
+      noteCameraMove()
       if (ref.current) sendViewport(s.viewport, ref.current)
       const world = worldRef.current
       if (!world) return
@@ -106,6 +115,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
     })
     return () => {
       unsub()
+      sizeObserver?.disconnect()
       window.clearTimeout(idle)
     }
   }, [])

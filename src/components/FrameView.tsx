@@ -10,6 +10,7 @@ import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { useFrameMounted } from '../lib/frameMounting'
+import { useFrameSleep } from '../lib/frameSleep'
 import { recordCreate, recordUpdate, recordUpdates, trackSave } from '../lib/history'
 import { snapFrame } from '../lib/snap'
 import { gesture } from '../lib/gesture'
@@ -324,6 +325,13 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   const frameComments = useStore((s) => s.comments).filter((c) => c.frameId === frame.id)
   /* only thread roots get a pin; replies live inside the root's popover */
   const comments = frameComments.filter((c) => !c.parentId && !c.resolvedAt)
+  /* frames at rest pause their animations (lib/frameSleep.ts); one being edited, by anyone, or worked by an agent stays awake */
+  const setHovered = useFrameSleep(iframeRef, {
+    frame,
+    ready: runtimeReady,
+    editing: editing || editors.length > 0,
+    working: frameComments.some((c) => c.forAgent && !c.resolvedAt && !!c.claimedBy && !c.failedAt),
+  })
   const [probe, setProbe] = useState<ProbeHit | null>(null)
   /* element selected for text editing inside the iframe (edit mode only) */
   const [activeHit, setActiveHit] = useState<ProbeHit | null>(null)
@@ -711,7 +719,11 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
               const zoom = useStore.getState().viewport.zoom
               sendHover((e.clientX - r.left) / zoom, (e.clientY - r.top) / zoom)
             }}
-            onPointerLeave={clearHover}
+            onPointerEnter={() => setHovered(true)}
+            onPointerLeave={() => {
+              clearHover()
+              setHovered(false)
+            }}
           >
             {mounted && (
               <iframe

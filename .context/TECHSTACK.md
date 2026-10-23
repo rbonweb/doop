@@ -76,6 +76,7 @@
 
 - React 18.3.1 + Vite 5.3.3 - SPA, entry at `index.html`.
 - Frame iframes mount progressively, nearest the viewport first, and only near the viewport (`src/lib/frameMounting.ts`); every frame document renders on the app's own main thread.
+- Frames sleep at rest (`src/lib/frameSleep.ts`): while the camera moves or a frame is beyond the near margin, its CSS animations, Web Animations and playing videos are paused through `doop:sleep`; selected, edited, hovered and agent-worked frames and present mode never sleep, and `?awake=1` turns it off.
 - Tailwind CSS 4.3.3 (`@tailwindcss/vite` 4.3.3) - styling; `tw-animate-css` 1.4.0 for animation
   utilities. Design tokens in `src/styles.css` (see `.context/DESIGN.md`).
 - Tauri 2.9.0 (`@tauri-apps/cli`, `desktop/src-tauri`) - desktop app wrapper around the web build.

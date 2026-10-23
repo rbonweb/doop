@@ -117,7 +117,10 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
   const [view, setView] = useState<'canvas' | 'board'>('canvas')
   const [showConnect, setShowConnect] = useState(false)
   const [showShare, setShowShare] = useState(false)
-  const [presenting, setPresenting] = useState(false)
+  const presenting = useStore((s) => s.presenting)
+  const setPresenting = useStore((s) => s.setPresenting)
+  /* leaving the canvas ends a presentation, so the next canvas starts with its frames awake */
+  useEffect(() => () => useStore.getState().setPresenting(false), [])
   /* returning from a GitHub App install: the setup redirect appends a signed
      pass — pull it off the URL and open the import modal on the repo picker */
   const [ghInstallPass, setGhInstallPass] = useState<string | null>(() => {

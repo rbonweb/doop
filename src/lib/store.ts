@@ -114,6 +114,9 @@ interface State {
   /** clientId of the peer whose camera this one is tracking (Figma-style
    *  follow); any camera move of our own lets go */
   following: string | null
+  /** the full-screen present mode is open (frames behind it never sleep, see lib/frameSleep.ts) */
+  presenting: boolean
+  setPresenting(v: boolean): void
 
   activePageId: string | null
   setActivePage(id: string): void
@@ -220,6 +223,7 @@ export const useStore = create<State>((set, get) => ({
   allowanceVersion: 0,
   flyTo: null,
   following: null,
+  presenting: false,
   selectedIds: [],
   selectedId: null,
   panMode: false,
@@ -547,6 +551,7 @@ export const useStore = create<State>((set, get) => ({
   setViewport: (viewport) => set({ viewport, following: null }),
   /* fires on every pointermove during a drag — skip the no-op transitions
      so unsnapped drags don't render the (empty) guide layer each frame */
+  setPresenting: (presenting) => set({ presenting }),
   setSnapGuides: (snapGuides) =>
     set((s) => (snapGuides.length === 0 && s.snapGuides.length === 0 ? s : { snapGuides })),
   setStream: (frameId, actor) =>

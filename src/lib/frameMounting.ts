@@ -14,18 +14,35 @@ const REFRESH_MS = 120
 /* a moving viewport is not re-evaluated at all until it has been still this long: frames mounted mid-gesture start as blank documents that fill in later, which reads as flicker, so the whole set is settled once on idle instead */
 const VIEWPORT_IDLE_MS = 150
 
-interface Viewport {
+export interface Viewport {
   x: number
   y: number
   zoom: number
 }
 
-interface Size {
+export interface Size {
   width: number
   height: number
 }
 
-type FrameBox = Pick<Frame, 'id' | 'x' | 'y' | 'width' | 'height'>
+export type FrameBox = Pick<Frame, 'id' | 'x' | 'y' | 'width' | 'height'>
+
+/** Whether a frame is on screen or within `NEAR_MARGIN` of it. */
+export function isNearViewport(frame: FrameBox, viewport: Viewport, size: Size): boolean {
+  const zoom = viewport.zoom || 1
+  const marginX = (size.width * NEAR_MARGIN) / zoom
+  const marginY = (size.height * NEAR_MARGIN) / zoom
+  const left = -viewport.x / zoom
+  const top = -viewport.y / zoom
+  const right = left + size.width / zoom
+  const bottom = top + size.height / zoom
+  return (
+    frame.x < right + marginX &&
+    frame.x + frame.width > left - marginX &&
+    frame.y < bottom + marginY &&
+    frame.y + frame.height > top - marginY
+  )
+}
 
 /** Frames near the viewport that are not mounted yet, nearest the centre of the view first. */
 export function framesToMount(
@@ -35,23 +52,10 @@ export function framesToMount(
   mounted: ReadonlySet<string>,
 ): string[] {
   const zoom = viewport.zoom || 1
-  const marginX = (size.width * NEAR_MARGIN) / zoom
-  const marginY = (size.height * NEAR_MARGIN) / zoom
-  const left = -viewport.x / zoom
-  const top = -viewport.y / zoom
-  const right = left + size.width / zoom
-  const bottom = top + size.height / zoom
-  const centreX = (left + right) / 2
-  const centreY = (top + bottom) / 2
+  const centreX = (-viewport.x + size.width / 2) / zoom
+  const centreY = (-viewport.y + size.height / 2) / zoom
   return frames
-    .filter(
-      (f) =>
-        !mounted.has(f.id) &&
-        f.x < right + marginX &&
-        f.x + f.width > left - marginX &&
-        f.y < bottom + marginY &&
-        f.y + f.height > top - marginY,
-    )
+    .filter((f) => !mounted.has(f.id) && isNearViewport(f, viewport, size))
     .map((f) => ({ id: f.id, distance: Math.hypot(f.x + f.width / 2 - centreX, f.y + f.height / 2 - centreY) }))
     .sort((a, b) => a.distance - b.distance)
     .map((f) => f.id)
