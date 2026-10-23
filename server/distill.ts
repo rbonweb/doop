@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { store } from './store.ts'
 import * as actions from './actions.ts'
 import { distillModel } from './instanceSettings.ts'
+import { sanitizeInline, untrustedBlock } from './promptSafety.ts'
 
 /**
  * The Memory distiller: when enough undistilled design decisions pile up on a
@@ -49,7 +50,7 @@ async function summarizeDecision(canvasId: string, decisionId: string) {
       {
         role: 'user',
         content: `Raw design feedback a human gave an agent on a shared canvas (the agent carried it out):
-"${decision.text}"
+${untrustedBlock('design feedback', decision.text)}
 
 Rewrite it as ONE short, general style preference for this project's design memory. Generalize from the specific instance to the underlying taste — e.g. "make this button blue like the others" becomes "Prefer blue accent buttons". Imperative, under 90 characters, no quotes, no trailing period. Reply with the preference only.`,
       },
@@ -119,13 +120,18 @@ async function distill(canvasId: string) {
   const guides = store.getGuidelines(canvasId)
 
   const guideList = guides.length
-    ? guides.map((g) => `- ${g.name} ("${actions.guidelineTitle(g)}"): ${actions.guidelineSummary(g)}`).join('\n')
+    ? guides
+        .map(
+          (g) =>
+            `- ${g.name} (${JSON.stringify(sanitizeInline(actions.guidelineTitle(g)))}): ${sanitizeInline(actions.guidelineSummary(g), 400)}`,
+        )
+        .join('\n')
     : '(none yet)'
   const decisionList = decisions
     .map((d) =>
       d.summary
-        ? `- [${d.id}] ${d.summary} (${d.from}'s words: "${d.text}")`
-        : `- [${d.id}] ${d.from} asked${d.agentName ? ` ${d.agentName}` : ''}: "${d.text}"`,
+        ? `- [${d.id}] ${sanitizeInline(d.summary, 400)} (${sanitizeInline(d.from)}'s words: ${JSON.stringify(sanitizeInline(d.text, 800))})`
+        : `- [${d.id}] ${sanitizeInline(d.from)} asked${d.agentName ? ` ${sanitizeInline(d.agentName)}` : ''}: ${JSON.stringify(sanitizeInline(d.text, 800))}`,
     )
     .join('\n')
   /* what was already pitched: never re-propose a dismissed rule, don't repeat
@@ -135,18 +141,18 @@ async function distill(canvasId: string) {
     .filter((p) => p.status !== 'pending')
     .slice(0, 5)
   const proposalList = priorProposals.length
-    ? priorProposals.map((p) => `- [${p.status}] ${p.rule}`).join('\n')
+    ? priorProposals.map((p) => `- [${p.status}] ${sanitizeInline(p.rule, 400)}`).join('\n')
     : '(none)'
 
   const prompt = `You maintain the design memory of a shared canvas. Humans gave agents the following feedback, and each item below was carried out — they are settled decisions, newest first:
 
-${decisionList}
+${untrustedBlock('list of decisions', decisionList, { max: 16_000 })}
 
 Style guides already on this canvas:
-${guideList}
+${untrustedBlock('list of style guides', guideList, { max: 8_000 })}
 
 Rules previously suggested from this memory (dismissed = the human rejected it; never re-propose it or a trivial variant):
-${proposalList}
+${untrustedBlock('list of earlier suggestions', proposalList, { max: 4_000 })}
 
 If these decisions reveal a durable style preference, distill it into ONE markdown bullet for the most fitting guide. Judge by substance, not count:
 - ONE decision is enough when it is stated as a standing preference — "never/always …", "keep that as our signature style", "prefer X over Y", or a general taste like "less claude-esque, more white and blue".

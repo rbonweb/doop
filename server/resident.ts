@@ -21,6 +21,9 @@ import { websiteAccessErrorMessage } from './websiteAccess.ts'
 import { executeGuardedBatch } from './guardedBatch.ts'
 import { runRepoCards } from './githubRecon.ts'
 import { retryModelTurn } from './modelTurnRetry.ts'
+import { sanitizeInline, untrustedBlock } from './promptSafety.ts'
+import { cardsSection, commentsSection, feedbackSection, guidelinesText, inlineCode, quoted } from './residentPrompt.ts'
+import type { FeedbackItem } from './residentPrompt.ts'
 
 /**
  * The resident design team: a server-side Claude tool loop, run once per
@@ -51,6 +54,8 @@ const LARGE_HTML_CHARS = 60_000
 const MAX_HTML_READ_CHARS = 30_000
 const MAX_REWRITE_CHUNK_CHARS = 12_000
 const MAX_REWRITE_CHARS = 100_000
+/* the visible-text excerpt view_website returns is already bounded by the fetcher; this only keeps it whole */
+const MAX_WEBSITE_TEXT_CHARS = 60_000
 
 /* one run per canvas at a time; feedback arriving mid-run queues a re-run */
 const running = new Set<string>()
@@ -132,12 +137,6 @@ function systemFor(role: AgentRole): string {
     .join('; ')}) — leave it to them rather than fixing it yourself.`
 }
 
-interface FeedbackItem {
-  from: string
-  text: string
-  about: string
-}
-
 interface RunState {
   mutatedFrames: Set<string>
   sourceFrames: Set<string>
@@ -191,13 +190,13 @@ function strategyFor(text: string, frames: NonNullable<ReturnType<typeof store.g
 
   if (isRedesign && frames.length > 1) {
     return (
-      `Large cross-frame redesign strategy (${large.map((frame) => frame.name).join(', ')} exceed ${LARGE_HTML_CHARS} HTML characters): ` +
+      `Large cross-frame redesign strategy (${large.map((frame) => sanitizeInline(frame.name)).join(', ')} exceed ${LARGE_HTML_CHARS} HTML characters): ` +
       'screenshot and inspect the target and reference; use visible content plus computed design tokens; do not read the reference HTML; build replacement HTML atomically with begin_frame_rewrite, append_frame_rewrite chunks, and commit_frame_rewrite; screenshot the changed target.' +
       redesignNote
     )
   }
   return (
-    `Large targeted-edit strategy (${large.map((frame) => frame.name).join(', ')} exceed ${LARGE_HTML_CHARS} HTML characters): ` +
+    `Large targeted-edit strategy (${large.map((frame) => sanitizeInline(frame.name)).join(', ')} exceed ${LARGE_HTML_CHARS} HTML characters): ` +
     'inspect the relevant frame, use get_frame_html with query or a bounded range, apply the smallest exact edit, and screenshot the changed frame.' +
     redesignNote
   )
@@ -299,7 +298,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
     const frameList = visibleFrames
       .map(
         (f, index) =>
-          `- Frame ${index + 1}: id=${f.id}, name="${f.name}", ${Math.round(f.width)}x${Math.round(f.height)} (last edit: ${f.updatedBy}, ${f.html.length} bytes${f.html.length > LARGE_HTML_CHARS ? '; large document — avoid a full read for visual-reference work' : ''})`,
+          `- Frame ${index + 1}: id=${f.id}, name=${quoted(f.name)}, ${Math.round(f.width)}x${Math.round(f.height)} (last edit: ${sanitizeInline(f.updatedBy)}, ${f.html.length} bytes${f.html.length > LARGE_HTML_CHARS ? '; large document — avoid a full read for visual-reference work' : ''})`,
       )
       .join('\n')
 
@@ -315,10 +314,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
       )
     }
     if (items.length > 0) {
-      sections.push(
-        `New human feedback on this canvas:\n` +
-          items.map((i) => `- ${i.from} (about the work "${i.about}"): "${i.text}"`).join('\n'),
-      )
+      sections.push(feedbackSection(items))
     }
     /* a card asked from a selection is about THAT frame or element: the
        agent edits it in place instead of delivering something new elsewhere */
@@ -328,67 +324,70 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
       if (!f) {
         /* the target is gone: say so rather than letting the request run
            canvas-wide against something the human never pointed at */
-        return `\n  This request was scoped to frame ${scope.frameId}, which has since been deleted. Do not redesign anything else in its place: call set_status explaining that the frame it was about no longer exists, and finish.`
+        return `\n  This request was scoped to frame ${inlineCode(scope.frameId)}, which has since been deleted. Do not redesign anything else in its place: call set_status explaining that the frame it was about no longer exists, and finish.`
       }
-      const where = `frame ${f.id} ("${f.name}")`
+      const where = `frame ${f.id} (${quoted(f.name)})`
       if (!scope.selector) {
         return `\n  Scoped to ${where}: the request is about this frame. Edit it in place (edit_frame_html or set_frame_html); do not create a new frame unless the request explicitly asks for one.`
       }
       return (
-        `\n  Scoped to the element \`${scope.selector}\` inside ${where}: the request is about this element. ` +
+        `\n  Scoped to the element \`${inlineCode(scope.selector)}\` inside ${where}: the request is about this element. ` +
         `Call get_frame to read its HTML, change that element (and only what it needs) with edit_frame_html, and keep the rest of the frame as it is.`
       )
     }
     if (cards.length > 0) {
       sections.push(
-        `Queued cards — work requests humans left on the board for you:\n` +
-          cards
-            .map((c) => {
-              const pipeline = actions.pipelineOf(c)
-              const stage = Math.min(c.stage ?? 0, pipeline.length - 1)
-              const route =
-                pipeline.length > 1
-                  ? ` [stage ${stage + 1} of ${pipeline.length}: ${pipeline.map(roleName).join(' → ')}` +
-                    (stage > 0 ? `; earlier stages have already run — build on what they left]` : `]`)
-                  : ''
-              const attached = (c.attachments ?? [])
-                .map((id) => {
-                  const f = store.getFrame(id)
-                  return f ? `${f.id} ("${f.name}")` : null
-                })
-                .filter(Boolean)
-              const refs =
-                attached.length > 0
-                  ? `\n  Attached reference images, already on the canvas as frames: ${attached.join(', ')}. ` +
-                    `Call screenshot_frame on each BEFORE designing and build from what you see. ` +
-                    `They are source material — leave them as they are and deliver in a separate frame.`
-                  : ''
-              const scoped = describeScope(c.scope)
-              return `- from ${c.queuedBy}: "${c.status}"${route}${scoped}${refs}`
-            })
-            .join('\n'),
+        cardsSection(
+          cards.map((c) => {
+            const pipeline = actions.pipelineOf(c)
+            const stage = Math.min(c.stage ?? 0, pipeline.length - 1)
+            const route =
+              pipeline.length > 1
+                ? `\n  Route: [stage ${stage + 1} of ${pipeline.length}: ${pipeline.map(roleName).join(' → ')}` +
+                  (stage > 0 ? `; earlier stages have already run — build on what they left]` : `]`)
+                : ''
+            const attached = (c.attachments ?? [])
+              .map((id) => {
+                const f = store.getFrame(id)
+                return f ? `${f.id} (${quoted(f.name)})` : null
+              })
+              .filter(Boolean)
+            const refs =
+              attached.length > 0
+                ? `\n  Attached reference images, already on the canvas as frames: ${attached.join(', ')}. ` +
+                  `Call screenshot_frame on each BEFORE designing and build from what you see. ` +
+                  `They are source material — leave them as they are and deliver in a separate frame.`
+                : ''
+            return {
+              queuedBy: c.queuedBy ?? 'someone',
+              text: c.status,
+              notes: `${route}${describeScope(c.scope)}${refs}`,
+            }
+          }),
+        ),
       )
     }
     if (comments.length > 0) {
       sections.push(
-        `New element comments addressed to you (each is pinned to a specific element):\n` +
-          comments
-            .map((c) => {
-              const fname = store.getFrame(c.frameId)?.name ?? 'unknown frame'
-              /* a reply carries the conversation it answers, so "make it
-                 bigger" reads against what was said before */
-              const history = actions.commentThread(c)
-              const earlier = history
-                .slice(
-                  0,
-                  history.findIndex((x) => x.id === c.id),
-                )
-                .map((x) => `    ${x.from}: "${x.text}"`)
-                .join('\n')
-              const thread = earlier ? `\n  earlier in this thread:\n${earlier}` : ''
-              return `- ${c.from} on frame ${c.frameId} "${fname}", element ${c.selector}\n  element HTML at comment time: ${c.snippet}${thread}\n  comment: "${c.text}"`
-            })
-            .join('\n'),
+        commentsSection(
+          comments.map((c) => {
+            /* a reply carries the conversation it answers, so "make it
+               bigger" reads against what was said before */
+            const history = actions.commentThread(c)
+            return {
+              from: c.from,
+              frameId: c.frameId,
+              frameName: store.getFrame(c.frameId)?.name ?? 'unknown frame',
+              selector: c.selector,
+              snippet: c.snippet,
+              text: c.text,
+              earlier: history.slice(
+                0,
+                history.findIndex((x) => x.id === c.id),
+              ),
+            }
+          }),
+        ),
       )
     }
     const workText = [
@@ -404,7 +403,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
           references
             .map(
               (r) =>
-                `- ${r.id}: "${r.title}" (${Math.round(r.width)}x${Math.round(r.height)}, pinned by ${r.pinnedBy})`,
+                `- ${r.id}: ${quoted(r.title)} (${Math.round(r.width)}x${Math.round(r.height)}, pinned by ${sanitizeInline(r.pinnedBy)})`,
             )
             .join('\n') +
           `\nBefore designing or restyling anything, call get_reference on the most relevant one and match its palette, typography and spacing.`
@@ -458,9 +457,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
       const guidelinesBlock = guidelineDocs.length
         ? [
             {
-              text:
-                `# Canvas design guidelines\nEvery frame on this canvas must follow these docs — they outrank your own aesthetic preferences:\n\n` +
-                guidelineDocs.map((d) => `## ${d.name}\n\n${d.markdown}`).join('\n\n'),
+              text: guidelinesText(guidelineDocs, actions.MAX_GUIDELINE_CHARS),
               cache: true,
             },
           ]
@@ -1137,7 +1134,7 @@ async function execTool(
         runState.mutatedFrames.add(f.id)
         runState.verifiedFrames.delete(f.id)
         return ok(
-          `created frame ${f.id} ("${f.name}", ${Math.round(f.width)}x${Math.round(f.height)}) — it is revealing to viewers now`,
+          `created frame ${f.id} (${quoted(f.name)}, ${Math.round(f.width)}x${Math.round(f.height)}) — it is revealing to viewers now`,
         )
       }
       case 'inspect_frame': {
@@ -1281,7 +1278,7 @@ async function execTool(
             })
           blocks.push({
             type: 'text',
-            text: `#${i + 1}${p.alt ? ` — ${p.alt}` : ''} (${p.width}×${p.height}, avg ${p.avg_color}, by ${p.photographer})\nimage_url: ${p.image_url}`,
+            text: `#${i + 1}${p.alt ? ` — ${sanitizeInline(p.alt)}` : ''} (${p.width}×${p.height}, avg ${p.avg_color}, by ${sanitizeInline(p.photographer)})\nimage_url: ${p.image_url}`,
           })
         })
         return ok(blocks)
@@ -1415,12 +1412,13 @@ async function execTool(
           {
             type: 'text',
             text:
-              `${site.title || site.finalUrl} — ${site.finalUrl}` +
-              (site.description ? `\nMeta description: ${site.description}` : '') +
+              `${sanitizeInline(site.title || site.finalUrl)} — ${sanitizeInline(site.finalUrl, 500)}` +
+              (site.description ? `\nMeta description: ${sanitizeInline(site.description, 500)}` : '') +
               (site.shotCropped
                 ? `\nNote: the page is ${site.pageHeight}px tall — the screenshot shows only the top portion.`
                 : '') +
-              `\n\nVisible page text${site.textTruncated ? ' (truncated)' : ''}:\n${site.text}` +
+              `\n\nVisible page text${site.textTruncated ? ' (truncated)' : ''}:\n` +
+              untrustedBlock('visible text of a web page', site.text, { max: MAX_WEBSITE_TEXT_CHARS }) +
               '\n\nRead-only view — nothing was added to the canvas.',
           },
         ]
@@ -1444,7 +1442,7 @@ async function execTool(
           runState.verificationFrames.add(existing.id)
           runState.verifiedFrames.delete(existing.id)
           return ok(
-            `Reusing the existing editable source snapshot ${existing.id} ("${existing.name}") for ${requestedUrl}; no duplicate frame was added. Call screenshot_frame with frame_id=${existing.id}. Leave this source frame unchanged and deliver the new design separately.`,
+            `Reusing the existing editable source snapshot ${existing.id} (${quoted(existing.name)}) for ${requestedUrl}; no duplicate frame was added. Call screenshot_frame with frame_id=${existing.id}. Leave this source frame unchanged and deliver the new design separately.`,
           )
         }
 
@@ -1455,7 +1453,7 @@ async function execTool(
         else runState.sourceFrames.delete(f.id)
         runState.verifiedFrames.delete(f.id)
         return ok(
-          `Imported ${requestedUrl} as editable frame ${f.id} ("${f.name}", ${Math.round(f.width)}x${Math.round(f.height)}, ${f.html.length} HTML characters). Call screenshot_frame with frame_id=${f.id}.${
+          `Imported ${requestedUrl} as editable frame ${f.id} (${quoted(f.name)}, ${Math.round(f.width)}x${Math.round(f.height)}, ${f.html.length} HTML characters). Call screenshot_frame with frame_id=${f.id}.${
             raw.as_reference
               ? ' Leave this source frame unchanged and deliver the new design separately.'
               : ' This imported frame is the requested deliverable and may be edited directly.'
@@ -1466,7 +1464,7 @@ async function execTool(
         const refs = store.getReferences(canvasId)
         const ref = refs.find((r) => r.id === input.reference_id)
         if (!ref) {
-          const ids = refs.map((r) => `${r.id} ("${r.title}")`)
+          const ids = refs.map((r) => `${r.id} (${quoted(r.title)})`)
           return fail(
             ids.length
               ? `no reference with id ${input.reference_id} — this canvas has: ${ids.join(', ')}`
@@ -1491,7 +1489,7 @@ async function execTool(
         blocks.push({
           type: 'text',
           text:
-            `"${ref.title}" (${Math.round(ref.width)}x${Math.round(ref.height)}, pinned by ${ref.pinnedBy}) — match its palette, typography and spacing.\n\n` +
+            `${quoted(ref.title)} (${Math.round(ref.width)}x${Math.round(ref.height)}, pinned by ${sanitizeInline(ref.pinnedBy)}) — match its palette, typography and spacing.\n\n` +
             `HTML${truncated ? ` (first ${MAX_HTML_READ_CHARS} of ${ref.html.length} characters — lift the design tokens from the <style> head and the screenshot)` : ''}:\n${ref.html.slice(0, MAX_HTML_READ_CHARS)}`,
         })
         return ok(blocks)
@@ -1557,7 +1555,7 @@ async function execTool(
            keeping the verified-frames bookkeeping coherent */
         const blocks = runState.vision
           ? await frameImageBlocks(f)
-          : `Screenshot skipped: the selected model cannot view images. Frame "${f.name}" is ${f.width}×${f.height}px. Verify your work with get_frame_html and inspect_frame instead.`
+          : `Screenshot skipped: the selected model cannot view images. Frame ${quoted(f.name)} is ${f.width}×${f.height}px. Verify your work with get_frame_html and inspect_frame instead.`
         if (runState.mutatedFrames.has(input.frame_id) || runState.verificationFrames.has(input.frame_id)) {
           runState.verifiedFrames.add(input.frame_id)
         }
