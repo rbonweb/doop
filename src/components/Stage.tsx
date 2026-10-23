@@ -19,12 +19,13 @@ import { MOD_KEY } from '../lib/keys'
 import { MAX_ZOOM, MIN_ZOOM } from '../lib/fit'
 import { cn } from '../lib/utils'
 import { gesture } from '../lib/gesture'
+import { createWorldLayer } from '../lib/cameraLayer'
 import { hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { MenuHint } from './ui/menu'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from './ui/context-menu'
 import { Toolbar, ToolbarButton, ToolbarDivider, ToolbarValue } from './ui/toolbar'
 
-/* how long the camera must be still before the world layer is re-rasterized at its final scale */
+/* how long the camera must be still before a zoomed world layer is re-rasterized at its final scale */
 const CAMERA_IDLE_MS = 150
 
 const sendCursor = throttle((x: number, y: number) => sendWs({ type: 'cursor', x, y }), 50)
@@ -110,10 +111,12 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
 
      The world layer is promoted to its own compositor layer only while the
      camera moves (will-change: transform), so a zoom is a pure GPU scale of
-     the last bitmap. Once the camera has been still for a moment the hint is
-     dropped and the browser rasterizes every frame again at the final scale:
-     crisp at any zoom, with no iframe resize or relayout, so nothing reflows
-     or flickers. */
+     the last bitmap. Once the camera has been still for a moment after a
+     zoom the hint is dropped and the browser rasterizes every frame again at
+     the final scale: crisp at any zoom, with no iframe resize or relayout,
+     so nothing reflows or flickers. A pan never stretches the bitmap, so it
+     leaves the layer alone instead of freeing and re-allocating every tile
+     (lib/cameraLayer.ts). */
   useLayoutEffect(() => {
     function apply(vp: { x: number; y: number; zoom: number }) {
       const world = worldRef.current
@@ -136,7 +139,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
     publishSize()
     const sizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publishSize)
     if (stage) sizeObserver?.observe(stage)
-    let idle = 0
+    const layer = worldRef.current ? createWorldLayer(worldRef.current, CAMERA_IDLE_MS) : null
     const unsub = useStore.subscribe((s, prev) => {
       /* a (re)connect needs the camera announced afresh — the server only
          knows what this socket has sent */
@@ -146,18 +149,12 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
       /* frames pause their animations while the camera moves (lib/frameSleep.ts) */
       noteCameraMove()
       if (ref.current) sendViewport(s.viewport, ref.current)
-      const world = worldRef.current
-      if (!world) return
-      world.style.willChange = 'transform'
-      window.clearTimeout(idle)
-      idle = window.setTimeout(() => {
-        world.style.willChange = ''
-      }, CAMERA_IDLE_MS)
+      layer?.moved(s.viewport.zoom)
     })
     return () => {
       unsub()
       sizeObserver?.disconnect()
-      window.clearTimeout(idle)
+      layer?.dispose()
     }
   }, [])
 
@@ -584,7 +581,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
            `.stage` to map screen coordinates into the canvas. No CSS is
            attached to it — everything visual is in the utilities beside it. */
             className={cn(
-              'stage absolute inset-0 touch-none',
+              'stage isolate absolute inset-0 touch-none [contain:layout_paint_style]',
               panning
                 ? 'cursor-grabbing! [&_*]:cursor-grabbing!'
                 : panMode

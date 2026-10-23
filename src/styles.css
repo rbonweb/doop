@@ -221,6 +221,17 @@
 @utility corner-squircle {
   corner-shape: superellipse(1.4);
 }
+/* UI chrome that floats over the canvas world (top bar, panels, prompt bar). The world holds dozens of
+   composited iframe layers and is promoted and demoted as the camera moves; chrome that merely overlaps
+   it is composited implicitly, squashed with whatever else overlaps, and re-laid-out each time that
+   changes. Under GPU memory pressure the squashed pieces were dropped independently of each other (a
+   panel's text without its background). An explicit, permanent layer of its own keeps every piece of
+   chrome painted in one backing store that never depends on the world. */
+@utility chrome-layer {
+  isolation: isolate;
+  will-change: transform;
+  contain: layout style;
+}
 
 @layer base {
   * {
