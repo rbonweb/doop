@@ -68,6 +68,9 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
           {groupSize > 1 ? `Export ${groupSize} frames…` : 'Export…'}
           <MenuHint>{EXPORT_SHORTCUT}</MenuHint>
         </ContextMenuItem>
+        <ContextMenuItem onSelect={() => useStore.getState().openFrameHistory(frame.id)}>
+          Version history…
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
           title="Will be used as reference — agents copy its style in new designs"

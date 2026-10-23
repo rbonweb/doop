@@ -11,6 +11,8 @@ import type {
   CommunityCategory,
   CommunityItem,
   Frame,
+  FrameVersion,
+  FrameVersionInfo,
   WorkspaceDetail,
   WorkspaceInvite,
   WorkspaceMember,
@@ -407,6 +409,11 @@ export const api = {
     }),
   updateFrame: (frameId: string, patch: Partial<Frame>) =>
     req<Frame>('/api/frames/' + frameId, { method: 'PATCH', body: JSON.stringify({ ...patch, actor: actor() }) }),
+  frameVersions: (frameId: string) => req<FrameVersionInfo[]>(`/api/frames/${frameId}/versions`),
+  frameVersion: (frameId: string, versionId: string) =>
+    req<FrameVersion>(`/api/frames/${frameId}/versions/${versionId}`),
+  restoreFrameVersion: (frameId: string, versionId: string) =>
+    req<Frame>(`/api/frames/${frameId}/versions/${versionId}/restore`, { method: 'POST' }),
   deleteFrame: (frameId: string) =>
     req('/api/frames/' + frameId, { method: 'DELETE', body: JSON.stringify({ actor: actor() }) }),
   sendTaskFeedback: (taskId: string, text: string) =>

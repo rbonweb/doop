@@ -155,6 +155,13 @@ export function Inspector({
         </Button>
         <Button
           className={exportBtn}
+          title="Every earlier version of this frame — preview one, or restore it"
+          onClick={() => useStore.getState().openFrameHistory(frame.id)}
+        >
+          History
+        </Button>
+        <Button
+          className={exportBtn}
           title="Public image URL — always renders the current design; paste it as og:image or a blog featured image"
           onClick={() => {
             navigator.clipboard.writeText(`${location.origin}/i/${frame.id}.png?scale=2`).then(() => {

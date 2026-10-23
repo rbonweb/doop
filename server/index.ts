@@ -20,7 +20,7 @@ import * as commentNotifications from './commentNotifications.ts'
 import { notificationsRouter } from './notifications.ts'
 import * as webhooks from './webhooks.ts'
 import { webhooksRouter } from './webhookRoutes.ts'
-import { canAccessCanvas, canManageCanvas, hasDurableCanvasAccess, isAdmin } from './access.ts'
+import { canAccessCanvas, canEditFrame, canManageCanvas, hasDurableCanvasAccess, isAdmin } from './access.ts'
 import { auth, initAuth, syncAdmins, getUserName, PUBLIC_ORIGIN, loginProvidersConfig } from './auth.ts'
 import { inviteFor, inviteOnly } from './instanceSettings.ts'
 import { adminRouter } from './admin.ts'
@@ -665,6 +665,28 @@ function requireFrame(req: express.Request, res: express.Response, frameId: stri
     return null
   }
   return frame
+}
+
+/* Frame history: reading or restoring a frame's versions needs the right to
+   edit that frame, so it goes through the one canEditFrame seam. */
+function requireFrameEdit(req: express.Request, res: express.Response, frameId: string) {
+  const frame = requireFrame(req, res, frameId)
+  if (!frame) return null
+  if (!canEditFrame(req.user!.id, frame)) {
+    res.status(403).json({ error: 'you can’t edit this frame' })
+    return null
+  }
+  return frame
+}
+
+/** The version, if it belongs to this frame; otherwise answers 404. */
+async function requireFrameVersion(res: express.Response, frameId: string, versionId: string) {
+  const version = await persist.getFrameVersion(versionId)
+  if (!version || version.frameId !== frameId) {
+    res.status(404).json({ error: 'version not found' })
+    return null
+  }
+  return version
 }
 
 app.use('/api/local-agent', localAgentRouter)
@@ -1504,6 +1526,27 @@ app.post('/api/frames/:id/append', (req, res) => {
   })
   if (!frame) return res.status(404).json({ error: 'frame not found' })
   res.json({ ok: true, htmlBytes: frame.html.length })
+})
+
+app.get('/api/frames/:id/versions', async (req, res) => {
+  if (!requireFrameEdit(req, res, req.params.id)) return
+  res.json(await persist.listFrameVersions(req.params.id))
+})
+
+app.get('/api/frames/:id/versions/:versionId', async (req, res) => {
+  if (!requireFrameEdit(req, res, req.params.id)) return
+  const version = await requireFrameVersion(res, req.params.id, req.params.versionId)
+  if (version) res.json(version)
+})
+
+app.post('/api/frames/:id/versions/:versionId/restore', async (req, res) => {
+  if (!requireFrameEdit(req, res, req.params.id)) return
+  const version = await requireFrameVersion(res, req.params.id, req.params.versionId)
+  if (!version) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  const frame = actions.restoreFrameVersion(version, actor)
+  if (!frame) return res.status(404).json({ error: 'frame not found' })
+  res.json(frame)
 })
 
 app.delete('/api/frames/:id', (req, res) => {

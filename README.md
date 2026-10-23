@@ -532,29 +532,31 @@ Steering happens at three layers (the same architecture paper.design uses, plus 
 
 ### MCP tools
 
-| Tool                   | What it does                                                                                                                                                           |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `get_guide`            | The agent playbook — agents are instructed to load this first                                                                                                          |
-| `set_status`           | Broadcast a one-line "what I'm working on" — shown live in the working-now strip, avatar tooltip, and activity feed                                                    |
-| `get_feedback`         | Fetch & claim open human feedback requests — for agents whose job is to poll the canvas periodically                                                                   |
-| `get_comments`         | Read element-pinned comments and replies, optionally filtered by frame or resolution state, without claiming work                                                      |
-| `reply_to_comment`     | Reply inside an element-comment thread; `@mention` of a resident role is metered like a browser comment                                                                |
-| `resolve_comment`      | Resolve an element-comment thread; resolving an `@mention` thread records the exchange in canvas Memory                                                                |
-| `list_canvases`        | List all canvases                                                                                                                                                      |
-| `create_canvas`        | Create a canvas, returns its shareable id                                                                                                                              |
-| `get_canvas`           | Canvas layout: every frame's position/size/meta                                                                                                                        |
-| `view_website`         | Inspect one public page read-only; returns a desktop screenshot and visible text without changing the canvas                                                           |
-| `import_webpage`       | Import one public URL onto a canvas as an editable HTML snapshot/frame                                                                                                 |
-| `create_frame`         | Add a frame with HTML (auto-placed if no x/y)                                                                                                                          |
-| `get_frame`            | Read a frame including its HTML                                                                                                                                        |
-| `get_frame_screenshot` | Render the frame headlessly and return a PNG — lets agents _see_ and iterate on their design                                                                           |
-| `set_frame_html`       | Replace a frame's design in one shot — renders live for everyone                                                                                                       |
-| `append_frame_html`    | **Stream** a design in chunks (`start=true` first, `done=true` last) — viewers watch it build up                                                                       |
-| `edit_frame_html`      | Targeted exact find/replace in a frame's HTML — morphs into the render in place                                                                                        |
-| `update_frame`         | Rename / move / resize a frame                                                                                                                                         |
-| `delete_frame`         | Remove a frame                                                                                                                                                         |
-| `upload_asset`         | Store an image (png/jpg/webp/gif/svg) or a CSS stylesheet, max 5 MB, from a URL, a one-time `curl -T` upload or base64 → permanent `/a/<id>.<ext>` URL                 |
-| `generate_image`       | Generate an image from a prompt with the image model picked in Settings (GPT Image, Nano Banana or Seedream), on the user's own account, else a server key → asset URL |
+| Tool                    | What it does                                                                                                                                                           |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_guide`             | The agent playbook — agents are instructed to load this first                                                                                                          |
+| `set_status`            | Broadcast a one-line "what I'm working on" — shown live in the working-now strip, avatar tooltip, and activity feed                                                    |
+| `get_feedback`          | Fetch & claim open human feedback requests — for agents whose job is to poll the canvas periodically                                                                   |
+| `get_comments`          | Read element-pinned comments and replies, optionally filtered by frame or resolution state, without claiming work                                                      |
+| `reply_to_comment`      | Reply inside an element-comment thread; `@mention` of a resident role is metered like a browser comment                                                                |
+| `resolve_comment`       | Resolve an element-comment thread; resolving an `@mention` thread records the exchange in canvas Memory                                                                |
+| `list_canvases`         | List all canvases                                                                                                                                                      |
+| `create_canvas`         | Create a canvas, returns its shareable id                                                                                                                              |
+| `get_canvas`            | Canvas layout: every frame's position/size/meta                                                                                                                        |
+| `view_website`          | Inspect one public page read-only; returns a desktop screenshot and visible text without changing the canvas                                                           |
+| `import_webpage`        | Import one public URL onto a canvas as an editable HTML snapshot/frame                                                                                                 |
+| `create_frame`          | Add a frame with HTML (auto-placed if no x/y)                                                                                                                          |
+| `get_frame`             | Read a frame including its HTML                                                                                                                                        |
+| `get_frame_screenshot`  | Render the frame headlessly and return a PNG — lets agents _see_ and iterate on their design                                                                           |
+| `set_frame_html`        | Replace a frame's design in one shot — renders live for everyone                                                                                                       |
+| `append_frame_html`     | **Stream** a design in chunks (`start=true` first, `done=true` last) — viewers watch it build up                                                                       |
+| `edit_frame_html`       | Targeted exact find/replace in a frame's HTML — morphs into the render in place                                                                                        |
+| `update_frame`          | Rename / move / resize a frame                                                                                                                                         |
+| `list_frame_versions`   | List a frame's saved earlier versions, newest first (no HTML)                                                                                                          |
+| `restore_frame_version` | Roll a frame back to a saved version; the current design is saved first                                                                                                |
+| `delete_frame`          | Remove a frame                                                                                                                                                         |
+| `upload_asset`          | Store an image (png/jpg/webp/gif/svg) or a CSS stylesheet, max 5 MB, from a URL, a one-time `curl -T` upload or base64 → permanent `/a/<id>.<ext>` URL                 |
+| `generate_image`        | Generate an image from a prompt with the image model picked in Settings (GPT Image, Nano Banana or Seedream), on the user's own account, else a server key → asset URL |
 
 Mutating tools accept `agent_name`; the agent then appears in the presence stack (pulsing square avatar),
 gets an "editing" ring + chip on the frame it touched, and its actions land in the activity feed. Agents

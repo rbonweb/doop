@@ -1,4 +1,5 @@
-import type { Canvas } from '../shared/types.ts'
+import type { Canvas, Frame } from '../shared/types.ts'
+import { store } from './store.ts'
 import { hasRole, isWorkspaceMember } from './workspaces.ts'
 
 /**
@@ -50,4 +51,12 @@ export function canManageCanvas(userId: string | undefined, canvas: Canvas): boo
   if (!userId) return false
   if (canvas.ownerId === userId) return true
   return !!canvas.workspaceId && hasRole(canvas.workspaceId, userId, 'admin')
+}
+
+/** Whether a caller may change a frame, and so read or restore its history.
+ *  Today that is canvas access; this is the one seam to narrow once view-only
+ *  and comment-only roles exist. */
+export function canEditFrame(userId: string | undefined, frame: Frame): boolean {
+  const canvas = store.getCanvas(frame.canvasId)
+  return !!canvas && canAccessCanvas(userId, canvas)
 }
