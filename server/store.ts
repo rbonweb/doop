@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid'
 import { canvasPages, normalizePageTree, pageFrames } from '../shared/pages.ts'
 import { DEFAULT_NOTE_COLOR, NOTE_DEFAULT_SIZE } from '../shared/notes.ts'
+import { defaultFrameSize } from '../shared/slides.ts'
 import * as persist from './db/persist.ts'
 import type {
   Canvas,
@@ -596,8 +597,8 @@ class Store {
       name: input.name,
       x,
       y,
-      width: input.width ?? 640,
-      height: input.height ?? 480,
+      width: input.width ?? defaultFrameSize(input.slide).width,
+      height: input.height ?? defaultFrameSize(input.slide).height,
       html: input.html ?? '',
       createdAt: now,
       updatedAt: now,

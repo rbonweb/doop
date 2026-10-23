@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from 'react'
 import type { Frame } from '../../shared/types'
+import { deckOf } from '../../shared/slides'
 import { noteColorOf, noteExcerpt, notePageId } from '../../shared/notes'
 import { useStore } from '../lib/store'
 import { usePageCanvas } from '../lib/pages'
@@ -161,6 +162,8 @@ function visibleRows(frames: Frame[], query: string, expanded: Set<string>): Vis
 export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
   const pageCanvas = usePageCanvas()
   const frames = useMemo(() => pageCanvas?.frames ?? [], [pageCanvas])
+  /* each slide's place in the deck this page plays */
+  const deckNumber = useMemo(() => new Map(deckOf(frames).map((f, i) => [f.id, i + 1])), [frames])
   const selectedId = useStore((s) => s.selectedId)
   const selectedElement = useStore((s) => s.selectedElement)
   const setLayersOpen = useStore((s) => s.setLayersOpen)
@@ -471,6 +474,7 @@ export function LayersPanel({ onAddFrame }: { onAddFrame: () => void }) {
                       row={row}
                       selected={row.frame.id === selectedId && !selectedElement}
                       current={row.frame.id === selectedId}
+                      deck={deckNumber.get(row.frame.id)}
                       drop={drop?.key === row.key ? drop.place : undefined}
                       onToggle={() => setOpen(row.key, !row.open)}
                       onActivate={() => activate(row)}
@@ -615,6 +619,7 @@ function FrameRow({
   row,
   selected,
   current,
+  deck,
   drop,
   onToggle,
   onActivate,
@@ -623,6 +628,8 @@ function FrameRow({
   selected: boolean
   /** the frame is selected, whether or not an element inside it is */
   current: boolean
+  /** 1-based number of this slide in the page's deck; unset for a frame that is not a slide */
+  deck?: number
   drop?: DropPlace
   onToggle: () => void
   onActivate: () => void
@@ -648,6 +655,7 @@ function FrameRow({
             onCaret={onToggle}
             icon={<FrameIcon width={13} height={13} />}
             label={frame.name}
+            detail={deck === undefined ? undefined : ` · Slide ${deck}`}
             className={cn('font-semibold', current && !selected && 'text-brand [&_[data-icon]]:text-brand')}
             selected={selected}
             onClick={onActivate}

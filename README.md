@@ -93,6 +93,12 @@ The import source picker offers **Website**, **Live app** (the sync snippet), an
 Right-click a frame and choose **Export…** to download PNG or JPG. A progress toast tracks the
 render; the desktop app opens its native save panel.
 
+## Prototypes, present mode and decks
+
+Put `data-goto="<frame id or frame name>"` on any element in a frame and it becomes a prototype link. On the canvas a click still selects the element and ⌥-click follows the link; press **K** to draw an arrow for every link. Press **P** (or the play button) to present from the selected frame, or from the first frame of the page: ← and → walk the page in reading order, a link jumps to its frame, **Backspace** goes back, **Esc** exits. Frames that share a `view-transition-name` morph between screens.
+
+Mark frames as slides (the Inspector's **Slide** checkbox, or `slide: true` over MCP) and the slides of a page play as a deck, 1280×720 by default: **Space**, a click and → advance, and the runtime sets `data-sl-play` on the document for the whole show and `data-sl-entered` once a slide has arrived, so entrance animations can key off them. **S** opens the presenter view with the slide's speaker notes, the next slide, a timer and the slide number; the toolbar can also open it in a window of its own. **Export deck as PDF** (present toolbar, or right-click a page) renders one PDF page per slide at the slide's own size.
+
 ## Linear
 
 Connect Linear from **Integrations** to read issues through MCP or install Doop as a delegated
@@ -551,7 +557,7 @@ Steering happens at three layers (the same architecture paper.design uses, plus 
 | `set_frame_html`        | Replace a frame's design in one shot — renders live for everyone                                                                                                       |
 | `append_frame_html`     | **Stream** a design in chunks (`start=true` first, `done=true` last) — viewers watch it build up                                                                       |
 | `edit_frame_html`       | Targeted exact find/replace in a frame's HTML — morphs into the render in place                                                                                        |
-| `update_frame`          | Rename / move / resize a frame                                                                                                                                         |
+| `update_frame`          | Rename / move / resize a frame, make it a slide (`slide`) and set its `speaker_notes`                                                                                  |
 | `list_frame_versions`   | List a frame's saved earlier versions, newest first (no HTML)                                                                                                          |
 | `restore_frame_version` | Roll a frame back to a saved version; the current design is saved first                                                                                                |
 | `delete_frame`          | Remove a frame                                                                                                                                                         |

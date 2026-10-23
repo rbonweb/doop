@@ -22,6 +22,8 @@ import { notificationsRouter } from './notifications.ts'
 import * as webhooks from './webhooks.ts'
 import { webhooksRouter } from './webhookRoutes.ts'
 import { commentAnchorRouter } from './commentRoutes.ts'
+import { deckRouter } from './deckRoutes.ts'
+import { MAX_SPEAKER_NOTES_CHARS } from '../shared/slides.ts'
 import {
   canAccessCanvas,
   canEditCanvas,
@@ -703,6 +705,7 @@ app.use('/api/local-agent', localAgentRouter)
 app.use('/api/notifications', notificationsRouter)
 app.use('/api/webhooks', webhooksRouter)
 app.use('/api/comments', commentAnchorRouter)
+app.use('/api/canvases', deckRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/community', communityRouter)
 app.use('/api/automations', automationsRouter)
@@ -1495,15 +1498,29 @@ app.put('/api/canvases/:id/pages', (req, res) => {
   res.json(clean)
 })
 
+const validSpeakerNotes = (v: unknown): v is string => typeof v === 'string' && v.length <= MAX_SPEAKER_NOTES_CHARS
+
 app.post('/api/canvases/:id/frames', (req, res) => {
   if (!requireCanvas(req, res, req.params.id)) return
-  const { name, pageId, x, y, width, height, html } = req.body ?? {}
+  const { name, pageId, x, y, width, height, html, slide, speakerNotes } = req.body ?? {}
   if (pageId !== undefined && !store.getCanvas(req.params.id)?.pages?.some((p) => p.id === pageId))
     return res.status(400).json({ error: 'page not found' })
+  if (speakerNotes !== undefined && !validSpeakerNotes(speakerNotes))
+    return res.status(400).json({ error: `speakerNotes must be text of up to ${MAX_SPEAKER_NOTES_CHARS} characters` })
   const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const frame = actions.createFrame(
     req.params.id,
-    { name: String(name || 'Frame'), pageId, x, y, width, height, html },
+    {
+      name: String(name || 'Frame'),
+      pageId,
+      x,
+      y,
+      width,
+      height,
+      html,
+      ...(slide === true ? { slide: true } : {}),
+      ...(speakerNotes ? { speakerNotes } : {}),
+    },
     actor,
   )
   if (!frame) return res.status(404).json({ error: 'canvas not found' })
@@ -1519,7 +1536,11 @@ app.patch('/api/frames/:id', (req, res) => {
     !store.getCanvas(store.getFrame(req.params.id)!.canvasId)?.pages?.some((p) => p.id === patch.pageId)
   )
     return res.status(400).json({ error: 'page not found' })
-  const allowed = ['name', 'pageId', 'x', 'y', 'width', 'height', 'html'] as const
+  if (patch.slide !== undefined && typeof patch.slide !== 'boolean')
+    return res.status(400).json({ error: 'slide must be true or false' })
+  if (patch.speakerNotes !== undefined && !validSpeakerNotes(patch.speakerNotes))
+    return res.status(400).json({ error: `speakerNotes must be text of up to ${MAX_SPEAKER_NOTES_CHARS} characters` })
+  const allowed = ['name', 'pageId', 'x', 'y', 'width', 'height', 'html', 'slide', 'speakerNotes'] as const
   const clean: Record<string, unknown> = {}
   for (const k of allowed) if (patch[k] !== undefined) clean[k] = patch[k]
   const frame = actions.updateFrame(req.params.id, clean, actor)

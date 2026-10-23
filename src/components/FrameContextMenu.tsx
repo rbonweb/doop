@@ -4,7 +4,9 @@ import { api, errorMessage } from '../lib/api'
 import { copyFrames, duplicateFrames, hasFrameClip, pasteFrameAtScreen } from '../lib/frameClipboard'
 import { deleteFramesTracked } from '../lib/history'
 import { addNote } from '../lib/notes'
+import { startPresenting } from '../lib/present'
 import { useStore } from '../lib/store'
+import { toggleSlide } from '../lib/slideEdits'
 import { EXPORT_SHORTCUT, MOD_KEY } from '../lib/keys'
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from './ui/context-menu'
 import { MenuHint } from './ui/menu'
@@ -59,6 +61,13 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
           <MenuHint>{MOD_KEY}D</MenuHint>
         </ContextMenuItem>
         <ContextMenuItem onSelect={() => void addNote(frame.canvasId, { frameId: frame.id })}>Add note</ContextMenuItem>
+        <ContextMenuItem onSelect={() => startPresenting(frame.id)}>
+          Present
+          <MenuHint>P</MenuHint>
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => toggleSlide(frame)}>
+          {frame.slide ? 'Remove from deck' : 'Make a slide'}
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem
           onSelect={() => navigator.clipboard.writeText(`${location.origin}/c/${frame.canvasId}?frame=${frame.id}`)}

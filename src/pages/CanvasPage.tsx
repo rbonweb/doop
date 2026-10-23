@@ -38,6 +38,7 @@ import {
   SourcePicker,
 } from '../components/ImportSources'
 import { PresentMode } from '../components/PresentMode'
+import { startPresenting } from '../lib/present'
 import { FrameExportModal } from '../components/FrameExportModal'
 import { getIdentity, setName } from '../lib/identity'
 import { hasFrameClip, pasteFrameCentered, pasteImagesCentered } from '../lib/frameClipboard'
@@ -117,6 +118,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
   const [showShare, setShowShare] = useState(false)
   const presenting = useStore((s) => s.presenting)
   const setPresenting = useStore((s) => s.setPresenting)
+  const presentFrameId = useStore((s) => s.presentFrameId)
   /* leaving the canvas ends a presentation, so the next canvas starts with its frames awake */
   useEffect(() => () => useStore.getState().setPresenting(false), [])
   /* returning from a GitHub App install: the setup redirect appends a signed
@@ -343,14 +345,14 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
             <PeerAvatars others={others} />
           </div>
           <BarDivider />
-          <Tooltip label={selectedId ? 'Present this frame' : 'Select a frame to present'} side="bottom">
+          <Tooltip label={selectedId ? 'Present from this frame (P)' : 'Present this page (P)'} side="bottom">
             <Button
               variant="ghost"
               size="icon"
               className="size-[34px] rounded-[7px] bg-surface hover:border-ink-faint hover:bg-paper-deep disabled:opacity-40"
-              aria-label="Present selected frame"
-              disabled={!selectedId}
-              onClick={() => setPresenting(true)}
+              aria-label="Present"
+              disabled={!canvas?.frames.length}
+              onClick={() => startPresenting()}
             >
               <PlayIcon className="size-3.5" />
             </Button>
@@ -634,7 +636,7 @@ export function CanvasPage({ canvasId }: { canvasId: string }) {
       {renaming && <RenameSelfModal current={me.name} onClose={() => setRenaming(false)} />}
       {showConnect && <ConnectModal canvasId={canvasId} onClose={() => setShowConnect(false)} />}
       <ShortcutsDialog />
-      {presenting && selectedId && <PresentMode frameId={selectedId} onClose={() => setPresenting(false)} />}
+      {presenting && presentFrameId && <PresentMode startId={presentFrameId} onClose={() => setPresenting(false)} />}
       {showShare && canvas && (
         <ShareModal
           key={canvas.id}

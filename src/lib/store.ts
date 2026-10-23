@@ -125,6 +125,9 @@ interface State {
   /** a request for the Stage to glide the camera to a frame — the prompt bar
    *  raises it so a first deliverable streams in on-screen, never off-canvas */
   flyTo: { frameId: string; at: number } | { point: { x: number; y: number }; at: number } | null
+  /** prototype link arrows (data-goto) are drawn for every frame, not only the selected ones — per viewer, `k` toggles it */
+  flowLinksVisible: boolean
+  setFlowLinksVisible(v: boolean): void
   /** sticky notes are showing on the stage — per viewer, `n` toggles it */
   notesVisible: boolean
   /** notes this viewer has folded down to a corner chip */
@@ -137,6 +140,9 @@ interface State {
   /** the full-screen present mode is open (frames behind it never sleep, see lib/frameSleep.ts) */
   presenting: boolean
   setPresenting(v: boolean): void
+  /** the frame a presentation starts on, set by startPresenting() before it opens */
+  presentFrameId: string | null
+  setPresentFrame(id: string | null): void
 
   activePageId: string | null
   setActivePage(id: string): void
@@ -236,6 +242,7 @@ interface State {
 const LAYERS_OPEN_KEY = 'doop:layers-open'
 const NOTES_VISIBLE_KEY = 'doop:notes-visible'
 const NOTES_FOLDED_KEY = 'doop:notes-folded'
+const FLOW_LINKS_KEY = 'doop:flow-links'
 /* longer than the slowest real export (Canva: render + verify, ~3 min) */
 const BUSY_NOTICE_MAX_MS = 5 * 60_000
 
@@ -252,6 +259,14 @@ function readNotesVisible(): boolean {
     return localStorage.getItem(NOTES_VISIBLE_KEY) !== '0'
   } catch {
     return true
+  }
+}
+
+function readFlowLinksVisible(): boolean {
+  try {
+    return localStorage.getItem(FLOW_LINKS_KEY) === '1'
+  } catch {
+    return false
   }
 }
 
@@ -293,6 +308,7 @@ export const useStore = create<State>((set, get) => ({
   flyTo: null,
   following: null,
   presenting: false,
+  presentFrameId: null,
   selectedIds: [],
   selectedId: null,
   panMode: false,
@@ -304,6 +320,7 @@ export const useStore = create<State>((set, get) => ({
   layersOpen: readLayersOpen(),
   historyFrameId: null,
   notesVisible: readNotesVisible(),
+  flowLinksVisible: readFlowLinksVisible(),
   foldedNotes: readFoldedNotes(),
   editingNoteId: null,
   viewport: { x: 0, y: 0, zoom: 1 },
@@ -552,6 +569,10 @@ export const useStore = create<State>((set, get) => ({
     remember(NOTES_VISIBLE_KEY, notesVisible ? '1' : '0')
     set({ notesVisible })
   },
+  setFlowLinksVisible: (flowLinksVisible) => {
+    remember(FLOW_LINKS_KEY, flowLinksVisible ? '1' : '0')
+    set({ flowLinksVisible })
+  },
   toggleNoteFolded: (id) =>
     set((s) => {
       const foldedNotes = { ...s.foldedNotes }
@@ -718,6 +739,7 @@ export const useStore = create<State>((set, get) => ({
   /* fires on every pointermove during a drag — skip the no-op transitions
      so unsnapped drags don't render the (empty) guide layer each frame */
   setPresenting: (presenting) => set({ presenting }),
+  setPresentFrame: (presentFrameId) => set({ presentFrameId }),
   setSnapGuides: (snapGuides) =>
     set((s) => (snapGuides.length === 0 && s.snapGuides.length === 0 ? s : { snapGuides })),
   setStream: (frameId, actor) =>

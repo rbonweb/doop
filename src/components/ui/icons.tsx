@@ -46,7 +46,9 @@ import {
   ViewStructureUp,
   NavArrowDown,
   NavArrowRight,
+  OpenNewWindow,
   PlaySolid,
+  Presentation,
   Plus,
   Post,
   RefreshDouble,
@@ -59,6 +61,7 @@ import {
   SunLight,
   Text,
   Trash,
+  Undo,
   Xmark,
 } from 'iconoir-react'
 
@@ -106,6 +109,10 @@ export const ImageIcon = icon(MediaImage)
 export const VectorIcon = icon(DesignNib)
 export const BookmarkIcon = icon(Bookmark)
 export const PlayIcon = icon(PlaySolid)
+/** a slide: the deck stage */
+export const SlideIcon = icon(Presentation)
+export const OpenWindowIcon = icon(OpenNewWindow)
+export const UndoIcon = icon(Undo)
 export const ArrowUpIcon = icon(ArrowUp)
 export const ChevronLeftIcon = icon(NavArrowLeft)
 export const GridIcon = icon(ViewGrid)

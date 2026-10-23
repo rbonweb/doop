@@ -24,10 +24,14 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     vSheet.replaceSync('html,body{overscroll-behavior-x:none}')
     document.adoptedStyleSheets = document.adoptedStyleSheets.concat(vSheet)
   } catch (e) {}
+  /* attributes the show puts on <html> and the design never writes: a morph must leave them be */
+  function isShowAttr(name) { return name === 'data-sl-play' || name === 'data-sl-entered' }
+
   function syncAttrs(from, to) {
+    var root = from === document.documentElement
     for (var i = from.attributes.length - 1; i >= 0; i--) {
       var name = from.attributes[i].name
-      if (name === 'data-v-ran') continue
+      if (name === 'data-v-ran' || (root && isShowAttr(name))) continue
       if (!to.hasAttribute(name)) from.removeAttribute(name)
     }
     for (var j = 0; j < to.attributes.length; j++) {
@@ -365,6 +369,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       marked[j].removeAttribute('data-v-active')
       marked[j].removeAttribute('data-v-hover')
     }
+    root.removeAttribute('data-sl-play')
+    root.removeAttribute('data-sl-entered')
     root.style.removeProperty('zoom') // crisp-render zoom is ours, not the design's
     if (!root.getAttribute('style')) root.removeAttribute('style')
     return '<!doctype html>\\n' + root.outerHTML
@@ -421,6 +427,14 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   /* Escape pressed with focus inside the frame: the parent never sees the
      key event itself, so relay it (present mode closes on it) */
   document.addEventListener('keydown', function (ev) {
+    if (presenting && !editing && ev.key !== 'Escape') {
+      var typing = ev.target && ev.target.closest && ev.target.closest('input,textarea,select,[contenteditable]')
+      if (!typing && !ev.metaKey && !ev.ctrlKey && !ev.altKey && PRESENT_KEYS.indexOf(ev.key) >= 0) {
+        ev.preventDefault()
+        parent.postMessage({ type: 'doop:key', key: ev.key }, '*')
+      }
+      return
+    }
     if (ev.key !== 'Escape') return
     if (editing) {
       setEdit(false)
@@ -692,6 +706,123 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     })
   }
 
+  /* ---- present ----
+     While the parent presents this frame it sends doop:mode. A click on an element inside [data-goto] then asks the
+     parent to jump to that frame (the prototype link), and in a slide show any other click asks for the next slide. The
+     keys that drive the show are relayed, since a key pressed with focus inside this document never reaches the parent.
+     A show of slides also marks <html>: data-sl-play for the whole show, and data-sl-entered once a slide has arrived,
+     so a design can key its entrance animations to [data-sl-entered]. */
+  var presenting = false
+  var slidesShow = false
+  var presentSheet = null
+  var PRESENT_KEYS = ['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', ' ', 'Backspace', 's', 'S']
+  var CROSSFADE_MS = 250
+
+  function setEntered(on) {
+    var root = document.documentElement
+    if (on) root.setAttribute('data-sl-entered', '')
+    else root.removeAttribute('data-sl-entered')
+  }
+
+  /* the slide is drawn in its resting state first, then arrives: two frames, so the first paint lands in between */
+  function arrive() {
+    setEntered(false)
+    requestAnimationFrame(function () { requestAnimationFrame(function () { setEntered(true) }) })
+  }
+
+  function setPresent(on, slides) {
+    presenting = on
+    slidesShow = on && slides
+    try {
+      if (on && !presentSheet) {
+        presentSheet = new CSSStyleSheet()
+        presentSheet.replaceSync('[data-goto]{cursor:pointer}')
+        document.adoptedStyleSheets = document.adoptedStyleSheets.concat(presentSheet)
+      } else if (!on && presentSheet) {
+        var gone = presentSheet
+        presentSheet = null
+        document.adoptedStyleSheets = document.adoptedStyleSheets.filter(function (sheet) { return sheet !== gone })
+      }
+    } catch (e) { /* no constructable sheets: the cursor stays as authored */ }
+    var root = document.documentElement
+    if (slidesShow) {
+      root.setAttribute('data-sl-play', '')
+      arrive()
+    } else {
+      root.removeAttribute('data-sl-play')
+      root.removeAttribute('data-sl-entered')
+    }
+  }
+
+  /* No view-transition support: dip the document out and back in over CROSSFADE_MS */
+  function crossfade(html) {
+    var root = document.documentElement
+    var swap = function () {
+      if (slidesShow) setEntered(false)
+      render(html)
+    }
+    if (typeof root.animate !== 'function') { swap(); if (slidesShow) arrive(); return }
+    var half = CROSSFADE_MS / 2
+    var out = root.animate([{ opacity: 1 }, { opacity: 0 }], { duration: half, easing: 'ease-in', fill: 'forwards' })
+    var next = function () {
+      swap()
+      var back = root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: half, easing: 'ease-out' })
+      out.cancel()
+      var arrived = function () { if (slidesShow) setEntered(true) }
+      back.finished.then(arrived, arrived)
+    }
+    out.finished.then(next, next)
+  }
+
+  /* A swap while presenting. Where the browser has view transitions, elements sharing a view-transition-name in both
+     documents morph; data-sl-entered goes off inside the update callback and comes back when the transition ends. */
+  function renderSwap(html) {
+    if (typeof document.startViewTransition !== 'function') { crossfade(html); return }
+    var transition = null
+    try {
+      transition = document.startViewTransition(function () {
+        if (slidesShow) setEntered(false)
+        render(html)
+      })
+    } catch (e) { transition = null }
+    if (!transition) { crossfade(html); return }
+    var arrived = function () { if (slidesShow) setEntered(true) }
+    transition.finished.then(arrived, arrived)
+  }
+
+  document.addEventListener('click', function (ev) {
+    if (!presenting || editing || laserOn) return
+    var from = ev.target && ev.target.closest ? ev.target : null
+    var link = from ? from.closest('[data-goto]') : null
+    if (link) {
+      ev.preventDefault()
+      ev.stopPropagation()
+      parent.postMessage({ type: 'doop:goto', target: link.getAttribute('data-goto') || '' }, '*')
+      return
+    }
+    /* a click on something that acts for itself (a link, a field) is not a "next slide" */
+    if (slidesShow && !(from && from.closest('a[href],button,input,textarea,select,summary,label,[contenteditable]'))) {
+      parent.postMessage({ type: 'doop:advance' }, '*')
+    }
+  }, true)
+
+  /* the pointer moving inside this document never reaches the parent, which hides its toolbar when the pointer rests */
+  var lastPointer = 0
+  document.addEventListener('mousemove', function () {
+    if (!presenting) return
+    var now = Date.now()
+    if (now - lastPointer < 120) return
+    lastPointer = now
+    parent.postMessage({ type: 'doop:pointer' }, '*')
+  }, true)
+
+  /* the canvas never follows links on a plain click; ⌥-click asks what sits under the pointer */
+  function gotoAt(x, y) {
+    var el = document.elementFromPoint(x, y)
+    var link = el && el.closest ? el.closest('[data-goto]') : null
+    return link ? link.getAttribute('data-goto') || '' : null
+  }
+
   window.addEventListener('message', function (ev) {
     /* only the parent drives this document — a script inside the frame must
        not be able to pose as the panel and push edits into the save path */
@@ -705,7 +836,18 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       var applied = applyStyle(d.selector, d.styles)
       parent.postMessage({ type: 'doop:style-result', reqId: d.reqId, ok: applied, info: applied ? inspect(d.selector) : null }, '*')
     }
-    if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) render(d.html)
+    if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) {
+      if (d.transition && presenting) renderSwap(d.html)
+      else {
+        render(d.html)
+        /* the first render of a slide show: the slide arrives. A live edit keeps the attribute the morph left alone. */
+        if (slidesShow && !document.documentElement.hasAttribute('data-sl-entered')) arrive()
+      }
+    }
+    if (d.type === 'doop:mode') setPresent(!!d.present, !!d.slides)
+    if (d.type === 'doop:goto-at') {
+      parent.postMessage({ type: 'doop:goto-result', reqId: d.reqId, target: gotoAt(d.x, d.y) }, '*')
+    }
     if (d.type === 'doop:edit') setEdit(!!d.on)
     if (d.type === 'doop:sleep') setSleep(!!d.on)
     if (d.type === 'doop:laser') setLaser(!!d.on)

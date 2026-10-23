@@ -5,6 +5,7 @@ import {
   addPage,
   canNestPage,
   canvasPages,
+  framePageId,
   movePage,
   pageAncestors,
   pageDepth,
@@ -16,6 +17,8 @@ import {
 } from '../../shared/pages'
 import type { CanvasPageInfo } from '../../shared/types'
 import { useStore } from '../lib/store'
+import { downloadDeckPdf } from '../lib/deckExport'
+import { deckOf } from '../../shared/slides'
 import { savePages, moveFramesToPage } from '../lib/pageEdits'
 import { loadCollapsedPages, saveCollapsedPages } from '../lib/pageCollapse'
 import { ApiError } from '../lib/api'
@@ -80,6 +83,9 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   const activePageId = useStore((s) => s.activePageId)
   const selectedIds = useStore((s) => s.selectedIds)
   const canvasId = canvas?.id
+  /* how many slides a page's deck has: the page menu offers the PDF only when there are some */
+  const slideCount = (pageId: string) =>
+    canvas ? deckOf(canvas.frames.filter((f) => framePageId(canvas, f) === pageId)).length : 0
   const [busy, setBusy] = useState(false)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [name, setName] = useState('')
@@ -447,6 +453,17 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                       ))}
                     </ContextMenuSubContent>
                   </ContextMenuSub>
+                )}
+                {slideCount(page.id) > 0 && (
+                  <>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem
+                      onSelect={() => void downloadDeckPdf(canvasId!, page.id, page.name, slideCount(page.id))}
+                    >
+                      Export deck as PDF
+                      <MenuHint>{slideCount(page.id)} slides</MenuHint>
+                    </ContextMenuItem>
+                  </>
                 )}
                 <ContextMenuSeparator />
                 <ContextMenuItem
