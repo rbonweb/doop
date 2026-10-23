@@ -20,7 +20,11 @@
       import { Stage } from '/src/components/Stage.tsx'
       import { useStore } from '/src/lib/store.ts'
       import '/src/styles.css'
-      window.seedPages = (canvas) => useStore.getState().setCanvas(canvas)
+      /* dragging a frame takes the edit role, which the socket's init normally hands the store */
+      window.seedPages = (canvas) => {
+        useStore.getState().setRole('edit')
+        useStore.getState().setCanvas(canvas)
+      }
       window.pageState = () => ({
         activePageId: useStore.getState().activePageId,
         viewport: useStore.getState().viewport,

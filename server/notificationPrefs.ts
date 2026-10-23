@@ -32,6 +32,8 @@ export interface Mailable {
   id: string
   name: string
   email: string
+  /** whether the address is verified, which decides if a domain grant applies */
+  emailVerified?: boolean
 }
 
 /** The accounts among these ids that comment email may go to: banned users
@@ -43,6 +45,7 @@ export async function mailableForComments(ids: string[]): Promise<Mailable[]> {
       id: authSchema.user.id,
       name: authSchema.user.name,
       email: authSchema.user.email,
+      emailVerified: authSchema.user.emailVerified,
       banned: authSchema.user.banned,
     })
     .from(authSchema.user)
@@ -52,5 +55,7 @@ export async function mailableForComments(ids: string[]): Promise<Mailable[]> {
     .from(notificationPrefs)
     .where(and(inArray(notificationPrefs.userId, ids), eq(notificationPrefs.commentEmails, false)))
   const muted = new Set(off.map((r) => r.userId))
-  return rows.filter((r) => !r.banned && !muted.has(r.id)).map(({ id, name, email }) => ({ id, name, email }))
+  return rows
+    .filter((r) => !r.banned && !muted.has(r.id))
+    .map(({ id, name, email, emailVerified }) => ({ id, name, email, emailVerified: !!emailVerified }))
 }

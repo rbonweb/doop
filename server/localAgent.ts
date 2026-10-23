@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { localAgentRuns } from './localAgentRuns.ts'
 import { getLocalAgentPreference, saveLocalAgentPreference } from './localAgentPreferences.ts'
 import { store } from './store.ts'
-import { canAccessCanvas } from './access.ts'
+import { canAccessCanvas, canEdit } from './access.ts'
 import { isBanned } from './auth.ts'
 import { onFeedback } from './resident.ts'
 
@@ -90,7 +90,7 @@ export async function handleLocalAgentMcp(req: Request, res: Response) {
   const id = req.params.id ?? ''
   const run = localAgentRuns.authorized(id, token)
   const canvas = run && store.getCanvas(run.request.canvasId)
-  if (!run || !canvas || !canAccessCanvas(run.userId, canvas) || (await isBanned(run.userId))) {
+  if (!run || !canvas || !canEdit(run.userId, canvas) || (await isBanned(run.userId))) {
     res.status(403).json({ error: 'Local run unavailable' })
     return
   }

@@ -50,3 +50,14 @@ export function getIdentity(): { clientId: string; name: string } {
 export function setName(name: string) {
   storage.set('doop:name', name)
 }
+
+/* A signed-out visitor chooses the name their comments carry once; it is also
+   the name their cursor shows in the room. The server adds the "(guest)" mark. */
+export function hasChosenGuestName(): boolean {
+  return storage.get('doop:guestNamed') === '1'
+}
+
+export function chooseGuestName(name: string) {
+  setName(name)
+  storage.set('doop:guestNamed', '1')
+}

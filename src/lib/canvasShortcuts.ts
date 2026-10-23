@@ -8,6 +8,7 @@ import { redo, undo } from './history'
 import { deleteSelection } from './layerEdits'
 import { applyDevice, restoreDevices, tidyFrames } from './layoutEdits'
 import { reviewNext } from './marks'
+import { canCommentNow, canEditNow } from './role'
 import { isOverlayOpen, type Shortcut } from './shortcuts'
 import { useStore } from './store'
 
@@ -31,6 +32,11 @@ const hasTextSelection = () => !!window.getSelection()?.toString()
 
 const ZOOM_STEP = 1.25
 
+/* The server refuses every write below the edit role; these guards keep the keys from even trying. Reading keys (copy,
+   fit, export, laser, notes visibility) stay open to everyone who can see the canvas, commenting needs the comment role. */
+const mayEdit = () => canEditNow()
+const mayEditOnCanvas = () => onCanvas() && canEditNow()
+
 /* The dispatcher takes the first matching entry, so the mode-exit Esc sits ahead of the selection's. */
 export const canvasShortcuts: Shortcut[] = [
   {
@@ -53,6 +59,7 @@ export const canvasShortcuts: Shortcut[] = [
     label: 'Delete the selected element or frames',
     group: 'Selection',
     /* a picked element is what ⌫ removes, the frame only when nothing inside it is picked; nothing to act on leaves the key alone */
+    when: mayEdit,
     run: () => deleteSelection(),
   },
   {
@@ -82,7 +89,7 @@ export const canvasShortcuts: Shortcut[] = [
     mods: ['mod'],
     label: 'Duplicate the selected frames',
     group: 'Selection',
-    when: () => selectedFrames().length > 0,
+    when: () => mayEdit() && selectedFrames().length > 0,
     run: () => duplicateFrames(selectedFrames()),
   },
   {
@@ -115,7 +122,16 @@ export const canvasShortcuts: Shortcut[] = [
   },
 
   /* ---- history ---- */
-  { id: 'undo', repeat: true, key: 'z', mods: ['mod'], label: 'Undo', group: 'Canvas', run: () => void undo() },
+  {
+    id: 'undo',
+    repeat: true,
+    key: 'z',
+    mods: ['mod'],
+    label: 'Undo',
+    group: 'Canvas',
+    when: mayEdit,
+    run: () => void undo(),
+  },
   {
     id: 'redo',
     repeat: true,
@@ -123,6 +139,7 @@ export const canvasShortcuts: Shortcut[] = [
     mods: ['mod', 'shift'],
     label: 'Redo',
     group: 'Canvas',
+    when: mayEdit,
     run: () => void redo(),
   },
   {
@@ -133,6 +150,7 @@ export const canvasShortcuts: Shortcut[] = [
     label: 'Redo',
     group: 'Canvas',
     hidden: true,
+    when: mayEdit,
     run: () => void redo(),
   },
 
@@ -142,7 +160,7 @@ export const canvasShortcuts: Shortcut[] = [
     key: 't',
     label: 'Tidy the selection, or the whole page, into rows',
     group: 'Canvas',
-    when: onCanvas,
+    when: mayEditOnCanvas,
     run: () => void tidyFrames(),
   },
   ...DEVICES.map((device): Shortcut => ({
@@ -150,7 +168,7 @@ export const canvasShortcuts: Shortcut[] = [
     key: device.key,
     label: `${device.label} size, ${device.width} × ${device.height}`,
     group: 'Canvas',
-    when: onCanvas,
+    when: mayEditOnCanvas,
     run: () => applyDevice(device),
   })),
   {
@@ -158,7 +176,7 @@ export const canvasShortcuts: Shortcut[] = [
     key: '0',
     label: 'Restore the sizes and positions from before the device keys',
     group: 'Canvas',
-    when: onCanvas,
+    when: mayEditOnCanvas,
     run: () => restoreDevices(),
   },
   {
@@ -243,7 +261,7 @@ export const canvasShortcuts: Shortcut[] = [
     key: 'c',
     label: 'Comment: click an element to comment on it',
     group: 'Modes',
-    when: onCanvas,
+    when: () => onCanvas() && canCommentNow(),
     run: () => state().setCommentMode(!state().commentMode),
   },
   {

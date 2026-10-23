@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useStore } from '../lib/store'
 import { usePageCanvas, currentPageCanvas } from '../lib/pages'
 import { sendWs } from '../lib/ws'
+import { useCanEdit } from '../lib/role'
 import { throttle } from '../lib/throttle'
 import { FrameView } from './FrameView'
 import { StickyNote } from './StickyNote'
@@ -79,6 +80,8 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
   )
   const select = useStore((s) => s.select)
   const panMode = useStore((s) => s.panMode)
+  /* the toolbar's "+ Frame" and the background menu's Paste/New frame are edits */
+  const mayEdit = useCanEdit()
   const [panning, setPanning] = useState(false)
   /* the selection rectangle being dragged out, in world coordinates */
   const [marquee, setMarquee] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
@@ -638,14 +641,18 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
         <FollowFrame />
 
         <Toolbar className="absolute bottom-[calc(8px+env(safe-area-inset-bottom))] left-1/2 z-[35] -translate-x-1/2 sm:bottom-4">
-          <ToolbarButton onClick={onAddFrame}>+ Frame</ToolbarButton>
-          <ToolbarButton
-            title="Add a sticky note (N shows or hides all notes)"
-            onClick={() => canvas && void addNote(canvas.id)}
-          >
-            Note
-          </ToolbarButton>
-          <ToolbarDivider />
+          {mayEdit && (
+            <>
+              <ToolbarButton onClick={onAddFrame}>+ Frame</ToolbarButton>
+              <ToolbarButton
+                title="Add a sticky note (N shows or hides all notes)"
+                onClick={() => canvas && void addNote(canvas.id)}
+              >
+                Note
+              </ToolbarButton>
+              <ToolbarDivider />
+            </>
+          )}
           <ToolbarButton
             aria-label="Zoom out"
             onClick={() => {
@@ -682,7 +689,7 @@ export function Stage({ onAddFrame }: { onAddFrame: () => void }) {
         </Toolbar>
         <ModePill />
 
-        {canvas && (
+        {canvas && mayEdit && (
           <ContextMenuContent>
             <ContextMenuItem
               disabled={!hasFrameClip()}

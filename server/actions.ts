@@ -357,10 +357,12 @@ export function addChatMessage(
   text: string,
   from: string,
   fromUserId?: string,
+  allowAgent = true,
 ): ChatMessage | undefined {
   const clean = text.trim().slice(0, MAX_CHAT_CHARS)
   if (!clean || !store.getCanvas(canvasId)) return undefined
-  const roles = mentionedRoles(clean)
+  /* an author who may not ask agents to change the canvas posts plain chat */
+  const roles = allowAgent ? mentionedRoles(clean) : []
   const card =
     roles.length > 0
       ? addQueuedCard(
@@ -569,12 +571,21 @@ export function findComment(commentId: string): ElementComment | undefined {
   return undefined
 }
 
+/** How a comment is posted beyond its text and author. */
+export interface CommentOptions {
+  /** false stores an @agent mention as plain text: the author may not ask agents to change the canvas */
+  allowAgent?: boolean
+  /** account ids of the people the text @mentions — already checked by the caller, order kept */
+  mentions?: string[]
+}
+
 export function addElementComment(
   frameId: string,
   input: { selector: string; snippet: string; text: string; anchor?: unknown },
   from: string,
   fromUserId?: string,
   kind: ActorKind = 'user',
+  options: CommentOptions = {},
 ): ElementComment | undefined {
   const frame = store.getFrame(frameId)
   if (!frame) return undefined
@@ -590,6 +601,7 @@ export function addElementComment(
     from,
     fromUserId,
     kind,
+    options,
   )
 }
 
@@ -601,6 +613,7 @@ export function replyToComment(
   from: string,
   fromUserId?: string,
   kind: ActorKind = 'user',
+  options: CommentOptions = {},
 ): ElementComment | undefined {
   const open = openThread(commentId)
   if (!open) return undefined
@@ -617,6 +630,7 @@ export function replyToComment(
     from,
     fromUserId,
     kind,
+    options,
   )
 }
 
@@ -640,11 +654,14 @@ function postComment(
   from: string,
   fromUserId?: string,
   kind: ActorKind = 'user',
+  options: CommentOptions = {},
 ): ElementComment | undefined {
   const clean = text.trim()
   if (!clean) return undefined
-  /* @Doop, @brand, @a11y… — whichever resident agent is mentioned picks it up */
-  const mentioned = mentionedRole(clean)
+  /* @Doop, @brand, @a11y… — whichever resident agent is mentioned picks it up,
+     unless the author may not ask agents to change the canvas */
+  const mentioned = options.allowAgent === false ? undefined : mentionedRole(clean)
+  const people = [...new Set(options.mentions ?? [])]
   const list = commentLog.get(frame.canvasId) ?? []
   /* strictly increasing per canvas: thread order is reconstructed from `at`
      after a restart, so two messages must never share a timestamp */
@@ -662,6 +679,7 @@ function postComment(
     at,
     ...(anchor.anchor ? { anchor: anchor.anchor } : {}),
     ...(mentioned ? { forAgent: true, targetAgent: mentioned.name } : {}),
+    ...(people.length ? { mentions: people } : {}),
     ...(anchor.parentId ? { parentId: anchor.parentId } : {}),
   }
   list.unshift(comment)

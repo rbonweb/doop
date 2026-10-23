@@ -1,7 +1,7 @@
 import * as actions from './actions.ts'
 import { store } from './store.ts'
 import { workspaceMemberIds } from './workspaces.ts'
-import { canAccessCanvas } from './access.ts'
+import { canView } from './access.ts'
 import { mailerConfigured, sendMail } from './mailer.ts'
 import { mailableForComments, type Mailable } from './notificationPrefs.ts'
 import { commentLink, settingsLink } from './links.ts'
@@ -13,9 +13,11 @@ import type { ActorKind, Canvas, ElementComment } from '../shared/types.ts'
  * replies they were not in the room to see. Listens to the canvas event bus
  * (server/events.ts), so REST and MCP comments both count.
  *
- * Who: the owner, invited members, the members of the canvas's workspace, and
- * everyone who already wrote in the thread — minus the person who just wrote,
- * and minus anyone who can no longer open the canvas by the time it sends.
+ * Who: the owner, invited members, the members of the canvas's workspace,
+ * everyone who already wrote in the thread, and anyone @mentioned in it (the
+ * server checked they can view the canvas before it stored the mention) —
+ * minus the person who just wrote, minus anyone who switched comment email
+ * off, and minus anyone who can no longer open the canvas by the time it sends.
  * An agent's reply is news to everyone, including the account whose key or
  * session ran the agent: that account did not type the words.
  *
@@ -53,7 +55,11 @@ export function recipientsFor(canvas: Canvas, comment: ElementComment, actorKind
   if (canvas.workspaceId) for (const id of workspaceMemberIds(canvas.workspaceId)) ids.add(id)
   /* share-link visitors leave no durable trace — the thread they wrote in is
      the only record that they care about it */
-  for (const c of actions.commentThread(comment)) if (c.fromUserId) ids.add(c.fromUserId)
+  for (const c of actions.commentThread(comment)) {
+    if (c.fromUserId) ids.add(c.fromUserId)
+    /* an @mention pulls the person into the thread, even if they never wrote in it */
+    for (const mentioned of c.mentions ?? []) ids.add(mentioned)
+  }
   if (actorKind === 'user' && comment.fromUserId) ids.delete(comment.fromUserId)
   return [...ids]
 }
@@ -91,9 +97,9 @@ async function flush(key: string) {
        the batch opened, so a comment never reaches someone who could no
        longer open the canvas to read it. */
     const canvas = store.getCanvas(batch.canvasId)
-    if (!canvas || !canAccessCanvas(batch.userId, canvas)) return
+    if (!canvas) return
     const [person] = await mailableForComments([batch.userId])
-    if (!person) return
+    if (!person || !canView(person, canvas)) return
     await sendMail(digest(person, canvas, batch.items))
   } catch (err) {
     console.error(`[comments] notification email to ${batch.userId} failed`, err)
@@ -111,15 +117,16 @@ export function digest(
   const authors = [...new Set(items.map((i) => i.comment.from))]
   const n = items.length
   const first = items[0]
+  const mentioned = (comment: ElementComment) => !!comment.mentions?.includes(person.id)
   const subject =
     n === 1 && first
-      ? `${first.comment.from} ${first.comment.parentId ? 'replied' : 'commented'} on ${quote(canvas.name)}`
+      ? `${first.comment.from} ${mentioned(first.comment) ? 'mentioned you' : first.comment.parentId ? 'replied' : 'commented'} on ${quote(canvas.name)}`
       : authors.length === 1
         ? `${authors[0]} left ${n} comments on ${quote(canvas.name)}`
         : `${n} new comments on ${quote(canvas.name)}`
   const body = items
     .map(({ comment, frameName }) => {
-      const verb = comment.parentId ? 'replied in' : 'commented on'
+      const verb = mentioned(comment) ? 'mentioned you in' : comment.parentId ? 'replied in' : 'commented on'
       const text = comment.text.length > 600 ? `${comment.text.slice(0, 597)}…` : comment.text
       return `${comment.from} ${verb} ${quote(frameName)}:\n\n  ${quote(text.replace(/\n/g, '\n  '))}\n  ${commentLink(comment)}`
     })

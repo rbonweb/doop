@@ -46,5 +46,4 @@ without SMTP. Shared shape in `shared/notifications.ts`.
 
 - Email on resolve: low signal for the person who left the comment; a webhook event instead.
 - Durable queue / retries: see the webhook spec, which needs them anyway.
-- Human @mentions: the only mention syntax is for resident agent roles; a mention path for
-  people would need a picker and a parser first.
+- Human @mentions as a separate system: people mentions now ship with sharing roles (see [sharing-roles.md](sharing-roles.md)). The composer picker offers people who can view the canvas, the server re-validates every id, and a mentioned person joins the recipients of the comment email (respecting the opt-out) and gets a live toast and pin pulse when online. The email subject says "mentioned you" in that case.

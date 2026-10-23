@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express'
-import { canAccessCanvas } from './access.ts'
 import * as persist from './db/persist.ts'
 import { store } from './store.ts'
+import { requireCanvas } from './sharing.ts'
 
 /** /api/canvases/:id/seen: what each person has already looked at on a canvas, behind the "new" marks. */
 export const seenRouter = Router()
@@ -9,22 +9,15 @@ export const seenRouter = Router()
 /** Most frames one request may report; the client batches a second of views, so a real one is far smaller. */
 export const MAX_SEEN_PER_REQUEST = 500
 
-/** The caller and canvas, when this caller may see it; otherwise the response is already sent. */
+/** The caller and canvas, when this caller may view it (any role); otherwise the response is already sent. */
 function canvasFor(req: Request, res: Response) {
   const userId = req.user?.id
   if (!userId) {
     res.status(401).json({ error: 'sign in to track what you have seen' })
     return null
   }
-  const canvas = store.getCanvas(String(req.params.id))
-  if (!canvas) {
-    res.status(404).json({ error: 'not found' })
-    return null
-  }
-  if (!canAccessCanvas(userId, canvas)) {
-    res.status(403).json({ error: 'this canvas is private — ask the owner for access' })
-    return null
-  }
+  const canvas = requireCanvas(req, res, String(req.params.id), 'view')
+  if (!canvas) return null
   return { userId, canvas }
 }
 

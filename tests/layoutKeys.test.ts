@@ -41,6 +41,9 @@ beforeEach(() => {
   useStore.setState({
     canvas,
     activePageId: null,
+    role: 'edit',
+    laser: false,
+    commentMode: false,
     selectedIds: [],
     selectedId: null,
     stageSize: { width: 1200, height: 800 },
@@ -203,5 +206,64 @@ describe('the keys', () => {
   it('? opens the shortcuts dialog', () => {
     press({ key: '?', shiftKey: true })
     expect(useStore.getState().shortcutsOpen).toBe(true)
+  })
+
+  describe.each(['view', 'comment'] as const)('with the %s role', (role) => {
+    beforeEach(() => {
+      useStore.setState({ role, laser: false, commentMode: false, selectedIds: ['a'], selectedId: 'a' })
+    })
+
+    it('leaves the layout alone: device keys, 0 and t do nothing', () => {
+      const before = rects()
+      for (const init of [
+        { key: '1', code: 'Digit1' },
+        { key: '2', code: 'Digit2' },
+        { key: '0', code: 'Digit0' },
+        { key: 't' },
+      ]) {
+        expect(press(init)).toBe(false)
+      }
+      expect(rects()).toEqual(before)
+      expect(updateFrame).not.toHaveBeenCalled()
+    })
+
+    it('does not delete, duplicate, undo or redo', () => {
+      for (const init of [
+        { key: 'Backspace' },
+        { key: 'Delete' },
+        { key: 'd', metaKey: true },
+        { key: 'z', metaKey: true },
+        { key: 'z', metaKey: true, shiftKey: true },
+        { key: 'y', metaKey: true },
+      ]) {
+        expect(press(init)).toBe(false)
+      }
+      expect(useStore.getState().canvas!.frames).toHaveLength(3)
+    })
+
+    it('still lets them look: laser, fit, select all and notes visibility work', () => {
+      expect(press({ key: 'l' })).toBe(true)
+      expect(useStore.getState().laser).toBe(true)
+      expect(press({ key: '1', shiftKey: true, code: 'Digit1' })).toBe(true)
+      expect(press({ key: 'a', metaKey: true })).toBe(true)
+      const visible = useStore.getState().notesVisible
+      expect(press({ key: 'n' })).toBe(true)
+      expect(useStore.getState().notesVisible).toBe(!visible)
+    })
+  })
+
+  it('comment mode needs the comment role: view is refused, comment is allowed', () => {
+    useStore.setState({ role: 'view' })
+    expect(press({ key: 'c' })).toBe(false)
+    expect(useStore.getState().commentMode).toBe(false)
+    useStore.setState({ role: 'comment' })
+    expect(press({ key: 'c' })).toBe(true)
+    expect(useStore.getState().commentMode).toBe(true)
+  })
+
+  it('a canvas whose role has not arrived yet grants nothing', () => {
+    useStore.setState({ role: null })
+    expect(press({ key: 't' })).toBe(false)
+    expect(press({ key: 'c' })).toBe(false)
   })
 })

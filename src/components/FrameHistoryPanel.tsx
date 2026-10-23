@@ -3,6 +3,7 @@ import type { Frame, FrameVersion, FrameVersionInfo } from '../../shared/types'
 import { api, errorMessage } from '../lib/api'
 import { FRAME_BOOTSTRAP } from '../lib/frameRuntime'
 import { recordUpdate } from '../lib/history'
+import { useCanEdit } from '../lib/role'
 import { useStore } from '../lib/store'
 import { timeAgo } from '../lib/time'
 import { cn } from '@/lib/utils'
@@ -58,6 +59,8 @@ export function FrameHistoryPanel({
   className?: string
   onClose: () => void
 }) {
+  /* anyone who can see the canvas can browse its versions; only editors can restore one */
+  const mayEdit = useCanEdit()
   const [list, setList] = useState<ListState | null>(null)
   const [reloads, setReloads] = useState(0)
   const [pickedId, setPickedId] = useState<string | null>(null)
@@ -120,6 +123,7 @@ export function FrameHistoryPanel({
   }, [frame.id, selectedId, version])
 
   async function restore() {
+    if (!mayEdit) return
     if (!version) return
     setRestoring(true)
     setRestoreError(null)
@@ -207,9 +211,11 @@ export function FrameHistoryPanel({
                 {restoreError}
               </p>
             )}
-            <Button variant="primary" block disabled={!version || restoring} onClick={() => setConfirming(true)}>
-              {restoring ? 'Restoring…' : 'Restore this version'}
-            </Button>
+            {mayEdit && (
+              <Button variant="primary" block disabled={!version || restoring} onClick={() => setConfirming(true)}>
+                {restoring ? 'Restoring…' : 'Restore this version'}
+              </Button>
+            )}
           </div>
           <PanelBody className="p-1.5">
             <ul className="grid gap-px" aria-label="Saved versions">
@@ -224,7 +230,7 @@ export function FrameHistoryPanel({
       )}
 
       <ConfirmDialog
-        open={confirming}
+        open={mayEdit && confirming}
         onOpenChange={setConfirming}
         title="Restore this version?"
         description={

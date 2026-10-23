@@ -15,6 +15,7 @@ import {
   type PageNode,
 } from '../../shared/pages'
 import type { CanvasPageInfo } from '../../shared/types'
+import { useCanEdit } from '../lib/role'
 import { useStore } from '../lib/store'
 import { savePages, moveFramesToPage } from '../lib/pageEdits'
 import { strongerMark, type Mark } from '../../shared/marks'
@@ -83,6 +84,8 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   const activePageId = useStore((s) => s.activePageId)
   const selectedIds = useStore((s) => s.selectedIds)
   const marksByPage = useMarks((s) => s.pageMarks)
+  /* below edit the tree only navigates: no add, rename, nest, move, reorder or delete (the server refuses them too) */
+  const mayEdit = useCanEdit()
   const canvasId = canvas?.id
   const [busy, setBusy] = useState(false)
   const [renaming, setRenaming] = useState<string | null>(null)
@@ -114,7 +117,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   }
 
   async function save(next: CanvasPageInfo[], selectId?: string, rename?: string) {
-    if (!canvas || busy) return
+    if (!mayEdit || !canvas || busy) return
     setBusy(true)
     try {
       await savePages(canvas, next, selectId)
@@ -171,7 +174,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   }
 
   function startDrag(e: ReactPointerEvent<HTMLButtonElement>, id: string) {
-    if (busy || e.button !== 0 || e.detail > 1) return
+    if (!mayEdit || busy || e.button !== 0 || e.detail > 1) return
     stopDrag.current?.()
     const startY = e.clientY
     const startX = e.clientX
@@ -256,7 +259,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   }
 
   async function moveSelection(pageId: string) {
-    if (!canvas || busy) return
+    if (!mayEdit || !canvas || busy) return
     setBusy(true)
     try {
       await moveFramesToPage(canvas, selectedIds, pageId)
@@ -274,19 +277,21 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
     >
       <div className="flex items-center justify-between py-1 font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-ink-faint">
         <span data-slot="page-section-heading">Pages</span>
-        <Button
-          variant="bare"
-          size="icon-sm"
-          className="size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink"
-          aria-label="Add page"
-          disabled={busy}
-          onClick={() => {
-            const page = { id: nanoid(10), name: `Page ${pages.length + 1}` }
-            void save([...pages, page], page.id)
-          }}
-        >
-          <PlusIcon width={12} height={12} />
-        </Button>
+        {mayEdit && (
+          <Button
+            variant="bare"
+            size="icon-sm"
+            className="size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink"
+            aria-label="Add page"
+            disabled={busy}
+            onClick={() => {
+              const page = { id: nanoid(10), name: `Page ${pages.length + 1}` }
+              void save([...pages, page], page.id)
+            }}
+          >
+            <PlusIcon width={12} height={12} />
+          </Button>
+        )}
       </div>
       <div role="tree" aria-label="Pages" onKeyDown={onKeyDown}>
         {rows.map(({ page, depth, childCount, collapsed }) => {
@@ -307,7 +312,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
             : marksByPage[page.id]
           return (
             <ContextMenu key={page.id}>
-              <ContextMenuTrigger asChild>
+              <ContextMenuTrigger asChild disabled={!mayEdit}>
                 <div
                   data-page-id={page.id}
                   role="treeitem"
@@ -382,7 +387,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                   ) : (
                     <button
                       data-page-name=""
-                      className={`min-w-0 flex-1 touch-none select-none truncate py-1.5 pr-2 text-left text-[12.5px] ${nested ? 'pl-1' : 'pl-2'} ${drag ? 'cursor-grabbing' : 'cursor-grab'} ${active || holdsActive ? 'font-semibold' : ''}`}
+                      className={`min-w-0 flex-1 touch-none select-none truncate py-1.5 pr-2 text-left text-[12.5px] ${nested ? 'pl-1' : 'pl-2'} ${!mayEdit ? 'cursor-pointer' : drag ? 'cursor-grabbing' : 'cursor-grab'} ${active || holdsActive ? 'font-semibold' : ''}`}
                       aria-current={active ? 'page' : undefined}
                       onPointerDown={(e) => {
                         didDrag.current = false
@@ -396,7 +401,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                         useStore.getState().setActivePage(page.id)
                       }}
                       onDoubleClick={() => {
-                        if (busy || didDrag.current) return
+                        if (!mayEdit || busy || didDrag.current) return
                         setRenaming(page.id)
                         setName(page.name)
                       }}
@@ -475,7 +480,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
           )
         })}
       </div>
-      {selectedIds.length > 0 && pages.length > 1 && (
+      {mayEdit && selectedIds.length > 0 && pages.length > 1 && (
         <select
           aria-label="Move selected frames to page"
           className="mt-2 w-full rounded border border-line bg-paper p-1 text-xs"

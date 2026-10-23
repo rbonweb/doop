@@ -5,6 +5,10 @@ import { useStore } from '../lib/store'
 import { currentPageCanvas } from '../lib/pages'
 import { registerFrameWindow, unregisterFrameWindow } from '../lib/frameBridge'
 import { api } from '../lib/api'
+import { postComment, postReply } from '../lib/commenting'
+import { canCommentNow, useCanComment, useCanEdit } from '../lib/role'
+import { authClient } from '../lib/auth'
+import { MentionTextarea, mentionIds, type MentionTextareaHandle } from './MentionTextarea'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
@@ -24,7 +28,6 @@ import { MarkDot } from './MarkDot'
 import { useFrameMark } from '../lib/marks'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
-import { Textarea } from './ui/textarea'
 import { Tooltip } from './ui/tooltip'
 import { DownloadIcon, GithubIcon, SyncIcon } from './ui/icons'
 import { EXPORT_SHORTCUT } from '../lib/keys'
@@ -130,6 +133,11 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
      a group, the top bar's Export acts on all of them */
   const soleSelected = useStore((s) => s.selectedIds.length === 1 && s.selectedIds[0] === frame.id)
   const mark = useFrameMark(frame.id)
+  /* below edit a frame can be selected, probed and commented on, never moved */
+  const mayEdit = useCanEdit()
+  const mayComment = useCanComment()
+  const guest = useStore((s) => s.guest)
+  const pulses = useStore((s) => s.pulses)
   /* the document renders once the Stage's scheduler reaches this frame, or at once when someone selects it */
   const scheduled = useFrameMounted(frame.id)
   const [selectedOnce, setSelectedOnce] = useState(false)
@@ -180,6 +188,29 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     if (useStore.getState().panMode) return
     e.stopPropagation()
     e.preventDefault()
+    if (!mayEdit) {
+      /* read-only: a click selects the frame and picks the element under the
+         cursor (so it can be commented on); there is no drag and no resize */
+      if (mode !== 'move') return
+      select(frame.id)
+      const down = { x: e.clientX, y: e.clientY }
+      const at = { x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }
+      const release = (ev: PointerEvent) => {
+        window.removeEventListener('pointerup', release)
+        if (Math.abs(ev.clientX - down.x) + Math.abs(ev.clientY - down.y) > 4) return
+        if (probeOnClick) {
+          /* laser is for everyone who can look; comment mode needs the comment role */
+          const mode = useStore.getState()
+          if (mode.laser) {
+            iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-click', x: at.x, y: at.y }, '*')
+          } else if (mode.commentMode && canCommentNow()) composeAt(at.x, at.y)
+          else probeAt(at.x, at.y)
+        }
+        if (panelOnClick) useStore.getState().setInspectorOpen(true)
+      }
+      window.addEventListener('pointerup', release)
+      return
+    }
     /* ⌥⇧-drag duplicates: the moment the drag is real, leave a copy of the
        frame at its origin and keep dragging this one — same net effect as
        Figma's "drag off a duplicate", without retargeting the drag */
@@ -615,7 +646,9 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
         /* found by a fallback: tell the server the new path so the next load is a direct hit */
         const how = ev.data.how as string | null
         const path = ev.data.selector as string | null
-        if (comment && rect && how && how !== 'path' && path && path !== comment.selector) {
+        /* healing rewrites the stored pin: it takes an account that may comment (guests and viewers just resolve it locally) */
+        const mayHeal = canCommentNow() && !useStore.getState().guest
+        if (mayHeal && comment && rect && how && how !== 'path' && path && path !== comment.selector) {
           const key = `${id}|${path}`
           if (!healed.current.has(key)) {
             healed.current.add(key)
@@ -647,7 +680,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---- inline text editing ---- */
-  const canEdit = !!frame.html && !stream && !/<script/i.test(frame.html)
+  const canEdit = mayEdit && !!frame.html && !stream && !/<script/i.test(frame.html)
 
   function enterEdit() {
     select(frame.id)
@@ -736,7 +769,8 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
         >
           <div
             className={cn(
-              'absolute -top-[26px] left-0 flex origin-bottom-left cursor-grab select-none items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] font-semibold text-ink-soft',
+              'absolute -top-[26px] left-0 flex origin-bottom-left select-none items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] font-semibold text-ink-soft',
+              mayEdit ? 'cursor-grab' : 'cursor-default',
               /* the label is counter-scaled from its bottom-left corner, so
                  its box must be pre-shrunk by the same factor: a full-width
                  box scaled by 1/zoom would reach far past the frame's right
@@ -819,7 +853,8 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
 
           <div
             className={cn(
-              'absolute inset-0 cursor-grab overflow-hidden rounded-[6px] border border-line',
+              'absolute inset-0 overflow-hidden rounded-[6px] border border-line',
+              mayEdit ? 'cursor-grab' : 'cursor-default',
               /* frames far outside the view are not rendered at all, so a large canvas keeps a bounded set of live iframe layers and tiles however far out it is zoomed */
               '[content-visibility:auto]',
               /* a frame whose document is still on its way is a quiet placeholder, not a stark white box */
@@ -953,6 +988,8 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                   /* the pin reflects the newest agent request in the thread */
                   const agentItem = [...thread].reverse().find((x) => x.forAgent && !x.resolvedAt)
                   const working = agentItem?.claimedBy && !agentItem.failedAt
+                  /* someone @mentioned you in this thread and you have not opened it yet */
+                  const mentioned = c.id in pulses
                   return (
                     <div
                       key={c.id}
@@ -965,6 +1002,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                         orphan && !open && 'opacity-80',
                         working &&
                           "after:absolute after:-inset-1.5 after:rounded-[inherit] after:border-2 after:border-current after:opacity-50 after:content-[''] after:[animation:stream-pulse_1.1s_ease-in-out_infinite]",
+                        mentioned && 'animate-[mention-ring_1.4s_ease-out_infinite]',
                       )}
                       style={{
                         ...(orphan
@@ -983,6 +1021,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                         setProbe(null)
                         setComposing(false)
                         setOpenThread(open ? null : c.id)
+                        useStore.getState().clearPulse(c.id)
                       }}
                       title={`${orphan ? 'The element this was on changed\n' : ''}${c.from}: ${c.text}${thread.length > 1 ? ` (${thread.length - 1} replies)` : ''}`}
                     >
@@ -991,9 +1030,12 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                         <CommentThread
                           thread={thread}
                           alignEnd={orphan}
-                          onReply={(text) =>
-                            api
-                              .replyComment(c.id, text)
+                          canvasId={frame.canvasId}
+                          canReply={mayComment}
+                          canResolve={mayComment && !guest}
+                          canRetry={mayEdit}
+                          onReply={(text, mentions) =>
+                            postReply(c.id, text, mentions)
                               .then(() => posthog.capture('element_comment_replied'))
                               .catch((err) => {
                                 /* the wall explains a hit limit; anything else
@@ -1036,28 +1078,32 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                           <span className="rounded-[5px] bg-paper/[0.14] px-[5px] py-px text-[11px] font-bold text-paper [font-family:ui-monospace,monospace]">
                             {anchor.tag}
                           </span>
-                          <Button
-                            variant="inverse"
-                            className={EL_TOOLBAR_BTN}
-                            onClick={() => {
-                              setComposePrefill('')
-                              setComposing(true)
-                            }}
-                          >
-                            💬 Comment
-                          </Button>
-                          <Button
-                            variant="inverse"
-                            className={EL_TOOLBAR_BTN}
-                            onClick={() => {
-                              /* pre-mentioned → the comment dispatches as an agent
+                          {mayComment && (
+                            <Button
+                              variant="inverse"
+                              className={EL_TOOLBAR_BTN}
+                              onClick={() => {
+                                setComposePrefill('')
+                                setComposing(true)
+                              }}
+                            >
+                              💬 Comment
+                            </Button>
+                          )}
+                          {mayEdit && (
+                            <Button
+                              variant="inverse"
+                              className={EL_TOOLBAR_BTN}
+                              onClick={() => {
+                                /* pre-mentioned → the comment dispatches as an agent
                              job scoped to this element's selector + snippet */
-                              setComposePrefill(`@${DEFAULT_ROLE_ID} `)
-                              setComposing(true)
-                            }}
-                          >
-                            ✦ Ask AI
-                          </Button>
+                                setComposePrefill(`@${DEFAULT_ROLE_ID} `)
+                                setComposing(true)
+                              }}
+                            >
+                              ✦ Ask AI
+                            </Button>
+                          )}
                           <Button
                             variant="inverse"
                             className={EL_TOOLBAR_BTN}
@@ -1081,15 +1127,14 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                       </>
                     ) : (
                       <CommentComposer
+                        canvasId={frame.canvasId}
                         initialText={composePrefill}
-                        onSubmit={(text) => {
-                          api
-                            .addComment(frame.id, {
-                              selector: anchor.selector,
-                              snippet: anchor.snippet,
-                              text,
-                              anchor: anchor.anchor,
-                            })
+                        onSubmit={(text, mentions) => {
+                          postComment(
+                            frame.id,
+                            { selector: anchor.selector, snippet: anchor.snippet, text, anchor: anchor.anchor },
+                            mentions,
+                          )
                             .then(() => posthog.capture('element_comment_created'))
                             .catch((err) => {
                               /* an @mention past the free tier raises the wall */
@@ -1108,13 +1153,15 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
             )
           })()}
 
-          <div
-            className={cn(
-              'absolute -right-[7px] -bottom-[7px] h-3.5 w-3.5 cursor-nwse-resize rounded-[4px] border-[1.5px] border-ink bg-surface opacity-0 [transition:opacity_0.12s] group-hover:opacity-100',
-              selected && 'opacity-100',
-            )}
-            onPointerDown={(e) => startDrag(e, 'resize')}
-          />
+          {mayEdit && (
+            <div
+              className={cn(
+                'absolute -right-[7px] -bottom-[7px] h-3.5 w-3.5 cursor-nwse-resize rounded-[4px] border-[1.5px] border-ink bg-surface opacity-0 [transition:opacity_0.12s] group-hover:opacity-100',
+                selected && 'opacity-100',
+              )}
+              onPointerDown={(e) => startDrag(e, 'resize')}
+            />
+          )}
         </div>
       </ContextMenuTrigger>
       <FrameContextMenu frame={frame} at={menuAt} />
@@ -1125,34 +1172,42 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
 function CommentComposer({
   onSubmit,
   onCancel,
+  canvasId,
   initialText = '',
 }: {
-  onSubmit: (text: string) => void
+  onSubmit: (text: string, mentions: string[]) => void
   onCancel: () => void
+  canvasId: string
   initialText?: string
 }) {
   const [text, setText] = useState(initialText)
-  const taRef = useRef<HTMLTextAreaElement>(null)
+  const taRef = useRef<MentionTextareaHandle>(null)
   useEffect(() => taRef.current?.focus(), [])
-  const send = () => text.trim() && onSubmit(text)
+  const myId = authClient.useSession().data?.user.id
+  const guest = useStore((s) => s.guest)
+  const mayEdit = useCanEdit()
+  const send = () => text.trim() && onSubmit(text, mentionIds(text, taRef.current?.picked() ?? []))
   /* @mention a resident agent to route the comment to it; without one the
      comment is a note for the humans in the room */
-  const mentioned = mentionedRole(text)
+  const mentioned = mayEdit ? mentionedRole(text) : undefined
   return (
     <div className="w-[240px] rounded-[10px] border border-line bg-surface p-2 shadow-pop animate-[chip-in_0.18s_ease]">
-      <Textarea
+      <MentionTextarea
         ref={taRef}
-        variant="bare"
+        canvasId={canvasId}
+        people={!guest}
+        agents={mayEdit}
+        myId={myId}
         className="min-h-[58px] md:text-[13px]"
         value={text}
-        placeholder="Leave a comment on this element…"
-        onChange={(e) => setText(e.target.value)}
+        placeholder={guest ? 'Leave a comment on this element…' : 'Leave a comment… @ to mention someone'}
+        onChange={setText}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send()
           if (e.key === 'Escape') onCancel()
         }}
       />
-      {!mentioned && (
+      {mayEdit && !mentioned && (
         <div className="mb-2 flex flex-wrap gap-1">
           {AGENT_ROLES.map((role) => (
             <Button
@@ -1175,6 +1230,7 @@ function CommentComposer({
             {mentioned.name} will pick this up
           </span>
         )}
+        {guest && <span className="mr-auto text-[11px] text-ink-faint">Posting as a guest</span>}
         <Button variant="solid" size="pill" className="px-3.5 py-[5px] text-xs" disabled={!text.trim()} onClick={send}>
           Post
         </Button>
@@ -1195,6 +1251,10 @@ function agentStatus(c: ElementComment): string | null {
 function CommentThread({
   thread,
   alignEnd = false,
+  canvasId,
+  canReply,
+  canResolve,
+  canRetry,
   onReply,
   onResolve,
   onRetry,
@@ -1203,11 +1263,22 @@ function CommentThread({
   thread: ElementComment[]
   /** open towards the left: the pin sits at the frame's right edge */
   alignEnd?: boolean
+  canvasId: string
+  /** below comment the thread is read-only */
+  canReply: boolean
+  /** guests can reply but not close a thread */
+  canResolve: boolean
+  /** retrying a stopped agent request is an editor's call */
+  canRetry: boolean
   /** rejects when the reply did not land — the draft is kept for a retry */
-  onReply: (text: string) => Promise<unknown>
+  onReply: (text: string, mentions: string[]) => Promise<unknown>
   onResolve: () => void
   onRetry: (commentId: string) => void
 }) {
+  const replyRef = useRef<MentionTextareaHandle>(null)
+  const myId = authClient.useSession().data?.user.id
+  const guest = useStore((s) => s.guest)
+  const mayEdit = useCanEdit()
   const [reply, setReply] = useState('')
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -1221,13 +1292,13 @@ function CommentThread({
     const submitted = reply
     setSending(true)
     setFailed(false)
-    onReply(submitted)
+    onReply(submitted, mentionIds(submitted, replyRef.current?.picked() ?? []))
       /* only clear what was sent — text typed meanwhile is a new draft */
       .then(() => setReply((current) => (current === submitted ? '' : current)))
       .catch(() => setFailed(true))
       .finally(() => setSending(false))
   }
-  const mentioned = mentionedRole(reply)
+  const mentioned = mayEdit ? mentionedRole(reply) : undefined
   return (
     <div
       className={cn(
@@ -1249,44 +1320,54 @@ function CommentThread({
               {c.failedAt ? (
                 <div className="mt-1 flex items-center gap-2 text-[11px] leading-[1.4] text-accent-ink">
                   <span>{c.failureReason ?? 'The agent did not finish.'}</span>
-                  <Button
-                    variant="danger-solid"
-                    size="pill"
-                    className="shrink-0 px-[9px] py-[3px] text-[11px]"
-                    onClick={() => onRetry(c.id)}
-                  >
-                    ↻ Retry
-                  </Button>
+                  {canRetry && (
+                    <Button
+                      variant="danger-solid"
+                      size="pill"
+                      className="shrink-0 px-[9px] py-[3px] text-[11px]"
+                      onClick={() => onRetry(c.id)}
+                    >
+                      ↻ Retry
+                    </Button>
+                  )}
                 </div>
               ) : null}
             </div>
           )
         })}
       </div>
-      <Textarea
-        variant="bare"
-        className="mt-2 min-h-[38px] md:text-[13px]"
-        value={reply}
-        placeholder="Reply… (@doop to ask the agent)"
-        onChange={(e) => setReply(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send()
-        }}
-      />
+      {canReply ? (
+        <MentionTextarea
+          ref={replyRef}
+          canvasId={canvasId}
+          people={!guest}
+          agents={mayEdit}
+          myId={myId}
+          className="mt-2 min-h-[38px] md:text-[13px]"
+          value={reply}
+          placeholder={mayEdit ? 'Reply… (@ to mention, @doop to ask the agent)' : 'Reply…'}
+          onChange={setReply}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send()
+          }}
+        />
+      ) : null}
       {failed && (
         <div className="mt-1 text-[11px] leading-[1.4] text-accent-ink">
           That reply did not go through — it may be resolved already. Try again.
         </div>
       )}
       <div className="mt-1.5 flex items-center gap-1.5">
-        <Button
-          variant="ghost"
-          size="pill"
-          className="px-2.5 text-ink-soft hover:border-ink-soft hover:bg-transparent hover:text-ink"
-          onClick={onResolve}
-        >
-          ✓ Resolve
-        </Button>
+        {canResolve && (
+          <Button
+            variant="ghost"
+            size="pill"
+            className="px-2.5 text-ink-soft hover:border-ink-soft hover:bg-transparent hover:text-ink"
+            onClick={onResolve}
+          >
+            ✓ Resolve
+          </Button>
+        )}
         {mentioned && (
           <span
             className="ml-auto inline-flex min-w-0 items-center gap-1 truncate text-[11px] font-semibold text-brand"
@@ -1296,15 +1377,17 @@ function CommentThread({
             <span className="truncate">{mentioned.name}</span>
           </span>
         )}
-        <Button
-          variant="solid"
-          size="pill"
-          className={cn('px-3 py-[4px] text-xs', !mentioned && 'ml-auto')}
-          disabled={!reply.trim() || sending}
-          onClick={send}
-        >
-          {sending ? 'Posting…' : 'Reply'}
-        </Button>
+        {canReply && (
+          <Button
+            variant="solid"
+            size="pill"
+            className={cn('px-3 py-[4px] text-xs', !mentioned && 'ml-auto')}
+            disabled={!reply.trim() || sending}
+            onClick={send}
+          >
+            {sending ? 'Posting…' : 'Reply'}
+          </Button>
+        )}
       </div>
     </div>
   )

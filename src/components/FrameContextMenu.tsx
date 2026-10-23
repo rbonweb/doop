@@ -6,6 +6,7 @@ import { deleteFramesTracked } from '../lib/history'
 import { addNote } from '../lib/notes'
 import { useStore } from '../lib/store'
 import { EXPORT_SHORTCUT, MOD_KEY } from '../lib/keys'
+import { useCanEdit, useIsGuest } from '../lib/role'
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from './ui/context-menu'
 import { MenuHint } from './ui/menu'
 import { FrameExportModal } from './FrameExportModal'
@@ -25,6 +26,10 @@ async function copyImageUrl(frame: Frame) {
 export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefObject<{ x: number; y: number }> }) {
   /* the frames the open export dialog is for, fixed when Export is chosen */
   const [exportTargets, setExportTargets] = useState<Frame[] | null>(null)
+  /* below edit the menu only reads: copy, share, export and history, no paste, duplicate, notes, memory or delete */
+  const mayEdit = useCanEdit()
+  /* history is a signed-in route; a signed-out guest has no account to read it with */
+  const guest = useIsGuest()
   /* a right-click inside a multi-selection acts on the whole group */
   const groupSize = useStore((s) => (s.selectedIds.includes(frame.id) ? s.selectedIds.length : 1))
   function groupFrames(): Frame[] {
@@ -47,18 +52,24 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
           {groupSize > 1 ? `Copy ${groupSize} frames` : 'Copy'}
           <MenuHint>{MOD_KEY}C</MenuHint>
         </ContextMenuItem>
-        <ContextMenuItem
-          disabled={!hasFrameClip()}
-          onSelect={() => pasteFrameAtScreen(frame.canvasId, at.current.x, at.current.y)}
-        >
-          Paste
-          <MenuHint>{MOD_KEY}V</MenuHint>
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={() => duplicateFrames(groupFrames())}>
-          {groupSize > 1 ? `Duplicate ${groupSize} frames` : 'Duplicate'}
-          <MenuHint>{MOD_KEY}D</MenuHint>
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={() => void addNote(frame.canvasId, { frameId: frame.id })}>Add note</ContextMenuItem>
+        {mayEdit && (
+          <>
+            <ContextMenuItem
+              disabled={!hasFrameClip()}
+              onSelect={() => pasteFrameAtScreen(frame.canvasId, at.current.x, at.current.y)}
+            >
+              Paste
+              <MenuHint>{MOD_KEY}V</MenuHint>
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => duplicateFrames(groupFrames())}>
+              {groupSize > 1 ? `Duplicate ${groupSize} frames` : 'Duplicate'}
+              <MenuHint>{MOD_KEY}D</MenuHint>
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => void addNote(frame.canvasId, { frameId: frame.id })}>
+              Add note
+            </ContextMenuItem>
+          </>
+        )}
         <ContextMenuSeparator />
         <ContextMenuItem
           onSelect={() => navigator.clipboard.writeText(`${location.origin}/c/${frame.canvasId}?frame=${frame.id}`)}
@@ -70,21 +81,27 @@ export function FrameContextMenu({ frame, at }: { frame: Frame; at: MutableRefOb
           {groupSize > 1 ? `Export ${groupSize} frames…` : 'Export…'}
           <MenuHint>{EXPORT_SHORTCUT}</MenuHint>
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => useStore.getState().openFrameHistory(frame.id)}>
-          Version history…
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem
-          title="Will be used as reference — agents copy its style in new designs"
-          onSelect={() => api.pinReference(frame.canvasId, frame.id).catch(console.error)}
-        >
-          Add to design memory
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem tone="danger" onSelect={deleteSelection}>
-          {groupSize > 1 ? `Delete ${groupSize} frames` : 'Delete frame'}
-          <MenuHint>⌫</MenuHint>
-        </ContextMenuItem>
+        {!guest && (
+          <ContextMenuItem onSelect={() => useStore.getState().openFrameHistory(frame.id)}>
+            Version history…
+          </ContextMenuItem>
+        )}
+        {mayEdit && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              title="Will be used as reference — agents copy its style in new designs"
+              onSelect={() => api.pinReference(frame.canvasId, frame.id).catch(console.error)}
+            >
+              Add to design memory
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem tone="danger" onSelect={deleteSelection}>
+              {groupSize > 1 ? `Delete ${groupSize} frames` : 'Delete frame'}
+              <MenuHint>⌫</MenuHint>
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenuContent>
       {exportTargets && <FrameExportModal frames={exportTargets} onClose={() => setExportTargets(null)} />}
     </>

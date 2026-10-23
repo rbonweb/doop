@@ -13,6 +13,7 @@ import {
 import { gesture } from '../lib/gesture'
 import { discardEmptyNote, removeNote, saveNote } from '../lib/notes'
 import { parseMarkdown, type Block, type Inline } from '../lib/noteMarkdown'
+import { useCanEdit } from '../lib/role'
 import { useStore } from '../lib/store'
 import { timeAgo } from '../lib/time'
 import { cn } from '../lib/utils'
@@ -188,9 +189,9 @@ function Blocks({ blocks }: { blocks: Block[] }) {
   )
 }
 
-function NoteBody({ markdown }: { markdown: string }) {
+function NoteBody({ markdown, mayEdit }: { markdown: string; mayEdit: boolean }) {
   const blocks = useMemo(() => parseMarkdown(markdown), [markdown])
-  if (!blocks.length) return <p className="text-ink-faint">Double-click to write…</p>
+  if (!blocks.length) return <p className="text-ink-faint">{mayEdit ? 'Double-click to write…' : 'Empty note'}</p>
   return <Blocks blocks={blocks} />
 }
 
@@ -253,7 +254,9 @@ function NoteEditor({ note }: { note: CanvasNote }) {
  *  straight to the element while the pointer is down and commit once on
  *  release, so a drag never re-renders anything. */
 export const StickyNote = memo(function StickyNote({ note, frameName }: { note: CanvasNote; frameName?: string }) {
-  const editing = useStore((s) => s.editingNoteId === note.id)
+  /* below edit a note is read-only: no drag, resize, colours, delete or editor (the server refuses those writes too) */
+  const mayEdit = useCanEdit()
+  const editing = useStore((s) => mayEdit && s.editingNoteId === note.id)
   const folded = useStore((s) => !!s.foldedNotes[note.id])
   const color = noteColorOf(note)
   const cardRef = useRef<HTMLDivElement>(null)
@@ -276,7 +279,7 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
     onDone: (dx: number, dy: number, el: HTMLDivElement) => void,
   ) {
     /* space held: let the press reach the Stage, which pans */
-    if (e.button !== 0 || useStore.getState().panMode) return
+    if (!mayEdit || e.button !== 0 || useStore.getState().panMode) return
     const el = cardRef.current
     if (!el) return
     e.stopPropagation()
@@ -383,22 +386,23 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
           aria-label="Note actions"
           className="flex items-center gap-1 rounded-lg border border-line bg-surface p-1 shadow-pop"
         >
-          {NOTE_COLORS.map((c) => (
-            <button
-              key={c}
-              type="button"
-              aria-label={`${SWATCH[c]} note`}
-              aria-pressed={c === color}
-              title={SWATCH[c]}
-              style={hueOf(c)}
-              onClick={() => c !== color && saveNote(note, { color: c })}
-              className={cn(
-                'size-4 rounded-full border border-[color-mix(in_srgb,var(--note)_55%,var(--line))] bg-[color-mix(in_srgb,var(--note)_70%,var(--surface))] transition-transform hover:scale-125',
-                c === color && 'ring-2 ring-ink/70 ring-offset-1 ring-offset-surface',
-              )}
-            />
-          ))}
-          <span aria-hidden className="mx-0.5 h-4 w-px bg-line" />
+          {mayEdit &&
+            NOTE_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                aria-label={`${SWATCH[c]} note`}
+                aria-pressed={c === color}
+                title={SWATCH[c]}
+                style={hueOf(c)}
+                onClick={() => c !== color && saveNote(note, { color: c })}
+                className={cn(
+                  'size-4 rounded-full border border-[color-mix(in_srgb,var(--note)_55%,var(--line))] bg-[color-mix(in_srgb,var(--note)_70%,var(--surface))] transition-transform hover:scale-125',
+                  c === color && 'ring-2 ring-ink/70 ring-offset-1 ring-offset-surface',
+                )}
+              />
+            ))}
+          {mayEdit && <span aria-hidden className="mx-0.5 h-4 w-px bg-line" />}
           <button
             type="button"
             aria-label="Fold note"
@@ -408,22 +412,27 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
           >
             <CollapseAllIcon width={13} height={13} />
           </button>
-          <button
-            type="button"
-            aria-label="Delete note"
-            title="Delete note"
-            onClick={() => removeNote(note)}
-            className="grid size-6 place-items-center rounded-md text-ink-soft transition-colors hover:bg-accent-ink/10 hover:text-accent-ink"
-          >
-            <TrashIcon width={13} height={13} />
-          </button>
+          {mayEdit && (
+            <button
+              type="button"
+              aria-label="Delete note"
+              title="Delete note"
+              onClick={() => removeNote(note)}
+              className="grid size-6 place-items-center rounded-md text-ink-soft transition-colors hover:bg-accent-ink/10 hover:text-accent-ink"
+            >
+              <TrashIcon width={13} height={13} />
+            </button>
+          )}
         </div>
       </div>
 
       <header
         onPointerDown={startMove}
-        onDoubleClick={() => useStore.getState().setEditingNote(note.id)}
-        className="flex h-6 flex-none cursor-grab items-center gap-1.5 rounded-t-[7px] border-b border-[color-mix(in_srgb,var(--note)_30%,var(--line-soft))] bg-[color-mix(in_srgb,var(--note)_30%,var(--surface))] px-2 font-mono text-[9.5px] font-medium uppercase tracking-[0.12em] text-ink-soft select-none active:cursor-grabbing"
+        onDoubleClick={() => mayEdit && useStore.getState().setEditingNote(note.id)}
+        className={cn(
+          'flex h-6 flex-none items-center gap-1.5 rounded-t-[7px] border-b border-[color-mix(in_srgb,var(--note)_30%,var(--line-soft))] bg-[color-mix(in_srgb,var(--note)_30%,var(--surface))] px-2 font-mono text-[9.5px] font-medium uppercase tracking-[0.12em] text-ink-soft select-none',
+          mayEdit ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
+        )}
       >
         <NoteIcon width={11} height={11} className="flex-none" />
         <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
@@ -434,11 +443,12 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
       <div
         ref={bodyRef}
         onDoubleClick={(e) => {
-          if (!editing && !(e.target as HTMLElement).closest('a')) useStore.getState().setEditingNote(note.id)
+          if (mayEdit && !editing && !(e.target as HTMLElement).closest('a'))
+            useStore.getState().setEditingNote(note.id)
         }}
         className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-[family-name:var(--font-ui)] text-[13px] leading-[1.5] [overflow-wrap:anywhere]"
       >
-        {editing ? <NoteEditor note={note} /> : <NoteBody markdown={note.markdown} />}
+        {editing ? <NoteEditor note={note} /> : <NoteBody markdown={note.markdown} mayEdit={mayEdit} />}
       </div>
 
       <footer className="flex h-6 flex-none items-center gap-1.5 border-t border-[color-mix(in_srgb,var(--note)_22%,var(--line-soft))] px-3 text-[10.5px] text-ink-soft select-none">
@@ -457,12 +467,14 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
       </footer>
 
       {/* dog-ear: the corner you pull to resize */}
-      <div
-        role="separator"
-        aria-label="Resize note"
-        onPointerDown={startResize}
-        className="absolute -right-px -bottom-px size-4 cursor-nwse-resize rounded-br-lg bg-[color-mix(in_srgb,var(--note)_55%,var(--surface))] opacity-70 transition-opacity [clip-path:polygon(100%_0,100%_100%,0_100%)] hover:opacity-100"
-      />
+      {mayEdit && (
+        <div
+          role="separator"
+          aria-label="Resize note"
+          onPointerDown={startResize}
+          className="absolute -right-px -bottom-px size-4 cursor-nwse-resize rounded-br-lg bg-[color-mix(in_srgb,var(--note)_55%,var(--surface))] opacity-70 transition-opacity [clip-path:polygon(100%_0,100%_100%,0_100%)] hover:opacity-100"
+        />
+      )}
     </div>
   )
 })

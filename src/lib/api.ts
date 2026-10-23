@@ -3,6 +3,7 @@ import type { LocalAgentPreference, LocalAgentJob, LocalAgentResult } from '../.
 import type { NotificationPrefs, NotificationSettings } from '../../shared/notifications'
 import type { WebhookDeliveryResult, WebhookEventType, WebhookInfo } from '../../shared/webhooks'
 import type {
+  AccessRequestInfo,
   ActivityItem,
   ChatMessage,
   Canvas,
@@ -12,9 +13,15 @@ import type {
   CommentAnchor,
   CommunityCategory,
   CommunityItem,
+  DomainGrant,
+  ElementComment,
   Frame,
   FrameVersion,
   FrameVersionInfo,
+  LinkAccess,
+  LinkAudience,
+  MemberRole,
+  CanvasRole,
   WorkspaceDetail,
   WorkspaceInvite,
   WorkspaceMember,
@@ -30,9 +37,30 @@ export type HomeActivity = ActivityItem & { canvasId: string; canvasName: string
 export interface CanvasMember {
   userId: string
   name: string
+  /** only the owner is shown addresses; everyone else gets an empty string */
   email: string
   owner: boolean
+  role: CanvasRole
 }
+
+/** A comment as the create/reply routes answer: `notice` says something was held back. */
+export type PostedComment = ElementComment & { notice?: string }
+
+/** A person the @mention picker can offer. */
+export interface MentionPerson {
+  userId: string
+  name: string
+}
+
+/** What the share link currently does, as the server confirms it. */
+export interface LinkState {
+  linkAccess: LinkAccess
+  linkAudience: LinkAudience
+  hasLinkPassword: boolean
+}
+
+/** What a signed-out visitor meets at a canvas URL. */
+export type PublicGate = { mode: 'open' | 'password' | 'signin' }
 
 /** A write-only design-sync key: apps embed its secret in the doop-sync
  *  snippet to push their live screens onto this canvas. */
@@ -318,9 +346,14 @@ export const api = {
   claimCanvas: (id: string) => req(`/api/canvases/${id}/claim`, { method: 'POST' }),
   renameCanvas: (id: string, name: string) =>
     req('/api/canvases/' + id, { method: 'PATCH', body: JSON.stringify({ name, actor: actor() }) }),
-  /* owner-only: what the share link grants people who aren't invited */
-  setLinkAccess: (id: string, linkAccess: 'edit' | 'none') =>
-    req('/api/canvases/' + id, { method: 'PATCH', body: JSON.stringify({ linkAccess }) }),
+  /* owner-only: what the share link grants people who aren't invited, who it
+     admits, and its password (a string sets it, null removes it) */
+  setLinkAccess: (id: string, linkAccess: LinkAccess) =>
+    req<LinkState>('/api/canvases/' + id, { method: 'PATCH', body: JSON.stringify({ linkAccess }) }),
+  setLinkSettings: (
+    id: string,
+    patch: { linkAccess?: LinkAccess; linkAudience?: LinkAudience; linkPassword?: string | null },
+  ) => req<LinkState>('/api/canvases/' + id, { method: 'PATCH', body: JSON.stringify(patch) }),
   /* community gallery: owner-only listing, open browsing and copying */
   publishCanvas: (id: string, listing: { description: string; category: CommunityCategory }) =>
     req<Pick<Canvas, 'publishedAt' | 'description' | 'category'>>(`/api/canvases/${id}/publish`, {
@@ -332,8 +365,49 @@ export const api = {
   copyCommunityCanvas: (id: string) => req<Canvas>(`/api/community/${id}/copy`, { method: 'POST' }),
   /* collaborators: the owner plus invited members */
   listMembers: (canvasId: string) => req<CanvasMember[]>(`/api/canvases/${canvasId}/members`),
-  inviteMember: (canvasId: string, email: string) =>
-    req<CanvasMember>(`/api/canvases/${canvasId}/members`, { method: 'POST', body: JSON.stringify({ email }) }),
+  inviteMember: (canvasId: string, email: string, role: MemberRole = 'edit') =>
+    req<CanvasMember>(`/api/canvases/${canvasId}/members`, { method: 'POST', body: JSON.stringify({ email, role }) }),
+  setMemberRole: (canvasId: string, userId: string, role: MemberRole) =>
+    req(`/api/canvases/${canvasId}/members/${userId}`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+  /* sharing with an email domain (verified addresses only) */
+  listDomains: (canvasId: string) =>
+    req<{ grants: DomainGrant[]; mailer: boolean }>(`/api/canvases/${canvasId}/domains`),
+  setDomain: (canvasId: string, domain: string, role: MemberRole) =>
+    req<DomainGrant>(`/api/canvases/${canvasId}/domains`, { method: 'PUT', body: JSON.stringify({ domain, role }) }),
+  removeDomain: (canvasId: string, domain: string) =>
+    req(`/api/canvases/${canvasId}/domains/${encodeURIComponent(domain)}`, { method: 'DELETE' }),
+  /* access requests: the asker's side, and the owner's inbox */
+  accessGate: (canvasId: string) =>
+    req<{ access: boolean; passwordRequired?: boolean; requested?: boolean }>(`/api/canvases/${canvasId}/gate`),
+  requestAccess: (canvasId: string, message: string) =>
+    req<{ ok: boolean }>(`/api/canvases/${canvasId}/access-requests`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
+  listAccessRequests: (canvasId: string) => req<AccessRequestInfo[]>(`/api/canvases/${canvasId}/access-requests`),
+  approveAccessRequest: (canvasId: string, userId: string, role: MemberRole) =>
+    req(`/api/canvases/${canvasId}/access-requests/${userId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ role }),
+    }),
+  declineAccessRequest: (canvasId: string, userId: string) =>
+    req(`/api/canvases/${canvasId}/access-requests/${userId}/decline`, { method: 'POST' }),
+  /* the @mention picker */
+  mentionPeople: (canvasId: string) => req<MentionPerson[]>(`/api/canvases/${canvasId}/people`),
+  /* the pages a signed-out visitor can reach */
+  publicGate: (canvasId: string) => req<PublicGate>(`/api/public/canvas/${canvasId}`),
+  unlockCanvas: (canvasId: string, password: string) =>
+    req<{ ok: boolean }>(`/api/public/canvas/${canvasId}/unlock`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  guestComment: (frameId: string, input: { selector: string; snippet: string; text: string; name: string }) =>
+    req<PostedComment>(`/api/public/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
+  guestReply: (commentId: string, text: string, name: string) =>
+    req<PostedComment>(`/api/public/comments/${commentId}/replies`, {
+      method: 'POST',
+      body: JSON.stringify({ text, name }),
+    }),
   removeMember: (canvasId: string, userId: string) =>
     req(`/api/canvases/${canvasId}/members/${userId}`, { method: 'DELETE' }),
   /* design-sync keys for the embeddable snippet */
@@ -484,10 +558,15 @@ export const api = {
     req(`/api/canvases/${canvasId}/cards/${cardId}/retry`, { method: 'POST' }),
   sendChat: (canvasId: string, text: string) =>
     req<ChatMessage>(`/api/canvases/${canvasId}/chat`, { method: 'POST', body: JSON.stringify({ text }) }),
-  addComment: (frameId: string, input: { selector: string; snippet: string; text: string; anchor?: CommentAnchor }) =>
-    req(`/api/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
-  replyComment: (commentId: string, text: string) =>
-    req(`/api/comments/${commentId}/replies`, { method: 'POST', body: JSON.stringify({ text }) }),
+  addComment: (
+    frameId: string,
+    input: { selector: string; snippet: string; text: string; anchor?: CommentAnchor; mentions?: string[] },
+  ) => req<PostedComment>(`/api/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
+  replyComment: (commentId: string, text: string, mentions?: string[]) =>
+    req<PostedComment>(`/api/comments/${commentId}/replies`, {
+      method: 'POST',
+      body: JSON.stringify({ text, mentions }),
+    }),
   resolveComment: (commentId: string) => req(`/api/comments/${commentId}/resolve`, { method: 'POST' }),
   /** report the element's new CSS path after a pin was re-found by its anchor */
   healCommentAnchor: (commentId: string, selector: string) =>
@@ -554,7 +633,7 @@ export const api = {
 }
 
 export interface AdminCanvas extends CanvasMeta {
-  linkAccess: 'edit' | 'none'
+  linkAccess: LinkAccess
   memberCount: number
   owner?: { id: string; name: string; email: string }
 }

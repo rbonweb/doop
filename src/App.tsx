@@ -4,6 +4,7 @@ import { Home } from './pages/Home'
 import { Community } from './pages/Community'
 import { Settings } from './pages/Settings'
 import { CanvasPage } from './pages/CanvasPage'
+import { GuestCanvas } from './pages/GuestCanvas'
 import { AuthPage } from './pages/AuthPage'
 import { DesktopHandoff } from './pages/DesktopHandoff'
 import { DesktopSignIn } from './pages/DesktopSignIn'
@@ -122,13 +123,18 @@ export function App() {
      a separate service (see server/marketing.ts) that owns `/` for
      visitors; share links (/c/…) and interrupted MCP OAuth redirects keep
      their URL so the deep link / resume logic survives the sign-in. */
-  if (!session)
+  if (!session) {
+    /* a share link that admits guests (or asks for its password) opens for a
+       signed-out visitor; the page asks the server which, and falls back to
+       the sign-in form for everything else */
+    const guestCanvasId = path.match(/^\/c\/([^/]+)/)?.[1]
     return (
       <>
         <ShellDragBar />
-        <AuthPage />
+        {guestCanvasId ? <GuestCanvas canvasId={guestCanvasId} key={guestCanvasId} /> : <AuthPage />}
       </>
     )
+  }
 
   /* /admin waits for /api/me: before it answers we can't tell an admin from
      a borrowed "view as" session, and rendering Admin in the latter flashes

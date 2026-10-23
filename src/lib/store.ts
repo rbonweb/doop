@@ -6,6 +6,7 @@ import type {
   AgentTask,
   Canvas,
   CanvasNote,
+  CanvasRole,
   ChatMessage,
   DesignDecision,
   ElementComment,
@@ -108,6 +109,20 @@ interface State {
   canvasNotFound: boolean
   /** a reconnect revealed a newer client bundle on the server — offer a reload */
   updateReady: boolean
+  /** what this connection may do on the open canvas; null until the join is answered */
+  role: CanvasRole | null
+  /** a signed-out visitor on an anyone-with-the-link canvas */
+  guest: boolean
+  /** the server refused the join (no access, or it was taken away) — CanvasPage
+   *  shows the no-access screen with the request form */
+  noAccess: boolean
+  /** commentId -> when someone @mentioned you in it: the pin pulses for a while */
+  pulses: Record<string, number>
+  /** bumped when someone asks for access, so an open Share dialog re-reads its list */
+  accessRequestTick: number
+  /** a guest is about to comment and has not given a name yet: the prompt that
+   *  asks settles this request */
+  guestNameRequest: { resolve: (name: string) => void; reject: () => void } | null
   /** frameId -> color, set briefly when a remote actor updates a frame */
   flashes: Record<string, { color: string; at: number }>
   /** frameId -> actor currently streaming a design into it */
@@ -145,6 +160,14 @@ interface State {
   setConnected(v: boolean): void
   setCanvasNotFound(v: boolean): void
   setUpdateReady(v: boolean): void
+  setRole(role: CanvasRole | null): void
+  setGuest(guest: boolean): void
+  setNoAccess(v: boolean): void
+  /** you were @mentioned in this thread: pulse its pin */
+  pulseComment(rootId: string): void
+  bumpAccessRequests(): void
+  clearPulse(rootId: string): void
+  setGuestNameRequest(request: State['guestNameRequest']): void
   setPresences(list: Presence[]): void
   upsertPresence(p: Presence): void
   removePresence(clientId: string): void
@@ -315,6 +338,12 @@ export const useStore = create<State>((set, get) => ({
   connected: false,
   canvasNotFound: false,
   updateReady: false,
+  role: null,
+  guest: false,
+  noAccess: false,
+  pulses: {},
+  accessRequestTick: 0,
+  guestNameRequest: null,
   notice: null,
   flashes: {},
   streams: {},
@@ -369,6 +398,30 @@ export const useStore = create<State>((set, get) => ({
   setConnected: (connected) => set({ connected }),
   setCanvasNotFound: (canvasNotFound) => set({ canvasNotFound }),
   setUpdateReady: (updateReady) => set({ updateReady }),
+  setRole: (role) => set({ role }),
+  setGuest: (guest) => set({ guest }),
+  setNoAccess: (noAccess) => set({ noAccess }),
+  pulseComment: (rootId) => {
+    const at = Date.now()
+    set((s) => ({ pulses: { ...s.pulses, [rootId]: at } }))
+    setTimeout(() => {
+      if (get().pulses[rootId] !== at) return
+      set((s) => {
+        const pulses = { ...s.pulses }
+        delete pulses[rootId]
+        return { pulses }
+      })
+    }, 30_000)
+  },
+  bumpAccessRequests: () => set((s) => ({ accessRequestTick: s.accessRequestTick + 1 })),
+  clearPulse: (rootId) =>
+    set((s) => {
+      if (!(rootId in s.pulses)) return {}
+      const pulses = { ...s.pulses }
+      delete pulses[rootId]
+      return { pulses }
+    }),
+  setGuestNameRequest: (guestNameRequest) => set({ guestNameRequest }),
   setPresences: (list) =>
     set((s) => ({
       presences: Object.fromEntries(list.map((p) => [p.clientId, p])),

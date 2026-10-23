@@ -1,7 +1,6 @@
 import { Router } from 'express'
-import { canAccessCanvas } from './access.ts'
 import * as actions from './actions.ts'
-import { store } from './store.ts'
+import { requireCanvas } from './sharing.ts'
 
 /** /api/comments: routes on existing comments that live apart from the
  *  main server file so they can be tested on their own. */
@@ -12,11 +11,8 @@ export const commentAnchorRouter = Router()
 commentAnchorRouter.patch('/:id/anchor', (req, res) => {
   const found = actions.findComment(String(req.params.id))
   if (!found) return res.status(404).json({ error: 'comment not found' })
-  const canvas = store.getCanvas(found.canvasId)
-  if (!canvas) return res.status(404).json({ error: 'not found' })
-  if (!canAccessCanvas(req.user?.id, canvas)) {
-    return res.status(403).json({ error: 'this canvas is private — ask the owner for access' })
-  }
+  /* healing rewrites the stored pin, so it takes the right to comment, not just to look */
+  if (!requireCanvas(req, res, found.canvasId, 'comment')) return
   const selector: unknown = req.body?.selector
   if (typeof selector !== 'string' || !selector.trim() || selector.length > actions.MAX_SELECTOR_LENGTH) {
     return res.status(400).json({ error: `selector must be a string of 1-${actions.MAX_SELECTOR_LENGTH} characters` })
