@@ -67,3 +67,34 @@ it('rehomes a frame whose page no longer exists to the first page on boot', () =
     { id: 'legacy', pageId: 'c1:page1', immediate: true },
   ])
 })
+
+it('repairs a broken page tree on boot and on save so bad data never persists', () => {
+  const canvas: Canvas = {
+    id: 'c1',
+    name: 'Tree',
+    ownerId: 'alice',
+    createdAt: 1,
+    updatedAt: 1,
+    pages: [
+      { id: 'child', name: 'Child', parentId: 'parent' },
+      { id: 'parent', name: 'Parent' },
+      { id: 'ghost-child', name: 'Ghost child', parentId: 'ghost' },
+    ],
+    frames: [],
+  }
+  store.init([canvas])
+  const pages = () => store.getCanvas('c1')!.pages
+  expect(pages()).toEqual([
+    { id: 'parent', name: 'Parent' },
+    { id: 'child', name: 'Child', parentId: 'parent' },
+    { id: 'ghost-child', name: 'Ghost child' },
+  ])
+  store.setPages('c1', [
+    { id: 'a', name: 'A', parentId: 'b' },
+    { id: 'b', name: 'B', parentId: 'a' },
+  ])
+  expect(pages()).toEqual([
+    { id: 'a', name: 'A' },
+    { id: 'b', name: 'B', parentId: 'a' },
+  ])
+})

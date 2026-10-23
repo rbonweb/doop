@@ -1,4 +1,4 @@
-import { canvasPages, samePages } from '../shared/pages.ts'
+import { canvasPages, normalizePageTree, samePages, validatePageTree } from '../shared/pages.ts'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { Request, Response } from 'express'
@@ -67,7 +67,7 @@ function textWithNudge(data: unknown, nudge: string) {
 const REVIEW_NUDGE =
   'You have not seen this design yet. Call get_frame_screenshot on it now, judge it against the review checkpoints (fit, spacing, hierarchy, contrast, alignment, realism), and fix any issues before moving on.'
 
-import type { Actor } from '../shared/types.ts'
+import type { Actor, CanvasPageInfo } from '../shared/types.ts'
 
 /** Reaches agents whose session predates set_status (or who skipped the guide). */
 function withStatusNudge<T extends { content: { type: 'text' | 'image'; [k: string]: unknown }[] }>(
@@ -162,6 +162,19 @@ const agentName = z
   .describe(
     'Your display name, shown live to everyone on the canvas (e.g. "Claude", "Codex"). Reuse the SAME name on every call so your work is attributed consistently.',
   )
+
+/** Pages cross the MCP boundary as `parent_id` (snake_case like every other agent-facing field). */
+function toMcpPage(page: CanvasPageInfo): { id: string; name: string; parent_id?: string } {
+  return page.parentId === undefined
+    ? { id: page.id, name: page.name }
+    : { id: page.id, name: page.name, parent_id: page.parentId }
+}
+
+function fromMcpPage(page: { id: string; name: string; parent_id?: string | undefined }): CanvasPageInfo {
+  return page.parent_id === undefined
+    ? { id: page.id, name: page.name }
+    : { id: page.id, name: page.name, parentId: page.parent_id }
+}
 
 function frameSummary(f: {
   pageId?: string
@@ -334,7 +347,7 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
     'get_canvas',
     {
       description:
-        'Get a canvas: its name and every frame with position, size and metadata (not the HTML — use get_frame for that). Use this to see the current layout before adding or editing frames. Pass your agent_name so any human feedback waiting for you is delivered with the result.',
+        'Get a canvas: its name, its pages (a nested page carries parent_id, the page it sits under; parents are listed before their subpages) and every frame with position, size and metadata (not the HTML — use get_frame for that). Use this to see the current layout before adding or editing frames. Pass your agent_name so any human feedback waiting for you is delivered with the result.',
       inputSchema: { canvas_id: z.string(), agent_name: agentName.optional() },
     },
     async ({ canvas_id, agent_name }) => {
@@ -367,7 +380,7 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
         text({
           id: c.id,
           name: c.name,
-          pages: c.pages,
+          pages: c.pages?.map(toMcpPage),
           /* demo frames (the Doop welcome show, seeded examples) are product
              content, not user work — hidden so agents never mistake them for
              the canvas's established style */
@@ -729,31 +742,45 @@ export function buildMcpServer(owner?: string, ownerId?: string): McpServer {
     'set_canvas_pages',
     {
       description:
-        'Create, rename, reorder or delete canvas pages. Send the complete ordered page list with stable IDs (read get_canvas first). A page containing frames cannot be deleted: move its frames with update_frame first.',
+        'Create, rename, reorder, nest or delete canvas pages. Send the complete ordered page list with stable IDs (read get_canvas first). Nest a page under another with parent_id (the parent page id; omit for a top-level page). Pages nest at most 2 levels deep (3 levels in total), a parent page is a normal page that can hold its own frames, and children appear in list order under their parent, so list each parent before its subpages. Deleting a page that has subpages requires re-pointing them (change their parent_id) first. A page containing frames cannot be deleted: move its frames with update_frame first.',
       inputSchema: {
         canvas_id: z.string(),
         expectedPages: z
-          .array(z.object({ id: z.string(), name: z.string() }))
+          .array(z.object({ id: z.string(), name: z.string(), parent_id: z.string().optional() }))
           .describe('Exact ordered pages returned by get_canvas; protects collaborators from overwritten changes'),
         pages: z
-          .array(z.object({ id: z.string().trim().min(1).max(100), name: z.string().trim().min(1).max(100) }))
+          .array(
+            z.object({
+              id: z.string().trim().min(1).max(100),
+              name: z.string().trim().min(1).max(100),
+              parent_id: z
+                .string()
+                .trim()
+                .min(1)
+                .max(100)
+                .optional()
+                .describe('Id of the page this one is nested under; omit for a top-level page'),
+            }),
+          )
           .min(1)
           .max(100),
         agent_name: agentName,
       },
     },
-    async ({ canvas_id, pages, expectedPages, agent_name }) => {
+    async ({ canvas_id, pages: requested, expectedPages, agent_name }) => {
       const canvas = canvasFor(canvas_id)
       if (!canvas) return noCanvas(canvas_id)
-      if (!samePages(expectedPages, canvasPages(canvas)))
+      if (!samePages(expectedPages.map(fromMcpPage), canvasPages(canvas)))
         return err('Pages changed. Read get_canvas again before saving.')
-      if (new Set(pages.map((p) => p.id)).size !== pages.length) return err('Page IDs must be unique')
+      const treeError = validatePageTree(requested.map(fromMcpPage))
+      if (treeError) return err(treeError)
+      const pages = normalizePageTree(requested.map(fromMcpPage))
       const firstId = canvas.pages?.[0]?.id ?? `${canvas.id}:page1`
       if (canvas.frames.some((f) => !pages.some((p) => p.id === (f.pageId ?? firstId))))
         return err('Move frames before deleting their page')
       const actor = actorFrom(agent_name)
       actions.setCanvasPages(canvas_id, pages, actor)
-      return text({ ok: true, pages })
+      return text({ ok: true, pages: pages.map(toMcpPage) })
     },
   )
 

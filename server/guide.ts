@@ -190,6 +190,21 @@ Viewers watch designs assemble live. Stream with append_frame_html:
   component 480×360, square social post 640×640. Set width/height on create_frame, or
   adjust later with update_frame.
 
+## Pages
+
+- A canvas is split into pages. Every frame belongs to exactly one page (its pageId in
+  get_canvas); create_frame and update_frame take a pageId, and a page that still holds
+  frames cannot be deleted.
+- Pages can be nested to group related ones: set parent_id on a page in set_canvas_pages
+  to the id of the page it sits under. A parent is still a normal page that can hold its
+  own frames, and an empty parent works as a pure group.
+- Nesting is at most 3 levels in total (a top-level page, its subpage, and that subpage's
+  subpage). List every parent before its subpages; subpages keep the list order among
+  themselves. get_canvas shows each nested page's parent_id.
+- set_canvas_pages takes the complete list plus the expectedPages you read from
+  get_canvas, so re-read get_canvas first and send parent_id back unchanged for pages you
+  are not moving.
+
 ## GitHub-imported frames — the repo is the source of truth
 
 Frames whose HTML carries a "doop-github-screen" marker meta were imported from a
