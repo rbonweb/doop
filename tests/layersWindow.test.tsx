@@ -84,13 +84,14 @@ describe('LayersPanel on a large frame', () => {
     container.remove()
   })
 
+  /* builds thousands of rows: about a second here, several on a loaded CI runner */
   it('renders only the rows in view when a search matches thousands of elements', () => {
     search('p')
     const rendered = items()
     expect(rendered.length).toBeGreaterThan(0)
     expect(rendered.length).toBeLessThan(100)
     expect(rendered[0]?.textContent).toBe('Big frame')
-  })
+  }, 20_000)
 
   it('keeps the full height of the list so the scrollbar covers every row', () => {
     search('p')

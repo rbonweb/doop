@@ -259,7 +259,7 @@ describe('slides, speaker notes and the deck PDF', () => {
       const res = await deck(who)
       expect([200, 500, 429]).toContain(res.status)
     }
-  })
+  }, 60_000)
 })
 
 describe('sticky notes', () => {

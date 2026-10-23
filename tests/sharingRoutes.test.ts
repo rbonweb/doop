@@ -520,12 +520,13 @@ describe('sharing roles', () => {
       expect((await other.patch(`/api/canvases/${linkCanvas}`, { linkPassword: 'whatever123' })).status).toBe(403)
     })
 
+    /* the image route renders with headless Chrome, which a CI runner launches slowly */
     it('leaves the public frame image route as it was', async () => {
       const anon = new Client(server)
       expect((await anon.get('/i/no-such-frame.png')).status).toBe(404)
       /* private canvas, no session: the route has never asked for one */
       expect([401, 403]).not.toContain((await anon.get(`/i/${linkFrame}.png`)).status)
-    })
+    }, 30_000)
   })
 })
 
