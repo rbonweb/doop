@@ -1,4 +1,5 @@
 import { FRAME_REPLAY_RUNTIME } from './frameReplayRuntime'
+import { ANCHOR_TOOLS_SOURCE } from '../../shared/commentAnchor'
 
 /**
  * Bootstrap document loaded once per frame iframe. The parent posts HTML in
@@ -10,6 +11,11 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
 <html><head></head><body><script data-v-boot>
 (function () {
   ${FRAME_REPLAY_RUNTIME}
+  /* the comment-anchor matching, embedded from shared/commentAnchor.ts so the
+     app and the tests run one copy. A bundler that keeps function names
+     wraps them in __name(); the identity shim keeps the embedded source valid. */
+  var __name = function (fn) { return fn }
+  var anchorTools = ${ANCHOR_TOOLS_SOURCE}
   /* horizontal overscroll inside a frame must not chain to the parent page,
      where the browser turns it into a history back/forward swipe. Adopted
      sheet, not a <style> tag — the morph would wipe a tag from <head>. */
@@ -327,11 +333,20 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     return { x: r.left / curZoom, y: r.top / curZoom, width: r.width / curZoom, height: r.height / curZoom }
   }
 
-  function hitInfo(el) {
+  /* x/y: where the click landed, in design px; without one the pin sits mid-element */
+  function hitInfo(el, x, y) {
+    var box = el.getBoundingClientRect()
+    var fx = 0.5
+    var fy = 0.5
+    if (typeof x === 'number' && typeof y === 'number' && box.width > 0 && box.height > 0) {
+      fx = (x * curZoom - box.left) / box.width
+      fy = (y * curZoom - box.top) / box.height
+    }
     var snippet = el.outerHTML || ''
     if (snippet.length > 400) snippet = snippet.slice(0, 397) + '...'
     return {
       selector: cssPath(el),
+      anchor: anchorTools.buildAnchor(el, fx, fy),
       tag: el.tagName.toLowerCase(),
       text: (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
       snippet: snippet,
@@ -342,7 +357,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   function probe(x, y) {
     var el = document.elementFromPoint(x * curZoom, y * curZoom)
     if (!el || el === document.documentElement || el === document.body) return null
-    return hitInfo(el)
+    return hitInfo(el, x, y)
   }
 
   /* the Layers panel selects by selector rather than by point */
@@ -498,12 +513,19 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       parent.postMessage({ type: 'doop:code-result', reqId: d.reqId, html: elementCode(d.selector) }, '*')
     }
     if (d.type === 'doop:locate') {
+      /* the stored path first, then the anchor's fallbacks; how says which one hit */
       var found = null
+      var how = null
+      var currentPath = null
       try {
-        var target = d.selector ? document.querySelector(d.selector) : null
-        if (target) found = designRect(target)
+        var hit = anchorTools.resolveAnchor(document, d.selector, d.anchor)
+        if (hit) {
+          found = designRect(hit.el)
+          how = hit.how
+          currentPath = cssPath(hit.el)
+        }
       } catch (e) { /* bad selector -> null */ }
-      parent.postMessage({ type: 'doop:located', reqId: d.reqId, rect: found }, '*')
+      parent.postMessage({ type: 'doop:located', reqId: d.reqId, rect: found, how: how, selector: currentPath }, '*')
     }
     /* re-rasterize crisply when the canvas is zoomed in: layout stays identical
        (viewport is scaled up by the same factor outside) but pixels are k-times denser */

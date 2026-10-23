@@ -386,7 +386,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
                 .map((x) => `    ${x.from}: "${x.text}"`)
                 .join('\n')
               const thread = earlier ? `\n  earlier in this thread:\n${earlier}` : ''
-              return `- ${c.from} on frame ${c.frameId} "${fname}", element ${c.selector}\n  element HTML at comment time: ${c.snippet}${thread}\n  comment: "${c.text}"`
+              return `- ${c.from} on frame ${c.frameId} "${fname}", element ${c.selector}\n  element HTML at comment time: ${c.snippet}${c.anchor?.quote ? `\n  text of the element: "${c.anchor.quote}"` : ''}${thread}\n  comment: "${c.text}"`
             })
             .join('\n'),
       )

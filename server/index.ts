@@ -20,6 +20,7 @@ import * as commentNotifications from './commentNotifications.ts'
 import { notificationsRouter } from './notifications.ts'
 import * as webhooks from './webhooks.ts'
 import { webhooksRouter } from './webhookRoutes.ts'
+import { commentAnchorRouter } from './commentRoutes.ts'
 import { canAccessCanvas, canManageCanvas, hasDurableCanvasAccess, isAdmin } from './access.ts'
 import { auth, initAuth, syncAdmins, getUserName, PUBLIC_ORIGIN, loginProvidersConfig } from './auth.ts'
 import { inviteFor, inviteOnly } from './instanceSettings.ts'
@@ -670,6 +671,7 @@ function requireFrame(req: express.Request, res: express.Response, frameId: stri
 app.use('/api/local-agent', localAgentRouter)
 app.use('/api/notifications', notificationsRouter)
 app.use('/api/webhooks', webhooksRouter)
+app.use('/api/comments', commentAnchorRouter)
 app.use('/api/admin', adminRouter)
 app.use('/api/community', communityRouter)
 app.use('/api/automations', automationsRouter)
@@ -1508,7 +1510,7 @@ app.delete('/api/frames/:id', (req, res) => {
 
 app.post('/api/frames/:id/comments', async (req, res) => {
   if (!requireFrame(req, res, req.params.id)) return
-  const { selector, snippet, text } = req.body ?? {}
+  const { selector, snippet, text, anchor } = req.body ?? {}
   /* a comment that @mentions a resident agent is a new command to the team,
      so it's metered like a card; plain comments and replies stay free */
   if (mentionedRole(String(text ?? ''))) {
@@ -1519,7 +1521,7 @@ app.post('/api/frames/:id/comments', async (req, res) => {
   }
   const comment = actions.addElementComment(
     req.params.id,
-    { selector: String(selector ?? ''), snippet: String(snippet ?? ''), text: String(text ?? '') },
+    { selector: String(selector ?? ''), snippet: String(snippet ?? ''), text: String(text ?? ''), anchor },
     req.user!.name,
     req.user!.id,
   )
