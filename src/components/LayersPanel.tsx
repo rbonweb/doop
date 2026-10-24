@@ -608,7 +608,7 @@ export function LayersRailToggle() {
   return (
     <nav
       aria-label="Layers panel"
-      className="pointer-events-auto absolute top-2.5 left-3.5 z-[35] flex w-10 flex-col items-center gap-0.5 rounded-[12px] bg-surface p-[5px] shadow-float"
+      className="chrome-layer pointer-events-auto absolute top-2.5 left-3.5 z-[35] flex w-10 flex-col items-center gap-0.5 rounded-[12px] bg-surface p-[5px] shadow-float"
     >
       <Tooltip label="Expand panel" side="right">
         <Button

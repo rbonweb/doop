@@ -19,7 +19,7 @@ Hold <kbd>Alt</kbd> and click to follow a link, or press <kbd>K</kbd> to draw an
 
 ## Present mode
 
-Press <kbd>P</kbd>, or the play button, to present from the selected frame, or from the first frame of the page when nothing is selected.
+Press <kbd>⇧P</kbd>, or the play button, to present from the selected frame, or from the first frame of the page when nothing is selected.
 
 | Key                         | Action                                   |
 | --------------------------- | ---------------------------------------- |

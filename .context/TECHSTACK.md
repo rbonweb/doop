@@ -148,6 +148,7 @@
 
 - React 18.3.1 + Vite 8 - SPA, entry at `index.html`.
 - Frame iframes mount progressively, nearest the viewport first, and only near the viewport (`src/lib/frameMounting.ts`); a moving camera freezes the set, which is re-evaluated once when the viewport has been still for a moment, so frames never mount mid-gesture; every frame document renders on the app's own main thread.
+- The Layers panel mounts only the rows in view (`src/lib/rowWindow.ts`) and defers search with `useDeferredValue`, so a search on a large canvas stays responsive.
 - Frames sleep at rest (`src/lib/frameSleep.ts`): while the camera moves or a frame is beyond the near margin, its CSS animations, Web Animations and playing videos are paused through `doop:sleep`; selected, edited, hovered and agent-worked frames and present mode never sleep, and `?awake=1` turns it off.
 - The canvas composites GPU-safely: `src/lib/cameraLayer.ts` promotes the world layer only while the camera moves and demotes it only when the zoom drifted (a pan never re-rasterizes the frame iframes), floating UI uses the `chrome-layer` utility (`src/styles.css`) so it keeps one permanent backing store, and frames far outside the view carry `content-visibility: auto` so a large canvas keeps a bounded set of live iframe layers.
 - Tailwind CSS 4.3.3 (`@tailwindcss/vite` 4.3.3) - styling; `tw-animate-css` 1.4.0 for animation

@@ -25,7 +25,7 @@ import { CommentsPanel } from './CommentsPanel'
 import { PromptBar } from './PromptBar'
 import { taskFrameId } from '../lib/taskFrame'
 import { useOpenThreadCount } from '../lib/comments'
-import { useCanEdit } from '../lib/role'
+import { useCanEdit, useIsGuest } from '../lib/role'
 
 const emptyNote = 'px-4 py-6 text-center text-[12px] text-ink-faint'
 
@@ -68,7 +68,12 @@ export function ActivityPanel({
   const setTab = useStore((s) => s.setPanelTab)
   /* the Agents composer and Memory are for editors: a commenter's panel is the threads and the activity feed */
   const canEdit = useCanEdit()
-  const tab = canEdit || storedTab === 'comments' || storedTab === 'activity' ? storedTab : 'comments'
+  /* the server sends a guest's restricted connection no activity, so the tab is hidden for them */
+  const guest = useIsGuest()
+  const tab =
+    (canEdit || storedTab === 'comments' || storedTab === 'activity') && !(guest && storedTab === 'activity')
+      ? storedTab
+      : 'comments'
   const [, tick] = useState(0)
   const openThreads = useOpenThreadCount()
   const working = useStore((s) => s.tasks.filter((t) => t.agentName && !t.endedAt && !t.failedAt).length)
@@ -114,9 +119,11 @@ export function ActivityPanel({
             >
               Comments
             </PanelIconTab>
-            <PanelIconTab value="activity" icon={<PulseIcon />} title="Activity">
-              Activity
-            </PanelIconTab>
+            {!guest && (
+              <PanelIconTab value="activity" icon={<PulseIcon />} title="Activity">
+                Activity
+              </PanelIconTab>
+            )}
             {canEdit && (
               <PanelIconTab
                 value="memory"
@@ -142,9 +149,11 @@ export function ActivityPanel({
         <PanelTabPanel value="comments" className={tabEnter}>
           <CommentsPanel />
         </PanelTabPanel>
-        <PanelTabPanel value="activity" className={tabEnter}>
-          <ActivityList />
-        </PanelTabPanel>
+        {!guest && (
+          <PanelTabPanel value="activity" className={tabEnter}>
+            <ActivityList />
+          </PanelTabPanel>
+        )}
         {canEdit && (
           <PanelTabPanel value="memory" className={tabEnter}>
             <MemoryPanel />

@@ -354,23 +354,25 @@ authenticate over OAuth and drive the canvas from outside, on your own subscript
 Three paths, same canvas: the Doop Agent on our key (free tier), the Doop Agent on your key, or your
 own agent over MCP.
 
-| Variable                        | Default                     | What it does                                                                         |
-| ------------------------------- | --------------------------- | ------------------------------------------------------------------------------------ |
-| `DOOP_AGENT_PROVIDER`           | `anthropic`                 | What the free tier runs on: `anthropic` \| `azure`                                   |
-| `ANTHROPIC_API_KEY`             | _unset_                     | Pays for the free Doop Agent tier (default provider) and the distiller               |
-| `ANTHROPIC_BASE_URL`            | Anthropic                   | Sends the server key's calls to a proxy or compatible endpoint (never users' keys)   |
-| `AZURE_OPENAI_ENDPOINT`         | _unset_                     | The free tier's Azure OpenAI resource, when `DOOP_AGENT_PROVIDER=azure`              |
-| `AZURE_OPENAI_API_KEY`          | _unset_                     | A key of that resource                                                               |
-| `AZURE_OPENAI_DEPLOYMENT`       | _unset_                     | The deployment the free tier runs on                                                 |
-| `AZURE_OPENAI_API_VERSION`      | _unset_                     | Pins an `api-version` query parameter; the v1 surface needs none                     |
-| `AZURE_OPENAI_REASONING_EFFORT` | _unset_                     | Reasoning effort on Azure runs; unset sends none (non-reasoning-safe)                |
-| `RESIDENT_TASK_LIMIT`           | `0`                         | Free Doop Agent tasks per account; `0` means a connected account from the first task |
-| `DOOP_AGENT_MODEL`              | `claude-opus-5`             | Model for the Doop Agent on the server's Anthropic key                               |
-| `DOOP_AGENT_OPENAI_MODEL`       | `gpt-5.6-terra`             | Default tier on a user's account; each user can pick another in Settings             |
-| `DOOP_AGENT_OPENROUTER_MODEL`   | `moonshotai/kimi-k2.6`      | Default model on a connected OpenRouter key                                          |
-| `DOOP_AGENT_GEMINI_MODEL`       | `gemini-3.7-flash`          | Default model on a connected Gemini key                                              |
-| `CHATGPT_CONNECT_DISABLED`      | _unset_                     | `1` hides the ChatGPT flow, leaving the API-key path                                 |
-| `DOOP_DISTILL_MODEL`            | `claude-haiku-4-5-20251001` | Model for the guideline distiller                                                    |
+| Variable                        | Default                     | What it does                                                                                                               |
+| ------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `DOOP_AGENT_PROVIDER`           | `anthropic`                 | What the free tier runs on: `anthropic` \| `azure`                                                                         |
+| `ANTHROPIC_API_KEY`             | _unset_                     | Pays for the free Doop Agent tier (default provider) and the distiller                                                     |
+| `ANTHROPIC_BASE_URL`            | Anthropic                   | Sends the server key's calls to a proxy or compatible endpoint (never users' keys)                                         |
+| `AZURE_OPENAI_ENDPOINT`         | _unset_                     | The free tier's Azure OpenAI resource, when `DOOP_AGENT_PROVIDER=azure`                                                    |
+| `AZURE_OPENAI_API_KEY`          | _unset_                     | A key of that resource                                                                                                     |
+| `AZURE_OPENAI_DEPLOYMENT`       | _unset_                     | The deployment the free tier runs on                                                                                       |
+| `AZURE_OPENAI_API_VERSION`      | _unset_                     | Pins an `api-version` query parameter; the v1 surface needs none                                                           |
+| `AZURE_OPENAI_REASONING_EFFORT` | _unset_                     | Reasoning effort on Azure runs; unset sends none (non-reasoning-safe)                                                      |
+| `RESIDENT_TASK_LIMIT`           | `0`                         | Free Doop Agent tasks per account; `0` means a connected account from the first task                                       |
+| `DOOP_AGENT_MODEL`              | `claude-opus-5`             | Model for the Doop Agent on the server's Anthropic key                                                                     |
+| `DOOP_AGENT_OPENAI_MODEL`       | `gpt-5.6-terra`             | Default tier on a user's account; each user can pick another in Settings                                                   |
+| `DOOP_AGENT_OPENROUTER_MODEL`   | `moonshotai/kimi-k2.6`      | Default model on a connected OpenRouter key                                                                                |
+| `DOOP_AGENT_GEMINI_MODEL`       | `gemini-3.7-flash`          | Default model on a connected Gemini key                                                                                    |
+| `CHATGPT_CONNECT_DISABLED`      | _unset_                     | `1` hides the ChatGPT flow, leaving the API-key path                                                                       |
+| `DOOP_DISTILL_MODEL`            | `claude-haiku-4-5-20251001` | Model for the guideline distiller                                                                                          |
+| `DOOP_INVITE_ONLY`              | _unset_                     | `1` closes sign-up: nobody joins except through an invite link an admin makes on the Admin page (Accounts, Invite someone) |
+| `DOOP_NOINDEX`                  | _unset_                     | `1` asks search engines not to index the instance (`X-Robots-Tag: noindex` and a disallow-all `robots.txt`)                |
 
 `RESIDENT_TASK_LIMIT` is the free-tier meter. By default it is `0`: the Doop Agent only runs once
 the user connects a model account (their ChatGPT subscription or an OpenAI key) — a connected
@@ -382,7 +384,7 @@ it to a large number, since you're paying Anthropic directly either way.
 
 ## Accounts
 
-The web app requires an account (better-auth, email/password — open signup). Your account name is your identity everywhere: cursors, presence, the activity feed, and feedback attribution are all server-authoritative from the session, and the WebSocket rejects unauthenticated joins. **Canvases are private by default**, Figma-style: only the owner and people they invite (Share → invite by email, existing doop accounts) can open one. Your home screen lists your own canvases plus ones shared with you (plus unowned legacy ones, claimable there). Agents connected over MCP act under the account that approved them and get exactly that user's access.
+The web app requires an account (better-auth, email/password — open signup by default; set `DOOP_INVITE_ONLY=1` to make it invite-only, and admins create the invite links accounts come from on the Admin page, under **Accounts**). Your account name is your identity everywhere: cursors, presence, the activity feed, and feedback attribution are all server-authoritative from the session, and the WebSocket rejects unauthenticated joins. **Canvases are private by default**, Figma-style: only the owner and people they invite (Share → invite by email, existing doop accounts) can open one. Your home screen lists your own canvases plus ones shared with you (plus unowned legacy ones, claimable there). Agents connected over MCP act under the account that approved them and get exactly that user's access.
 
 ### Sharing and roles
 
@@ -406,10 +408,9 @@ Set `SIGNUP_EMAIL_DOMAINS=jointhetroops.com` to restrict new accounts to one ema
 comma-separated list for several domains. Matching is case-insensitive and exact; existing accounts
 are unaffected. Leave it unset to keep public signup open.
 
-For an invite-only instance, set `SIGNUP_ALLOWED_EMAILS=you@example.com,teammate@example.com`: only
-those exact addresses can create an account, and the refusal names no one on the list. It combines
-with `SIGNUP_EMAIL_DOMAINS`, so an address on either list may sign up. To invite someone, add their
-address and restart.
+For an invite-only instance, set `SIGNUP_ALLOWED_EMAILS=you@example.com,teammate@example.com`: only those exact addresses can create an account, and the refusal names no one on the list. It combines with `SIGNUP_EMAIL_DOMAINS`, so an address on either list may sign up. To invite someone, add their address and restart.
+
+Or set `DOOP_INVITE_ONLY=1` to close sign-up entirely: nobody joins except through an invite link an admin makes on the Admin page, under **Accounts**, **Invite someone**. The two allowlists still admit their addresses.
 
 Set `REQUIRE_EMAIL_VERIFICATION=false` to let people in before they verify — the link is still
 emailed, it just stops gating sign-in. Admin promotion is deliberately not part of that trade:

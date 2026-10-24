@@ -1,7 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { colorFor } from '../../shared/types'
 import { useStore } from '../lib/store'
 import { api } from '../lib/api'
+import { authClient } from '../lib/auth'
+import { postReply } from '../lib/commenting'
+import { useCanComment, useCanEdit, useIsGuest } from '../lib/role'
 import { posthog } from '../lib/posthog'
 import { timeAgo } from '../lib/time'
 import { isComposingEnter } from '../lib/keys'
@@ -9,11 +12,11 @@ import { isCanvasComment } from '../../shared/comments'
 import { pageThreads, threadState, type CommentThreadGroup, type ThreadState } from '../lib/comments'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
-import { Input } from './ui/input'
 import { PanelBody } from './ui/panel'
 import { CheckIcon } from './ui/icons'
 import { Disclosure } from './ui/collapsible'
 import { isResidentLimit } from './TeamAllowance'
+import { MentionTextarea, mentionIds, type MentionTextareaHandle } from './MentionTextarea'
 
 const emptyNote = 'px-4 py-6 text-center text-[12px] leading-[1.45] text-ink-faint'
 
@@ -105,6 +108,13 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
+  const replyRef = useRef<MentionTextareaHandle>(null)
+  const myId = authClient.useSession().data?.user.id
+  /* below comment a thread is read-only; a guest can reply but not close it;
+     only an editor may @mention an agent */
+  const mayComment = useCanComment()
+  const mayEdit = useCanEdit()
+  const guest = useIsGuest()
 
   /* fly to the pin (its frame, or its point on the canvas) and pop it — the
      pin shows the whole conversation, this row is the index entry */
@@ -124,10 +134,11 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
   async function reply() {
     const text = draft.trim()
     if (!text || sending) return
+    const mentions = mentionIds(text, replyRef.current?.picked() ?? [])
     setSending(true)
     setFailed(false)
     try {
-      await api.replyComment(root.id, text)
+      await postReply(root.id, text, mentions)
       posthog.capture('element_comment_replied')
       setDraft((current) => (current === draft ? '' : current))
     } catch (err) {
@@ -215,30 +226,36 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
           </ol>
         </Disclosure>
       )}
-      {!resolved && (
-        <div className="flex items-center gap-1.5 py-1 pr-1.5 pl-[28px]">
-          <Input
-            variant="bare"
-            inputSize="auto"
-            className="h-7 min-w-0 flex-1 rounded-[7px] bg-surface px-2.5 shadow-ring focus:shadow-elevation-1-focus md:text-[12px]"
-            placeholder="Reply… @doop to ask the agent"
-            aria-label={`Reply to ${root.from}`}
+      {!resolved && mayComment && (
+        <div className="flex items-start gap-1.5 py-1 pr-1.5 pl-[28px]">
+          <MentionTextarea
+            ref={replyRef}
+            canvasId={root.canvasId}
+            people={!guest}
+            agents={mayEdit}
+            myId={myId}
+            className="min-h-7 min-w-0 flex-1 rounded-[7px] bg-surface px-2.5 py-1 shadow-ring focus:shadow-elevation-1-focus md:text-[12px]"
+            placeholder={mayEdit ? 'Reply… @ to mention, @doop to ask the agent' : 'Reply…'}
             value={draft}
-            disabled={sending}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={setDraft}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !isComposingEnter(e)) void reply()
+              if (e.key === 'Enter' && !e.shiftKey && !isComposingEnter(e)) {
+                e.preventDefault()
+                void reply()
+              }
             }}
           />
-          <Button
-            variant="bare"
-            className="h-7 flex-none gap-1 rounded-[7px] px-2 text-[12px] font-normal"
-            title="Mark this thread as resolved"
-            onClick={resolve}
-          >
-            <CheckIcon className="size-3.5" />
-            Resolve
-          </Button>
+          {!guest && (
+            <Button
+              variant="bare"
+              className="h-7 flex-none gap-1 rounded-[7px] px-2 text-[12px] font-normal"
+              title="Mark this thread as resolved"
+              onClick={resolve}
+            >
+              <CheckIcon className="size-3.5" />
+              Resolve
+            </Button>
+          )}
         </div>
       )}
       {failed && (

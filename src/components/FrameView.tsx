@@ -36,8 +36,9 @@ import { CommentComposer, CommentPin, CommentThread } from './CommentPopovers'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Tooltip } from './ui/tooltip'
-import { EyeClosedIcon, GithubIcon, LockIcon, SlideIcon, SyncIcon } from './ui/icons'
+import { DownloadIcon, EyeClosedIcon, GithubIcon, LockIcon, SlideIcon, SyncIcon } from './ui/icons'
 import { isSyncedFrame } from '../lib/sync'
+import { EXPORT_SHORTCUT } from '../lib/keys'
 import { isGithubFrame, isGithubPlaceholder } from '../lib/github'
 import { AgentIcon } from './AgentIcon'
 import { ElementResizeHandles } from './ElementResizeHandles'
@@ -188,6 +189,10 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     setPathEdit(null)
   }, [])
   const selected = useStore((s) => s.selectedIds.includes(frame.id))
+  /* the title bar offers Export only when this is the one selected frame: with
+     a group, the top bar's Export acts on all of them */
+  const soleSelected = useStore((s) => s.selectedIds.length === 1 && s.selectedIds[0] === frame.id)
+  const presenting = useStore((s) => s.presenting)
   const mark = useFrameMark(frame.id)
   /* below edit a frame can be selected, probed and commented on, never moved */
   const mayEdit = useCanEdit()
@@ -1102,6 +1107,21 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                       Slide
                     </span>
                   </Tooltip>
+                )}
+                {soleSelected && !editing && !dragging && !presenting && (
+                  <Button
+                    variant="default"
+                    size="pill"
+                    className="gap-1 text-ink-soft hover:text-ink"
+                    title={`Export this frame as PNG or JPG (${EXPORT_SHORTCUT})`}
+                    aria-label={`Export ${frame.name}`}
+                    /* a press here is a button press, not the start of a frame drag */
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => useStore.getState().openExport([frame.id])}
+                  >
+                    <DownloadIcon width={10} height={10} strokeWidth={2.2} aria-hidden />
+                    Export
+                  </Button>
                 )}
                 {pathNote && (
                   <span

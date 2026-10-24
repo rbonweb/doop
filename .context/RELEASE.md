@@ -23,14 +23,11 @@ Both packages are 0.x, so breaking changes bump the minor, not the major. With t
 
 ## Self-hosted server (Docker)
 
-No container release pipeline for the server app. Self-hosting is
-`docker compose up` (`docker-compose.yml` + `Dockerfile`) - builds the app image locally, runs it
-on port 4400 alongside a `postgres:16-alpine` container, and applies DB migrations at boot
-(`server/db/index.ts`). CI (`ci.yml`) validates every push/PR to `main` (typecheck, lint,
-format:check, build, test) but does not build or push a container image.
-The CI build uses `bun run --bun build` to match the `oven/bun` Docker build stage,
-where `node` commands run with Bun. Extension tests also build with both runtimes
-and run the Bun-built archive under Node, including its nested runtime dependencies.
+This fork publishes every green `main` as a GHCR image and a GitHub release tagged `v<package.json version>-fork.N`, built by `.github/workflows/fork-release.yml`. `deploy/doop.sh` with `deploy/docker-compose.yml` installs and updates a server from those images; in the app, **Admin -> Update now** installs the latest one and backs up the database first. See [`deploy/README.md`](../deploy/README.md). Upstream's `release-please.yml` and `cla.yml` only run on `kgoedecke/doop`.
+
+Local self-hosting is still `docker compose up` (`docker-compose.yml` + `Dockerfile`) - builds the app image locally, runs it on port 4400 alongside a `postgres:16-alpine` container, and applies DB migrations at boot (`server/db/index.ts`). CI (`ci.yml`) validates every push/PR to `main` (typecheck, lint, format:check, build, test) but does not build or push a container image.
+
+The CI build uses `bun run --bun build` to match the `oven/bun` Docker build stage, where `node` commands run with Bun. Extension tests also build with both runtimes and run the Bun-built archive under Node, including its nested runtime dependencies.
 
 ## Desktop app (Tauri: macOS DMG + Windows NSIS installer)
 

@@ -92,17 +92,12 @@ async function exportOutcome(frame: Frame, format: FrameExportFormat): Promise<s
   return isDesktopShell() ? null : `“${result.fileName}” is ready`
 }
 
-/** Render and download a frame export, reporting through the canvas toast:
- *  a spinner while the server renders (rendering can take several seconds),
- *  then the outcome. Fired from surfaces that close on click, so the
- *  toast in the store is the only place the result can land. */
-/** Save the frame's document as an .html file — the same text the raw editor
- *  shows, so a draft in progress exports as typed. Nothing to fetch, so it
- *  cannot fail the way the rendered exports can. */
+/** Save the frame's document as an .html file: the same text the raw editor shows, so a draft in progress exports as typed. Nothing to fetch, so it cannot fail the way the rendered exports can. */
 export function downloadFrameHtml(frame: Frame, html = frame.html): void {
   saveBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), `${frame.name || 'frame'}.html`)
 }
 
+/** Render and download a frame export, reporting through the canvas toast: a spinner while the server renders (rendering can take several seconds), then the outcome. Fired from surfaces that close on click, so the toast in the store is the only place the result can land. */
 export async function downloadFrameExport(frame: Frame, format: FrameExportFormat): Promise<void> {
   await runExportJob(`Exporting ${FORMAT_LABEL[format]}…`, () => exportOutcome(frame, format))
 }
@@ -175,11 +170,7 @@ export async function exportFrames(
   return summary
 }
 
-/** Render the frame and put the PNG itself on the clipboard, reporting
- *  through the canvas toast like the downloads. ClipboardItem gets the
- *  pending blob, not an awaited one: WebKit allows the write only while the
- *  click's user activation is live, and the render can take seconds. */
-/** Copy a frame to the clipboard as a PNG rendered at `scale` (the menu's Copy as PNG is 2×; `i` / `⇧I` are 2× / 4×). The clipboard write gets the pending render, not a finished blob, so Safari keeps the click or key press as the user gesture. */
+/** Copy a frame to the clipboard as a PNG rendered at `scale` (the menu's Copy as PNG is 2×; `i` / `⇧I` are 2× / 4×), reporting through the canvas toast like the downloads. The clipboard write gets the pending render, not a finished blob, so Safari keeps the click or key press as the user gesture; ClipboardItem gets the pending blob because WebKit allows the write only while the click's user activation is live, and the render can take seconds. */
 export async function copyFramePng(frame: Frame, scale: 2 | 4 = 2): Promise<void> {
   /* no async clipboard outside a secure context (a self-hosted instance on
      plain http) or in older engines: say so before spending a render */

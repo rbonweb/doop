@@ -519,7 +519,7 @@ export const api = {
     req<FrameVersion>(`/api/frames/${frameId}/versions/${versionId}`),
   /* `replaced` is the complete state the server swapped out — the undo copy */
   restoreFrameVersion: (frameId: string, versionId: string) =>
-    req<{ frame: Frame; replaced: Pick<Frame, 'html' | 'width' | 'height'> }>(
+    req<{ frame: Frame; replaced: Pick<Frame, 'html' | 'width' | 'height' | 'name'> }>(
       `/api/frames/${frameId}/versions/${versionId}/restore`,
       {
         method: 'POST',

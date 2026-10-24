@@ -142,9 +142,12 @@ describe.skipIf(!findBrowserPath())('page list controls and keyboard history', (
     )
     await page.click('button[aria-label="New frame"]')
     await page.waitForSelector('iframe[data-doop-frame]')
-    await page.waitForSelector('[role="treeitem"][aria-selected="true"]')
+    await page.waitForSelector('[role="tree"][aria-label="Layers"] [role="treeitem"][aria-selected="true"]')
     expect(selectedColor).toBe(
-      await page.$eval('[role="treeitem"][aria-selected="true"]', (row) => getComputedStyle(row).backgroundColor),
+      await page.$eval(
+        '[role="tree"][aria-label="Layers"] [role="treeitem"][aria-selected="true"]',
+        (row) => getComputedStyle(row).backgroundColor,
+      ),
     )
     await page.keyboard.press('Delete')
     await page.waitForFunction(() => document.querySelectorAll('iframe[data-doop-frame]').length === 0)

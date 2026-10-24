@@ -51,6 +51,7 @@ export function CanvasComments({
   const canvasId = useStore((s) => s.canvas?.id)
   const pageId = useStore((s) => (s.canvas ? (s.activePageId ?? canvasPages(s.canvas)[0]!.id) : null))
   const all = useStore((s) => s.comments)
+  const pulses = useStore((s) => s.pulses)
   /* only thread roots get a pin; replies live inside the root's popover */
   const roots = all.filter(
     (c): c is CanvasComment => isCanvasComment(c) && c.pageId === pageId && !c.parentId && !c.resolvedAt,
@@ -130,7 +131,9 @@ export function CanvasComments({
             open={open}
             left={c.x}
             top={c.y}
+            mentioned={c.id in pulses}
             onToggle={() => {
+              useStore.getState().clearPulse(c.id)
               onComposeDone()
               setOpenThread(open ? null : c.id)
             }}

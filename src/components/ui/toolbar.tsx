@@ -10,7 +10,10 @@ function Toolbar({ className, ...props }: React.ComponentProps<'div'>) {
     <div
       data-slot="toolbar"
       role="toolbar"
-      className={cn('relative flex items-center gap-0.5 rounded-[12px] bg-surface p-[5px] shadow-float', className)}
+      className={cn(
+        'chrome-layer relative flex items-center gap-0.5 rounded-[12px] bg-surface p-[5px] shadow-float',
+        className,
+      )}
       {...props}
     />
   )

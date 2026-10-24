@@ -22,7 +22,7 @@ import { PresenceFace } from './PeerAvatars'
 
 const islandBtn = 'relative size-7 rounded-[8px] text-ink-soft hover:bg-paper-deep hover:text-ink disabled:opacity-35'
 const island =
-  'pointer-events-auto absolute z-[38] flex w-10 flex-col items-center gap-1 rounded-[12px] bg-surface py-1.5 shadow-float'
+  'chrome-layer pointer-events-auto absolute z-[38] flex w-10 flex-col items-center gap-1 rounded-[12px] bg-surface py-1.5 shadow-float'
 
 /** The right-hand icon islands, sitting just left of the open panels. The top
  *  island offers what is hidden: the Inspector for a selected frame, and one

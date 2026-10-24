@@ -3,7 +3,7 @@ import { useStore } from '../lib/store'
 import type { Frame } from '../../shared/types'
 import { usePageCanvas, currentPageCanvas } from '../lib/pages'
 import { sendWs } from '../lib/ws'
-import { useCanEdit } from '../lib/role'
+import { useCanComment, useCanEdit } from '../lib/role'
 import { throttle } from '../lib/throttle'
 import { FrameView, HiddenFrameView } from './FrameView'
 import { StickyNote } from './StickyNote'
@@ -89,7 +89,7 @@ const EDIT_TOOLS: ReadonlySet<Tool> = new Set<Tool>(['frame', 'rectangle', 'circ
 
 /* the floating hint above the tool rail */
 const HINT_CLASS =
-  'absolute bottom-full left-1/2 mb-2 flex w-max max-w-[min(340px,90vw)] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-[10px] bg-surface px-3 py-2 text-center text-[12px] text-ink-soft shadow-pop md:top-0 md:bottom-auto md:left-full md:mb-0 md:ml-2.5 md:translate-x-0 md:justify-start md:text-left'
+  'chrome-layer absolute bottom-full left-1/2 mb-2 flex w-max max-w-[min(340px,90vw)] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-[10px] bg-surface px-3 py-2 text-center text-[12px] text-ink-soft shadow-pop md:top-0 md:bottom-auto md:left-full md:mb-0 md:ml-2.5 md:translate-x-0 md:justify-start md:text-left'
 
 const sendCursor = throttle((x: number, y: number) => sendWs({ type: 'cursor', x, y }), 50)
 /* the camera is shared so others can follow it — same cadence as the cursor */
@@ -138,6 +138,7 @@ export function Stage({
   const panMode = useStore((s) => s.panMode)
   /* the rail's mutating tools, the background menu's Paste/New frame/New note are edits */
   const mayEdit = useCanEdit()
+  const mayComment = useCanComment()
   /* ⌘. — the tool pill and the zoom pill go with the rest of the chrome */
   const uiHidden = useStore((s) => s.uiHidden)
   const laser = useStore((s) => s.laser)
@@ -908,7 +909,7 @@ export function Stage({
                   aria-label={t.label}
                   aria-pressed={!laser && tool === t.id}
                   className="relative z-[1] min-w-9 hover:bg-transparent aria-pressed:text-ink sm:min-w-0"
-                  disabled={!mayEdit && EDIT_TOOLS.has(t.id)}
+                  disabled={(!mayEdit && EDIT_TOOLS.has(t.id)) || (!mayComment && t.id === 'comment')}
                   onClick={() => setTool(t.id)}
                 >
                   {TOOL_ICONS[t.id]}
