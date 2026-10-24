@@ -8,6 +8,8 @@ struct NativeCanvasView: View {
     @State private var sheet: Panel?
     @State private var prompt = ""
     @State private var sending = false
+    /// The scope key the person dismissed with the chip's ×; a new selection brings the chip back.
+    @State private var dismissedScope: String?
     @State private var exportURL: URL?
     private let summary: CanvasSummary
     private enum Panel: String, Identifiable { case frames, inspector, tasks, comments, export; var id: String { rawValue } }
@@ -18,24 +20,22 @@ struct NativeCanvasView: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
         VStack(spacing: 0) {
             HStack(spacing: 7) {
                 Circle().fill(model.connected ? .green : .orange).frame(width: 6, height: 6)
-                Text(model.connected ? "Live" : "Connecting…")
+                Text(model.connected ? "Live" : model.connecting ? "Connecting…" : "Disconnected")
                 Spacer()
                 if !model.presences.isEmpty { Label("\(model.presences.count) here", systemImage: "person.2") }
                 Text("\(model.canvas?.frames.count ?? 0) \(model.canvas?.frames.count == 1 ? "frame" : "frames")")
             }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.vertical, 10)
-            if let error = model.error {
+            if let error = model.error ?? model.connectionError {
                 HStack {
                     Text(error).font(.caption)
                     Spacer()
-                    Button { model.error = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss message")
+                    Button { if model.error != nil { model.error = nil } else { model.connectionError = nil } } label: { Image(systemName: "xmark") }.accessibilityLabel("Dismiss message")
                 }.padding(12).background(Color.orange.opacity(0.12))
             }
             ZStack(alignment: .bottom) {
-                BlitzCanvasSurface(model: model).ignoresSafeArea(.container, edges: .bottom)
                 VStack(spacing: 10) {
                     if let element = model.selectedElement {
                         HStack(spacing: 10) {
@@ -48,34 +48,31 @@ struct NativeCanvasView: View {
                             Button("Comment") { sheet = .comments }.font(.callout.bold())
                             Button { model.selectedElement = nil } label: { Image(systemName: "xmark") }.accessibilityLabel("Clear element selection")
                         }.padding(.horizontal, 16).padding(.vertical, 12).modifier(FloatingGlass())
-                    } else if model.inspecting, model.selected != nil {
-                        Text("Tap an element in the selected frame").font(.caption).padding(10).modifier(FloatingGlass())
                     }
-                    VStack(spacing: 10) {
-                        HStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        if let scope = promptScope {
+                            PromptScopeChip(scope: scope) { dismissedScope = scope.key }
+                        } else {
                             Image(systemName: "sparkles").foregroundStyle(.tint)
-                            TextField("Ask your agent to design…", text: $prompt, axis: .vertical).lineLimit(1...4)
-                                .textFieldStyle(.plain)
-                                .accessibilityIdentifier("canvas.prompt")
-                            Button(action: sendPrompt) {
-                                if sending { ProgressView() } else { Image(systemName: "arrow.up.circle.fill").font(.title) }
-                            }.disabled(sending || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.connected)
-                                .accessibilityLabel("Send design task")
-                        }.padding(.horizontal, 16).padding(.vertical, 14).modifier(FloatingGlass())
-                        GlassDock {
-                            GlassDockButton(label: "Add frame", symbol: "plus", caption: "Add") { Task { await model.addFrame() } }
-                            GlassDockButton(label: "Fit canvas", symbol: "arrow.up.left.and.arrow.down.right", caption: "Fit") { model.viewportCommand += 1 }
-                            GlassDockButton(label: "Frames", symbol: "square.3.layers.3d") { sheet = .frames }
-                            GlassDockButton(label: "Frame properties", symbol: "slider.horizontal.3", caption: "Properties") { sheet = .inspector }.disabled(model.selected == nil)
-                            GlassDockButton(label: "Inspect elements", symbol: "scope", caption: "Inspect", selected: model.inspecting) {
-                                model.inspecting.toggle()
-                                if !model.inspecting { model.selectedElement = nil }
-                            }.disabled(model.selected == nil)
                         }
-                    }
-                }.frame(maxWidth: 620).padding(.horizontal, 16).padding(.top, 10)
-                    .offset(y: geometry.safeAreaInsets.bottom < 80 ? max(0, geometry.safeAreaInsets.bottom - 16) : 0)
+                        TextField(promptPlaceholder, text: $prompt, axis: .vertical).lineLimit(1...4)
+                            .textFieldStyle(.plain)
+                            .accessibilityIdentifier("canvas.prompt")
+                        Button(action: sendPrompt) {
+                            if sending { ProgressView() } else { Image(systemName: "arrow.up.circle.fill").font(.title) }
+                        }.disabled(sending || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.connected)
+                            .accessibilityLabel("Send design task")
+                    }.padding(.horizontal, 16).padding(.vertical, 14).modifier(FloatingGlass())
+                }.frame(maxWidth: 620).padding(12)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .background {
+                // The renderer fills the home-indicator area; controls retain
+                // the safe area. CanvasView clips its layers below the header.
+                BlitzCanvasSurface(model: model)
+                    .ignoresSafeArea(.container, edges: .bottom)
+            }
+            .overlay(alignment: .topTrailing) { canvasTools.padding(12) }
         }
         .background(CanvasBackSwipeGuard())
         .navigationTitle(model.canvas?.name ?? summary.name).navigationBarTitleDisplayMode(.inline)
@@ -105,19 +102,45 @@ struct NativeCanvasView: View {
                 }
             }
         }
-        .onAppear { model.start() }
+        .onAppear { if scenePhase == .active { model.start() } }
         .onDisappear { model.stop() }
         .onChange(of: scenePhase) { phase in if phase == .active { model.start() } else if phase == .background { model.stop() } }
         .onChange(of: model.deleted) { deleted in if deleted { dismiss() } }
     }
+
+    private var canvasTools: some View {
+        VStack(spacing: 2) {
+            GlassDockButton(label: "Undo", symbol: "arrow.uturn.backward") { Task { await model.undo() } }
+                .disabled(!model.canUndo).accessibilityIdentifier("canvas.undo")
+                .keyboardShortcut("z", modifiers: .command)
+            Divider().frame(width: 24).padding(.vertical, 2)
+            GlassDockButton(label: "Add frame", symbol: "plus") { Task { await model.addFrame() } }
+                .disabled(!model.canEdit)
+            GlassDockButton(label: "Fit canvas", symbol: "arrow.up.left.and.arrow.down.right") { model.viewportCommand += 1 }
+            GlassDockButton(label: "Frames", symbol: "square.3.layers.3d") { sheet = .frames }
+            GlassDockButton(label: "Frame properties", symbol: "slider.horizontal.3") { sheet = .inspector }
+                .disabled(model.selected == nil || !model.canEdit)
+        }.padding(4).modifier(FloatingGlass())
+    }
+
+    /// The selection scopes the prompt, as on the web, until the chip is dismissed.
+    private var promptScope: PromptScope? {
+        guard let scope = model.promptScope, scope.key != dismissedScope else { return nil }
+        return scope
+    }
+
+    private var promptPlaceholder: String {
+        guard let scope = promptScope else { return "Ask your agent to design…" }
+        return scope.isElement ? "Ask your agent to change this element…" : "Ask your agent to change this frame…"
     }
 
     private func sendPrompt() {
         let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
         sending = true
+        let scope = promptScope?.scope
         Task {
-            do { try await model.queue(value); prompt = ""; sheet = .tasks }
+            do { try await model.queue(value, scope: scope); prompt = ""; sheet = .tasks }
             catch { model.error = error.localizedDescription }
             sending = false
         }
@@ -148,6 +171,29 @@ struct NativeCanvasView: View {
             exportURL = destination
             sheet = .export
         } catch { model.error = error.localizedDescription }
+    }
+}
+
+/// The prompt bar's scope: the selected frame's name, or the picked element's
+/// `tag#id.class`, with an × that asks without it.
+private struct PromptScopeChip: View {
+    let scope: PromptScope
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: scope.isElement ? "scope" : "rectangle").font(.caption)
+            Text(scope.label).font(.caption.monospaced().bold()).lineLimit(1).truncationMode(.tail)
+            Button(action: dismiss) { Image(systemName: "xmark").font(.caption2.bold()) }
+                .accessibilityLabel(scope.isElement ? "Remove element scope" : "Remove frame scope")
+        }
+        .foregroundStyle(.tint)
+        .padding(.leading, 8).padding(.trailing, 6).padding(.vertical, 5)
+        .background(Color.primary.opacity(0.09), in: Capsule())
+        .frame(maxWidth: 150, alignment: .leading)
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(scope.isElement ? "Scoped to \(scope.label) in \(scope.frameName)" : "Scoped to the frame \(scope.label)")
     }
 }
 
@@ -215,7 +261,7 @@ private struct TasksPanel: View {
                 if model.tasks.isEmpty { Text("Ask your agent to design something. Tasks appear here as the team works.").foregroundStyle(.secondary) }
                 ForEach(model.tasks.sorted { $0.startedAt > $1.startedAt }) { task in
                     HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: task.failedAt != nil ? "exclamationmark.circle" : task.endedAt != nil ? "checkmark.circle" : "sparkles").foregroundStyle(task.failedAt != nil ? .orange : .blue)
+                        Image(systemName: task.failedAt != nil ? "exclamationmark.circle" : task.endedAt != nil ? "checkmark.circle" : "sparkles").foregroundStyle(task.failedAt != nil ? .orange : .primary)
                         VStack(alignment: .leading, spacing: 6) {
                             Text(task.status).font(.body)
                             Text(task.agentName.isEmpty ? "Waiting for an agent" : task.agentName).font(.caption).foregroundStyle(.secondary)
@@ -259,7 +305,7 @@ private struct CommentsPanel: View {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack { Text(comment.from).font(.subheadline.bold()); Spacer(); if comment.resolvedAt != nil { Image(systemName: "checkmark.circle").foregroundStyle(.green) } }
                             Text(comment.text)
-                            Text(model.canvas?.frames.first(where: { $0.id == comment.frameId })?.name ?? "Frame").font(.caption).foregroundStyle(.secondary)
+                            Text(model.canvas?.frames.first(where: { $0.id == comment.frameId })?.name ?? (comment.frameId == nil ? "Canvas" : "Deleted frame")).font(.caption).foregroundStyle(.secondary)
                         }.padding(.vertical, 6)
                     }
                 }

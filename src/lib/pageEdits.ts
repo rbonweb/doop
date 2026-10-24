@@ -1,8 +1,8 @@
 import type { Canvas, CanvasPageInfo } from '../../shared/types'
-import { canvasPages, framePageId, samePages } from '../../shared/pages'
+import { canvasPages, framePageId, pageDescendants, samePages } from '../../shared/pages'
 import { api, ApiError } from './api'
 import { useStore } from './store'
-import { recordPages, recordUpdates, trackSave } from './history'
+import { recordPageCopy, recordPages, recordUpdates, trackSave } from './history'
 
 export function savePages(canvas: Canvas, next: CanvasPageInfo[], selectId?: string) {
   const task = savePagesAndRecord(canvas, next, selectId)
@@ -36,6 +36,41 @@ async function savePagesAndRecord(canvas: Canvas, next: CanvasPageInfo[], select
     }
     throw error
   }
+}
+
+/** Copy a page and its frames in one server call, then show the copy. */
+export function duplicatePage(canvas: Canvas, pageId: string) {
+  const task = (async () => {
+    const expected = canvasPages(canvas)
+    const activeBefore = useStore.getState().activePageId
+    const copy = await api.duplicatePage(canvas.id, pageId)
+    const state = useStore.getState()
+    if (state.canvas?.id !== canvas.id) return
+    /* history holds only this action's change (the copy after its source),
+       not whatever collaborators did to the list meanwhile, so undo takes
+       back the copy alone */
+    const after = [...expected]
+    const source = expected.find((page) => page.id === pageId)
+    const lastOfSource = source ? (pageDescendants(expected, pageId).at(-1) ?? source) : undefined
+    /* a page with sub-pages is copied whole; the copies sit after the source's last descendant */
+    after.splice(
+      lastOfSource ? expected.indexOf(lastOfSource) + 1 : expected.length,
+      0,
+      ...(copy.copiedPages ?? [copy.page]),
+    )
+    recordPageCopy(canvas.id, expected, after, activeBefore, copy.page.id, copy.frames)
+    /* the broadcast usually lands first; a page list or frame that already
+       moved on past this response is left alone */
+    if (samePages(canvasPages(state.canvas), expected)) state.setPages(copy.pages, canvas.id)
+    for (const frame of copy.frames) {
+      const local = state.canvas.frames.find((f) => f.id === frame.id)
+      if (!local || local.updatedAt < frame.updatedAt) state.upsertFrame(frame)
+    }
+    for (const note of copy.notes ?? []) state.upsertNote(note)
+    useStore.getState().setActivePage(copy.page.id)
+  })()
+  trackSave(task)
+  return task
 }
 
 export function moveFramesToPage(canvas: Canvas, ids: string[], pageId: string) {

@@ -37,13 +37,13 @@ let container: HTMLDivElement
 let root: Root
 
 function tree() {
-  const el = container.querySelector<HTMLElement>('[role="tree"]')
+  const el = container.querySelector<HTMLElement>('[role="tree"][aria-label="Layers"]')
   if (!el) throw new Error('layers tree not rendered')
   return el
 }
 
 function items() {
-  return [...container.querySelectorAll<HTMLElement>('[role="treeitem"]')]
+  return [...tree().querySelectorAll<HTMLElement>('[role="treeitem"]')]
 }
 
 function search(text: string) {

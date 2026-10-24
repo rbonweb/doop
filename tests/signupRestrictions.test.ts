@@ -1,9 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Client, startServer, type Server } from './harness.ts'
 
-const PORT = 4997
-const INVITE_ONLY_PORT = 4995
-
 let server: Server
 let client: Client
 let inviteOnly: Server
@@ -19,11 +16,11 @@ function signUp(target: Client, base: string, email: string, name: string) {
 
 beforeAll(async () => {
   ;[server, inviteOnly] = await Promise.all([
-    startServer(PORT, {
+    startServer({
       SIGNUP_EMAIL_DOMAINS: 'jointhetroops.com, partner.test',
       SIGNUP_ALLOWED_EMAILS: 'guest@example.com',
     }),
-    startServer(INVITE_ONLY_PORT, { SIGNUP_ALLOWED_EMAILS: 'Owner@Example.com, teammate@example.com' }),
+    startServer({ SIGNUP_ALLOWED_EMAILS: 'Owner@Example.com, teammate@example.com' }),
   ])
   client = new Client(server)
   inviteOnlyClient = new Client(inviteOnly)

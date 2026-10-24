@@ -2,24 +2,28 @@ import { canvasPages, pageFrames } from '../../shared/pages'
 import { DEVICES } from '../../shared/devices'
 import type { Frame } from '../../shared/types'
 import { MOD_KEY } from './keys'
-import { copyFrameImage } from './copyFrameImage'
+import { copyFramePng } from './frameExport'
 import { copyFrames, duplicateFrames } from './frameClipboard'
 import { redo, undo } from './history'
-import { deleteSelection } from './layerEdits'
+import { hideUiHinted } from './hideUi'
+import { deleteSelection, toggleLockSelection, toggleSelectionHidden } from './layerEdits'
 import { applyDevice, restoreDevices, tidyFrames } from './layoutEdits'
 import { markAllSeen, reviewNext } from './marks'
 import { canCommentNow, canEditNow } from './role'
 import { isOverlayOpen, type Shortcut } from './shortcuts'
 import { startPresenting } from './present'
 import { useStore } from './store'
+import { TOOLS, isDrawingTool, type Tool } from './tools'
 
-/* The canvas's own keys. Existing ones (delete, esc, undo/redo, copy, duplicate, zoom) behave exactly as they did when
-   CanvasPage and the Stage each listened for them; the rest are new. */
+/* The canvas's own keys, the only keyboard listener the canvas has: the tool letters, undo/redo, copy, duplicate,
+   delete, zoom and fit, ⌘. (hide the UI), ⌘K (the Agents composer), ⌘⇧H / ⌘⇧L (hide and lock the selection) and Esc
+   all live in this table. Keys that belong to one gesture (Space-hold pan, and Esc/Enter inside the path editor, the
+   drag preview, the resize grips and the drawing composer) stay with that gesture's own capture-phase handler. */
 
 const state = useStore.getState
 
-/** Whether the canvas (not the board) is on screen — the Stage reports its size only while it is mounted. */
-const onCanvas = () => state().stageSize !== null
+/** Whether the canvas is on screen and not covered by present mode: the Stage reports its size only while it is mounted. */
+const onCanvas = () => state().stageSize !== null && !state().presenting
 
 const selectedFrames = (): Frame[] => state().canvas?.frames.filter((f) => state().selectedIds.includes(f.id)) ?? []
 
@@ -38,19 +42,46 @@ const ZOOM_STEP = 1.25
 const mayEdit = () => canEditNow()
 const mayEditOnCanvas = () => onCanvas() && canEditNow()
 
+/* The tools that change the design need the edit role; select and hand only move the camera, comment needs comment. */
+const toolAllowed = (tool: Tool) => (tool === 'comment' ? canCommentNow() : !isDrawingTool(tool) || canEditNow())
+
+/* Esc inside the canvas's own composers (a comment, a drawing's text box) drops the draft and goes back to Select;
+   any other field keeps Escape for its own editing. */
+const inCanvasComposer = (target: HTMLElement) => !!target.closest('[data-comment-ui], [data-drawing-input]')
+
 /* The dispatcher takes the first matching entry, so the mode-exit Esc sits ahead of the selection's. */
 export const canvasShortcuts: Shortcut[] = [
   {
-    id: 'exit-mode',
+    id: 'exit-laser',
     key: 'escape',
-    label: 'Leave laser or comment mode',
+    label: 'Leave laser mode',
     group: 'Modes',
-    when: () => state().laser || state().commentMode,
+    when: () => state().laser,
+    run: () => state().setLaser(false),
+  },
+  {
+    id: 'exit-tool',
+    key: 'escape',
+    label: 'Back to the Select tool',
+    group: 'Tools',
+    when: () => state().tool !== 'select',
+    inFields: inCanvasComposer,
     run: () => {
-      state().setLaser(false)
-      state().setCommentMode(false)
+      state().setTool('select')
+      /* a draft in a composer is the composer's own business (its handler runs first); the key itself is left alone */
+      return false
     },
   },
+
+  /* ---- tools: V H F R O P T C, from the one TOOLS table the rail draws its buttons from ---- */
+  ...TOOLS.map((tool): Shortcut => ({
+    id: `tool-${tool.id}`,
+    key: tool.key.toLowerCase(),
+    label: `${tool.label} tool`,
+    group: 'Tools',
+    when: () => onCanvas() && toolAllowed(tool.id),
+    run: () => state().setTool(tool.id),
+  })),
 
   /* ---- selection ---- */
   {
@@ -111,9 +142,28 @@ export const canvasShortcuts: Shortcut[] = [
     run: () => copySelectedAsImage(4),
   },
   {
+    id: 'hide-selection',
+    key: 'h',
+    mods: ['mod', 'shift'],
+    label: 'Hide or show the selection',
+    group: 'Selection',
+    when: () => mayEdit() && state().selectedIds.length + (state().selectedElement ? 1 : 0) > 0,
+    /* false (nothing to act on) leaves the browser's own ⌘⇧H alone */
+    run: () => toggleSelectionHidden(),
+  },
+  {
+    id: 'lock-selection',
+    key: 'l',
+    mods: ['mod', 'shift'],
+    label: 'Lock or unlock the selection',
+    group: 'Selection',
+    when: () => mayEdit() && state().selectedIds.length + (state().selectedElement ? 1 : 0) > 0,
+    run: () => toggleLockSelection(),
+  },
+  {
     id: 'deselect',
     key: 'escape',
-    label: 'Clear the selection',
+    label: 'Clear the selection and stop following',
     group: 'Selection',
     run: () => {
       state().select(null)
@@ -159,6 +209,7 @@ export const canvasShortcuts: Shortcut[] = [
   {
     id: 'tidy',
     key: 't',
+    mods: ['shift'],
     label: 'Tidy the selection, or the whole page, into rows',
     group: 'Canvas',
     when: mayEditOnCanvas,
@@ -258,16 +309,9 @@ export const canvasShortcuts: Shortcut[] = [
     run: () => state().setLaser(!state().laser),
   },
   {
-    id: 'comment-mode',
-    key: 'c',
-    label: 'Comment: click an element to comment on it',
-    group: 'Modes',
-    when: () => onCanvas() && canCommentNow(),
-    run: () => state().setCommentMode(!state().commentMode),
-  },
-  {
     id: 'present',
     key: 'p',
+    mods: ['shift'],
     label: 'Present: from the selected frame, or the first frame of the page',
     group: 'Modes',
     when: () => onCanvas() && !!state().canvas?.frames.length,
@@ -315,6 +359,38 @@ export const canvasShortcuts: Shortcut[] = [
     },
   },
   {
+    id: 'hide-ui',
+    key: '.',
+    mods: ['mod'],
+    label: 'Hide or show every panel and toolbar',
+    group: 'View',
+    /* only the bare chord: ⌘⇧. and ⌥ variants stay free for the browser and the OS */
+    when: (e) => !e.shiftKey && !e.altKey && !state().presenting && state().stageSize !== null,
+    run: () => {
+      const s = state()
+      s.toggleUiHidden()
+      /* Esc deliberately leaves the UI hidden, as in Figma; the first hide in this browser says how to get it back */
+      if (state().uiHidden && !hideUiHinted()) s.pushNotice(`UI hidden · ${MOD_KEY}. to show`)
+    },
+  },
+  {
+    id: 'agents-composer',
+    key: 'k',
+    mods: ['mod'],
+    label: 'Ask the Doop Agent',
+    group: 'Canvas',
+    /* from anywhere, text fields included: the page opens the Agents panel, this puts the keyboard in its composer */
+    inFields: true,
+    when: (e) => !e.shiftKey && !e.altKey && canEditNow() && !state().presenting,
+    run: () => {
+      const s = state()
+      /* a field under `hidden` cannot take focus, so asking for the composer ends hide-UI */
+      if (s.uiHidden) s.toggleUiHidden()
+      s.setPanelTab('tasks')
+      s.requestComposerFocus()
+    },
+  },
+  {
     id: 'export',
     key: 'e',
     mods: ['mod', 'shift'],
@@ -328,5 +404,5 @@ export const canvasShortcuts: Shortcut[] = [
 
 function copySelectedAsImage(scale: 2 | 4) {
   const frame = state().canvas?.frames.find((f) => f.id === state().selectedId)
-  if (frame) void copyFrameImage(frame, scale)
+  if (frame) void copyFramePng(frame, scale)
 }

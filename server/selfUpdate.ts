@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
 import type { UpdateInfo, UpdateRelease, UpdateStatus } from '../shared/selfUpdate.ts'
+import { env } from './env.ts'
 
 /**
  * Updating a deployed instance from its Admin page.
@@ -21,10 +22,10 @@ import type { UpdateInfo, UpdateRelease, UpdateStatus } from '../shared/selfUpda
  *   DOOP_UPDATE_API   the GitHub API base, overridden only by tests
  */
 
-const CURRENT = process.env.DOOP_VERSION || 'dev'
-const REPO = process.env.DOOP_UPDATE_REPO || ''
-const DIR = process.env.DOOP_UPDATE_DIR || ''
-const API = (process.env.DOOP_UPDATE_API || 'https://api.github.com').replace(/\/$/, '')
+const CURRENT = env.DOOP_VERSION
+const REPO = env.DOOP_UPDATE_REPO ?? ''
+const DIR = env.DOOP_UPDATE_DIR ?? ''
+const API = env.DOOP_UPDATE_API
 
 /* GitHub allows 60 anonymous API calls an hour per address */
 const CACHE_MS = 10 * 60_000

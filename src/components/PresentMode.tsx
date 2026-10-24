@@ -10,8 +10,8 @@ import { useIsGuest } from '../lib/role'
 import { useStore } from '../lib/store'
 import { cn } from '../lib/utils'
 import { PresenterPanel, SHOW_SURFACE } from './PresenterView'
-import { Button } from './ui/button'
 import { ChevronLeftIcon, ChevronRightIcon, DownloadIcon, NoteIcon, OpenWindowIcon, UndoIcon, XIcon } from './ui/icons'
+import { IconButton } from './ui/icon-button'
 
 /* Full-screen presentation of a canvas page: it fills the viewport (letterboxed on near-black, in both themes) with one frame at native
    resolution scaled to fit, still connected to the room so edits streaming in render live. ← → walk the page in reading
@@ -26,7 +26,8 @@ const STRIP_HEIGHT = 176
 const CHROME_HIDE_MS = 2000
 const NOTICE_MS = 2600
 
-const toolbarBtn = 'text-white border border-transparent hover:border-white/25 hover:bg-white/15'
+/* the show is dark in both themes, so the quiet icon button wears white instead of the ink tokens */
+const toolbarBtn = 'text-white hover:bg-white/15 hover:text-white data-[on]:bg-white/15 data-[on]:text-white'
 
 export function PresentMode({ startId, onClose }: { startId: string; onClose: () => void }) {
   const canvas = useStore((s) => s.canvas)
@@ -317,7 +318,7 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
 
       {showStrip && (
         <div
-          className="absolute inset-x-0 bottom-0 border-t border-white/15 bg-[#0b0b0d]"
+          className="absolute inset-x-0 bottom-0 border-t border-white/15 bg-code"
           style={{ height: STRIP_HEIGHT }}
           role="region"
           aria-label="Presenter view"
@@ -338,7 +339,7 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
       {shownNotice && (
         <div
           role="status"
-          className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-white px-3.5 py-1.5 text-[12.5px] font-semibold text-[#17171b] shadow-pop animate-[chip-in_0.25s_ease]"
+          className="absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-white px-3.5 py-1.5 text-body font-medium text-code shadow-pop animate-[chip-in_0.25s_ease]"
         >
           {shownNotice}
         </div>
@@ -348,7 +349,7 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
         role="toolbar"
         aria-label="Presentation controls"
         className={cn(
-          'absolute left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-white/20 bg-[#0b0b0d]/85 px-2 py-1.5 text-white shadow-pop backdrop-blur transition-[opacity,translate] duration-200',
+          'absolute left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-white/20 bg-code/85 px-2 py-1.5 text-white shadow-pop backdrop-blur transition-[opacity,translate] duration-200',
           chromeVisible ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-2 opacity-0',
         )}
         style={{ bottom: (showStrip ? STRIP_HEIGHT : 0) + 16 }}
@@ -361,20 +362,18 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
         }}
       >
         {nav.history.length > 0 && (
-          <Button
-            variant="inverse"
-            size="icon-sm"
+          <IconButton
+            shape="round"
             className={toolbarBtn}
             aria-label="Back to the previous screen"
             title="Back (Backspace)"
             onClick={back}
           >
             <UndoIcon />
-          </Button>
+          </IconButton>
         )}
-        <Button
-          variant="inverse"
-          size="icon-sm"
+        <IconButton
+          shape="round"
           className={toolbarBtn}
           aria-label="Previous frame"
           title="Previous (←)"
@@ -382,16 +381,15 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
           onClick={() => step(-1)}
         >
           <ChevronLeftIcon />
-        </Button>
+        </IconButton>
         <div className="flex min-w-[8.5rem] max-w-[18rem] flex-col items-center px-2 leading-tight">
-          <span className="max-w-full truncate text-[12.5px] font-semibold">{frame.name}</span>
-          <span className="font-mono text-[10.5px] tabular-nums text-white/65" aria-label="Position">
+          <span className="max-w-full truncate text-body font-medium">{frame.name}</span>
+          <span className="font-mono text-micro tabular-nums text-white/65" aria-label="Position">
             {index > 0 ? `${index} / ${total}` : `– / ${total}`}
           </span>
         </div>
-        <Button
-          variant="inverse"
-          size="icon-sm"
+        <IconButton
+          shape="round"
           className={toolbarBtn}
           aria-label="Next frame"
           title="Next (→)"
@@ -399,56 +397,53 @@ export function PresentMode({ startId, onClose }: { startId: string; onClose: ()
           onClick={() => step(1)}
         >
           <ChevronRightIcon />
-        </Button>
+        </IconButton>
         {deckPage && (
           <>
             <span className="mx-1 h-5 w-px bg-white/20" aria-hidden />
-            <Button
-              variant="inverse"
-              size="icon-sm"
-              className={cn(toolbarBtn, showStrip && 'bg-white/15')}
+            <IconButton
+              shape="round"
+              className={toolbarBtn}
+              on={showStrip}
               aria-label="Presenter view"
               aria-pressed={showStrip}
               title="Presenter view: notes, next slide, timer (S)"
               onClick={() => setStripOpen((open) => !open)}
             >
               <NoteIcon />
-            </Button>
-            <Button
-              variant="inverse"
-              size="icon-sm"
+            </IconButton>
+            <IconButton
+              shape="round"
               className={toolbarBtn}
               aria-label="Open presenter window"
               title="Open the presenter view in its own window"
               onClick={openPresenterWindow}
             >
               <OpenWindowIcon />
-            </Button>
+            </IconButton>
             {!guest && (
-              <Button
-                variant="inverse"
-                size="icon-sm"
+              <IconButton
+                shape="round"
                 className={toolbarBtn}
                 aria-label="Export deck as PDF"
                 title="Export deck as PDF"
                 onClick={() => void downloadDeckPdf(deckPage.canvasId, deckPage.pageId, deckPage.name, deckPage.slides)}
               >
                 <DownloadIcon />
-              </Button>
+              </IconButton>
             )}
           </>
         )}
         <span className="mx-1 h-5 w-px bg-white/20" aria-hidden />
-        <Button
-          variant="inverse"
-          size="icon-sm"
+        <IconButton
+          shape="round"
           className={toolbarBtn}
           aria-label="Exit presentation"
           title="Exit presentation (Esc)"
           onClick={onClose}
         >
           <XIcon />
-        </Button>
+        </IconButton>
       </div>
     </div>
   )

@@ -5,7 +5,7 @@ let hidden: Server
 let listed: Server
 
 beforeAll(async () => {
-  ;[hidden, listed] = await Promise.all([startServer(4989, { DOOP_NOINDEX: '1' }), startServer(4990)])
+  ;[hidden, listed] = await Promise.all([startServer({ DOOP_NOINDEX: '1' }), startServer()])
 }, 70_000)
 
 afterAll(() => {

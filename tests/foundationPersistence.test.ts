@@ -85,24 +85,27 @@ function version(frameId: string, n: number): FrameVersion {
     height: 480,
     savedAt: n,
     savedBy: 'Ada',
+    htmlBytes: `<p>${n}</p>`.length,
     reason: 'human',
   }
 }
 
 it('keeps the newest 50 versions of a frame and lists them newest first without html', async () => {
-  for (let n = 1; n <= 53; n++) await persist.saveFrameVersion(version('f-trim', n))
-  await persist.saveFrameVersion({ ...version('f-other', 1), id: 'other-1' })
+  for (let n = 1; n <= 53; n++) persist.saveFrameVersion(version('f-trim', n))
+  persist.saveFrameVersion({ ...version('f-other', 1), id: 'other-1' })
 
   const listed = await persist.listFrameVersions('f-trim')
-  expect(listed).toHaveLength(persist.MAX_FRAME_VERSIONS)
+  expect(listed).toHaveLength(50)
   expect(listed[0]?.savedAt).toBe(53)
   expect(listed.at(-1)?.savedAt).toBe(4)
+  expect(listed[0]).toMatchObject({ name: 'Hero', reason: 'human', htmlBytes: '<p>53</p>'.length })
   expect(listed[0]).not.toHaveProperty('html')
-  expect((await persist.getFrameVersion('v-53'))?.html).toBe('<p>53</p>')
-  expect(await persist.getFrameVersion('v-1')).toBeUndefined()
+  expect((await persist.getFrameVersion('f-trim', 'v-53'))?.html).toBe('<p>53</p>')
+  expect(await persist.getFrameVersion('f-trim', 'v-1')).toBeUndefined()
   expect(await persist.listFrameVersions('f-other')).toHaveLength(1)
 
-  await persist.deleteFrameVersions('f-trim')
+  /* deleting a frame takes its history with it, behind any write still queued */
+  persist.deleteFrame('f-trim')
   expect(await persist.listFrameVersions('f-trim')).toEqual([])
 })
 
@@ -269,8 +272,10 @@ it('adds the frame design stamp as a nullable column, so rows written before it 
   const pg = new PGlite(dir)
   try {
     const tags = journalTags()
-    expect(tags.at(-1)).toBe('0029_frame_content_stamp')
-    for (const tag of tags.slice(0, -1)) await pg.exec(migrationSql(tag))
+    /* the stamp keeps its number; the upstream migrations that follow it replay on top of it */
+    const stamp = tags.indexOf('0029_frame_content_stamp')
+    expect(stamp).toBeGreaterThan(0)
+    for (const tag of tags.slice(0, stamp)) await pg.exec(migrationSql(tag))
     await pg.exec(
       `INSERT INTO frames (id, canvas_id, name, x, y, width, height, html, created_at, updated_at, updated_by) VALUES ('f1', 'c1', 'F', 0, 0, 1, 1, '', 1, 2, 'a')`,
     )

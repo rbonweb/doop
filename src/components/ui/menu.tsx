@@ -16,21 +16,18 @@ const MenuSurface = React.forwardRef<HTMLDivElement, React.ComponentProps<'div'>
       ref={ref}
       data-slot="menu-surface"
       role="menu"
-      className={cn(
-        'min-w-[190px] rounded-[10px] border border-line bg-surface p-[5px] shadow-pop animate-[chip-in_0.18s_ease]',
-        className,
-      )}
+      className={cn('min-w-[190px] rounded-[12px] bg-surface p-1.5 shadow-pop animate-[chip-in_0.18s_ease]', className)}
       {...props}
     />
   )
 })
 
 const menuItemVariants = cva(
-  'flex w-full items-center gap-2 rounded-[7px] border-0 bg-transparent px-2.5 py-[7px] text-left text-[13px] font-medium leading-normal no-underline transition-colors disabled:cursor-default disabled:text-ink-faint disabled:hover:bg-transparent',
+  'flex w-full items-center gap-2 rounded-[8px] border-0 bg-transparent px-2.5 py-[7px] text-left text-[12.5px] font-normal leading-normal no-underline transition-colors disabled:cursor-default disabled:text-ink-faint disabled:hover:bg-transparent',
   {
     variants: {
       tone: {
-        default: 'text-ink hover:bg-line-soft',
+        default: 'text-ink hover:bg-sub',
         danger: 'text-accent-ink hover:bg-accent-ink/10',
       },
     },
@@ -74,7 +71,7 @@ function MenuLabel({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
       data-slot="menu-label"
-      className={cn('px-2.5 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-ink-faint', className)}
+      className={cn('px-2.5 pb-1 pt-1.5 text-[11px] font-normal text-ink-faint', className)}
       {...props}
     />
   )

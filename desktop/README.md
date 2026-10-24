@@ -43,6 +43,56 @@ bun run dev    # opens the shell against the local vite server (localhost:4300)
 
 `bun run dev` expects the dev server in the repo root to be running.
 
+## Add to Claude
+
+Connect AI → Claude → **Add to Claude** opens Claude Desktop's install prompt
+directly, without a save dialog or a file to locate. The page prepares the bundled
+extension with this Doop instance's `/mcp` URL; `claude_add_extension` stages it in
+Doop's cache and opens it with Claude (macOS) or the registered `.mcpb` handler
+(Windows). Claude asks the user to confirm installation, then Doop asks them to
+approve the OAuth connection. Credentials are never included in this handoff.
+
+The native capability marker `__DOOP_CLAUDE_EXTENSION__` gates this flow so older
+shells do not invoke an unknown command. Public HTTPS servers also offer a prefilled
+online connector link; local servers require a connection from the user's computer.
+
+## Add to Codex
+
+Connect AI → Codex → **Add to Codex** registers this instance's `/mcp` URL in
+`~/.codex/config.toml`. ChatGPT desktop's Codex tab and Codex CLI share this config.
+No CLI installation, command execution, or file download is needed for registration.
+Open a new Codex chat afterwards and authenticate Doop through the client's MCP settings;
+CLI users can run `codex mcp login doop`. OAuth credentials remain managed by Codex.
+
+In a browser, **Open Doop Desktop** sends `doop://connect/codex?origin=…&canvas=…`.
+Both launch-time and running-app links open the Codex setup screen. The link only
+opens that screen: the user clicks **Add to Codex** inside the app to write config.
+The requesting origin must match the desktop server (the production www alias is
+accepted), and the native command derives the MCP URL from its own webview rather
+than trusting the link. A self-hosted website therefore needs a matching desktop build.
+The originating canvas is retained for the suggested first prompt and the Done action.
+The standalone handoff screen does not show live agent arrival status because it is
+not subscribed to that canvas; the usual canvas Connect AI dialog keeps that status.
+
+The installer preserves comments and unrelated settings, keeps same-server credentials
+and tool policies, re-enables a disabled matching entry, and refuses to overwrite a
+different `doop` connection or malformed config. It writes atomically, follows existing
+config symlinks, and honors an existing absolute `CODEX_HOME` inherited by Doop Desktop.
+Terminal-only environment overrides and WSL configs may differ from the desktop process;
+use manual setup in that environment when needed. No shell environment is imported.
+
+`__DOOP_CODEX_SETUP__` gates the native command. Older shells show an update hint and
+manual commands. This requires a new desktop release as well as the hosted frontend.
+The separate ChatGPT browser setup remains manual and is labeled **Open ChatGPT setup**.
+
+Run `cargo test --locked` in `desktop/src-tauri` for config and filesystem tests.
+Frontend tests cover native success/error states, older shells, both deep-link delivery
+paths, server mismatches, and canvas context. Before releasing, smoke-test a packaged
+macOS and Windows app with a website handoff, approve Doop's OAuth in Codex, and start
+a fresh chat. WSL installation remains a manual CLI path.
+
+Reference: [OpenAI's MCP configuration docs](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
 ## Local Claude CLI
 
 Settings → Doop Agent includes **Claude Plan** in shells built with the
@@ -110,8 +160,10 @@ Intel) DMG for macOS and an NSIS installer for Windows:
 
 Versions are bumped by release-please: commits touching `desktop/` open a
 "chore(desktop): release x.y.z" PR that updates `package.json`,
-`src-tauri/tauri.conf.json`, `Cargo.toml` and `Cargo.lock` together, plus
-`desktop/CHANGELOG.md`. Merging it does not tag — push the tag by hand:
+`src-tauri/tauri.conf.json` and `Cargo.toml` together, plus `desktop/CHANGELOG.md`
+(`Cargo.lock` lags one version until the next local build; CI copies the shell's version line
+from `Cargo.toml` into the lock before `cargo test --locked`). Merging it
+does not tag — push the tag by hand:
 
 ```sh
 # after the release PR is merged; X.Y.Z is the version that PR set in desktop/package.json

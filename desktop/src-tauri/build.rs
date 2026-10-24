@@ -7,6 +7,8 @@ fn main() {
             "claude_install",
             "claude_run",
             "claude_stop",
+            "claude_add_extension",
+            "codex_add_mcp",
         ]),
     ))
     .expect("failed to build desktop permissions");

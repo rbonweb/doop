@@ -1,4 +1,6 @@
+import { env } from './env.ts'
 import { canvasPages, normalizePageTree, samePages, validatePageTree } from '../shared/pages.ts'
+import { FIRST_CANVAS_PATH } from '../shared/firstCanvas.ts'
 import { localAgentRouter, handleLocalAgentMcp } from './localAgent.ts'
 import { handleGeminiCloudMcp } from './geminiCloudMcp.ts'
 import { geminiCloudWorkerFor } from './geminiCloudRuns.ts'
@@ -7,11 +9,11 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import express from 'express'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { toNodeHandler, fromNodeHeaders } from 'better-auth/node'
 import { oAuthDiscoveryMetadata } from 'better-auth/plugins'
 import { WebSocketServer, WebSocket } from 'ws'
-import { store } from './store.ts'
+import { PageLimitError, store } from './store.ts'
 import { getImage } from './previews.ts'
 import { parseImageScale } from '../shared/imageScale.ts'
 import * as actions from './actions.ts'
@@ -42,7 +44,7 @@ import {
   GUEST_MARK,
   guestDisplayName,
 } from './sharing.ts'
-import { auth, initAuth, syncAdmins, getUserName, PUBLIC_ORIGIN, loginProvidersConfig } from './auth.ts'
+import { auth, initAuth, syncAdmins, getUserName, loginProvidersConfig } from './auth.ts'
 import { inviteFor, inviteOnly } from './instanceSettings.ts'
 import { adminRouter } from './admin.ts'
 import { communityRouter, parseListing, publishableFrames } from './community.ts'
@@ -92,7 +94,7 @@ import { isPeerViewport } from '../shared/viewport.ts'
 import { roleAtLeast } from '../shared/types.ts'
 import type { Canvas, CanvasPageInfo, CanvasRole, ClientMessage, Presence, ServerMessage } from '../shared/types.ts'
 
-const PORT = Number(process.env.PORT || 4400)
+const PORT = env.PORT
 
 /* Identifies the client bundle this process serves. Hashing dist/index.html
    works because Vite writes hashed asset names into it — any frontend change
@@ -195,9 +197,7 @@ interface Conn {
   cookie?: string
 }
 
-/* A guest (and a view-only member) is sent the canvas itself, its comments and
-   presence, nothing of the team's working conversation: chat, agent tasks,
-   Memory and the activity feed. */
+/* A guest (and a view-only member) is sent the canvas itself, its comments and presence, nothing of the team's working conversation: agent tasks, Memory and the activity feed. */
 const RESTRICTED_MESSAGES: ReadonlySet<ServerMessage['type']> = new Set([
   'presence:join',
   'presence:leave',
@@ -371,7 +371,7 @@ app.set('trust proxy', 1)
    rides every response, pages and images alike, and is what search engines
    act on; robots.txt below still lets them fetch everything, because a
    crawler refused a page never sees its noindex and may list the bare URL. */
-const NOINDEX = ['1', 'true'].includes((process.env.DOOP_NOINDEX ?? '').toLowerCase())
+const NOINDEX = env.DOOP_NOINDEX
 if (NOINDEX) {
   app.use((_req, res, next) => {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive')
@@ -390,8 +390,8 @@ app.get('/healthz', (_req, res) => res.json({ ok: true }))
 /* must not leak to a third party.                                     */
 /* ------------------------------------------------------------------ */
 
-const PH_INGEST = process.env.POSTHOG_INGEST_HOST || 'https://us.i.posthog.com'
-const PH_ASSETS = process.env.POSTHOG_ASSETS_HOST || 'https://us-assets.i.posthog.com'
+const PH_INGEST = env.POSTHOG_INGEST_HOST
+const PH_ASSETS = env.POSTHOG_ASSETS_HOST
 const PH_DROP_HEADERS = new Set(['host', 'connection', 'cookie', 'content-length', 'accept-encoding'])
 
 app.use('/relay', async (req, res) => {
@@ -571,7 +571,7 @@ app.put('/u/:token', async (req, res) => {
       { stylesheets: true },
     )
     success = true
-    const url = `${PUBLIC_ORIGIN}/a/${asset.id}.${asset.ext}`
+    const url = `${env.BETTER_AUTH_URL}/a/${asset.id}.${asset.ext}`
     res.json({
       ok: true,
       url,
@@ -632,6 +632,19 @@ app.all('/gemini-cloud/mcp/:id', (req, res, next) => {
 })
 app.all('/local-agent/mcp/:id', (req, res, next) => {
   handleLocalAgentMcp(req, res).catch(next)
+})
+
+/* Where a brand-new account lands: the canvas signup created for it
+   (server/auth.ts databaseHooks), where the demo agent is waiting to
+   perform. better-auth sends new Google / Microsoft / SSO users here as
+   their newUserCallbackURL and the email form comes here too, so every
+   signup path shares one landing. Signed out, or without a canvas of their
+   own any more, the dashboard will do. Ahead of the /api session guard:
+   a browser arrives here, so a missing session is a redirect, not a 401. */
+app.get(FIRST_CANVAS_PATH, async (req, res) => {
+  const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) }).catch(() => null)
+  const canvas = session && store.firstCanvasOf(session.user.id)
+  res.redirect(canvas ? `/c/${canvas.id}` : '/')
 })
 
 /* Public: does an account exist for this email? Drives the login page's
@@ -751,6 +764,54 @@ app.get('/api/me', async (req, res) => {
   })
 })
 
+/* Resolve the application from the consent code itself, never a client name or
+   id supplied by the page. Only the account authorizing the code may use it. */
+async function mcpConsent(code: string, userId: string) {
+  const [request] = await db.select().from(authSchema.verification).where(eq(authSchema.verification.identifier, code))
+  if (!request || request.expiresAt <= new Date()) return null
+  let value: { userId?: string; clientId?: string; requireConsent?: boolean } | null
+  try {
+    value = JSON.parse(request.value)
+  } catch {
+    return null
+  }
+  if (!value || value.userId !== userId || value.requireConsent !== true || typeof value.clientId !== 'string')
+    return null
+  const [client] = await db
+    .select()
+    .from(authSchema.oauthApplication)
+    .where(eq(authSchema.oauthApplication.clientId, value.clientId))
+  return client && !client.disabled ? { name: client.name } : null
+}
+
+app.get('/api/mcp-consent/:code', async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store')
+    const client = await mcpConsent(req.params.code!, req.user!.id)
+    if (!client)
+      return res.status(404).json({ error: 'This connection request has expired. Start again from your agent.' })
+    res.json(client)
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.post('/api/mcp-consent/:code', async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-store')
+    if (typeof req.body?.accept !== 'boolean') return res.status(400).json({ error: 'Choose whether to connect.' })
+    if (!(await mcpConsent(req.params.code!, req.user!.id)))
+      return res.status(404).json({ error: 'This connection request has expired. Start again from your agent.' })
+    const result = await auth.api.oAuthConsent({
+      headers: fromNodeHeaders(req.headers),
+      body: { accept: req.body.accept, consent_code: req.params.code! },
+    })
+    res.json(result)
+  } catch (error) {
+    next(error)
+  }
+})
+
 /* Canvas access on the REST surface: resolve the canvas (or the frame's
    canvas) and run it through the role resolver before touching anything.
    `min` is the least role the route needs: view for reads, comment for
@@ -759,14 +820,29 @@ app.get('/api/me', async (req, res) => {
 const requireCanvas = requireCanvasRole
 const requireFrame = requireFrameRole
 
-/** The version, if it belongs to this frame; otherwise answers 404. */
-async function requireFrameVersion(res: express.Response, frameId: string, versionId: string) {
-  const version = await persist.getFrameVersion(versionId)
-  if (!version || version.frameId !== frameId) {
-    res.status(404).json({ error: 'version not found' })
-    return null
+/** Like `requireFrame`, plus the optimistic-concurrency check path editing relies on: when the caller sends the
+ *  `updatedAt` it last saw, a frame that moved on meanwhile answers 409 with the current frame. */
+function requireFrameAt(
+  req: express.Request,
+  res: express.Response,
+  frameId: string,
+  min: CanvasRole,
+  expectedUpdatedAt?: unknown,
+) {
+  const frame = requireFrame(req, res, frameId, min)
+  if (!frame) return null
+  if (expectedUpdatedAt !== undefined) {
+    if (typeof expectedUpdatedAt !== 'number' || !Number.isSafeInteger(expectedUpdatedAt) || expectedUpdatedAt < 0) {
+      res.status(400).json({ error: 'expectedUpdatedAt must be a nonnegative integer' })
+      return null
+    }
+    // PATCH and DELETE mutate the store synchronously after this check.
+    if (frame.updatedAt !== expectedUpdatedAt) {
+      res.status(409).json({ error: 'The frame changed while you were editing. Please try again.', frame })
+      return null
+    }
   }
-  return version
+  return frame
 }
 
 app.use('/api/local-agent', localAgentRouter)
@@ -974,9 +1050,22 @@ app.delete('/api/agent-keys/:id', async (req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/canvases', (req, res) =>
+app.get('/api/canvases', async (req, res) => {
+  const list = workspaces.canvasesFor(req.user!.id)
+  /* the people on each canvas (owner first, then invited members) resolve
+     to names in one query — the home tiles wear them as an avatar stack */
+  const peopleIds = new Set<string>()
+  for (const c of list) for (const id of canvasPeopleIds(c.id)) peopleIds.add(id)
+  const names = new Map<string, string>()
+  if (peopleIds.size) {
+    const rows = await db
+      .select({ id: authSchema.user.id, name: authSchema.user.name })
+      .from(authSchema.user)
+      .where(inArray(authSchema.user.id, [...peopleIds]))
+    for (const r of rows) names.set(r.id, r.name)
+  }
   res.json(
-    workspaces.canvasesFor(req.user!.id).map((c) => {
+    list.map((c) => {
       /* which agents have worked on this canvas (most recent first), with
          the user whose token they connected under and when they last worked */
       const seen = new Map<string, { owner?: string; lastAt: number }>()
@@ -986,12 +1075,20 @@ app.get('/api/canvases', (req, res) =>
       }
       return {
         ...c,
+        people: canvasPeopleIds(c.id).map((id) => ({ id, name: names.get(id) ?? 'Unknown' })),
         agents: [...seen].slice(0, 8).map(([name, v]) => ({ name, owner: v.owner, lastAt: v.lastAt })),
         activeTasks: activeAgentTasks(actions.getTasks(c.id)),
       }
     }),
-  ),
-)
+  )
+})
+
+/** owner first, then invited members, each once */
+function canvasPeopleIds(canvasId: string): string[] {
+  const c = store.getCanvas(canvasId)
+  if (!c) return []
+  return [...new Set([...(c.ownerId ? [c.ownerId] : []), ...(c.memberIds ?? [])])]
+}
 
 /* A workspace canvas needs membership and a workspace that may still grow —
    the 402 is what every client turns into the upgrade modal. */
@@ -1476,7 +1573,7 @@ app.post(
       })
       /* absolute like the MCP flow: frame HTML renders inside sandboxed
          srcdoc iframes where root-relative URLs don't resolve */
-      res.json({ url: `${PUBLIC_ORIGIN}/a/${asset.id}.${asset.ext}`, mime: asset.mime, size: asset.size })
+      res.json({ url: `${env.BETTER_AUTH_URL}/a/${asset.id}.${asset.ext}`, mime: asset.mime, size: asset.size })
     } catch (e) {
       res.status(400).json({ error: e instanceof Error ? e.message : 'upload failed' })
     }
@@ -1530,14 +1627,38 @@ app.put('/api/canvases/:id/pages', (req, res) => {
 
 const validSpeakerNotes = (v: unknown): v is string => typeof v === 'string' && v.length <= MAX_SPEAKER_NOTES_CHARS
 
+app.post('/api/canvases/:id/pages/:pageId/duplicate', async (req, res) => {
+  const canvas = requireCanvas(req, res, req.params.id, 'edit')
+  if (!canvas) return
+  if (!canvasPages(canvas).some((page) => page.id === req.params.pageId))
+    return res.status(404).json({ error: 'page not found' })
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  try {
+    const copy = await actions.duplicatePage(canvas.id, req.params.pageId, actor)
+    if (!copy) return res.status(404).json({ error: 'page not found' })
+    res.json({
+      page: copy.page,
+      pages: copy.pages,
+      copiedPages: copy.copiedPages,
+      frames: copy.frames,
+      notes: copy.notes,
+    })
+  } catch (e) {
+    if (e instanceof PageLimitError) return res.status(400).json({ error: e.message })
+    console.error('[pages] duplicate failed', e)
+    res.status(500).json({ error: 'Could not duplicate the page. Please try again.' })
+  }
+})
+
 app.post('/api/canvases/:id/frames', (req, res) => {
   if (!requireCanvas(req, res, req.params.id, 'edit')) return
-  const { name, pageId, x, y, width, height, html, slide, speakerNotes } = req.body ?? {}
+  const { name, pageId, x, y, width, height, html, slide, speakerNotes, hidden, locked } = req.body ?? {}
   if (pageId !== undefined && !store.getCanvas(req.params.id)?.pages?.some((p) => p.id === pageId))
     return res.status(400).json({ error: 'page not found' })
   if (speakerNotes !== undefined && !validSpeakerNotes(speakerNotes))
     return res.status(400).json({ error: `speakerNotes must be text of up to ${MAX_SPEAKER_NOTES_CHARS} characters` })
   const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  /* `hidden` and `locked` let undo bring a deleted frame back as it was */
   const frame = actions.createFrame(
     req.params.id,
     {
@@ -1550,6 +1671,8 @@ app.post('/api/canvases/:id/frames', (req, res) => {
       html,
       ...(slide === true ? { slide: true } : {}),
       ...(speakerNotes ? { speakerNotes } : {}),
+      hidden: hidden === true,
+      locked: locked === true,
     },
     actor,
   )
@@ -1558,8 +1681,8 @@ app.post('/api/canvases/:id/frames', (req, res) => {
 })
 
 app.patch('/api/frames/:id', (req, res) => {
-  if (!requireFrame(req, res, req.params.id, 'edit')) return
-  const { actor: _ignored, ...patch } = req.body ?? {}
+  if (!requireFrameAt(req, res, req.params.id, 'edit', req.body?.expectedUpdatedAt)) return
+  const { actor: _ignored, expectedUpdatedAt: _version, ...patch } = req.body ?? {}
   const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   if (
     patch.pageId !== undefined &&
@@ -1573,6 +1696,9 @@ app.patch('/api/frames/:id', (req, res) => {
   const allowed = ['name', 'pageId', 'x', 'y', 'width', 'height', 'html', 'slide', 'speakerNotes'] as const
   const clean: Record<string, unknown> = {}
   for (const k of allowed) if (patch[k] !== undefined) clean[k] = patch[k]
+  /* the eye in the Layers panel: anything but a literal true shows the frame */
+  if (patch.hidden !== undefined) clean.hidden = patch.hidden === true
+  if (patch.locked !== undefined) clean.locked = !!patch.locked
   const frame = actions.updateFrame(req.params.id, clean, actor)
   if (!frame) return res.status(404).json({ error: 'frame not found' })
   res.json(frame)
@@ -1590,8 +1716,9 @@ app.post('/api/frames/:id/append', (req, res) => {
   res.json({ ok: true, htmlBytes: frame.html.length })
 })
 
-/* Frame history needs edit, to read or to restore: an old version can hold
-   content the editors have since removed, which a viewer was never shown. */
+/* design history: the states a frame had before later edits replaced them, newest first and without HTML; one
+   version in full; restore. Needs edit, to read or to restore: an old version can hold content the editors have
+   since removed, which a viewer was never shown. */
 app.get('/api/frames/:id/versions', async (req, res) => {
   if (!requireFrame(req, res, req.params.id, 'edit')) return
   res.json(await persist.listFrameVersions(req.params.id))
@@ -1599,22 +1726,22 @@ app.get('/api/frames/:id/versions', async (req, res) => {
 
 app.get('/api/frames/:id/versions/:versionId', async (req, res) => {
   if (!requireFrame(req, res, req.params.id, 'edit')) return
-  const version = await requireFrameVersion(res, req.params.id, req.params.versionId)
-  if (version) res.json(version)
+  const version = await persist.getFrameVersion(req.params.id, req.params.versionId)
+  if (!version) return res.status(404).json({ error: 'version not found' })
+  res.json(version)
 })
 
 app.post('/api/frames/:id/versions/:versionId/restore', async (req, res) => {
   if (!requireFrame(req, res, req.params.id, 'edit')) return
-  const version = await requireFrameVersion(res, req.params.id, req.params.versionId)
-  if (!version) return
   const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
-  const frame = actions.restoreFrameVersion(version, actor)
-  if (!frame) return res.status(404).json({ error: 'frame not found' })
-  res.json(frame)
+  const restored = await actions.restoreFrameVersion(req.params.id, req.params.versionId, actor)
+  if (restored === null) return res.status(404).json({ error: 'version not found' })
+  if (!restored) return res.status(404).json({ error: 'frame not found' })
+  res.json(restored)
 })
 
 app.delete('/api/frames/:id', (req, res) => {
-  if (!requireFrame(req, res, req.params.id, 'edit')) return
+  if (!requireFrameAt(req, res, req.params.id, 'edit', req.body?.expectedUpdatedAt)) return
   const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
   const frame = actions.deleteFrame(req.params.id, actor)
   if (!frame) return res.status(404).json({ error: 'frame not found' })
@@ -1688,6 +1815,48 @@ app.post('/api/frames/:id/comments', async (req, res) => {
     { allowAgent: !notice, mentions },
   )
   if (!comment) return res.status(404).json({ error: 'frame not found or empty text' })
+  res.json(notice ? { ...comment, notice } : comment)
+})
+
+/* a comment pinned to a point on the canvas (world coordinates on one of its
+   pages) rather than to an element — same role, agent-mention and metering rules as an element comment */
+app.post('/api/canvases/:id/comments', async (req, res) => {
+  const canvas = requireCanvas(req, res, req.params.id, 'comment')
+  if (!canvas) return
+  const { pageId, x, y, text } = req.body ?? {}
+  if (typeof pageId !== 'string' || !canvasPages(canvas).some((page) => page.id === pageId)) {
+    return res.status(400).json({ error: 'page not found' })
+  }
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return res.status(400).json({ error: 'x and y must be numbers' })
+  const body = String(text ?? '')
+  if (!body.trim()) return res.status(400).json({ error: 'empty text' })
+  const notice = agentNotice(body, roleFor(req, canvas))
+  let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
+  if (!notice && mentionedRole(body)) {
+    gate = await allowance.consumeResidentTask(req.user!.id)
+    if (!gate.ok) {
+      return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
+    }
+  }
+  const mentions = await validMentions(canvas, body, req.body?.mentions)
+  const comment = actions.addCanvasComment(
+    canvas.id,
+    { pageId, x: Number(x), y: Number(y), text: body },
+    req.user!.name,
+    req.user!.id,
+    'user',
+    { allowAgent: !notice, mentions },
+  )
+  if (!comment) {
+    /* the page went away while the meter was being written: give the task
+       back — a failed refund is logged, never turned into a 500 */
+    if (gate) {
+      await allowance.refundResidentTask(gate, req.user!.id).catch((err) => {
+        console.error(`[comments] could not refund a resident task for ${req.user!.id}:`, err)
+      })
+    }
+    return res.status(409).json({ error: 'page removed meanwhile' })
+  }
   res.json(notice ? { ...comment, notice } : comment)
 })
 
@@ -1880,30 +2049,6 @@ app.post('/api/canvases/:id/cards', async (req, res) => {
   res.json(card)
 })
 
-/* the canvas chat: a plain message is free; one that @mentions resident
-   agents queues a card for them and is metered like any other card */
-app.post('/api/canvases/:id/chat', async (req, res) => {
-  const chatCanvas = requireCanvas(req, res, req.params.id, 'comment')
-  if (!chatCanvas) return
-  /* the same cut addChatMessage applies, so a mention past the cap is
-     never metered for a card that then does not exist */
-  const text = String(req.body?.text ?? '')
-    .trim()
-    .slice(0, actions.MAX_CHAT_CHARS)
-  if (!text) return res.status(400).json({ error: 'empty text' })
-  /* an @agent message queues a card, which makes the agent edit: editors only */
-  const notice = agentNotice(text, roleFor(req, chatCanvas))
-  if (!notice && mentionedRole(text)) {
-    const gate = await allowance.consumeResidentTask(req.user!.id)
-    if (!gate.ok) {
-      return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
-    }
-  }
-  const message = actions.addChatMessage(req.params.id, text, req.user!.name, req.user!.id, !notice)
-  if (!message) return res.status(404).json({ error: 'canvas not found or empty text' })
-  res.json(notice ? { ...message, notice } : message)
-})
-
 app.post('/api/canvases/:canvasId/cards/:id/done', (req, res) => {
   if (!requireCanvas(req, res, req.params.canvasId, 'edit')) return
   const card = actions.completeCard(req.params.canvasId, req.params.id)
@@ -1976,6 +2121,10 @@ function bridge(handler: (req: globalThis.Request) => Promise<globalThis.Respons
   }
 }
 app.get('/.well-known/oauth-authorization-server', (req, res) => bridge(oAuthDiscoveryMetadata(auth))(req, res))
+/* The same document under the OpenID Connect name: ChatGPT accepts either,
+   but its Enterprise workspace-domain restriction reads only this one (it
+   needs the userinfo_endpoint better-auth already lists there). */
+app.get('/.well-known/openid-configuration', (req, res) => bridge(oAuthDiscoveryMetadata(auth))(req, res))
 
 /* Protected-resource metadata must name the exact endpoint the CLIENT
    connected to (RFC 9728 §3.3 — strict clients such as Muse reject a `resource`
@@ -1987,8 +2136,8 @@ app.get('/.well-known/oauth-authorization-server', (req, res) => bridge(oAuthDis
 function protectedResourceMetadata(req: express.Request, res: express.Response) {
   res.json({
     resource: `${req.protocol}://${req.get('host')}/mcp`,
-    authorization_servers: [PUBLIC_ORIGIN],
-    jwks_uri: `${PUBLIC_ORIGIN}/api/auth/mcp/jwks`,
+    authorization_servers: [env.BETTER_AUTH_URL],
+    jwks_uri: `${env.BETTER_AUTH_URL}/api/auth/mcp/jwks`,
     scopes_supported: ['openid', 'profile', 'email', 'offline_access'],
     bearer_methods_supported: ['header'],
     resource_signing_alg_values_supported: ['RS256'],
@@ -2005,7 +2154,7 @@ app.get('/robots.txt', (_req, res) => {
     .send(
       NOINDEX
         ? 'User-agent: *\nAllow: /\n'
-        : `User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /c/\n\nSitemap: ${PUBLIC_ORIGIN}/sitemap.xml\n`,
+        : `User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /c/\n\nSitemap: ${env.BETTER_AUTH_URL}/sitemap.xml\n`,
     )
 })
 app.get('/sitemap.xml', (_req, res) => {
@@ -2013,12 +2162,12 @@ app.get('/sitemap.xml', (_req, res) => {
   res
     .type('application/xml')
     .send(
-      `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n  <url><loc>${PUBLIC_ORIGIN}/</loc></url>\n</urlset>\n`,
+      `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n  <url><loc>${env.BETTER_AUTH_URL}/</loc></url>\n</urlset>\n`,
     )
 })
 
 /* production: serve the built client */
-if (process.env.NODE_ENV === 'production') {
+if (env.isProduction) {
   const dist = path.join(process.cwd(), 'dist')
   app.use(compressedBundle(dist))
   app.use(express.static(dist, { setHeaders: immutableAssets }))
@@ -2127,7 +2276,6 @@ wss.on('connection', (ws, upgradeReq) => {
         tasks: restricted ? [] : actions.getTasks(msg.canvasId),
         feedback: restricted ? [] : actions.getFeedback(msg.canvasId),
         comments: actions.getComments(msg.canvasId),
-        chat: restricted ? [] : actions.getChat(msg.canvasId),
         decisions: restricted ? [] : actions.getDecisions(msg.canvasId),
         proposals: restricted ? [] : actions.getProposals(msg.canvasId),
         selfColor: presence.color,

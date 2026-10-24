@@ -15,10 +15,13 @@ export interface FeedbackItem {
 
 export interface CommentPrompt {
   from: string
-  frameId: string
-  frameName: string
-  selector: string
-  snippet: string
+  /** a canvas comment (pinned to a point, not an element): the harness-built location line, which carries no
+   *  person-written text beyond sanitized names. Element comments leave it out and give the four fields below. */
+  location?: string
+  frameId?: string
+  frameName?: string
+  selector?: string
+  snippet?: string
   /** the element's own text when the comment was left, so a moved element can still be found */
   quote?: string
   text: string
@@ -77,16 +80,20 @@ export function cardsSection(cards: CardPrompt[]): string {
 
 export function commentsSection(comments: CommentPrompt[]): string {
   return (
-    `New element comments addressed to you (each is pinned to a specific element):\n` +
+    `New comments addressed to you (each is pinned to a specific element inside a frame, or to a point on the canvas):\n` +
     comments
       .map((c) => {
         const author = sanitizeInline(c.from)
         const earlier = c.earlier
           .map((x) => untrustedBlock(`earlier message from ${sanitizeInline(x.from)}`, x.text))
           .join('\n')
+        const where =
+          c.location !== undefined
+            ? `- ${quoted(c.from)} ${c.location}`
+            : `- ${quoted(c.from)} on frame ${inlineCode(c.frameId ?? '')} ${quoted(c.frameName ?? '')}, element ${inlineCode(c.selector ?? '')}\n` +
+              `  element HTML at comment time:\n${untrustedBlock('element HTML excerpt', c.snippet ?? '')}`
         return (
-          `- ${quoted(c.from)} on frame ${inlineCode(c.frameId)} ${quoted(c.frameName)}, element ${inlineCode(c.selector)}\n` +
-          `  element HTML at comment time:\n${untrustedBlock('element HTML excerpt', c.snippet)}` +
+          where +
           (c.quote ? `\n  text of the element:\n${untrustedBlock('element text', c.quote)}` : '') +
           (earlier ? `\n  earlier in this thread:\n${earlier}` : '') +
           `\n  comment:\n${untrustedBlock(`comment from ${author}`, c.text)}`

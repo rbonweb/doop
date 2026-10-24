@@ -3,37 +3,25 @@ import { navigate } from '../App'
 import { api, ApiError } from '../lib/api'
 import { chooseGuestName, getIdentity } from '../lib/identity'
 import { Button } from './ui/button'
-import { CheckIcon, LockIcon } from './ui/icons'
 import { Input } from './ui/input'
 import { Modal, ModalActions, ModalLede, ModalTitle } from './ui/modal'
 import { Note } from './ui/note'
-import { AuthScreen } from './ui/screen'
+import { AuthCard, AuthCardText, AuthScreen } from './ui/screen'
 import { Textarea } from './ui/textarea'
-import { Wordmark } from './ui/wordmark'
 
 /* The screens a visitor meets before a canvas opens: the password gate, the
    no-access page with its request form, and the one-time "who are you" prompt
    a guest answers before commenting. They share the canvas-not-found card. */
 
-function GateCard({ children }: { children: ReactNode }) {
+function GateCard({ title, children }: { title: ReactNode; children: ReactNode }) {
   return (
     <AuthScreen>
-      <div className="flex w-[min(420px,100%)] animate-[modal-in_0.28s_cubic-bezier(0.2,0.9,0.3,1.1)] flex-col gap-3.5 rounded-[12px] border border-line bg-surface p-6 pt-[30px] text-center shadow-pop sm:p-9 sm:pb-8">
-        <Wordmark className="mb-1.5 self-center" />
+      <AuthCard title={title} align="center">
         {children}
-      </div>
+      </AuthCard>
     </AuthScreen>
   )
 }
-
-function Seal({ children }: { children: ReactNode }) {
-  return (
-    <span className="mx-auto grid size-11 place-items-center rounded-full bg-paper-deep text-ink-soft">{children}</span>
-  )
-}
-
-const heading = 'font-serif text-[27px] font-normal leading-[1.08] tracking-[-0.015em]'
-const lede = 'text-[14px] leading-[1.5] text-ink-soft'
 
 /** Ask for the link password. `onUnlocked` runs once the server has set the cookie. */
 export function PasswordForm({
@@ -74,6 +62,7 @@ export function PasswordForm({
       <div key={shake} className={shake ? 'animate-[gate-shake_0.32s_ease]' : undefined}>
         <Input
           type="password"
+          variant="well"
           autoComplete="off"
           autoFocus={autoFocus}
           inputSize="lg"
@@ -108,14 +97,10 @@ export function PasswordGate({
   onSignIn: () => void
 }) {
   return (
-    <GateCard>
-      <Seal>
-        <LockIcon width={20} height={20} aria-hidden />
-      </Seal>
-      <h1 className={heading}>This canvas is password protected</h1>
-      <p className={lede}>Enter the password the owner shared with you to open it.</p>
+    <GateCard title="This canvas is password protected">
+      <AuthCardText>Enter the password the owner shared with you to open it.</AuthCardText>
       <PasswordForm canvasId={canvasId} onUnlocked={onUnlocked} />
-      <Button variant="link" size="sm" className="self-center text-ink-soft" onClick={onSignIn}>
+      <Button variant="bare" size="sm" className="self-center" onClick={onSignIn}>
         Have an account? Sign in
       </Button>
     </GateCard>
@@ -173,20 +158,17 @@ export function NoAccess({ canvasId }: { canvasId: string }) {
   }
 
   return (
-    <GateCard>
-      <Seal>
-        {requested ? <CheckIcon width={20} height={20} aria-hidden /> : <LockIcon width={20} height={20} aria-hidden />}
-      </Seal>
-      <h1 className={heading}>{requested ? 'Request sent' : 'You don’t have access to this canvas'}</h1>
+    <GateCard title={requested ? 'Request sent' : 'You don’t have access to this canvas'}>
       {requested ? (
-        <p className={lede}>
+        <AuthCardText>
           The owner has been told. This page opens the canvas as soon as they say yes, and we will email you too.
-        </p>
+        </AuthCardText>
       ) : (
         <>
-          <p className={lede}>Ask the owner to let you in. Add a note so they know who you are.</p>
+          <AuthCardText>Ask the owner to let you in. Add a note so they know who you are.</AuthCardText>
           <form onSubmit={request} className="flex flex-col gap-2.5 text-left">
             <Textarea
+              variant="well"
               rows={3}
               maxLength={500}
               placeholder="Optional message, e.g. “Hi, I’m on the checkout team.”"
@@ -208,11 +190,11 @@ export function NoAccess({ canvasId }: { canvasId: string }) {
       )}
       {gate?.passwordRequired && !requested && (
         <div className="mt-1 flex flex-col gap-2 border-t border-line-soft pt-4 text-left">
-          <p className="text-[12.5px] font-medium text-ink-soft">Have the link password?</p>
+          <p className="text-body font-medium text-ink-soft">Have the link password?</p>
           <PasswordForm canvasId={canvasId} autoFocus={false} onUnlocked={() => location.reload()} />
         </div>
       )}
-      <Button variant="link" size="sm" className="self-center text-ink-soft" onClick={() => navigate('/')}>
+      <Button variant="bare" size="sm" className="self-center" onClick={() => navigate('/')}>
         Back to your canvases
       </Button>
     </GateCard>
@@ -240,6 +222,7 @@ export function GuestNamePrompt({ onDone, onCancel }: { onDone: (name: string) =
         </ModalLede>
         <Input
           ref={ref}
+          variant="well"
           className="mt-4"
           inputSize="lg"
           maxLength={40}

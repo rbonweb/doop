@@ -9,7 +9,6 @@ import { Client, startServer, type Server } from './harness.ts'
  * Stylesheet assets end to end, against the real server: upload_asset over MCP (data and ticket paths), the browser upload route that stays images-only, the /a/ route's headers, and a server render of a frame that links the uploaded stylesheet.
  */
 
-const PORT = 5031
 const THEME = '@charset "UTF-8";\n/* theme */\n:root{--brand:#2743ee}\n.hero{background:var(--brand);height:120px}\n'
 
 let server: Server
@@ -42,7 +41,7 @@ function pathOf(url: unknown): string {
 }
 
 beforeAll(async () => {
-  server = await startServer(PORT, { BETTER_AUTH_URL: `http://localhost:${PORT}` })
+  server = await startServer()
   owner = await new Client(server).signUp('css-owner@test.dev', 'Owner')
   canvasId = ((await (await owner.post('/api/canvases', { name: 'CSS' })).json()) as { id: string }).id
   const key = (await (await owner.post('/api/agent-keys', { name: 'css-test' })).json()) as { secret: string }
@@ -66,7 +65,7 @@ describe('upload_asset with a stylesheet', () => {
     const res = body as Record<string, unknown>
     expect(res.ok).toBe(true)
     expect(res.mime).toBe('text/css')
-    expect(String(res.url)).toMatch(new RegExp(`^http://localhost:${PORT}/a/[\\w-]+\\.css$`))
+    expect(String(res.url)).toMatch(new RegExp(`^http://localhost:${server.port}/a/[\\w-]+\\.css$`))
     expect(res.usage).toBe(`<link rel="stylesheet" href="${res.url}">`)
     expect(res.size_bytes).toBe(Buffer.byteLength(THEME))
   })

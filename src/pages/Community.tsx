@@ -8,44 +8,28 @@ import {
 } from '../../shared/types'
 import { api } from '../lib/api'
 import { navigate } from '../App'
-import { Logo } from '../components/Logo'
 import { timeAgo } from '../lib/time'
-import { AccountMenu, ConnectCard, IconCommunity, IconGrid } from '../components/DashShell'
+import { AppRail, railLayout } from '../components/AppRail'
+import { FramePreview } from '../components/FramePreview'
 import { posthog } from '../lib/posthog'
 import { openCanvasTab } from '../lib/desktop'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
-import { Input } from '../components/ui/input'
-import { Card, cardVariants } from '../components/ui/card'
+import { Kbd } from '../components/ui/kbd'
+import { Pressable } from '../components/ui/pressable'
+import { SearchField } from '../components/ui/search-field'
+import { MetaLine, Tile, TileBody, TileCover } from '../components/ui/tile'
+import { EmptyState } from '../components/ui/empty-state'
 import { Skeleton } from '../components/ui/skeleton'
-import { Wordmark } from '../components/ui/wordmark'
 import { Segmented, SegmentedItem } from '../components/ui/segmented'
 import { ToggleChipGroup, ToggleChipItem } from '../components/ui/toggle-chip'
 import { Modal, ModalEyebrow, ModalTitle } from '../components/ui/modal'
-import { CopyIcon, XIcon } from '../components/ui/icons'
+import { CopyIcon } from '../components/ui/icons'
 import { Toast } from '../components/ui/toast'
-import {
-  DashContent,
-  DashHeader,
-  DashLayout,
-  DashMain,
-  DashSectionLabel,
-  DashSidebar,
-  DashSubtitle,
-  DashTitle,
-} from '../components/ui/dash'
-import { NavItem } from './Home'
-import { cn } from '@/lib/utils'
+import { DashContent, DashHeader, DashLayout, DashMain, DashSubtitle, DashTitle } from '../components/ui/dash'
 
 type Shelf = 'all' | CommunityCategory
 type Sort = 'trending' | 'newest'
-
-/* a gallery tile: the raised Card surface, made clickable — the same tile as Home */
-const cardCls = cn(
-  cardVariants({ tone: 'raised' }),
-  'group relative z-[2] transform-gpu overflow-hidden rounded-[14px] p-0 text-left text-ink',
-  'bg-[color-mix(in_srgb,var(--surface)_72%,transparent)] backdrop-blur-[6px]',
-)
 
 /** The community gallery: designs people have published for others to
  *  preview and copy. Browsing is read-only by construction — a card shows
@@ -132,81 +116,27 @@ export function Community() {
   const empty = items !== null && items.length === 0
 
   return (
-    <DashLayout>
-      <DashSidebar>
-        <Wordmark size="sm" className="px-2 pb-5 text-[17px]" />
+    <DashLayout className={railLayout}>
+      <AppRail active="community" searchShortcut={false} />
 
-        <nav className="flex flex-col gap-0.5">
-          <NavItem icon={<IconGrid />} label="My canvases" on={false} go={() => navigate('/')} />
-        </nav>
-
-        <DashSectionLabel>Explore</DashSectionLabel>
-        <nav className="flex flex-col gap-0.5">
-          <NavItem
-            icon={<IconCommunity />}
-            label="Community"
-            count={counts.get('all')}
-            on={shelf === 'all'}
-            go={() => setShelf('all')}
+      <DashMain className="[background:var(--paper)]">
+        <DashHeader variant="bare" className="max-md:min-h-[104px]">
+          <SearchField
+            ref={searchRef}
+            size="header"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search the gallery"
+            aria-label="Search the gallery"
+            trailing={<Kbd className="hidden md:inline-flex">⌘K</Kbd>}
           />
-          {shelves.map((c) => (
-            <NavItem
-              key={c}
-              icon={<span className="w-[15px]" />}
-              label={COMMUNITY_CATEGORY_LABELS[c]}
-              count={counts.get(c)}
-              on={shelf === c}
-              go={() => setShelf(c)}
-            />
-          ))}
-        </nav>
-
-        <div className="min-h-6 flex-1" />
-        <ConnectCard />
-      </DashSidebar>
-
-      <DashMain>
-        <DashHeader className="max-md:min-h-[104px]">
-          <Button
-            variant="bare"
-            className="min-h-10 gap-2 p-0 font-display text-base font-extrabold text-ink hover:bg-transparent md:hidden"
-            onClick={() => navigate('/')}
-            aria-label="Doop home"
-          >
-            <Logo className="size-7" /> Doop
-          </Button>
-          <label className="order-2 flex h-10 max-w-none flex-1 basis-full items-center gap-[9px] rounded-[10px] border border-line bg-surface px-[11px] text-ink-faint focus-within:border-ink-faint md:order-none md:h-[34px] md:max-w-[400px] md:basis-auto">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="7" />
-              <path d="m20 20-3.2-3.2" />
-            </svg>
-            <Input
-              ref={searchRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search the gallery"
-              aria-label="Search the gallery"
-              variant="bare"
-              inputSize="auto"
-              className="flex-1 md:text-[13px]"
-            />
-            <kbd className="hidden flex-none rounded-[5px] border border-line px-[5px] py-px font-mono text-[10px] text-ink-faint md:block">
-              ⌘K
-            </kbd>
-          </label>
           <span className="flex-1" />
-          <Button variant="ghost" className="min-h-10 md:min-h-0" onClick={() => navigate('/')}>
-            ← My canvases
-          </Button>
-          <AccountMenu />
         </DashHeader>
 
         <DashContent>
           <div className="flex items-start gap-4 md:items-end">
             <div>
-              <DashTitle>
-                Community<em className="not-italic text-brand">.</em>
-              </DashTitle>
+              <DashTitle>Community</DashTitle>
               <DashSubtitle>
                 {items === null
                   ? '…'
@@ -231,11 +161,11 @@ export function Community() {
               value={shelf}
               onValueChange={(next) => setShelf(next as Shelf)}
             >
-              <ToggleChipItem value="all" className="px-2.5 py-1 text-[12px]">
+              <ToggleChipItem value="all" size="sm">
                 All · {counts.get('all')}
               </ToggleChipItem>
               {shelves.map((c) => (
-                <ToggleChipItem key={c} value={c} className="px-2.5 py-1 text-[12px]">
+                <ToggleChipItem key={c} value={c} size="sm">
                   {COMMUNITY_CATEGORY_LABELS[c]} · {counts.get(c)}
                 </ToggleChipItem>
               ))}
@@ -243,29 +173,29 @@ export function Community() {
           )}
 
           {empty ? (
-            <Card className="mt-7 max-w-[560px] rounded-[18px] px-5 pb-6 pt-5 sm:px-7 sm:pb-7 sm:pt-[26px]">
-              <h3 className="font-display text-[20px] font-extrabold tracking-[-0.02em]">Nothing on the shelves yet</h3>
-              <p className="mb-[18px] mt-2.5 text-sm leading-[1.6] text-ink-soft">
-                Anyone can list a canvas here from its Share menu — people preview it and copy it into their own
-                account, and the original stays private. Be the first.
-              </p>
-              <Button variant="primary" onClick={() => navigate('/')}>
-                Pick a canvas to publish
-              </Button>
-            </Card>
+            <EmptyState
+              className="mt-7"
+              title="Nothing on the shelves yet"
+              description="Anyone can list a canvas here from its Share menu — people preview it and copy it into their own account, and the original stays private. Be the first."
+              action={
+                <Button variant="primary" onClick={() => navigate('/')}>
+                  Pick a canvas to publish
+                </Button>
+              }
+            />
           ) : (
             <>
               {items !== null && (query.trim() || shelf !== 'all') && (
-                <div className="mt-[18px] text-xs text-ink-faint">
+                <div className="mt-[18px] text-caption text-ink-faint">
                   {visible.length} of {items.length}
                 </div>
               )}
               {items !== null && visible.length === 0 ? (
-                <p className="mt-7 text-[13.5px] text-ink-soft">Nothing matches — try a different search or shelf.</p>
+                <p className="mt-7 text-copy text-ink-soft">Nothing matches — try a different search or shelf.</p>
               ) : (
                 <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-3.5 xs:grid-cols-[repeat(auto-fill,minmax(250px,1fr))] md:gap-4">
                   {items === null &&
-                    [0, 1, 2, 3].map((i) => <Skeleton key={i} index={i} className={cn(cardCls, 'min-h-[260px]')} />)}
+                    [0, 1, 2, 3].map((i) => <Skeleton key={i} index={i} shape="tile" aspect="16/10" />)}
                   {visible.map((item) => (
                     <GalleryCard
                       key={item.id}
@@ -309,31 +239,25 @@ function GalleryCard({
 }) {
   const cover = item.frames[0]
   return (
-    <div className={cardCls}>
-      <button
-        className="block w-full border-0 bg-transparent text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
-        onClick={onOpen}
-      >
-        <div className="relative grid aspect-[16/10] place-items-center overflow-hidden border-b border-line-soft [background:radial-gradient(circle,var(--dot)_1px,transparent_1px)_0_0/18px_18px,var(--paper-deep)]">
-          {cover ? <FrameImage frameId={cover.id} /> : <span className="text-[12px] text-ink-faint">no preview</span>}
+    <Tile>
+      <Pressable onClick={onOpen}>
+        <TileCover aspect="16/10">
+          <FramePreview frameId={cover?.id} empty="no preview" />
           {item.frames.length > 1 && (
             <Badge className="absolute left-2 top-2 bg-surface/90">{item.frames.length} frames</Badge>
           )}
-        </div>
-        <div className="px-3 pb-3 pt-2.5">
-          <div className="truncate font-display text-[13.5px] font-semibold">{item.name}</div>
-          {item.description && (
-            <p className="mt-1 line-clamp-2 text-[12px] leading-[1.45] text-ink-soft">{item.description}</p>
-          )}
-          <div className="mt-[7px] flex items-center gap-1.5 text-[11.5px] text-ink-faint">
+        </TileCover>
+        <TileBody>
+          <div className="truncate font-display text-copy font-semibold">{item.name}</div>
+          {item.description && <p className="mt-1 line-clamp-2 text-label text-ink-soft">{item.description}</p>}
+          <MetaLine className="mt-[7px]">
             <span className="truncate">by {item.authorName}</span>
-            <span className="opacity-60">·</span>
             <span className="flex-none">
               {item.copyCount} {item.copyCount === 1 ? 'copy' : 'copies'}
             </span>
-          </div>
-        </div>
-      </button>
+          </MetaLine>
+        </TileBody>
+      </Pressable>
       <Button
         size="sm"
         variant="primary"
@@ -343,7 +267,7 @@ function GalleryCard({
       >
         <CopyIcon className="size-3.5" /> {copying ? 'Copying…' : 'Use this'}
       </Button>
-    </div>
+    </Tile>
   )
 }
 
@@ -362,21 +286,16 @@ function DesignModal({
 }) {
   return (
     <Modal size="xl" onClose={onClose}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <ModalEyebrow>{COMMUNITY_CATEGORY_LABELS[item.category]}</ModalEyebrow>
-          <ModalTitle className="mt-1.5 truncate">{item.name}</ModalTitle>
-          <p className="mt-1 text-[12.5px] text-ink-faint">
-            by {item.authorName} · published {timeAgo(item.publishedAt)} · {item.copyCount}{' '}
-            {item.copyCount === 1 ? 'copy' : 'copies'}
-          </p>
-        </div>
-        <Button variant="ghost" size="icon" className="size-10 flex-none" aria-label="Close" onClick={onClose}>
-          <XIcon />
-        </Button>
+      <div className="min-w-0">
+        <ModalEyebrow>{COMMUNITY_CATEGORY_LABELS[item.category]}</ModalEyebrow>
+        <ModalTitle className="mt-1.5 truncate">{item.name}</ModalTitle>
+        <p className="mt-1 text-caption text-ink-faint">
+          by {item.authorName} · published {timeAgo(item.publishedAt)} · {item.copyCount}{' '}
+          {item.copyCount === 1 ? 'copy' : 'copies'}
+        </p>
       </div>
-      {item.description && <p className="mt-3 text-sm leading-[1.6] text-ink-soft">{item.description}</p>}
-      <div className="-mx-5 mt-4 flex gap-3 overflow-x-auto px-5 pb-2 sm:-mx-7 sm:px-7">
+      {item.description && <p className="mt-3 text-copy text-ink-soft">{item.description}</p>}
+      <div className="-mx-5 mt-4 flex gap-3 overflow-x-auto px-5 pb-2">
         {item.frames.map((frame) => (
           <figure key={frame.id} className="flex-none">
             {/* one shared height so mixed artboards read as a row, not a
@@ -386,19 +305,19 @@ function DesignModal({
                 sizing to the frame's real height would squeeze that into a
                 portrait sliver and crop the sides away. */}
             <div
-              className="h-[300px] max-w-[min(520px,80vw)] overflow-hidden rounded-[10px] border border-line bg-paper-deep"
+              className="h-[300px] max-w-[min(520px,80vw)] overflow-hidden rounded-pill border border-line bg-paper-deep"
               style={{ aspectRatio: `${frame.width} / ${Math.min(frame.height, PREVIEW_MAX_HEIGHT)}` }}
             >
-              <FrameImage frameId={frame.id} />
+              <FramePreview frameId={frame.id} />
             </div>
-            <figcaption className="mt-1.5 truncate text-[11.5px] text-ink-faint">
+            <figcaption className="mt-1.5 truncate text-caption text-ink-faint">
               {frame.name} · {Math.round(frame.width)}×{Math.round(frame.height)}
             </figcaption>
           </figure>
         ))}
       </div>
       <div className="mt-4 flex flex-col items-stretch gap-2.5 border-t border-line-soft pt-4 sm:flex-row sm:items-center sm:justify-between">
-        <span className="text-xs text-ink-faint">
+        <span className="text-caption text-ink-faint">
           Copies land in your canvases as a private copy — edit freely, the original is untouched.
         </span>
         <Button variant="primary" className="justify-center" disabled={copying} onClick={onCopy}>
@@ -412,17 +331,3 @@ function DesignModal({
 /** A published frame through the public image pipeline. The frame id is
  *  all the gallery holds; a render that fails says so instead of leaving a
  *  blank tile that looks like an empty design. */
-function FrameImage({ frameId }: { frameId: string }) {
-  const [failed, setFailed] = useState(false)
-  if (failed)
-    return <span className="grid h-full w-full place-items-center text-[12px] text-ink-faint">preview unavailable</span>
-  return (
-    <img
-      src={`/i/${frameId}.jpg?preview`}
-      alt=""
-      loading="lazy"
-      className="h-full w-full object-cover object-top"
-      onError={() => setFailed(true)}
-    />
-  )
-}

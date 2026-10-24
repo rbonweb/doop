@@ -16,6 +16,7 @@ import {
   setModels,
   SettingRefused,
 } from './instanceSettings.ts'
+import { env } from './env.ts'
 
 /**
  * Instance-admin surface, mounted at /api/admin (so already behind the
@@ -134,8 +135,8 @@ function modelsView() {
   return {
     ...modelSettings(),
     /* whether the server's own key exists, and where its calls go */
-    serverKey: Boolean(process.env.ANTHROPIC_API_KEY),
-    baseUrl: process.env.ANTHROPIC_BASE_URL || null,
+    serverKey: Boolean(env.ANTHROPIC_API_KEY),
+    baseUrl: env.ANTHROPIC_BASE_URL ?? null,
   }
 }
 

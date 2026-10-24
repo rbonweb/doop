@@ -86,14 +86,17 @@ beforeEach(() => {
 })
 
 describe('add_comment MCP tool', () => {
-  it('is registered as a mutating tool that needs a canvas, frame, text and agent name', async () => {
+  it('is registered as a mutating tool that needs a canvas, text and agent name, with the frame optional', async () => {
     const { client, close } = await connect()
     try {
       const tool = (await client.listTools()).tools.find((t) => t.name === 'add_comment')
       expect(tool).toBeDefined()
       expect(tool!.annotations?.readOnlyHint).not.toBe(true)
       const schema = tool!.inputSchema as { required?: string[] }
-      expect(new Set(schema.required)).toEqual(new Set(['canvas_id', 'frame_id', 'text', 'agent_name']))
+      expect(new Set(schema.required)).toEqual(new Set(['canvas_id', 'text', 'agent_name']))
+      expect(Object.keys((tool!.inputSchema as { properties: object }).properties)).toEqual(
+        expect.arrayContaining(['frame_id', 'page_id', 'x', 'y']),
+      )
     } finally {
       await close()
     }
@@ -162,6 +165,59 @@ describe('add_comment MCP tool', () => {
         agent_name: 'Claude',
       })
       expect(empty.isError).toBe(true)
+      expect(actions.getComments(CANVAS.id)).toHaveLength(0)
+    } finally {
+      await close()
+    }
+  })
+
+  it('places a canvas comment with page_id, x and y and no frame', async () => {
+    const { client, close } = await connect()
+    try {
+      const pageId = `${CANVAS.id}:page1`
+      const { parsed, isError } = await call(client, 'add_comment', {
+        canvas_id: CANVAS.id,
+        page_id: pageId,
+        x: 120,
+        y: -40,
+        text: 'Leave room for a footer here',
+        agent_name: 'Claude',
+      })
+      expect(isError).toBeFalsy()
+      expect(parsed).toMatchObject({ pageId, x: 120, y: -40, from: 'Claude', fromKind: 'agent' })
+      expect((parsed as { frameId?: unknown }).frameId ?? undefined).toBeUndefined()
+      expect(actions.getComments(CANVAS.id)).toHaveLength(1)
+      expect(actions.getActivity(CANVAS.id)[0]).toMatchObject({ actorName: 'Claude', actorKind: 'agent' })
+    } finally {
+      await close()
+    }
+  })
+
+  it('rejects a canvas comment without a full point, on an unknown page, or mixed with a frame pin', async () => {
+    const { client, close } = await connect()
+    try {
+      const pageId = `${CANVAS.id}:page1`
+      const base = { canvas_id: CANVAS.id, text: 'Here', agent_name: 'Claude' }
+      const noPoint = await call(client, 'add_comment', { ...base, page_id: pageId, x: 1 })
+      expect(noPoint.isError).toBe(true)
+      expect(noPoint.raw).toContain('page_id with x and y')
+
+      const unknownPage = await call(client, 'add_comment', { ...base, page_id: 'missing', x: 1, y: 2 })
+      expect(unknownPage.isError).toBe(true)
+      expect(unknownPage.raw).toContain('no page with id missing')
+
+      const quoted = await call(client, 'add_comment', {
+        ...base,
+        page_id: pageId,
+        x: 1,
+        y: 2,
+        quote: 'Start free trial',
+      })
+      expect(quoted.isError).toBe(true)
+
+      const both = await call(client, 'add_comment', { ...base, frame_id: FRAME.id, page_id: pageId, x: 1, y: 2 })
+      expect(both.isError).toBe(true)
+      expect(both.raw).toContain('not both')
       expect(actions.getComments(CANVAS.id)).toHaveLength(0)
     } finally {
       await close()

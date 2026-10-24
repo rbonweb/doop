@@ -48,7 +48,7 @@ function sniffImage(buf: Buffer): AssetMime | undefined {
 }
 
 /* Every pattern below is linear in the input: a 5 MB upload must not be able to stall the event loop with backtracking. */
-// eslint-disable-next-line no-control-regex -- matching control characters is the point
+// oxlint-disable-next-line no-control-regex -- matching control characters is the point
 const BINARY_CONTROL = /[\u0000-\u0008\u000B\u000E-\u001F\u007F]/
 const MARKUP_TAG = /<(?:script|html|!doctype|body|iframe)\b/i
 const CSS_AT_RULE =

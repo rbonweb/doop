@@ -19,13 +19,16 @@ import { timeAgo } from '../lib/time'
 import { cn } from '../lib/utils'
 import { MOD_KEY } from '../lib/keys'
 import { CollapseAllIcon, NoteIcon, TrashIcon } from './ui/icons'
+import { IconButton } from './ui/icon-button'
+import { Pressable } from './ui/pressable'
+import { Textarea } from './ui/textarea'
 
 /* Same counter-scaling the frame labels use: the `--zoom` variable is set by
    the Stage, so a pan or zoom never re-renders a note. */
 const COUNTER_SCALE = '[transform:scale(min(calc(1/var(--zoom,1)),2.4))]'
 
 /* the brand blue pulled toward the ink, so it reads on every tint in both themes */
-const LINK_INK = 'text-[color-mix(in_srgb,var(--brand)_62%,var(--ink))]'
+const LINK_INK = '[color:color-mix(in_srgb,var(--brand)_62%,var(--ink))]'
 
 const SWATCH: Record<NoteColor, string> = {
   yellow: 'Yellow',
@@ -60,7 +63,7 @@ function Inlines({ nodes }: { nodes: Inline[] }) {
             return <br key={i} />
           case 'strong':
             return (
-              <strong key={i} className="font-semibold">
+              <strong key={i} className="font-medium">
                 <Inlines nodes={node.children} />
               </strong>
             )
@@ -78,7 +81,7 @@ function Inlines({ nodes }: { nodes: Inline[] }) {
             )
           case 'code':
             return (
-              <code key={i} className="rounded-[4px] bg-ink/8 px-1 py-px font-mono text-[0.88em]">
+              <code key={i} className="rounded-tag bg-ink/8 px-1 py-px font-mono text-label">
                 {node.text}
               </code>
             )
@@ -104,7 +107,7 @@ function Inlines({ nodes }: { nodes: Inline[] }) {
                   e.preventDefault()
                   flyToFrame(node.frameId)
                 }}
-                className={cn(LINK_INK, 'cursor-pointer rounded-[4px] bg-ink/10 px-1 no-underline hover:bg-ink/15')}
+                className={cn(LINK_INK, 'cursor-pointer rounded-tag bg-ink/10 px-1 no-underline hover:bg-ink/15')}
               >
                 <Inlines nodes={node.children} />
               </a>
@@ -116,9 +119,9 @@ function Inlines({ nodes }: { nodes: Inline[] }) {
 }
 
 const HEADING_CLASS = {
-  1: 'mb-1.5 mt-0.5 text-[1.25em] font-semibold leading-tight tracking-[-0.01em]',
-  2: 'mb-1 mt-0.5 text-[1.1em] font-semibold leading-tight',
-  3: 'mb-1 mt-0.5 text-[1em] font-semibold leading-tight',
+  1: 'mb-1.5 mt-0.5 text-heading font-semibold',
+  2: 'mb-1 mt-0.5 text-lead font-semibold',
+  3: 'mb-1 mt-0.5 text-copy font-semibold',
 } as const
 
 function Blocks({ blocks }: { blocks: Block[] }) {
@@ -146,7 +149,7 @@ function Blocks({ blocks }: { blocks: Block[] }) {
             return (
               <pre
                 key={i}
-                className="mb-1.5 overflow-x-auto rounded-md bg-ink/8 px-2 py-1.5 font-mono text-[0.86em] leading-snug last:mb-0"
+                className="mb-1.5 overflow-x-auto rounded-row bg-ink/8 px-2 py-1.5 font-mono text-label leading-snug last:mb-0"
               >
                 {block.text}
               </pre>
@@ -227,15 +230,16 @@ function NoteEditor({ note }: { note: CanvasNote }) {
   }
 
   return (
-    <textarea
+    <Textarea
       ref={ref}
+      variant="bare"
       value={draft}
       maxLength={MAX_NOTE_CHARS}
       spellCheck
       placeholder="Write in markdown…  [label](goto:frameId) flies to a frame"
       data-stage-scroll=""
       aria-label="Note text"
-      className="block size-full resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-[1.55] text-ink outline-none placeholder:text-ink-faint"
+      className="block size-full font-mono text-label md:text-label"
       onChange={(e) => setDraft(e.target.value)}
       onBlur={() => finish(true)}
       onPointerDown={(e) => e.stopPropagation()}
@@ -345,8 +349,9 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
 
   if (folded) {
     return (
-      <button
-        type="button"
+      <Pressable
+        layout="inline"
+        focus="ring"
         title={noteExcerpt(note.markdown, 120) || 'Empty note'}
         aria-label="Unfold note"
         data-note-id={note.id}
@@ -355,13 +360,13 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
         onPointerDown={(e) => e.stopPropagation()}
         onClick={() => useStore.getState().toggleNoteFolded(note.id)}
         className={cn(
-          'absolute z-10 grid size-7 origin-top-left cursor-pointer place-items-center rounded-lg border border-[color-mix(in_srgb,var(--note)_45%,var(--line))] bg-[color-mix(in_srgb,var(--note)_34%,var(--surface))] text-ink shadow-card transition-transform hover:scale-110',
+          'absolute z-10 grid size-7 origin-top-left place-items-center rounded-control border border-[color-mix(in_srgb,var(--note)_45%,var(--line))] bg-[color-mix(in_srgb,var(--note)_34%,var(--surface))] text-ink shadow-card transition-transform hover:scale-110',
           'animate-in fade-in zoom-in-90 duration-200',
           COUNTER_SCALE,
         )}
       >
         <NoteIcon width={15} height={15} />
-      </button>
+      </Pressable>
     )
   }
 
@@ -373,7 +378,7 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
       data-color={color}
       style={{ left: note.x, top: note.y, width: note.width, height: note.height, ...hueOf(color) }}
       className={cn(
-        'group absolute z-10 flex flex-col overflow-visible rounded-lg border border-[color-mix(in_srgb,var(--note)_42%,var(--line))] bg-[color-mix(in_srgb,var(--note)_17%,var(--surface))] text-ink shadow-card',
+        'group absolute z-10 flex flex-col overflow-visible rounded-control border border-[color-mix(in_srgb,var(--note)_42%,var(--line))] bg-[color-mix(in_srgb,var(--note)_17%,var(--surface))] text-ink shadow-card',
         'animate-in fade-in zoom-in-95 duration-200 data-[active]:shadow-pop data-[active]:ring-1 data-[active]:ring-[color-mix(in_srgb,var(--note)_60%,transparent)]',
         editing && 'ring-2 ring-brand/60',
       )}
@@ -390,44 +395,44 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
         <div
           role="toolbar"
           aria-label="Note actions"
-          className="flex items-center gap-1 rounded-lg border border-line bg-surface p-1 shadow-pop"
+          className="flex items-center gap-1 rounded-control bg-surface p-1 shadow-pop"
         >
           {mayEdit &&
             NOTE_COLORS.map((c) => (
-              <button
+              <Pressable
                 key={c}
-                type="button"
+                layout="inline"
+                focus="ring"
                 aria-label={`${SWATCH[c]} note`}
                 aria-pressed={c === color}
                 title={SWATCH[c]}
                 style={hueOf(c)}
                 onClick={() => c !== color && saveNote(note, { color: c })}
                 className={cn(
-                  'size-4 rounded-full border border-[color-mix(in_srgb,var(--note)_55%,var(--line))] bg-[color-mix(in_srgb,var(--note)_70%,var(--surface))] transition-transform hover:scale-125',
+                  'size-4 flex-none rounded-full border border-[color-mix(in_srgb,var(--note)_55%,var(--line))] bg-[color-mix(in_srgb,var(--note)_70%,var(--surface))] transition-transform hover:scale-125',
                   c === color && 'ring-2 ring-ink/70 ring-offset-1 ring-offset-surface',
                 )}
               />
             ))}
           {mayEdit && <span aria-hidden className="mx-0.5 h-4 w-px bg-line" />}
-          <button
-            type="button"
+          <IconButton
+            size="sm"
             aria-label="Fold note"
             title="Fold to a corner"
             onClick={() => useStore.getState().toggleNoteFolded(note.id)}
-            className="grid size-6 place-items-center rounded-md text-ink-soft transition-colors hover:bg-paper-deep hover:text-ink"
           >
-            <CollapseAllIcon width={13} height={13} />
-          </button>
+            <CollapseAllIcon size="rail" />
+          </IconButton>
           {mayEdit && (
-            <button
-              type="button"
+            <IconButton
+              size="sm"
+              variant="danger"
               aria-label="Delete note"
               title="Delete note"
               onClick={() => removeNote(note)}
-              className="grid size-6 place-items-center rounded-md text-ink-soft transition-colors hover:bg-accent-ink/10 hover:text-accent-ink"
             >
-              <TrashIcon width={13} height={13} />
-            </button>
+              <TrashIcon size="rail" />
+            </IconButton>
           )}
         </div>
       </div>
@@ -436,7 +441,7 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
         onPointerDown={startMove}
         onDoubleClick={() => mayEdit && useStore.getState().setEditingNote(note.id)}
         className={cn(
-          'flex h-6 flex-none items-center gap-1.5 rounded-t-[7px] border-b border-[color-mix(in_srgb,var(--note)_30%,var(--line-soft))] bg-[color-mix(in_srgb,var(--note)_30%,var(--surface))] px-2 font-mono text-[9.5px] font-medium uppercase tracking-[0.12em] text-ink-soft select-none',
+          'flex h-6 flex-none items-center gap-1.5 rounded-t-row border-b border-[color-mix(in_srgb,var(--note)_30%,var(--line-soft))] bg-[color-mix(in_srgb,var(--note)_30%,var(--surface))] px-2 text-micro font-medium text-ink-soft select-none',
           mayEdit ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
         )}
       >
@@ -452,14 +457,14 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
           if (mayEdit && !editing && !(e.target as HTMLElement).closest('a'))
             useStore.getState().setEditingNote(note.id)
         }}
-        className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-[family-name:var(--font-ui)] text-[13px] leading-[1.5] [overflow-wrap:anywhere]"
+        className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-sans text-copy [overflow-wrap:anywhere]"
       >
         {editing ? <NoteEditor note={note} /> : <NoteBody markdown={note.markdown} mayEdit={mayEdit} />}
       </div>
 
-      <footer className="flex h-6 flex-none items-center gap-1.5 border-t border-[color-mix(in_srgb,var(--note)_22%,var(--line-soft))] px-3 text-[10.5px] text-ink-soft select-none">
+      <footer className="flex h-6 flex-none items-center gap-1.5 border-t border-[color-mix(in_srgb,var(--note)_22%,var(--line-soft))] px-3 text-caption text-ink-soft select-none">
         {editing ? (
-          <span className="font-mono tracking-[0.02em]">{MOD_KEY}↵ save · Esc cancel</span>
+          <span className="font-mono text-micro">{MOD_KEY}↵ save · Esc cancel</span>
         ) : (
           <>
             <span aria-hidden className="size-1.5 flex-none rounded-full" style={{ background: colorFor(author) }} />
@@ -478,7 +483,7 @@ export const StickyNote = memo(function StickyNote({ note, frameName }: { note: 
           role="separator"
           aria-label="Resize note"
           onPointerDown={startResize}
-          className="absolute -right-px -bottom-px size-4 cursor-nwse-resize rounded-br-lg bg-[color-mix(in_srgb,var(--note)_55%,var(--surface))] opacity-70 transition-opacity [clip-path:polygon(100%_0,100%_100%,0_100%)] hover:opacity-100"
+          className="absolute -right-px -bottom-px size-4 cursor-nwse-resize rounded-br-control bg-[color-mix(in_srgb,var(--note)_55%,var(--surface))] opacity-70 transition-opacity [clip-path:polygon(100%_0,100%_100%,0_100%)] hover:opacity-100"
         />
       )}
     </div>

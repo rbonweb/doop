@@ -165,6 +165,23 @@ describe('get_comments MCP tool', () => {
     }
   })
 
+  it('returns canvas comments with their page and point, and leaves them out of a frame filter', async () => {
+    const onCanvas = comment({ id: 'm4', frameId: undefined, pageId: 'p1', x: 820, y: 240, selector: '', snippet: '' })
+    const onFrame = comment({ id: 'm1', at: 1 })
+    vi.spyOn(actions, 'getComments').mockReturnValue([onCanvas, onFrame])
+    const { client, close } = await connect()
+    try {
+      const all = await callComments(client, { canvas_id: CANVAS.id })
+      expect(all.parsed).toEqual([onCanvas, onFrame])
+      expect((all.parsed as Array<Record<string, unknown>>)[0]).toMatchObject({ pageId: 'p1', x: 820, y: 240 })
+      expect((all.parsed as Array<Record<string, unknown>>)[0]).not.toHaveProperty('frameId')
+      const onlyFrame = await callComments(client, { canvas_id: CANVAS.id, frame_id: FRAME_A.id })
+      expect(onlyFrame.parsed).toEqual([onFrame])
+    } finally {
+      await close()
+    }
+  })
+
   it('includes resolved comments by default and excludes them with include_resolved false', async () => {
     const resolved = comment({ id: 'm2', at: 2, text: 'fixed', resolvedAt: 5, resolvedBy: 'alice' })
     const open = comment({ id: 'm1', at: 1, text: 'open' })

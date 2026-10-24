@@ -428,9 +428,9 @@ describe('the show stays dark in both themes', () => {
     await mount(DECK(), 's1')
     await press('s')
     const dialog = container.querySelector('[role="dialog"]')!
-    expect(dialog.classList).toContain('bg-[#0b0b0d]')
+    expect(dialog.classList).toContain('bg-code')
     expect(dialog.classList).toContain('show-dark')
-    expect(container.querySelector('[role="region"][aria-label="Presenter view"]')!.classList).toContain('bg-[#0b0b0d]')
+    expect(container.querySelector('[role="region"][aria-label="Presenter view"]')!.classList).toContain('bg-code')
     expect(container.querySelector('[role="toolbar"]')!.className).toContain('text-white')
     /* the speaker notes' markdown reads the ink tokens, which .show-dark pins light; the chrome reads none */
     const outsideNotes = [dialog, ...dialog.querySelectorAll('[class]')]

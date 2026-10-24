@@ -98,3 +98,18 @@ it('repairs a broken page tree on boot and on save so bad data never persists', 
     { id: 'b', name: 'B', parentId: 'a' },
   ])
 })
+
+it('advances a frame version when multiple writes share the same timestamp', () => {
+  const now = vi.spyOn(Date, 'now').mockReturnValue(100)
+  try {
+    const canvas = store.createCanvas('Versions', 'alice')
+    const frame = store.createFrame(canvas.id, { name: 'Path' }, 'alice')!
+    const first = frame.updatedAt
+    const second = store.updateFrame(frame.id, { html: '<p>Second</p>' }, 'alice')!.updatedAt
+    const third = store.updateFrame(frame.id, { html: '<p>Third</p>' }, 'alice')!.updatedAt
+    expect(second).toBeGreaterThan(first)
+    expect(third).toBeGreaterThan(second)
+  } finally {
+    now.mockRestore()
+  }
+})

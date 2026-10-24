@@ -1,20 +1,15 @@
 import { useStore } from '../lib/store'
 import { listShortcuts, shortcutKeycaps, type Shortcut, type ShortcutGroup } from '../lib/shortcuts'
+import { Kbd } from './ui/kbd'
 import { Modal, ModalEyebrow, ModalLede, ModalTitle } from './ui/modal'
 
-const GROUPS: ShortcutGroup[] = ['Canvas', 'Selection', 'View', 'Modes']
+const GROUPS: ShortcutGroup[] = ['Tools', 'Canvas', 'Selection', 'View', 'Modes']
 
-/* The keycap look: a hairline chip on the paper tone, mono caps. */
 function Keycaps({ shortcut }: { shortcut: Shortcut }) {
   return (
     <span className="flex shrink-0 items-center gap-1">
       {shortcutKeycaps(shortcut).map((cap, i) => (
-        <kbd
-          key={i}
-          className="grid min-w-[22px] place-items-center rounded-[6px] border border-line bg-paper px-1.5 py-[3px] font-mono text-[11px] font-medium leading-none text-ink-soft shadow-[0_1px_0_var(--line)]"
-        >
-          {cap}
-        </kbd>
+        <Kbd key={i}>{cap}</Kbd>
       ))}
     </span>
   )
@@ -38,13 +33,11 @@ export function ShortcutsDialog() {
           if (!rows.length) return null
           return (
             <section key={group} aria-label={group}>
-              <h3 className="mb-2 font-mono text-[10px] font-[650] uppercase tracking-[0.14em] text-ink-faint">
-                {group}
-              </h3>
+              <h3 className="mb-2 text-caption font-medium text-ink-faint">{group}</h3>
               <ul className="divide-y divide-line-soft">
                 {rows.map((s) => (
-                  <li key={s.id} className="flex items-center justify-between gap-3 py-2 text-[13px] text-ink">
-                    <span className="min-w-0 leading-[1.35]">{s.label}</span>
+                  <li key={s.id} className="flex items-center justify-between gap-3 py-2 text-copy text-ink">
+                    <span className="min-w-0">{s.label}</span>
                     <Keycaps shortcut={s} />
                   </li>
                 ))}

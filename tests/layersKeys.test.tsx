@@ -39,7 +39,7 @@ let root: Root
 const reachedWindow = vi.fn()
 
 function pressDelete() {
-  const tree = container.querySelector<HTMLElement>('[role="tree"]')
+  const tree = container.querySelector<HTMLElement>('[role="tree"][aria-label="Layers"]')
   if (!tree) throw new Error('layers tree not rendered')
   act(() => {
     tree.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }))
@@ -87,5 +87,21 @@ describe('LayersPanel ⌫', () => {
     pressDelete()
     expect(deleteFrame).toHaveBeenCalledTimes(1)
     expect(reachedWindow).not.toHaveBeenCalled()
+  })
+
+  it('leaves ↵ on a focused lock button to the button, not to the tree', () => {
+    const lock = container.querySelector<HTMLButtonElement>('button[aria-label="Lock"]')
+    if (!lock) throw new Error('lock button not rendered')
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+    act(() => {
+      lock.dispatchEvent(enter)
+    })
+    /* the tree's ↵ flies to the frame and prevents the default — which would
+       have been the button's click */
+    expect(enter.defaultPrevented).toBe(false)
+    expect(useStore.getState().flyTo).toBeNull()
+    act(() => lock.click())
+    expect(updateFrame).toHaveBeenCalledTimes(1)
+    expect(useStore.getState().canvas?.frames[0]?.locked).toBe(true)
   })
 })

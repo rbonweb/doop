@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { Canvas, CanvasNote, Frame } from '../shared/types'
 
 /* Below the edit role the canvas UI offers no control that would be turned down by the server: sticky notes cannot be
-   dragged, recoloured, deleted or resized, the page tree only navigates, version history stays shut (it needs edit,
+   dragged, recoloured, deleted or resized, the page tree only navigates, version history offers no Restore (it needs edit,
    since an old version can hold what editors removed), and the slide flag and speaker notes cannot be edited. */
 const api = vi.hoisted(() => ({
   frameVersions: vi.fn(async () => [
@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
       name: 'Hero',
       width: 10,
       height: 10,
+      htmlBytes: 10,
     },
   ]),
   frameVersion: vi.fn(async () => ({
@@ -31,6 +32,7 @@ const api = vi.hoisted(() => ({
     name: 'Hero',
     width: 10,
     height: 10,
+    htmlBytes: 10,
     html: '<p>old</p>',
   })),
   restoreFrameVersion: vi.fn(),
@@ -49,7 +51,7 @@ vi.mock('../src/lib/posthog', () => ({ posthog: { capture: vi.fn() } }))
 const { useStore } = await import('../src/lib/store')
 const { StickyNote } = await import('../src/components/StickyNote')
 const { PagesPanel } = await import('../src/components/PagesPanel')
-const { FrameHistoryPanel } = await import('../src/components/FrameHistoryPanel')
+const { FrameHistoryModal } = await import('../src/components/FrameHistoryModal')
 const { Inspector } = await import('../src/components/Inspector')
 const { TooltipProvider } = await import('../src/components/ui/tooltip')
 
@@ -156,13 +158,20 @@ describe.each(['view', 'comment'] as const)('with the %s role', (role) => {
     expect(api.updatePages).not.toHaveBeenCalled()
   })
 
-  it('keeps version history shut: the panel asks the server for nothing and says who it is for', async () => {
-    await mount(<FrameHistoryPanel frame={frame} onClose={() => {}} />)
-    expect(container.textContent).toContain('Version history is for people who can edit')
-    expect(container.textContent).not.toContain('alice')
-    expect(container.textContent).not.toContain('Restore this version')
-    expect(api.frameVersions).not.toHaveBeenCalled()
-    expect(api.frameVersion).not.toHaveBeenCalled()
+  it('shows version history without Restore', async () => {
+    await mount(<FrameHistoryModal frame={frame} onClose={() => {}} />)
+    expect(document.body.textContent).toContain('alice')
+    expect(document.body.textContent).toContain('edit')
+    const row = [...document.body.querySelectorAll<HTMLButtonElement>('button[data-slot="list-row"]')].find((b) =>
+      b.textContent?.includes('alice'),
+    )!
+    await act(async () => row.click())
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(api.frameVersion).toHaveBeenCalled()
+    expect(document.body.textContent).not.toContain('Restore this version')
+    expect(api.restoreFrameVersion).not.toHaveBeenCalled()
   })
 
   it('hides the slide, speaker notes and History controls in the Inspector', async () => {
@@ -192,8 +201,8 @@ describe('with the edit role', () => {
     expect(container.textContent).toContain('Slide')
     expect(container.querySelector<HTMLTextAreaElement>('textarea[placeholder^="What to say"]')?.value).toBe('say hi')
     expect([...container.querySelectorAll('button')].some((b) => b.textContent === 'History')).toBe(true)
-    await mount(<FrameHistoryPanel frame={frame} onClose={() => {}} />)
-    expect(container.textContent).toContain('alice')
+    await mount(<FrameHistoryModal frame={frame} onClose={() => {}} />)
+    expect(document.body.textContent).toContain('alice')
     expect(api.frameVersions).toHaveBeenCalled()
   })
 
@@ -203,7 +212,14 @@ describe('with the edit role', () => {
     expect(labels()).toContain('Resize note')
     await mount(<PagesPanel />)
     expect(labels()).toContain('Add page')
-    await mount(<FrameHistoryPanel frame={frame} onClose={() => {}} />)
-    expect(container.textContent).toContain('Restore this version')
+    await mount(<FrameHistoryModal frame={frame} onClose={() => {}} />)
+    const row = [...document.body.querySelectorAll<HTMLButtonElement>('button[data-slot="list-row"]')].find((b) =>
+      b.textContent?.includes('alice'),
+    )!
+    await act(async () => row.click())
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(document.body.textContent).toContain('Restore this version')
   })
 })

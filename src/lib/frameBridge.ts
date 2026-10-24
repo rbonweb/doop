@@ -12,24 +12,58 @@ export interface ElementInfo {
   tag: string
   id: string
   classes: string[]
-  parent: { tag: string; id: string; className: string; display: string; flexDirection: string } | null
+  parent: {
+    tag: string
+    id: string
+    className: string
+    display: string
+    flexDirection: string
+    writingMode: string
+  } | null
+  /** Nearest ancestor with a layout box, skipping display: contents wrappers. */
+  layoutParent?: { display: string; flexDirection: string; writingMode: string } | null
   /** 1-based place among the parent's children, and how many there are */
   index: number
   count: number
   inline: Record<string, string>
   hasText: boolean
   rect: { x: number; y: number; width: number; height: number }
+  /** Rendered bounds relative to the parent's border box, in frame pixels. */
+  geometry: {
+    x: number
+    y: number
+    rotation: number | null
+    scaleX: number
+    scaleY: number
+    enabled: boolean
+    canAlign: boolean
+  }
+  /** rendered box over layout box: the element's own and inherited scale */
+  scale: { x: number; y: number }
   position: string
   display: string
   flexDirection: string
+  flexWrap: string
+  justifyContent: string
+  alignItems: string
+  writingMode: string
   width: number | null
   height: number | null
+  widthValue: string
+  heightValue: string
+  flexGrow: number
+  boxSizing: string
+  /** Unrounded computed padding and border sums, for content-box sizing. */
+  boxExtras: { width: number; height: number }
+  aspectRatio: string
+  naturalAspectRatio: number | null
   minWidth: string
   rowGap: number | null
   columnGap: number | null
   padding: [number | null, number | null, number | null, number | null]
   opacity: number | null
   visibility: string
+  clipsContent: boolean
   backgroundColor: string
   /** top, right, bottom, left */
   borderWidths: [number | null, number | null, number | null, number | null]
@@ -41,11 +75,28 @@ export interface ElementInfo {
   fontSize: number | null
   fontWeight: string
   fontFamily: string
+  /** Font faces declared by this frame, including linked web fonts. */
+  fontFamilies: string[]
   textAlign: string
+  direction: string
 }
 
 /** Inline style changes: a null or empty value removes the property. */
 export type StylePatch = Record<string, string | null>
+
+export type GeometryEdit =
+  | { kind: 'position'; axis: 'x' | 'y'; value: number }
+  | { kind: 'align'; axis: 'x' | 'y'; edge: 'start' | 'center' | 'end' }
+  | { kind: 'rotate'; value: number }
+  | { kind: 'flip'; axis: 'x' | 'y' }
+
+export async function editElementGeometry(
+  frameId: string,
+  selector: string,
+  edit: GeometryEdit,
+): Promise<ElementInfo | null> {
+  return infoOf(await requestFrame(frameId, 'doop:geometry', { selector, edit }))
+}
 
 /* A request `doop:<name>` is answered by `doop:<name>-result` carrying the
    same reqId — the convention every runtime request already follows. */
@@ -58,7 +109,7 @@ interface PendingAsk {
 const REPLY_TIMEOUT_MS = 2000
 
 const windows = new Map<string, Window>()
-const readyListeners = new Map<string, Set<() => void>>()
+const changeListeners = new Map<string, Set<() => void>>()
 const pending = new Map<number, PendingAsk>()
 let nextReq = 0
 let listening = false
@@ -68,6 +119,12 @@ function listen() {
   listening = true
   window.addEventListener('message', (ev: MessageEvent) => {
     const data = ev.data as { type?: string; reqId?: number } | null
+    if (data?.type === 'doop:frame-updated') {
+      for (const [frameId, win] of windows) {
+        if (ev.source === win) changeListeners.get(frameId)?.forEach((cb) => cb())
+      }
+      return
+    }
     if (typeof data?.type !== 'string' || typeof data.reqId !== 'number') return
     const ask = pending.get(data.reqId)
     /* the reply must come from the window that was asked — request ids are
@@ -80,22 +137,23 @@ function listen() {
 
 export function registerFrameWindow(frameId: string, win: Window) {
   windows.set(frameId, win)
-  readyListeners.get(frameId)?.forEach((cb) => cb())
+  changeListeners.get(frameId)?.forEach((cb) => cb())
 }
 
 export function unregisterFrameWindow(frameId: string, win: Window) {
   if (windows.get(frameId) === win) windows.delete(frameId)
 }
 
-/** Runs `cb` each time the frame's runtime (re)registers — a panel opened
- *  before the frame was ready uses this to ask again. Returns the unsubscribe. */
-export function onFrameReady(frameId: string, cb: () => void): () => void {
-  const set = readyListeners.get(frameId) ?? new Set()
+/** Re-read after the runtime registers, renders HTML, or loads font faces.
+ *  Store updates can precede the frame's throttled render. */
+export function onFrameChange(frameId: string, cb: () => void): () => void {
+  listen()
+  const set = changeListeners.get(frameId) ?? new Set()
   set.add(cb)
-  readyListeners.set(frameId, set)
+  changeListeners.set(frameId, set)
   return () => {
     set.delete(cb)
-    if (set.size === 0) readyListeners.delete(frameId)
+    if (set.size === 0) changeListeners.delete(frameId)
   }
 }
 
@@ -136,4 +194,13 @@ export async function inspectElement(frameId: string, selector: string): Promise
  *  element's fresh properties. */
 export async function styleElement(frameId: string, selector: string, styles: StylePatch): Promise<ElementInfo | null> {
   return infoOf(await requestFrame(frameId, 'doop:style', { selector, styles }))
+}
+
+/** Preview a whole scrub locally, then save once or restore its original CSS. */
+export async function styleGesture(
+  frameId: string,
+  selector: string,
+  phase: 'begin' | 'commit' | 'cancel',
+): Promise<ElementInfo | null> {
+  return infoOf(await requestFrame(frameId, 'doop:style-gesture', { selector, phase }))
 }

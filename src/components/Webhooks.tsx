@@ -3,16 +3,14 @@ import { api, errorMessage } from '../lib/api'
 import { posthog } from '../lib/posthog'
 import { timeAgo } from '../lib/time'
 import { WEBHOOK_EVENTS, WEBHOOK_EVENT_LABELS, type WebhookEventType, type WebhookInfo } from '../../shared/webhooks'
+import { ConfirmDialog } from './ui/alert-dialog'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Note } from './ui/note'
 import { Checkbox } from './ui/checkbox'
 import { CodeBlock } from './ui/code-block'
-import { Card, CardDescription, CardHeader, CardRow, CardTitle } from './ui/card'
+import { CardDescription, CardHeader, CardRow, CardTitle, SettingsCard } from './ui/card'
 import { TrashIcon } from './ui/icons'
-
-const settingsCard = 'mt-4 max-w-[1000px] overflow-hidden sm:mt-5'
-const settingsInput = 'w-full sm:w-[420px]'
 
 function hostOf(url: string): string {
   try {
@@ -39,18 +37,18 @@ function health(hook: WebhookInfo): { text: string; tone?: 'error' | 'success' }
 /** Picks events with the shared labels; used for the new-hook form. */
 function EventPicker({ value, onChange }: { value: WebhookEventType[]; onChange: (next: WebhookEventType[]) => void }) {
   return (
-    <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+    <div className="grid gap-1.5 sm:grid-cols-2">
       {WEBHOOK_EVENTS.map((event) => {
         const on = value.includes(event)
         return (
-          <label key={event} className="relative flex cursor-pointer items-center gap-2 text-[12.5px] text-ink">
+          <label key={event} className="relative flex cursor-pointer items-center gap-2 text-body text-ink">
             <Checkbox
               checked={on}
               onChange={() => onChange(on ? value.filter((e) => e !== event) : [...value, event])}
               aria-label={WEBHOOK_EVENT_LABELS[event]}
             />
             <span>
-              <code className="font-mono text-[11.5px] text-ink-soft">{event}</code>
+              <code className="font-mono text-caption text-ink-soft">{event}</code>
               <span className="text-ink-faint"> · {WEBHOOK_EVENT_LABELS[event]}</span>
             </span>
           </label>
@@ -72,6 +70,9 @@ export function Webhooks() {
   /* the one moment a secret exists client-side */
   const [secret, setSecret] = useState<{ id: string; secret: string } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  /* the action awaiting "are you sure" — an in-app dialog, since
+     window.confirm is a silent "cancel" in the desktop shell's webview */
+  const [confirming, setConfirming] = useState<{ kind: 'rotate' | 'remove'; hook: WebhookInfo } | null>(null)
   const [rowNote, setRowNote] = useState<Record<string, { text: string; tone?: 'error' | 'success' }>>({})
 
   useEffect(() => {
@@ -141,12 +142,6 @@ export function Webhooks() {
     act(
       hook,
       async () => {
-        if (
-          !window.confirm(
-            `Rotate the secret for ${hostOf(hook.url)}? Deliveries signed with the old one stop verifying.`,
-          )
-        )
-          return
         const { secret: fresh } = await api.rotateWebhookSecret(hook.id)
         posthog.capture('webhook_secret_rotated')
         setSecret({ id: hook.id, secret: fresh })
@@ -158,7 +153,6 @@ export function Webhooks() {
     act(
       hook,
       async () => {
-        if (!window.confirm(`Remove the webhook for ${hostOf(hook.url)}?`)) return
         await api.deleteWebhook(hook.id)
         posthog.capture('webhook_deleted')
         setHooks((current) => current?.filter((h) => h.id !== hook.id) ?? null)
@@ -168,13 +162,13 @@ export function Webhooks() {
     )
 
   return (
-    <Card className={settingsCard}>
+    <SettingsCard>
       <CardHeader>
         <CardTitle>Webhooks</CardTitle>
         <CardDescription>
           doop POSTs a signed JSON event to each URL below when something happens on a canvas you own, were invited to,
           or that lives in one of your workspaces — route it to Slack, n8n, an issue tracker, anything with an HTTP
-          endpoint. Each delivery carries an <code className="font-mono text-[12px]">X-Doop-Signature</code> header
+          endpoint. Each delivery carries an <code className="font-mono text-label">X-Doop-Signature</code> header
           (HMAC-SHA256 with the webhook’s secret) so the receiver can trust it. Failed deliveries are retried three
           times; a hook that keeps failing pauses itself.
         </CardDescription>
@@ -187,10 +181,9 @@ export function Webhooks() {
             {saving ? 'Adding…' : 'Add webhook'}
           </Button>
         }
-      >
-        <div className="min-w-0 flex-1">
+        controlWidth="lg"
+        control={
           <Input
-            className={settingsInput}
             value={url}
             onChange={(e) => {
               setUrl(e.target.value)
@@ -200,6 +193,10 @@ export function Webhooks() {
             inputMode="url"
             aria-label="Webhook URL"
           />
+        }
+      >
+        {/* basis-full drops the picker onto its own line under the URL field */}
+        <div className="min-w-0 basis-full">
           <EventPicker value={events} onChange={setEvents} />
           {error && <Note tone="error">{error}</Note>}
         </div>
@@ -229,7 +226,12 @@ export function Webhooks() {
                 <Button size="sm" variant="ghost" disabled={busy === hook.id} onClick={() => void test(hook)}>
                   Send test
                 </Button>
-                <Button size="sm" variant="ghost" disabled={busy === hook.id} onClick={() => void rotate(hook)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy === hook.id}
+                  onClick={() => setConfirming({ kind: 'rotate', hook })}
+                >
                   Rotate secret
                 </Button>
                 <Button size="sm" variant="ghost" disabled={busy === hook.id} onClick={() => void toggle(hook)}>
@@ -240,7 +242,7 @@ export function Webhooks() {
                   variant="ghost"
                   disabled={busy === hook.id}
                   aria-label={`Remove webhook for ${hostOf(hook.url)}`}
-                  onClick={() => void remove(hook)}
+                  onClick={() => setConfirming({ kind: 'remove', hook })}
                 >
                   <TrashIcon /> Remove
                 </Button>
@@ -248,10 +250,10 @@ export function Webhooks() {
             }
           >
             <div className="min-w-0 flex-1">
-              <div className="truncate font-mono text-[12.5px] text-ink-soft" title={hook.url}>
+              <div className="truncate font-mono text-body text-ink-soft" title={hook.url}>
                 {hook.url}
               </div>
-              <div className="mt-1 text-[11.5px] text-ink-faint">{hook.events.join(' · ')}</div>
+              <div className="mt-1 text-caption text-ink-faint">{hook.events.join(' · ')}</div>
               <Note tone={status.tone}>{status.text}</Note>
             </div>
           </CardRow>
@@ -262,6 +264,25 @@ export function Webhooks() {
           <Note>Add one above — a quick way to try it is an n8n Webhook node or a request bin.</Note>
         </CardRow>
       )}
-    </Card>
+      <ConfirmDialog
+        open={!!confirming}
+        onOpenChange={(open) => !open && setConfirming(null)}
+        title={
+          confirming?.kind === 'rotate'
+            ? `Rotate the secret for ${confirming ? hostOf(confirming.hook.url) : ''}?`
+            : `Remove the webhook for ${confirming ? hostOf(confirming.hook.url) : ''}?`
+        }
+        description={
+          confirming?.kind === 'rotate' ? 'Deliveries signed with the old secret stop verifying.' : undefined
+        }
+        confirmLabel={confirming?.kind === 'rotate' ? 'Rotate secret' : 'Remove webhook'}
+        destructive
+        onConfirm={() => {
+          const target = confirming
+          setConfirming(null)
+          if (target) void (target.kind === 'rotate' ? rotate(target.hook) : remove(target.hook))
+        }}
+      />
+    </SettingsCard>
   )
 }

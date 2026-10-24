@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { UpdateInfo } from '../../shared/selfUpdate'
 import { adminApi, ApiError } from '../lib/api'
 import { timeAgo } from '../lib/time'
-import { cn } from '@/lib/utils'
+import { ConfirmDialog } from './ui/alert-dialog'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
-import { cardVariants } from './ui/card'
+import { CardRow, SettingsCard } from './ui/card'
 
 const POLL_MS = 3000
 
@@ -20,6 +20,7 @@ export function VersionCard() {
   const [info, setInfo] = useState<UpdateInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState<string | null>(null)
   const loadedVersion = useRef<string | null>(null)
 
   const show = useCallback((next: UpdateInfo) => {
@@ -43,10 +44,6 @@ export function VersionCard() {
   }, [inFlight, load])
 
   async function install(tag: string) {
-    const ok = window.confirm(
-      `Install ${tag}? The database is backed up first, then Doop restarts: everyone is disconnected for about a minute.`,
-    )
-    if (!ok) return
     setBusy(true)
     setError(null)
     try {
@@ -62,35 +59,53 @@ export function VersionCard() {
   const { latest } = info
 
   return (
-    <div className={cn(cardVariants(), 'mt-5 flex flex-col gap-3 px-4 py-3.5 md:flex-row md:items-center md:gap-4')}>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2 font-display text-[14.5px] font-semibold">
-          Doop {info.current}
-          {latest && !info.updateAvailable && <Badge tone="outline">up to date</Badge>}
-          {latest && info.updateAvailable && <Badge tone="accent">{latest.tag} available</Badge>}
+    <SettingsCard>
+      <CardRow
+        className="sm:items-center"
+        action={
+          <>
+            {latest && (
+              <Button variant="ghost" size="sm" asChild>
+                <a href={latest.url} target="_blank" rel="noreferrer">
+                  Release notes
+                </a>
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" disabled={inFlight} onClick={() => void load(true)}>
+              Check again
+            </Button>
+            {info.enabled && latest && info.updateAvailable && (
+              <Button variant="primary" size="sm" disabled={busy || inFlight} onClick={() => setConfirming(latest.tag)}>
+                {inFlight ? 'Updating…' : 'Update now'}
+              </Button>
+            )}
+          </>
+        }
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2 font-display text-lead font-medium">
+            Doop {info.current}
+            {latest && !info.updateAvailable && <Badge tone="outline">up to date</Badge>}
+            {latest && info.updateAvailable && <Badge tone="accent">{latest.tag} available</Badge>}
+          </div>
+          <p className="mt-1 text-body text-ink-faint" role="status">
+            {error ?? describe(info)}
+          </p>
         </div>
-        <p className="mt-1 text-[12.5px] text-ink-faint" role="status">
-          {error ?? describe(info)}
-        </p>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        {latest && (
-          <Button variant="ghost" size="sm" asChild>
-            <a href={latest.url} target="_blank" rel="noreferrer">
-              Release notes
-            </a>
-          </Button>
-        )}
-        <Button variant="ghost" size="sm" disabled={inFlight} onClick={() => void load(true)}>
-          Check again
-        </Button>
-        {info.enabled && latest && info.updateAvailable && (
-          <Button variant="primary" size="sm" disabled={busy || inFlight} onClick={() => void install(latest.tag)}>
-            {inFlight ? 'Updating…' : 'Update now'}
-          </Button>
-        )}
-      </div>
-    </div>
+      </CardRow>
+      <ConfirmDialog
+        open={confirming !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirming(null)
+        }}
+        title={`Install ${confirming ?? ''}?`}
+        description="The database is backed up first, then Doop restarts: everyone is disconnected for about a minute."
+        confirmLabel="Update now"
+        onConfirm={() => {
+          if (confirming) void install(confirming)
+        }}
+      />
+    </SettingsCard>
   )
 }
 

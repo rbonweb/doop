@@ -11,8 +11,6 @@ import { Client, startServer, type Server } from './harness.ts'
  * visitor reaches.
  */
 
-const PORT = 5071
-
 let server: Server
 
 type Msg = { type: string; [key: string]: unknown }
@@ -26,7 +24,7 @@ class Room {
   private ready: Promise<void>
 
   constructor(canvasId: string, cookie: string, name = 'tester') {
-    this.ws = new WebSocket(`ws://localhost:${PORT}/ws`, { headers: { Cookie: cookie } })
+    this.ws = new WebSocket(`ws://localhost:${server.port}/ws`, { headers: { Cookie: cookie } })
     this.closedWith = new Promise((resolve) => this.ws.on('close', (code) => resolve(code)))
     this.ready = new Promise((resolve) => {
       this.ws.on('open', () =>
@@ -92,8 +90,7 @@ class At extends Client {
 const json = async (res: Response) => (await res.json()) as Record<string, unknown>
 
 beforeAll(async () => {
-  server = await startServer(PORT, {
-    BETTER_AUTH_URL: `http://localhost:${PORT}`,
+  server = await startServer({
     ANTHROPIC_API_KEY: '',
     OPENAI_API_KEY: '',
     DATABASE_URL: '',
@@ -113,6 +110,7 @@ describe('sharing roles', () => {
   const ids: Record<string, string> = {}
   let canvasId: string
   let frameId: string
+  let pageId: string
 
   beforeAll(async () => {
     owner = await new Client(server).signUp('owner@test.dev', 'Owner')
@@ -124,7 +122,9 @@ describe('sharing roles', () => {
     for (const [key, client] of Object.entries({ owner, viewer, commenter, editor, stranger, other })) {
       ids[key] = (await json(await client.get('/api/me'))).id as string
     }
-    canvasId = (await json(await owner.post('/api/canvases', { name: 'Roles' }))).id as string
+    const created = await json(await owner.post('/api/canvases', { name: 'Roles' }))
+    canvasId = created.id as string
+    pageId = (created.pages as { id: string }[])[0]!.id
     frameId = (await json(await owner.post(`/api/canvases/${canvasId}/frames`, { name: 'F1', html: '<h1>Hi</h1>' })))
       .id as string
     for (const [client, role] of [
@@ -158,7 +158,7 @@ describe('sharing roles', () => {
       ['POST', `/api/canvases/${canvasId}/import`, { url: 'https://example.com' }],
       ['PATCH', `/api/canvases/${canvasId}`, { name: 'renamed' }],
       ['POST', `/api/frames/${frameId}/comments`, { selector: 'h1', snippet: '', text: 'hello' }],
-      ['POST', `/api/canvases/${canvasId}/chat`, { text: 'hello' }],
+      ['POST', `/api/canvases/${canvasId}/comments`, { pageId, x: 1, y: 1, text: 'hello' }],
       ['POST', `/api/canvases/${canvasId}/duplicate`, undefined],
       ['GET', `/api/canvases/${canvasId}/sync-keys`, undefined],
     ]
@@ -185,7 +185,10 @@ describe('sharing roles', () => {
     expect((await commenter.post(`/api/canvases/${canvasId}/cards`, { title: 'do it' })).status).toBe(403)
     expect((await commenter.post(`/api/canvases/${canvasId}/frames`, { name: 'x' })).status).toBe(403)
     expect((await commenter.post(`/api/comments/${rootId}/retry`)).status).toBe(403)
-    expect((await commenter.post(`/api/canvases/${canvasId}/chat`, { text: 'plain chat is fine' })).status).toBe(200)
+    expect(
+      (await commenter.post(`/api/canvases/${canvasId}/comments`, { pageId, x: 1, y: 1, text: 'a plain pin is fine' }))
+        .status,
+    ).toBe(200)
     expect((await commenter.post(`/api/comments/${rootId}/resolve`)).status).toBe(200)
   })
 
@@ -205,9 +208,11 @@ describe('sharing roles', () => {
     )
     expect(reply.notice).toBeDefined()
     expect(reply.forAgent).toBeUndefined()
-    const chat = await json(await commenter.post(`/api/canvases/${canvasId}/chat`, { text: '@Doop hello' }))
-    expect(chat.notice).toBeDefined()
-    expect(chat.taskId).toBeUndefined()
+    const pin = await json(
+      await commenter.post(`/api/canvases/${canvasId}/comments`, { pageId, x: 2, y: 2, text: '@Doop hello' }),
+    )
+    expect(pin.notice).toBe('Only editors can ask agents to make changes.')
+    expect(pin.forAgent).toBeUndefined()
   })
 
   it('an edit role does what editors always did', async () => {
@@ -250,12 +255,10 @@ describe('sharing roles', () => {
     try {
       const v = await asViewer.joined()
       const e = await asEditor.joined()
-      expect(v?.role).toBe('view')
+      expect(v!.role).toBe('view')
       expect(e?.role).toBe('edit')
-      expect((v?.chat as unknown[]).length).toBe(0)
-      expect((v?.tasks as unknown[]).length).toBe(0)
-      expect((e?.chat as unknown[]).length).toBeGreaterThan(0)
-      expect((v?.comments as unknown[]).length).toBeGreaterThan(0)
+      expect((v!.tasks as unknown[]).length).toBe(0)
+      expect((v!.comments as unknown[]).length).toBeGreaterThan(0)
     } finally {
       asViewer.close()
       asEditor.close()
@@ -324,7 +327,7 @@ describe('sharing roles', () => {
       /* stranger cannot view; the Ghost id does not exist; the duplicate collapses; order is kept */
       expect(posted.mentions).toEqual([ids.commenter, ids.editor])
       const live = await asCommenter.waitFor('mention')
-      expect((live?.comment as { id: string }).id).toBe(posted.id)
+      expect((live!.comment as { id: string }).id).toBe(posted.id)
       /* an id whose @name is not in the text is not a mention */
       const quiet = await json(
         await owner.post(`/api/frames/${frameId}/comments`, {
@@ -371,7 +374,7 @@ describe('sharing roles', () => {
         })
         expect(res.status).toBe(200)
         const live = await asOwner.waitFor('access:request')
-        expect(live?.request).toMatchObject({
+        expect(live!.request).toMatchObject({
           userId: ids.stranger,
           name: 'Stranger',
           message: 'Hi, I am on the checkout team',
@@ -585,11 +588,10 @@ describe('guest links (anyone with the link, no sign-in)', () => {
       expect(canvas.memberIds).toBeUndefined()
       expect(canvas.ownerId).toBeUndefined()
       expect((canvas.frames as unknown[]).length).toBe(1)
-      expect((init?.chat as unknown[]).length).toBe(0)
       /* presence works, marked as a guest */
       const joined = await ownerRoom.waitFor('presence:join')
-      expect((joined?.presence as { name: string; guest?: boolean }).name).toBe('Pat (guest)')
-      expect((joined?.presence as { guest?: boolean }).guest).toBe(true)
+      expect((joined!.presence as { name: string; guest?: boolean }).name).toBe('Pat (guest)')
+      expect((joined!.presence as { guest?: boolean }).guest).toBe(true)
       room.send({ type: 'cursor', x: 3, y: 4 })
       expect(await ownerRoom.waitFor('cursor')).toBeDefined()
       /* an anonymous drag is refused and not broadcast */
@@ -609,7 +611,9 @@ describe('guest links (anyone with the link, no sign-in)', () => {
     expect(
       (await anon.post(`/api/frames/${frameId}/comments`, { selector: 'h1', snippet: '', text: 'x' })).status,
     ).toBe(401)
-    expect((await anon.post(`/api/canvases/${canvasId}/chat`, { text: 'x' })).status).toBe(401)
+    expect((await anon.post(`/api/canvases/${canvasId}/comments`, { pageId: 'p', x: 0, y: 0, text: 'x' })).status).toBe(
+      401,
+    )
     expect((await anon.post('/mcp', {})).status).toBe(401)
   })
 
@@ -632,7 +636,7 @@ describe('guest links (anyone with the link, no sign-in)', () => {
     expect(comment.from).toBe('Pat (guest)')
     expect(comment.fromUserId).toBeUndefined()
     const pushed = await ownerRoom.waitFor('comment')
-    expect((pushed?.comment as { from: string }).from).toBe('Pat (guest)')
+    expect((pushed!.comment as { from: string }).from).toBe('Pat (guest)')
     /* a guest may reply, but not resolve, and an @agent mention stays plain text */
     const reply = await json(
       await anon.post(`/api/public/comments/${comment.id as string}/replies`, { text: '@Doop do it', name: 'Pat' }),

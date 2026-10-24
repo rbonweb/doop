@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
+import { env } from './env.ts'
 
 /**
  * Password-protected share links.
@@ -72,7 +73,7 @@ export function decoyHash(): Promise<string> {
 /* ---- the unlock cookie ---- */
 
 function secret(): string {
-  return process.env.BETTER_AUTH_SECRET || 'doop-dev-secret-not-for-production'
+  return env.BETTER_AUTH_SECRET
 }
 
 /** Cookie names allow only token characters; canvas ids are nanoids, but be safe. */

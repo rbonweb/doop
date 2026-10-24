@@ -40,6 +40,8 @@ use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 #[cfg(target_os = "macos")]
 use tauri::Emitter;
 mod claude;
+mod claude_extension;
+mod codex;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -216,7 +218,9 @@ fn main() {
             claude::claude_login,
             claude::claude_install,
             claude::claude_run,
-            claude::claude_stop
+            claude::claude_stop,
+            claude_extension::claude_add_extension,
+            codex::codex_add_mcp
         ])
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             focus_main_window(app)
@@ -277,9 +281,10 @@ fn main() {
             // (traffic-light inset arrived with the overlay title bar, 0.1.2)
             // and the platform tells it which window framing it lives under.
             let desktop_marker = format!(
-                "window.__DOOP_DESKTOP__ = '{}'; window.__DOOP_DESKTOP_PLATFORM__ = '{}'; window.__DOOP_CLAUDE_CLI__ = true; window.__DOOP_CLAUDE_INSTALL__ = true;",
+                "window.__DOOP_DESKTOP__ = '{}'; window.__DOOP_DESKTOP_PLATFORM__ = '{}'; window.__DOOP_CLAUDE_CLI__ = true; window.__DOOP_CLAUDE_INSTALL__ = true; window.__DOOP_CLAUDE_EXTENSION__ = {}; window.__DOOP_CODEX_SETUP__ = true;",
                 app.package_info().version,
-                std::env::consts::OS
+                std::env::consts::OS,
+                cfg!(any(target_os = "macos", target_os = "windows"))
             );
             // macOS never reports the saved path on `Finished`, so remember
             // the destinations chosen on `Requested`, keyed by URL. The same

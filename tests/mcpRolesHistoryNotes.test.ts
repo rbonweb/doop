@@ -84,6 +84,7 @@ const VERSION: FrameVersion = {
   name: 'Hero',
   width: 640,
   height: 480,
+  htmlBytes: 12,
   html: '<h1>Old</h1>',
 }
 
@@ -152,7 +153,6 @@ beforeEach(() => {
     feedback: new Map(),
     comments: new Map([[CANVAS.id, [] as ElementComment[]]]),
     activity: new Map(),
-    chat: new Map(),
     decisions: new Map(),
     proposals: new Map(),
   } as unknown as Parameters<typeof actions.hydrateLogs>[0])
@@ -179,7 +179,10 @@ describe('history, notes and pages over MCP', () => {
   })
 
   it('lets an editor key restore a version and manage notes', async () => {
-    const restored = vi.spyOn(actions, 'restoreFrameVersion').mockReturnValue(FRAME)
+    const restored = vi.spyOn(actions, 'restoreFrameVersion').mockResolvedValue({
+      frame: FRAME,
+      replaced: { html: FRAME.html, width: FRAME.width, height: FRAME.height },
+    })
     const created = vi.spyOn(actions, 'createNote').mockReturnValue({ ok: true, note: NOTE })
     const updated = vi.spyOn(actions, 'updateNote').mockReturnValue({ ok: true, note: NOTE })
     const deleted = vi.spyOn(actions, 'deleteNote').mockReturnValue({ ok: true, note: NOTE })

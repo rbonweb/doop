@@ -103,9 +103,10 @@ export function askFrameIds(comments: readonly MarkComment[], viewer: MarkViewer
   }
   const asks = new Set<string>()
   for (const root of comments) {
-    if (!root.parentId && !asks.has(root.frameId) && threadNeedsViewer(root, repliesOf.get(root.id) ?? [], viewer)) {
-      asks.add(root.frameId)
-    }
+    /* a canvas comment (no frame) carries no frame mark */
+    const { frameId } = root
+    if (root.parentId || !frameId || asks.has(frameId)) continue
+    if (threadNeedsViewer(root, repliesOf.get(root.id) ?? [], viewer)) asks.add(frameId)
   }
   return asks
 }

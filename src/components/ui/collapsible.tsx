@@ -31,4 +31,31 @@ function CollapsibleTrigger({
   )
 }
 
-export { Collapsible, CollapsibleTrigger, CollapsibleContent }
+/** The fold-away aside, in place of a `<details>`: a quiet label that turns
+ *  its chevron, and the body under it. The body stays mounted while folded,
+ *  as a `<details>` body does, and is hidden by its closed state, so a
+ *  command or a link inside it exists before anyone opens it. */
+function Disclosure({
+  label,
+  className,
+  triggerClassName,
+  contentClassName,
+  children,
+  ...props
+}: Omit<React.ComponentProps<typeof CollapsiblePrimitive.Root>, 'children'> & {
+  label: React.ReactNode
+  triggerClassName?: string
+  contentClassName?: string
+  children: React.ReactNode
+}) {
+  return (
+    <Collapsible data-slot="disclosure" className={className} {...props}>
+      <CollapsibleTrigger className={cn('justify-start hover:text-ink', triggerClassName)}>{label}</CollapsibleTrigger>
+      <CollapsibleContent forceMount className={cn('mt-2 data-[state=closed]:hidden', contentClassName)}>
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+export { Collapsible, CollapsibleTrigger, CollapsibleContent, Disclosure }

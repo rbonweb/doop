@@ -1,11 +1,19 @@
 import { nanoid } from 'nanoid'
-import { canvasPages, normalizePageTree, pageFrames } from '../shared/pages.ts'
+import {
+  canvasPages,
+  copyPageName,
+  normalizePageTree,
+  pageDescendants,
+  pageFrames,
+  samePages,
+} from '../shared/pages.ts'
 import { DEFAULT_NOTE_COLOR, NOTE_DEFAULT_SIZE } from '../shared/notes.ts'
 import { defaultFrameSize } from '../shared/slides.ts'
 import * as persist from './db/persist.ts'
 import type {
   Canvas,
   CanvasNote,
+  CanvasPageInfo,
   CommunityCategory,
   DomainGrant,
   Frame,
@@ -36,6 +44,27 @@ export interface NoteInput {
   color?: string
 }
 
+export const MAX_PAGES = 100
+
+export class PageLimitError extends Error {
+  constructor() {
+    super(`A canvas holds at most ${MAX_PAGES} pages.`)
+  }
+}
+
+/** A duplicated page: `page` is the copy of `source`; a page with sub-pages is copied whole, so `copiedPages` lists
+ *  every new page (the copy first) and `frames` and `notes` are everything copied with them. */
+type PageCopy = {
+  source: CanvasPageInfo
+  page: CanvasPageInfo
+  pages: CanvasPageInfo[]
+  copiedPages: CanvasPageInfo[]
+  frames: Frame[]
+  notes: CanvasNote[]
+}
+
+const names = (pages: CanvasPageInfo[]) => pages.map((page) => page.name)
+
 /**
  * In-memory canvas/frame state — the hot path for reads, reveals and
  * broadcasts. Every committed mutation is mirrored to the database via
@@ -48,6 +77,8 @@ class Store {
      because a Canvas is sent whole to every client in the room */
   private domainGrants = new Map<string, DomainGrant[]>() // canvasId -> grants
   private linkPasswordHashes = new Map<string, string>() // canvasId -> hash
+  /** the page copy in flight per canvas, so the next one waits for it */
+  private pageCopies = new Map<string, Promise<unknown>>()
 
   init(
     canvases: Canvas[],
@@ -106,6 +137,17 @@ class Store {
       )
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((c) => this.toMeta(c, userId))
+  }
+
+  /** The canvas signup made for this user (server/auth.ts): the oldest one
+   *  they own. Undefined once they have deleted it, or for an account that
+   *  predates the signup hook. */
+  firstCanvasOf(userId: string): Canvas | undefined {
+    let first: Canvas | undefined
+    for (const c of this.canvases.values()) {
+      if (c.ownerId === userId && (!first || c.createdAt < first.createdAt)) first = c
+    }
+    return first
   }
 
   /** Every canvas on the instance, for the admin index only. Access is the
@@ -206,6 +248,103 @@ class Store {
     this.canvases.set(canvas.id, canvas)
     for (const frame of frames) this.frameIndex.set(frame.id, canvas.id)
     return canvas
+  }
+
+  /** Copy a page, every frame on it and its sticky notes (same names, geometry and html under fresh ids) into a new
+   * page named "<source> copy" (numbered when that name is taken). A page with sub-pages is copied whole: the copy
+   * keeps the source's parent, its sub-pages keep their shape under the new root, and the copy lands after the
+   * source's last sub-page. Copies of one canvas run one after another so two at once cannot pick the same name or
+   * overshoot the page limit; memory changes only once the copy is durable, as with duplicateCanvas. Rejects with
+   * PageLimitError when the copy would not fit under the page limit. */
+  duplicatePage(canvasId: string, pageId: string, by: string): Promise<PageCopy | undefined> {
+    const previous = this.pageCopies.get(canvasId) ?? Promise.resolve()
+    const task = previous.then(
+      () => this.copyPage(canvasId, pageId, by),
+      () => this.copyPage(canvasId, pageId, by),
+    )
+    this.pageCopies.set(canvasId, task)
+    const release = () => {
+      if (this.pageCopies.get(canvasId) === task) this.pageCopies.delete(canvasId)
+    }
+    void task.then(release, release)
+    return task
+  }
+
+  private async copyPage(canvasId: string, pageId: string, by: string): Promise<PageCopy | undefined> {
+    const canvas = this.canvases.get(canvasId)
+    if (!canvas) return undefined
+    const pages = canvasPages(canvas)
+    const source = pages.find((page) => page.id === pageId)
+    if (!source) return undefined
+    const subtree = [source, ...pageDescendants(pages, source.id)]
+    /* the copy sits where the source does, so it is no deeper than the source and the depth limit holds */
+    if (pages.length + subtree.length > MAX_PAGES) throw new PageLimitError()
+    const now = Date.now()
+    const pageIds = new Map(subtree.map((page) => [page.id, nanoid(10)]))
+    const copies: CanvasPageInfo[] = subtree.map((page) => {
+      const { parentId, ...rest } = page
+      const id = pageIds.get(page.id)!
+      if (page.id === source.id) {
+        const root: CanvasPageInfo = { ...rest, id, name: copyPageName(source.name, names(pages)) }
+        return parentId === undefined ? root : { ...root, parentId }
+      }
+      return { ...rest, id, parentId: pageIds.get(parentId!)! }
+    })
+    const page = copies[0]!
+    const frameIds = new Map<string, string>()
+    const frames: Frame[] = subtree.flatMap((sourcePage) =>
+      pageFrames(canvas, sourcePage.id).map(({ updatedByUserId: _user, updatedByKind: _kind, ...frame }) => {
+        const id = nanoid(10)
+        frameIds.set(frame.id, id)
+        return {
+          ...frame,
+          id,
+          pageId: pageIds.get(sourcePage.id)!,
+          createdAt: now,
+          updatedAt: now,
+          contentUpdatedAt: now,
+          updatedBy: by,
+        }
+      }),
+    )
+    /* a note on a frame goes with the frame, a free note with its page */
+    const notes: CanvasNote[] = (canvas.notes ?? []).flatMap((note) => {
+      const frameId = note.frameId ? frameIds.get(note.frameId) : undefined
+      const copiedPageId = note.pageId ? pageIds.get(note.pageId) : undefined
+      if (note.frameId ? !frameId : !copiedPageId) return []
+      const { frameId: _frame, pageId: _page, ...rest } = note
+      return [
+        {
+          ...rest,
+          id: nanoid(10),
+          ...(frameId ? { frameId } : {}),
+          ...(copiedPageId ? { pageId: copiedPageId } : {}),
+          createdAt: now,
+          updatedAt: now,
+          updatedBy: by,
+        },
+      ]
+    })
+    const next = [...pages]
+    next.splice(pages.indexOf(subtree[subtree.length - 1]!) + 1, 0, ...copies)
+    await persist.savePageCopy({ ...canvas, pages: next, updatedAt: now }, frames, notes)
+    if (this.canvases.get(canvasId) !== canvas) return undefined
+    /* a page save may have landed during the write: slot the copy after the
+       source's subtree wherever it is now (or last, if the source is gone),
+       under a name the live list does not use */
+    const live = canvasPages(canvas)
+    if (names(live).includes(page.name)) page.name = copyPageName(source.name, names(live))
+    if (page.parentId !== undefined && !live.some((candidate) => candidate.id === page.parentId)) delete page.parentId
+    const liveSource = live.find((candidate) => candidate.id === pageId)
+    const lastOfSource = liveSource ? (pageDescendants(live, pageId).at(-1) ?? liveSource) : undefined
+    const at = lastOfSource ? live.indexOf(lastOfSource) + 1 : live.length
+    canvas.pages = normalizePageTree([...live.slice(0, at), ...copies, ...live.slice(at)])
+    canvas.frames.push(...frames)
+    if (notes.length) (canvas.notes ??= []).push(...notes)
+    for (const frame of frames) this.frameIndex.set(frame.id, canvasId)
+    canvas.updatedAt = Math.max(canvas.updatedAt, now)
+    if (!samePages(canvas.pages, next)) persist.saveCanvas(canvas)
+    return { source, page, pages: canvas.pages, copiedPages: copies, frames, notes }
   }
 
   setPages(canvasId: string, pages: import('../shared/types.ts').CanvasPageInfo[]) {
@@ -573,6 +712,8 @@ class Store {
       demo?: boolean
       slide?: boolean
       speakerNotes?: string
+      hidden?: boolean
+      locked?: boolean
     },
     by: string,
     editor: EditorInfo = {},
@@ -611,6 +752,8 @@ class Store {
     if (input.demo) frame.demo = true
     if (input.slide) frame.slide = true
     if (input.speakerNotes) frame.speakerNotes = input.speakerNotes
+    if (input.hidden) frame.hidden = true
+    if (input.locked) frame.locked = true
     c.frames.push(frame)
     c.updatedAt = now
     this.frameIndex.set(frame.id, canvasId)
@@ -621,7 +764,12 @@ class Store {
 
   updateFrame(
     frameId: string,
-    patch: Partial<Pick<Frame, 'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html' | 'slide' | 'speakerNotes'>>,
+    patch: Partial<
+      Pick<
+        Frame,
+        'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html' | 'slide' | 'speakerNotes' | 'hidden' | 'locked'
+      >
+    >,
     by: string,
     editor: EditorInfo = {},
   ): Frame | undefined {
@@ -639,7 +787,8 @@ class Store {
     /* a frame from before the stamp existed keeps the time it last changed as its design time, frozen before this bump */
     if (!designChanged) frame.contentUpdatedAt ??= frame.updatedAt
     Object.assign(frame, patch)
-    frame.updatedAt = Date.now()
+    // Also serves as the optimistic-save version, including writes in the same millisecond.
+    frame.updatedAt = Math.max(Date.now(), frame.updatedAt + 1)
     if (designChanged) {
       frame.contentUpdatedAt = frame.updatedAt
       frame.updatedBy = by

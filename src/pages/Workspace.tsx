@@ -1,32 +1,25 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { WorkspaceDetail, WorkspaceRole } from '../../shared/types'
+import type { WorkspaceDetail, WorkspaceRole, WorkspaceSummary } from '../../shared/types'
 import { formatUsd, STATUS_LABELS, TEAM_SEAT_PRICE } from '../../shared/billing'
 import { navigate } from '../App'
 import { api, errorMessage, paywalledWorkspace } from '../lib/api'
 import { authClient } from '../lib/auth'
 import { posthog } from '../lib/posthog'
-import {
-  AccountMenu,
-  ConnectCard,
-  IconBack,
-  IconBilling,
-  IconChevron,
-  IconGear,
-  IconShare,
-} from '../components/DashShell'
+import { AppRail, railLayout } from '../components/AppRail'
 import { UpgradeModal } from '../components/WorkspaceModals'
-import { Sel } from '../components/AutomateShell'
 import { Avatar } from '../components/ui/avatar'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 import { Callout } from '../components/ui/callout'
-import { Card, CardBody, CardDescription, CardHeader, CardRow, CardTitle } from '../components/ui/card'
+import { CardBody, CardDescription, CardHeader, CardRow, CardTitle, SettingsCard } from '../components/ui/card'
 import { ConfirmDialog } from '../components/ui/alert-dialog'
 import { Input } from '../components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { PersonRow } from '../components/ui/list'
 import { Skeleton } from '../components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Toast } from '../components/ui/toast'
-import { Wordmark } from '../components/ui/wordmark'
+import { ChevronRightIcon, CreditCardIcon, GearIcon, UsersIcon } from '../components/ui/icons'
 import {
   DashContent,
   DashHeader,
@@ -34,7 +27,6 @@ import {
   DashMain,
   DashNavItem,
   DashSectionLabel,
-  DashSidebar,
   DashSubtitle,
   DashTitle,
 } from '../components/ui/dash'
@@ -63,11 +55,19 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
   })
   const [pane, setPane] = useState<Pane>(landing.checkout ? 'billing' : 'members')
 
+  /* the rail's workspace list, reloaded with the workspace so a rename or a
+     new plan shows in its row too */
+  const [spaces, setSpaces] = useState<WorkspaceSummary[] | undefined>(undefined)
+
   const reload = useCallback(() => {
     api
       .getWorkspace(workspaceId)
       .then(setWs)
       .catch(() => setMissing(true))
+    api
+      .listWorkspaces()
+      .then((w) => setSpaces(w.workspaces))
+      .catch(console.error)
   }, [workspaceId])
 
   useEffect(() => {
@@ -107,12 +107,10 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
 
   if (missing) {
     return (
-      <DashLayout>
-        <DashMain>
-          <DashHeader>
-            <span className="flex-1" />
-            <AccountMenu />
-          </DashHeader>
+      <DashLayout className={railLayout}>
+        <AppRail active={null} />
+        <DashMain className="[background:var(--paper)]">
+          <DashHeader variant="bare" />
           <DashContent>
             <DashTitle>Workspace not found</DashTitle>
             <DashSubtitle>It may have been deleted, or you are no longer a member.</DashSubtitle>
@@ -126,48 +124,52 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <DashLayout>
-      <DashSidebar>
-        <Wordmark size="sm" className="px-2 pb-5 text-[17px]" />
-        <Button
-          variant="ghost"
-          className="w-full justify-start gap-[9px] rounded-[9px] px-[10px] py-2 text-[13px] text-ink-soft hover:bg-paper hover:text-ink"
-          onClick={() => navigate('/')}
-        >
-          <IconBack /> Back to canvases
-        </Button>
-        <DashSectionLabel>{ws?.name ?? 'Workspace'}</DashSectionLabel>
+    <DashLayout className={railLayout}>
+      {/* the app rail, lit on this workspace, with its panes as the page's group */}
+      <AppRail active={`ws:${workspaceId}`} workspaces={spaces}>
+        <DashSectionLabel density="rail">{ws?.name ?? 'Workspace'}</DashSectionLabel>
         <nav className="flex flex-col gap-0.5">
-          <DashNavItem icon={<IconShare />} active={pane === 'members'} onClick={() => setPane('members')}>
+          <DashNavItem
+            density="rail"
+            icon={<UsersIcon size="rail" />}
+            active={pane === 'members'}
+            onClick={() => setPane('members')}
+          >
             People
           </DashNavItem>
-          <DashNavItem icon={<IconBilling />} active={pane === 'billing'} onClick={() => setPane('billing')}>
+          <DashNavItem
+            density="rail"
+            icon={<CreditCardIcon size="rail" />}
+            active={pane === 'billing'}
+            onClick={() => setPane('billing')}
+          >
             Plan &amp; billing
           </DashNavItem>
-          <DashNavItem icon={<IconGear />} active={pane === 'general'} onClick={() => setPane('general')}>
+          <DashNavItem
+            density="rail"
+            icon={<GearIcon size="rail" />}
+            active={pane === 'general'}
+            onClick={() => setPane('general')}
+          >
             General
           </DashNavItem>
         </nav>
-        <div className="min-h-6 flex-1" />
-        <ConnectCard />
-      </DashSidebar>
+      </AppRail>
 
-      <DashMain>
-        <DashHeader>
-          <nav className="flex items-center gap-2 text-[13px] text-ink-faint" aria-label="Breadcrumb">
+      <DashMain className="[background:var(--paper)]">
+        <DashHeader variant="bare">
+          <nav className="flex items-center gap-2 text-body text-ink-faint" aria-label="Breadcrumb">
             <Button
               variant="link"
               size="sm"
-              className="px-0 py-0 text-[13px] font-normal text-ink-faint hover:text-ink"
+              className="px-0 py-0 text-body font-normal text-ink-faint hover:text-ink"
               onClick={() => navigate('/')}
             >
               Home
             </Button>
-            <IconChevron />
+            <ChevronRightIcon size={12} />
             <b className="truncate font-semibold text-ink">{ws?.name ?? '…'}</b>
           </nav>
-          <span className="flex-1" />
-          <AccountMenu />
         </DashHeader>
 
         <DashContent>
@@ -185,7 +187,7 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
           </div>
 
           <Tabs value={pane} onValueChange={(next) => setPane(next as Pane)} className="mt-4 flex md:hidden">
-            <TabsList className="h-10 w-full border border-line bg-surface p-1 shadow-card">
+            <TabsList variant="card">
               <TabsTrigger value="members">People</TabsTrigger>
               <TabsTrigger value="billing">Billing</TabsTrigger>
               <TabsTrigger value="general">General</TabsTrigger>
@@ -213,7 +215,7 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
           )}
 
           {!ws ? (
-            <Skeleton className="mt-5 min-h-[260px] max-w-[1000px] rounded-[12px]" />
+            <Skeleton shape="card" className="mt-5 max-w-[1000px]" />
           ) : pane === 'members' ? (
             <MembersPane ws={ws} meId={meId} admin={admin} onChange={reload} onError={handle} onToast={showToast} />
           ) : pane === 'billing' ? (
@@ -314,7 +316,7 @@ function MembersPane({
   }
 
   return (
-    <Card className="mt-4 max-w-[1000px] overflow-hidden sm:mt-5">
+    <SettingsCard>
       <CardHeader>
         <CardTitle>People</CardTitle>
         <CardDescription>
@@ -325,7 +327,8 @@ function MembersPane({
         {admin && (
           <div className="mt-4 flex flex-col items-stretch gap-2 sm:flex-row">
             <Input
-              className="flex-1 rounded-[10px] bg-paper focus:ring-0"
+              variant="well"
+              className="flex-1"
               placeholder="Invite by email"
               type="email"
               value={email}
@@ -334,15 +337,12 @@ function MembersPane({
               onKeyDown={(event) => event.key === 'Enter' && invite()}
               aria-label="Email to invite"
             />
-            <Sel
-              value={role}
-              disabled={busy}
-              onChange={(e) => setRole(e.target.value as WorkspaceRole)}
-              aria-label="Role"
-            >
-              <option value="member">Member</option>
-              <option value="admin">Admin</option>
-            </Sel>
+            <Select value={role} disabled={busy} onValueChange={(value) => setRole(value as WorkspaceRole)}>
+              <SelectTrigger aria-label="Role">
+                <SelectValue />
+              </SelectTrigger>
+              <RoleOptions />
+            </Select>
             <Button variant="primary" className="justify-center" disabled={busy || !email.trim()} onClick={invite}>
               {busy ? 'Inviting…' : 'Invite'}
             </Button>
@@ -362,14 +362,12 @@ function MembersPane({
                   <Badge tone="accent">owner</Badge>
                 ) : admin ? (
                   <>
-                    <Sel
-                      value={m.role}
-                      onChange={(e) => changeRole(m.userId, e.target.value as WorkspaceRole)}
-                      aria-label={`Role of ${m.name}`}
-                    >
-                      <option value="member">Member</option>
-                      <option value="admin">Admin</option>
-                    </Sel>
+                    <Select value={m.role} onValueChange={(value) => changeRole(m.userId, value as WorkspaceRole)}>
+                      <SelectTrigger size="sm" aria-label={`Role of ${m.name}`}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <RoleOptions />
+                    </Select>
                     <Button
                       variant="bare-danger"
                       size="sm"
@@ -394,26 +392,20 @@ function MembersPane({
                 )
               }
             >
-              <Avatar name={m.name} className="size-8 flex-none border-0 text-xs" />
-              <span className="flex min-w-0 flex-col leading-[1.3]">
-                <b className="truncate text-[13px] font-semibold">
-                  {m.name}
-                  {self ? ' (you)' : ''}
-                </b>
-                <span className="truncate text-[12px] text-ink-faint">
-                  {m.email} · joined {timeAgo(m.addedAt)}
-                </span>
-              </span>
+              <PersonRow
+                className="flex-1"
+                avatar={<Avatar name={m.name} size={32} />}
+                name={`${m.name}${self ? ' (you)' : ''}`}
+                detail={`${m.email} · joined ${timeAgo(m.addedAt)}`}
+              />
             </CardRow>
           )
         })}
         {ws.invites.length > 0 && (
           <CardBody className="border-t border-line-soft bg-paper/60">
-            <span className="font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-ink-faint">
-              Waiting to sign up
-            </span>
+            <span className="text-caption text-ink-faint">Waiting to sign up</span>
             {ws.invites.map((inv) => (
-              <div key={inv.id} className="mt-2 flex items-center gap-3 text-[13px]">
+              <div key={inv.id} className="mt-2 flex items-center gap-3 text-body">
                 <span className="min-w-0 flex-1 truncate">
                   {inv.email}{' '}
                   <span className="text-ink-faint">
@@ -444,7 +436,7 @@ function MembersPane({
           setRemoving(null)
         }}
       />
-    </Card>
+    </SettingsCard>
   )
 }
 
@@ -495,7 +487,7 @@ function BillingPane({
   }
 
   return (
-    <Card className="mt-4 max-w-[1000px] overflow-hidden sm:mt-5">
+    <SettingsCard>
       <CardHeader>
         <CardTitle>Plan &amp; billing</CardTitle>
         <CardDescription>
@@ -505,7 +497,7 @@ function BillingPane({
         </CardDescription>
       </CardHeader>
       <CardRow label="Plan">
-        <b className="text-[13.5px]">{paid ? 'Team' : ws.billing.enabled ? 'Personal' : 'Self-hosted'}</b>
+        <b className="text-copy">{paid ? 'Team' : ws.billing.enabled ? 'Personal' : 'Self-hosted'}</b>
         {ws.billing.enabled && (
           <Badge
             tone={
@@ -520,17 +512,17 @@ function BillingPane({
           </Badge>
         )}
         {ws.cancelAtPeriodEnd && ws.currentPeriodEnd && (
-          <span className="text-[12px] text-ink-faint">ends {new Date(ws.currentPeriodEnd).toLocaleDateString()}</span>
+          <span className="text-label text-ink-faint">ends {new Date(ws.currentPeriodEnd).toLocaleDateString()}</span>
         )}
       </CardRow>
       {paid && (
         <>
           <CardRow label="Seats">
-            <span className="text-[13.5px]">
+            <span className="text-copy">
               {ws.seats} × {formatUsd(perSeat)} = <b>{formatUsd(ws.seats * perSeat)}</b> per {ws.interval ?? 'month'}
             </span>
             {ws.seats !== ws.memberCount && (
-              <span className="text-[12px] text-ink-faint">
+              <span className="text-label text-ink-faint">
                 ({ws.memberCount} {ws.memberCount === 1 ? 'person' : 'people'} now — Stripe catches up on the next
                 invoice)
               </span>
@@ -538,7 +530,7 @@ function BillingPane({
           </CardRow>
           {ws.currentPeriodEnd && (
             <CardRow label={ws.cancelAtPeriodEnd ? 'Ends' : 'Renews'}>
-              <span className="text-[13.5px]">{new Date(ws.currentPeriodEnd).toLocaleDateString()}</span>
+              <span className="text-copy">{new Date(ws.currentPeriodEnd).toLocaleDateString()}</span>
             </CardRow>
           )}
         </>
@@ -562,16 +554,14 @@ function BillingPane({
                   Refresh
                 </Button>
               )}
-              <span className="text-[12px] text-ink-faint">Cards, invoices, cancelling — all on Stripe’s portal.</span>
+              <span className="text-label text-ink-faint">Cards, invoices, cancelling — all on Stripe’s portal.</span>
             </>
           ) : (
-            <span className="text-[13px] text-ink-soft">
-              The owner holds the billing; only they can change the plan.
-            </span>
+            <span className="text-body text-ink-soft">The owner holds the billing; only they can change the plan.</span>
           )}
         </CardRow>
       )}
-    </Card>
+    </SettingsCard>
   )
 }
 
@@ -623,7 +613,7 @@ function GeneralPane({
 
   return (
     <>
-      <Card className="mt-4 max-w-[1000px] overflow-hidden sm:mt-5">
+      <SettingsCard>
         <CardHeader>
           <CardTitle>General</CardTitle>
           <CardDescription>The name everyone sees in their sidebar and on canvases filed here.</CardDescription>
@@ -639,7 +629,8 @@ function GeneralPane({
           }
         >
           <Input
-            className="max-w-[360px] rounded-[10px] bg-paper focus:ring-0"
+            variant="well"
+            className="max-w-[360px]"
             value={name}
             maxLength={80}
             disabled={!admin || busy}
@@ -649,11 +640,11 @@ function GeneralPane({
           />
         </CardRow>
         <CardRow label="Created">
-          <span className="text-[13px] text-ink-soft">{timeAgo(ws.createdAt)}</span>
+          <span className="text-body text-ink-soft">{timeAgo(ws.createdAt)}</span>
         </CardRow>
-      </Card>
+      </SettingsCard>
       {isOwner && (
-        <Card tone="flat" className="mt-4 max-w-[1000px] overflow-hidden border-accent-ink/30">
+        <SettingsCard tone="flat" className="border-accent-ink/30">
           <CardHeader>
             <CardTitle className="text-accent-ink">Delete workspace</CardTitle>
             <CardDescription>
@@ -667,7 +658,7 @@ function GeneralPane({
               Delete “{ws.name}”
             </Button>
           </CardBody>
-        </Card>
+        </SettingsCard>
       )}
       <ConfirmDialog
         open={confirmDelete}
@@ -682,5 +673,15 @@ function GeneralPane({
         }}
       />
     </>
+  )
+}
+
+/** The roles an admin can hand out; the owner is not one of them. */
+function RoleOptions() {
+  return (
+    <SelectContent>
+      <SelectItem value="member">Member</SelectItem>
+      <SelectItem value="admin">Admin</SelectItem>
+    </SelectContent>
   )
 }

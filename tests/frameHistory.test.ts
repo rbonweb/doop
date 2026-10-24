@@ -1,14 +1,15 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as actions from '../server/actions.ts'
 import { buildMcpServer } from '../server/mcp.ts'
 import { store } from '../server/store.ts'
-import type { Actor, Frame, FrameVersion, FrameVersionInfo } from '../shared/types.ts'
+import type { Canvas, Frame, FrameVersion, FrameVersionInfo } from '../shared/types.ts'
 
-/* The action layer runs for real against the in-memory store; only the
- * database is replaced, by a list that keeps frame versions the way the real
- * table does (newest first, no html when listed). */
+/* What this fork adds on top of the burst history (tests/frameVersionBursts.test.ts and tests/frameVersions.test.ts
+ * cover the bursts, the routes and the restore contract): every version records the frame's name in that state and
+ * why it was filed, and a restore brings the name back. The action layer runs for real against the in-memory store;
+ * only the database is replaced, by a list that keeps versions the way the real table does. */
 const saved: FrameVersion[] = []
 
 vi.mock('../server/db/persist.ts', () => {
@@ -34,192 +35,89 @@ vi.mock('../server/db/persist.ts', () => {
           .sort((a, b) => b.savedAt - a.savedAt)
           .map(({ html: _html, ...info }) => info),
       ),
-    getFrameVersion: (id: string) => Promise.resolve(saved.find((v) => v.id === id)),
+    getFrameVersion: (frameId: string, id: string) =>
+      Promise.resolve(saved.find((v) => v.id === id && v.frameId === frameId)),
   }
 })
 vi.mock('../server/resident.ts', () => ({ onFeedback: () => {} }))
 vi.mock('../server/distill.ts', () => ({ onDecision: () => {} }))
 
 const OWNER_ID = 'owner-1'
-const human: Actor = { name: 'Ada', kind: 'user', color: '#000', userId: OWNER_ID }
-const otherHuman: Actor = { name: 'Grace', kind: 'user', color: '#000', userId: 'user-2' }
-const agent: Actor = { name: 'Claude', kind: 'agent', color: '#000', userId: OWNER_ID }
+const CANVAS: Canvas = { id: 'c1', name: 'History', ownerId: OWNER_ID, createdAt: 0, updatedAt: 0, frames: [] }
+const human = actions.resolveActor({ name: 'Ada', kind: 'user' })
+const agent = actions.resolveActor({ name: 'Claude', kind: 'agent' })
 
 let frame: Frame
-let t0: number
-
-/** the fire-and-forget save finishes on the next macrotask */
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
-/** oldest first; the first save of a frame finishes a tick after later ones (it checks the database), so order by time */
-const versionsOf = (frameId: string) => saved.filter((v) => v.frameId === frameId).sort((a, b) => a.savedAt - b.savedAt)
-/** move the clock forward; only Date is faked, so flush() still works */
-const advance = (ms: number) => vi.setSystemTime(Date.now() + ms)
-
-function freshFrame(html: string, ownerId: string | undefined = OWNER_ID): Frame {
-  const canvas = store.createCanvas('History', ownerId)
-  const created = store.createFrame(canvas.id, { name: 'Hero', html, width: 800, height: 600 }, 'seed', {})
-  if (!created) throw new Error('failed to seed a frame')
-  return created
-}
 
 beforeEach(() => {
   saved.length = 0
-  vi.useFakeTimers({ toFake: ['Date'] })
-  t0 = Date.parse('2026-01-01T12:00:00Z')
-  vi.setSystemTime(t0)
-  frame = freshFrame('<p>v0</p>')
+  store.init([structuredClone(CANVAS)])
+  frame = actions.createFrame(CANVAS.id, { name: 'Hero', html: '<p>v0</p>', width: 800, height: 600 }, agent)!
 })
 
-afterEach(() => {
-  vi.useRealTimers()
-})
-
-describe('snapshotFrame', () => {
-  it('saves the state before a change, labelled by who is changing it', async () => {
+describe('version name and reason', () => {
+  it('labels each filed state by the kind of whoever wrote it', () => {
     actions.updateFrame(frame.id, { html: '<p>v1</p>' }, human)
-    await flush()
-    expect(versionsOf(frame.id)).toMatchObject([
-      { html: '<p>v0</p>', savedBy: 'Ada', reason: 'human', name: 'Hero', width: 800, height: 600 },
-    ])
-
-    const other = freshFrame('<p>a0</p>')
-    actions.updateFrame(other.id, { html: '<p>a1</p>' }, agent)
-    await flush()
-    expect(versionsOf(other.id)).toMatchObject([{ html: '<p>a0</p>', savedBy: 'Claude', reason: 'agent' }])
-  })
-
-  it('coalesces a burst of edits by one actor into a single version', async () => {
-    actions.updateFrame(frame.id, { html: '<p>v1</p>' }, human)
-    advance(30_000)
-    actions.updateFrame(frame.id, { html: '<p>v2</p>' }, human)
-    advance(60_000)
-    actions.updateFrame(frame.id, { html: '<p>v3</p>' }, human)
-    await flush()
-    expect(versionsOf(frame.id).map((v) => v.html)).toEqual(['<p>v0</p>'])
-  })
-
-  it('snapshots again once the same actor has been quiet for 2 minutes', async () => {
-    actions.updateFrame(frame.id, { html: '<p>v1</p>' }, human)
-    advance(actions.SNAPSHOT_COALESCE_MS + 1)
-    actions.updateFrame(frame.id, { html: '<p>v2</p>' }, human)
-    await flush()
-    expect(versionsOf(frame.id).map((v) => v.html)).toEqual(['<p>v0</p>', '<p>v1</p>'])
-  })
-
-  it('keeps a separate version for a different actor inside the window', async () => {
-    actions.updateFrame(frame.id, { html: '<p>v1</p>' }, human)
-    advance(10_000)
-    actions.updateFrame(frame.id, { html: '<p>v2</p>' }, agent)
-    advance(10_000)
-    actions.updateFrame(frame.id, { html: '<p>v3</p>' }, otherHuman)
-    await flush()
-    expect(versionsOf(frame.id).map((v) => [v.savedBy, v.html])).toEqual([
-      ['Ada', '<p>v0</p>'],
-      ['Claude', '<p>v1</p>'],
-      ['Grace', '<p>v2</p>'],
+    actions.updateFrame(frame.id, { html: '<p>v2</p>' }, agent, { replace: true })
+    expect(saved.map((v) => [v.html, v.savedBy, v.reason])).toEqual([
+      ['<p>v0</p>', 'Claude', 'agent'],
+      ['<p>v1</p>', 'Ada', 'human'],
     ])
   })
 
-  it('takes no snapshot when the html is unchanged or the frame is empty', async () => {
-    actions.updateFrame(frame.id, { html: '<p>v0</p>' }, human)
-    actions.updateFrame(frame.id, { x: 40, y: 40 }, human)
-    expect(actions.snapshotFrame(frame, human, 'human')).toBe(true)
-    advance(actions.SNAPSHOT_COALESCE_MS + 1)
-    expect(actions.snapshotFrame(frame, agent, 'agent')).toBe(false) // same html as the latest version
-
-    const empty = freshFrame('')
-    actions.updateFrame(empty.id, { html: '<p>first</p>' }, agent)
-    await flush()
-    expect(versionsOf(empty.id)).toEqual([])
-    expect(versionsOf(frame.id)).toHaveLength(1)
-  })
-})
-
-describe('streams', () => {
-  it('snapshots once at the start of a stream, never per chunk', async () => {
-    actions.appendFrameHtml(frame.id, '<section>one</section>', agent, { start: true })
-    actions.appendFrameHtml(frame.id, '<section>two</section>', agent)
-    actions.appendFrameHtml(frame.id, '<section>three</section>', agent, { done: true })
-    await flush()
-    expect(versionsOf(frame.id)).toMatchObject([{ html: '<p>v0</p>', reason: 'agent' }])
-  })
-
-  it('does not snapshot a stream by an actor who just snapshotted this frame', async () => {
-    actions.updateFrame(frame.id, { html: '<p>v1</p>' }, agent)
-    advance(5_000)
-    actions.appendFrameHtml(frame.id, '<section>new</section>', agent, { start: true, done: true })
-    await flush()
-    expect(versionsOf(frame.id).map((v) => v.html)).toEqual(['<p>v0</p>'])
-  })
-
-  it('keeps a human edit that interrupts a stream from snapshotting the half-written design', async () => {
-    actions.appendFrameHtml(frame.id, '<section>half</section>', agent, { start: true })
-    actions.updateFrame(frame.id, { html: '<p>mine</p>' }, human)
-    await flush()
-    expect(versionsOf(frame.id).map((v) => v.html)).toEqual(['<p>v0</p>'])
+  it('files the name the frame had in that state, not the one it was renamed to', () => {
+    actions.updateFrame(frame.id, { html: '<p>v1</p>', name: 'Renamed' }, agent, { replace: true })
+    expect(saved).toMatchObject([{ html: '<p>v0</p>', name: 'Hero', width: 800, height: 600 }])
+    expect(store.getFrame(frame.id)?.name).toBe('Renamed')
   })
 })
 
 describe('restoreFrameVersion', () => {
-  it('snapshots the current design first, then applies the version', async () => {
-    actions.updateFrame(frame.id, { html: '<p>v1</p>', name: 'Renamed', width: 1000, height: 700 }, agent)
-    await flush()
-    const old = versionsOf(frame.id)[0]!
-    expect(old).toMatchObject({ html: '<p>v0</p>', name: 'Hero', width: 800, height: 600 })
-
-    advance(5_000)
-    const restored = actions.restoreFrameVersion(old, human)
-    await flush()
-
-    expect(restored).toMatchObject({ html: '<p>v0</p>', name: 'Hero', width: 800, height: 600 })
-    expect(store.getFrame(frame.id)).toMatchObject({ html: '<p>v0</p>', name: 'Hero', width: 800, height: 600 })
-    const after = versionsOf(frame.id)
-    expect(after).toHaveLength(2)
-    expect(after[1]).toMatchObject({
-      html: '<p>v1</p>',
-      name: 'Renamed',
-      width: 1000,
-      height: 700,
-      reason: 'restore',
-      savedBy: 'Ada',
+  it('brings back the name with the design, and files what it replaced as a restore', async () => {
+    actions.updateFrame(frame.id, { html: '<p>v1</p>', name: 'Renamed', width: 1000, height: 700 }, agent, {
+      replace: true,
     })
-    expect(after[1]!.savedAt).toBeGreaterThan(old.savedAt)
+    const old = saved[0]!
+
+    const restored = await actions.restoreFrameVersion(frame.id, old.id, human)
+
+    expect(restored).toMatchObject({
+      frame: { html: '<p>v0</p>', name: 'Hero', width: 800, height: 600 },
+      replaced: { html: '<p>v1</p>', width: 1000, height: 700 },
+    })
+    expect(store.getFrame(frame.id)).toMatchObject({ html: '<p>v0</p>', name: 'Hero', width: 800, height: 600 })
+    expect(saved).toHaveLength(2)
+    expect(saved[1]).toMatchObject({ html: '<p>v1</p>', name: 'Renamed', reason: 'restore' })
   })
 
-  it('snapshots even when the actor edited the frame seconds ago, and logs one activity line', async () => {
-    actions.updateFrame(frame.id, { html: '<p>v1</p>' }, human)
-    advance(1_000)
-    actions.updateFrame(frame.id, { html: '<p>v2</p>' }, human) // coalesced: no version
-    advance(1_000)
-    await flush()
-    const old = versionsOf(frame.id)[0]!
-
-    actions.restoreFrameVersion(old, human)
-    await flush()
-
-    expect(versionsOf(frame.id).map((v) => [v.reason, v.html])).toEqual([
-      ['human', '<p>v0</p>'],
-      ['restore', '<p>v2</p>'],
-    ])
-    const lines = actions.getActivity(frame.canvasId).map((a) => a.message)
-    expect(lines[0]).toBe('restored “Hero” to the version from 2026-01-01 12:00 UTC')
-    expect(lines.filter((m) => m.startsWith('updated the design'))).toHaveLength(2) // the two edits, not the restore
-  })
-
-  it('returns undefined for a frame that is gone', () => {
-    const version: FrameVersion = {
-      id: 'v',
-      frameId: 'missing',
-      canvasId: 'c',
-      name: 'x',
-      html: '<p>x</p>',
-      width: 1,
-      height: 1,
+  it('keeps the current name when the version predates names', async () => {
+    actions.updateFrame(frame.id, { html: '<p>v1</p>', name: 'Renamed' }, agent, { replace: true })
+    const legacy: FrameVersion = {
+      id: 'legacy',
+      frameId: frame.id,
+      canvasId: CANVAS.id,
+      html: '<p>old</p>',
+      width: 800,
+      height: 600,
       savedAt: 1,
-      savedBy: 'Ada',
-      reason: 'human',
+      savedBy: 'Grace',
+      htmlBytes: 10,
     }
-    expect(actions.restoreFrameVersion(version, human)).toBeUndefined()
+    saved.push(legacy)
+
+    const restored = await actions.restoreFrameVersion(frame.id, legacy.id, human)
+
+    expect(restored?.frame).toMatchObject({ html: '<p>old</p>', name: 'Renamed' })
+  })
+
+  it('answers null for a version that belongs to another frame', async () => {
+    const other = actions.createFrame(CANVAS.id, { name: 'Other', html: '<p>o0</p>' }, agent)!
+    actions.updateFrame(other.id, { html: '<p>o1</p>' }, human)
+    const foreign = saved[0]!
+    expect(foreign.frameId).toBe(other.id)
+
+    expect(await actions.restoreFrameVersion(frame.id, foreign.id, human)).toBeNull()
+    expect(store.getFrame(frame.id)?.html).toBe('<p>v0</p>')
   })
 })
 
@@ -246,17 +144,16 @@ describe('MCP frame history tools', () => {
     vi.spyOn(actions, 'heartbeatAgent').mockImplementation(() => {})
   })
 
-  it('lists versions without html and restores one for the owner', async () => {
+  it('lists versions with their name and reason but no html, and restores one for the owner', async () => {
     actions.updateFrame(frame.id, { html: '<p>v1</p>' }, human)
-    await flush()
-    const old = versionsOf(frame.id)[0]!
+    const old = saved[0]!
     const { client, close } = await connect(OWNER_ID)
     try {
       const list = await call(client, 'list_frame_versions', { frame_id: frame.id })
       expect(list.isError).toBe(false)
       const parsed = JSON.parse(list.raw) as { versions: Record<string, unknown>[] }
       expect(parsed.versions).toHaveLength(1)
-      expect(parsed.versions[0]).toMatchObject({ id: old.id, savedBy: 'Ada', reason: 'human' })
+      expect(parsed.versions[0]).toMatchObject({ id: old.id, savedBy: 'Claude', name: 'Hero', reason: 'agent' })
       expect(parsed.versions[0]).not.toHaveProperty('html')
 
       const restore = await call(client, 'restore_frame_version', {
@@ -266,7 +163,7 @@ describe('MCP frame history tools', () => {
       })
       expect(restore.isError).toBe(false)
       expect(store.getFrame(frame.id)?.html).toBe('<p>v0</p>')
-      expect(versionsOf(frame.id).map((v) => v.reason)).toEqual(['human', 'restore'])
+      expect(saved.map((v) => v.reason)).toEqual(['agent', 'restore'])
     } finally {
       await close()
     }
@@ -274,8 +171,7 @@ describe('MCP frame history tools', () => {
 
   it('refuses a caller without access to the canvas, for both tools', async () => {
     actions.updateFrame(frame.id, { html: '<p>v1</p>' }, human)
-    await flush()
-    const old = versionsOf(frame.id)[0]!
+    const old = saved[0]!
     for (const stranger of ['someone-else', undefined]) {
       const { client, close } = await connect(stranger)
       try {
@@ -297,10 +193,9 @@ describe('MCP frame history tools', () => {
   })
 
   it('refuses a version that belongs to another frame', async () => {
-    const other = freshFrame('<p>o0</p>')
+    const other = actions.createFrame(CANVAS.id, { name: 'Other', html: '<p>o0</p>' }, agent)!
     actions.updateFrame(other.id, { html: '<p>o1</p>' }, human)
-    await flush()
-    const foreign = versionsOf(other.id)[0]!
+    const foreign = saved[0]!
     const { client, close } = await connect(OWNER_ID)
     try {
       const restore = await call(client, 'restore_frame_version', {

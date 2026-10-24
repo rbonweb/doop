@@ -16,8 +16,16 @@ export interface LayerNode {
   /** the first class (".hero") or id ("#nav") shown faint after the tag */
   detail: string
   kind: LayerKind
+  /** switched off through the Layers panel's eye (see setElementHidden) */
+  hidden: boolean
+  /** carries `data-doop-locked`: the stage neither picks nor edits it */
+  locked: boolean
   children: LayerNode[]
 }
+
+/** The attribute a locked layer carries in the frame's HTML. It travels with
+ *  the markup, so every collaborator (and agent) sees the same lock. */
+export const LOCK_ATTR = 'data-doop-locked'
 
 /* markup that renders nothing of its own has no place in a layer list */
 const HIDDEN_TAGS = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'TITLE', 'NOSCRIPT', 'TEMPLATE', 'BR', 'WBR'])
@@ -133,15 +141,23 @@ function detailOf(el: Element): string {
 
 function toNode(el: Element): LayerNode {
   const tag = el.tagName.toLowerCase()
-  const base = { selector: elementPath(el), tag, detail: detailOf(el) }
-  if (el.namespaceURI === 'http://www.w3.org/2000/svg') return { ...base, label: 'svg', kind: 'svg', children: [] }
+  const drawingName = el.hasAttribute('data-doop-drawing') ? el.getAttribute('data-name') : null
+  const base = {
+    selector: elementPath(el),
+    tag,
+    detail: drawingName ? '' : detailOf(el),
+    hidden: el.hasAttribute(HIDDEN_ATTR),
+    locked: el.hasAttribute(LOCK_ATTR),
+  }
+  if (el.namespaceURI === 'http://www.w3.org/2000/svg')
+    return { ...base, label: drawingName ?? 'svg', kind: 'svg', children: [] }
   if (IMAGE_TAGS.has(el.tagName)) return { ...base, label: tag, kind: 'image', children: [] }
   const children = layerChildren(el)
   const text = ownText(el)
   if (children.length === 0 && text) {
     return { ...base, label: text.length > 60 ? text.slice(0, 57) + '…' : text, detail: '', kind: 'text', children }
   }
-  return { ...base, label: tag, kind: 'box', children }
+  return { ...base, label: drawingName ?? tag, kind: 'box', children }
 }
 
 function layerChildren(el: Element): LayerNode[] {
@@ -194,6 +210,27 @@ export function elementHtml(html: string, selector: string): string | null {
   return find(parse(html), selector)?.outerHTML ?? null
 }
 
+/** True when the element, or anything above it, carries the lock — a lock
+ *  on a box covers everything inside it, as in Figma. `own` asks about the
+ *  element's own attribute only (what a toggle flips). A selector that no
+ *  longer resolves is not locked (there is nothing to protect). */
+export function isElementLocked(html: string, selector: string, own = false): boolean {
+  const el = find(parse(html), selector)
+  if (!el) return false
+  return own ? el.hasAttribute(LOCK_ATTR) : !!el.closest(`[${LOCK_ATTR}]`)
+}
+
+/** The frame's HTML with the element's own lock set or cleared, or null when
+ *  the selector no longer resolves. Clearing never touches a lock above it. */
+export function setElementLocked(html: string, selector: string, locked: boolean): string | null {
+  const doc = parse(html)
+  const el = find(doc, selector)
+  if (!el) return null
+  if (locked) el.setAttribute(LOCK_ATTR, 'true')
+  else el.removeAttribute(LOCK_ATTR)
+  return serialize(doc)
+}
+
 /** The frame's HTML with the element removed, or null when the selector no longer resolves. */
 export function removeElement(html: string, selector: string): string | null {
   const doc = parse(html)
@@ -209,6 +246,51 @@ export function replaceElement(html: string, selector: string, outerHtml: string
   const el = find(doc, selector)
   if (!el) return null
   el.outerHTML = outerHtml
+  return serialize(doc)
+}
+
+/* The Layers panel's eye on an element. The element stays in the markup,
+   marked and switched off with an inline display — so the live frame, every
+   export and an agent's screenshot agree it is not there, with no runtime
+   rule to carry around. */
+export const HIDDEN_ATTR = 'data-doop-hidden'
+/* the inline display it had before — value, and "!important" when it
+   carried one — so showing it again puts exactly that back */
+const DISPLAY_ATTR = 'data-doop-display'
+
+/** Whether the element is hidden; null when the selector no longer resolves. */
+export function isElementHidden(html: string, selector: string): boolean | null {
+  const el = find(parse(html), selector)
+  return el ? el.hasAttribute(HIDDEN_ATTR) : null
+}
+
+/** The frame's HTML with the element hidden or shown — the input itself
+ *  when it already is, null when the selector no longer resolves. Hiding
+ *  sets `display: none !important` inline (author CSS cannot put it back)
+ *  and remembers any inline display the element had; showing restores it. */
+export function setElementHidden(html: string, selector: string, hidden: boolean): string | null {
+  const doc = parse(html)
+  const el = find(doc, selector)
+  if (!el) return null
+  if (el.hasAttribute(HIDDEN_ATTR) === hidden) return html
+  const { style } = el as HTMLElement
+  if (hidden) {
+    if (style.display) {
+      const priority = style.getPropertyPriority('display')
+      el.setAttribute(DISPLAY_ATTR, priority ? `${style.display} !${priority}` : style.display)
+    }
+    el.setAttribute(HIDDEN_ATTR, 'true')
+    style.setProperty('display', 'none', 'important')
+  } else {
+    const prior = el.getAttribute(DISPLAY_ATTR)
+    el.removeAttribute(HIDDEN_ATTR)
+    el.removeAttribute(DISPLAY_ATTR)
+    if (prior) {
+      const [value = '', priority = ''] = prior.split(' !')
+      style.setProperty('display', value, priority)
+    } else style.removeProperty('display')
+    if (!el.getAttribute('style')) el.removeAttribute('style')
+  }
   return serialize(doc)
 }
 

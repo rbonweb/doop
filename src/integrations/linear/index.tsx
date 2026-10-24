@@ -4,9 +4,9 @@ import { ApiError, req, type IntegrationsStatus } from '../../lib/api'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { Modal, ModalActions, ModalLede, ModalTitle } from '../../components/ui/modal'
+import { Note } from '../../components/ui/note'
 import { DisconnectButton, IntegrationCard } from '../ui'
-import linearLogo from './logo.svg'
-import { cn } from '@/lib/utils'
+import { BrandMark } from '@/components/ui/brand-mark'
 
 interface LinearStatus {
   connected: boolean
@@ -22,21 +22,7 @@ function statusOf(status: IntegrationsStatus): LinearStatus {
 }
 
 function LinearTile({ size = 24, className }: { size?: number; className?: string }) {
-  return (
-    <span
-      aria-hidden
-      className={cn('inline-grid flex-none place-items-center', className)}
-      style={{
-        width: size,
-        height: size,
-        borderRadius: Math.round(size * 0.29),
-        background: '#090A0C',
-      }}
-    >
-      {/* Official logomark: https://linear.app/brand */}
-      <img src={linearLogo} alt="" width={Math.round(size * 0.58)} height={Math.round(size * 0.58)} />
-    </span>
-  )
+  return <BrandMark brand="linear" size={size} className={className} />
 }
 
 function LinearSettingsCard({ status, busy, setBusy, setStatus, requestDisconnect, showToast }: SettingsCardProps) {
@@ -131,14 +117,14 @@ function LinearSettingsCard({ status, busy, setBusy, setStatus, requestDisconnec
         <ModalLede>Choose how Doop works with your Linear workspace.</ModalLede>
         <div className="mt-5 flex flex-col gap-5">
           {linear.agent?.connected && (
-            <p className="text-sm text-ink-soft">
+            <p className="text-copy text-ink-soft">
               Delegate an issue to Doop in Linear. The design and canvas link arrive automatically.
             </p>
           )}
           {linear.agentConfigured && !linear.agent?.connected && (
             <div className="flex flex-col gap-2">
-              <h3 className="text-sm font-semibold">Automatic design pickup</h3>
-              <p className="text-sm leading-relaxed text-ink-soft">
+              <h3 className="text-copy font-semibold">Automatic design pickup</h3>
+              <p className="text-copy leading-relaxed text-ink-soft">
                 Install Doop in a Linear workspace you administer. Delegated tickets create private canvases in your
                 Doop account and run on your connected model account or task allowance. Workspace members who can
                 delegate to Doop can start these runs.
@@ -149,14 +135,12 @@ function LinearSettingsCard({ status, busy, setBusy, setStatus, requestDisconnec
             </div>
           )}
           {!linear.agentConfigured && !linear.agent?.connected && (
-            <p className="text-[11.5px] text-ink-faint">
-              Automatic design pickup needs a Linear app configured by this server’s administrator.
-            </p>
+            <Note>Automatic design pickup needs a Linear app configured by this server’s administrator.</Note>
           )}
           {error && (
-            <p role="alert" className="text-[11.5px] text-accent-ink">
+            <Note role="alert" tone="error">
               {error}
-            </p>
+            </Note>
           )}
           {hasKey && !replacing && (
             <Button variant="bare" size="sm" disabled={busy} onClick={() => setReplacing(true)}>
@@ -171,8 +155,8 @@ function LinearSettingsCard({ status, busy, setBusy, setStatus, requestDisconnec
                 void connect()
               }}
             >
-              <h3 className="text-sm font-semibold">Read-only ticket access</h3>
-              <p className="text-sm leading-relaxed text-ink-soft">
+              <h3 className="text-copy font-semibold">Read-only ticket access</h3>
+              <p className="text-copy leading-relaxed text-ink-soft">
                 Create a personal API key in Linear under{' '}
                 <a
                   href="https://linear.app/settings/account/security"
@@ -192,7 +176,8 @@ function LinearSettingsCard({ status, busy, setBusy, setStatus, requestDisconnec
                   placeholder="lin_api_…"
                   value={token}
                   disabled={busy}
-                  className="min-w-0 flex-1 bg-paper focus:ring-0"
+                  variant="well"
+                  className="min-w-0 flex-1"
                   onChange={(event) => {
                     setToken(event.target.value)
                     setError(null)
@@ -204,9 +189,7 @@ function LinearSettingsCard({ status, busy, setBusy, setStatus, requestDisconnec
               </div>
               {replacing && (
                 <>
-                  <p className="text-[11.5px] text-ink-faint">
-                    Your current key stays connected until the replacement is verified.
-                  </p>
+                  <Note>Your current key stays connected until the replacement is verified.</Note>
                   <Button
                     type="button"
                     variant="bare"

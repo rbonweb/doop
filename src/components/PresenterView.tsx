@@ -12,7 +12,7 @@ import {
 import { connect, disconnect } from '../lib/ws'
 import { useStore } from '../lib/store'
 import { cn } from '../lib/utils'
-import { Button } from './ui/button'
+import { IconButton } from './ui/icon-button'
 import { ChevronLeftIcon, ChevronRightIcon } from './ui/icons'
 import { MarkdownText } from './StickyNote'
 
@@ -23,7 +23,7 @@ import { MarkdownText } from './StickyNote'
 /* The show is dark in both themes, like any dark overlay: a fixed near-black ground and white text instead of the
    ink/paper tokens, which swap sides in the dark theme. `show-dark` (src/styles.css) pins the ink tokens light so the
    speaker notes' markdown, which reads them, stays legible on it. */
-export const SHOW_SURFACE = 'show-dark bg-[#0b0b0d] text-white'
+export const SHOW_SURFACE = 'show-dark bg-code text-white'
 
 /** A small live copy of a frame: the same sandboxed document the canvas renders, scaled down and inert. */
 export function FrameThumb({ frame, width, className }: { frame: Frame; width: number; className?: string }) {
@@ -42,7 +42,7 @@ export function FrameThumb({ frame, width, className }: { frame: Frame; width: n
   const scale = width / frame.width
   return (
     <div
-      className={cn('relative shrink-0 overflow-hidden rounded-[6px] bg-white ring-1 ring-white/20', className)}
+      className={cn('relative shrink-0 overflow-hidden rounded-row bg-white ring-1 ring-white/20', className)}
       style={{ width, height: Math.round(frame.height * scale) }}
     >
       <iframe
@@ -97,24 +97,19 @@ export function PresenterPanel({ frame, next, index, total, startedAt, variant, 
       <section
         aria-label="Speaker notes"
         data-stage-scroll=""
-        className={cn(
-          'min-w-0 flex-1 overflow-y-auto overscroll-contain',
-          big ? 'text-[22px] leading-[1.45]' : 'text-[15px] leading-[1.5]',
-        )}
+        className={cn('min-w-0 flex-1 overflow-y-auto overscroll-contain', big ? 'text-title' : 'text-lead')}
       >
-        <h2 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/55">
-          {frame.name || 'Slide'}
-        </h2>
+        <h2 className="mb-1.5 text-caption font-medium text-white/55">{frame.name || 'Slide'}</h2>
         {notes ? <MarkdownText markdown={notes} /> : <p className="text-white/55">No notes for this slide.</p>}
       </section>
       <aside className={cn('flex shrink-0 gap-4', big ? 'flex-col md:w-[360px]' : 'items-stretch')}>
         <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-white/55">Next</span>
+          <span className="text-caption font-medium text-white/55">Next</span>
           {next ? (
             <FrameThumb frame={next} width={big ? 360 : 192} />
           ) : (
             <div
-              className="grid place-items-center rounded-[6px] text-[12px] text-white/55 ring-1 ring-white/20"
+              className="grid place-items-center rounded-row text-label text-white/55 ring-1 ring-white/20"
               style={{ width: big ? 360 : 192, height: big ? 202 : 108 }}
             >
               End of the deck
@@ -123,36 +118,34 @@ export function PresenterPanel({ frame, next, index, total, startedAt, variant, 
         </div>
         <div className={cn('flex flex-col justify-between gap-2', big ? '' : 'w-[132px]')}>
           <div>
-            <div className="font-mono text-[28px] font-semibold leading-none tabular-nums" aria-label="Elapsed time">
+            <div className="font-mono text-title font-medium leading-none tabular-nums" aria-label="Elapsed time">
               {elapsed}
             </div>
-            <div className="mt-1.5 text-[12px] text-white/70" aria-label="Slide number">
+            <div className="mt-1.5 text-label text-white/70" aria-label="Slide number">
               Slide {index} / {total}
             </div>
           </div>
           <div className="flex gap-1.5">
-            <Button
-              variant="inverse"
-              size="icon-sm"
-              className="border border-white/25 text-white hover:bg-white/15"
+            <IconButton
+              shape="round"
+              className="text-white hover:bg-white/15 hover:text-white"
               aria-label="Previous slide"
               title="Previous slide (←)"
               disabled={index <= 1}
               onClick={onPrev}
             >
               <ChevronLeftIcon />
-            </Button>
-            <Button
-              variant="inverse"
-              size="icon-sm"
-              className="border border-white/25 text-white hover:bg-white/15"
+            </IconButton>
+            <IconButton
+              shape="round"
+              className="text-white hover:bg-white/15 hover:text-white"
               aria-label="Next slide"
               title="Next slide (→)"
               disabled={index >= total}
               onClick={onNext}
             >
               <ChevronRightIcon />
-            </Button>
+            </IconButton>
           </div>
         </div>
       </aside>
@@ -232,10 +225,10 @@ export function PresenterWindow({ canvasId }: { canvasId: string }) {
       ) : (
         <div className="grid h-full place-items-center px-6 text-center text-white/70">
           <div>
-            <p className="text-[18px] font-semibold text-white">
+            <p className="text-heading font-semibold text-white">
               {canvas ? 'Waiting for the presentation' : 'Connecting…'}
             </p>
-            <p className="mt-1.5 text-[14px]">
+            <p className="mt-1.5 text-copy">
               Present a deck in the other window. Notes and the next slide show up here as you go.
             </p>
           </div>

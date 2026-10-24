@@ -7,7 +7,15 @@ import type { Canvas, Frame } from '../shared/types'
 declare global {
   interface Window {
     seedPages: (canvas: Canvas) => void
-    pageState: () => { activePageId: string; viewport: { x: number; y: number; zoom: number }; selectedId: string }
+    pageState: () => {
+      activePageId: string
+      viewport: { x: number; y: number; zoom: number }
+      selectedId: string
+      selectedElement: { frameId: string; selector: string } | null
+      elementPanelOpen: boolean
+      inspectorOpen: boolean
+      notice?: string
+    }
   }
 }
 const frame = (id: string, pageId: string, x: number): Frame => ({
@@ -46,6 +54,9 @@ describe.skipIf(!findBrowserPath())('page camera and snapping', { timeout: 30_00
     vite = await createServer({ server: { port: 0 }, logLevel: 'error' })
     await vite.listen()
     browser = await getBrowser()
+    await browser
+      .defaultBrowserContext()
+      .overridePermissions(vite.resolvedUrls!.local[0]!, ['clipboard-read', 'clipboard-sanitized-write'])
     page = await browser.newPage()
     await page.setViewport({ width: 1200, height: 800 })
   }, 60_000)
@@ -75,6 +86,124 @@ describe.skipIf(!findBrowserPath())('page camera and snapping', { timeout: 30_00
       viewport: { x: -2500, y: 300, zoom: 1 },
     })
     expect(await page.$('iframe[title="original"]')).toBeNull()
+  })
+
+  it.each(['first', 'second'])('selects a linked element after its frame mounts on the %s page', async (pageId) => {
+    const target = { ...frame('target', pageId, 3000), html: '<main id="hero"><h1>Design</h1></main>' }
+    const selector = '#hero > h1:nth-of-type(1)'
+    await load(
+      canvas([frame('original', 'first', 0), target]),
+      `?${new URLSearchParams({ frame: target.id, selector })}`,
+    )
+    await page.waitForSelector('button[aria-label="Copy link to element"]')
+    expect(await page.evaluate(() => window.pageState())).toMatchObject({
+      activePageId: pageId,
+      selectedId: target.id,
+      selectedElement: { frameId: target.id, selector },
+      elementPanelOpen: true,
+      inspectorOpen: false,
+      viewport: { x: -2500, y: 300, zoom: 1 },
+    })
+
+    // Copy through the actual element toolbar, then reopen the resulting URL.
+    await page.locator('button[aria-label="Copy link to element"]').click()
+    await page.waitForFunction(() => window.pageState().notice === 'Element link copied')
+    const copied = await page.evaluate(() => navigator.clipboard.readText())
+    const url = new URL(copied)
+    expect(url.pathname).toBe('/c/c')
+    expect(url.searchParams.get('frame')).toBe(target.id)
+    expect(url.searchParams.get('selector')).toBe(selector)
+    expect(await page.evaluate(() => window.pageState().notice)).toBe('Element link copied')
+    await load(canvas([target]), url.search)
+    await page.waitForSelector('button[aria-label="Copy link to element"]')
+    expect(await page.evaluate(() => window.pageState().selectedElement)).toEqual({ frameId: target.id, selector })
+
+    // Deselecting still removes the probe and its panel after a deep link.
+    await page.mouse.click(100, 100)
+    await page.waitForFunction(() => window.pageState().selectedElement === null)
+    expect(await page.evaluate(() => window.pageState().elementPanelOpen)).toBe(false)
+  })
+
+  it.each(['#removed', '[invalid'])('falls back to the frame when the linked selector is %s', async (selector) => {
+    await load(canvas([frame('target', 'second', 3000)]), `?${new URLSearchParams({ frame: 'target', selector })}`)
+    await page.waitForFunction(() => !!window.pageState().notice)
+    expect(await page.evaluate(() => window.pageState())).toMatchObject({
+      activePageId: 'second',
+      selectedElement: null,
+      elementPanelOpen: false,
+      inspectorOpen: true,
+      notice: 'This element no longer exists. Showing its frame instead.',
+    })
+  })
+
+  it.each(['first', 'second'])('opens links to script-created elements on the %s page', async (pageId) => {
+    const target = {
+      ...frame('target', pageId, 3000),
+      html: `<main></main><script>
+        const chart = document.createElement('h1')
+        chart.id = 'chart'
+        chart.textContent = 'Live chart'
+        document.querySelector('main').append(chart)
+      </script>`,
+    }
+    await load(canvas([frame('original', 'first', 0), target]), '?frame=target&selector=%23chart')
+    await page.waitForSelector('button[aria-label="Copy link to element"]', { timeout: 5000 })
+    expect(await page.evaluate(() => window.pageState())).toMatchObject({
+      activePageId: pageId,
+      selectedId: target.id,
+      selectedElement: { frameId: target.id, selector: '#chart' },
+      elementPanelOpen: true,
+      inspectorOpen: false,
+    })
+    expect(await page.evaluate(() => window.pageState().notice)).toBeUndefined()
+
+    await page.locator('button[aria-label="Copy link to element"]').click()
+    await page.waitForFunction(() => window.pageState().notice === 'Element link copied')
+    const copied = await page.evaluate(() => navigator.clipboard.readText())
+    await load(canvas([target]), new URL(copied).search)
+    await page.waitForSelector('button[aria-label="Copy link to element"]', { timeout: 5000 })
+    expect(await page.evaluate(() => window.pageState().selectedElement)).toEqual({
+      frameId: target.id,
+      selector: '#chart',
+    })
+  })
+
+  it('falls back to frame details when a script removes an element from the saved HTML', async () => {
+    const target = {
+      ...frame('target', 'second', 3000),
+      html: '<h1 id="chart">Saved chart</h1><script>document.getElementById("chart").remove()</script>',
+    }
+    await load(canvas([target]), '?frame=target&selector=%23chart')
+    await page.waitForFunction(() => !!window.pageState().notice, { timeout: 5000 })
+    expect(await page.evaluate(() => window.pageState())).toMatchObject({
+      activePageId: 'second',
+      selectedId: target.id,
+      selectedElement: null,
+      elementPanelOpen: false,
+      inspectorOpen: true,
+      notice: 'This element no longer exists. Showing its frame instead.',
+    })
+    expect(await page.$('button[aria-label="Copy link to element"]')).toBeNull()
+  })
+
+  it('follows another element link and browser history within the same mounted canvas', async () => {
+    const target = { ...frame('target', 'first', 0), html: '<h1 id="one">One</h1><h2 id="two">Two</h2>' }
+    await load(canvas([target]), '?frame=target&selector=%23one')
+    await page.waitForFunction(() => window.pageState().selectedElement?.selector === '#one')
+    await page.evaluate(() => {
+      history.pushState(null, '', '?frame=target&selector=%23two')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    await page.waitForFunction(() => window.pageState().selectedElement?.selector === '#two')
+    await page.waitForSelector('button[aria-label="Copy link to element"]')
+    await page.evaluate(() => history.back())
+    await page.waitForFunction(() => window.pageState().selectedElement?.selector === '#one')
+    await page.evaluate(() => {
+      history.pushState(null, '', '?frame=target')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    await page.waitForFunction(() => window.pageState().inspectorOpen && !window.pageState().selectedElement)
+    await page.waitForSelector('button[aria-label="Copy link to element"]', { hidden: true })
   })
 
   it('does not snap a drag to the invisible frame on another page', async () => {

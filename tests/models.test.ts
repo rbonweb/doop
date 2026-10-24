@@ -40,7 +40,7 @@ beforeAll(async () => {
     })
   })
   await new Promise<void>((resolve) => anthropic.listen(0, '127.0.0.1', resolve))
-  server = await startServer(4992, {
+  server = await startServer({
     ANTHROPIC_API_KEY: 'server-key',
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${(anthropic.address() as AddressInfo).port}`,
     DOOP_AGENT_MODEL: 'env-agent-model',

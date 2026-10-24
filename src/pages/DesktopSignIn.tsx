@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { authClient } from '../lib/auth'
 import { desktopHandoffURL, parseDesktopSignInQuery } from '../lib/desktopAuth'
-import { AuthScreen } from '../components/ui/screen'
-import { Wordmark } from '../components/ui/wordmark'
+import { AuthCard, AuthCardText, AuthScreen } from '../components/ui/screen'
 import { Callout } from '../components/ui/callout'
 
 /* Step 1 of the desktop sign-in (src/lib/desktopAuth.ts), in the system
@@ -18,16 +17,23 @@ export function DesktopSignIn({ signedIn }: { signedIn: boolean }) {
 
   useEffect(() => {
     if (!request) return
-    const callbackURL = desktopHandoffURL(request.challenge, request.to)
+    const callbackURL = desktopHandoffURL(request.challenge, request.callbackURL)
     if (signedIn) {
       location.replace(callbackURL)
       return
     }
+    /* the handoff carries the in-app landing through to the deep link, so
+       a new account's first-canvas landing survives the hop too */
+    const redirects = {
+      callbackURL,
+      newUserCallbackURL: desktopHandoffURL(request.challenge, request.newUserCallbackURL),
+      errorCallbackURL: '/auth',
+    }
     const failed = 'Could not start sign-in — go back to the doop app and try again.'
     const start =
       request.provider === 'oidc'
-        ? authClient.signIn.oauth2({ providerId: 'oidc', callbackURL, errorCallbackURL: '/auth' })
-        : authClient.signIn.social({ provider: request.provider, callbackURL, errorCallbackURL: '/auth' })
+        ? authClient.signIn.oauth2({ providerId: 'oidc', ...redirects })
+        : authClient.signIn.social({ provider: request.provider, ...redirects })
     start
       .then((res) => {
         if (res.error) setStartError(res.error.message ?? failed)
@@ -37,17 +43,13 @@ export function DesktopSignIn({ signedIn }: { signedIn: boolean }) {
 
   return (
     <AuthScreen>
-      <div className="flex w-[min(400px,100%)] flex-col gap-3.5 rounded-[12px] border border-line bg-surface p-6 pt-[30px] shadow-pop sm:p-9 sm:pb-7">
-        <Wordmark className="mb-1.5" />
-        <h1 className="font-serif text-[34px] font-normal leading-[1.05] tracking-[-0.015em]">
-          {error ? 'Something went wrong.' : 'Signing you in…'}
-        </h1>
+      <AuthCard title={error ? 'Something went wrong.' : 'Signing you in…'}>
         {error ? (
           <Callout tone="error">{error}</Callout>
         ) : (
-          <p className="text-sm text-ink-soft">Taking you to your identity provider for the doop app.</p>
+          <AuthCardText>Taking you to your identity provider for the doop app.</AuthCardText>
         )}
-      </div>
+      </AuthCard>
     </AuthScreen>
   )
 }

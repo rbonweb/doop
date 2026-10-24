@@ -20,14 +20,14 @@ import { useCanEdit, useIsGuest } from '../lib/role'
 import { useStore } from '../lib/store'
 import { downloadDeckPdf } from '../lib/deckExport'
 import { deckOf } from '../../shared/slides'
-import { savePages, moveFramesToPage } from '../lib/pageEdits'
+import { savePages, duplicatePage, moveFramesToPage } from '../lib/pageEdits'
 import { strongerMark, type Mark } from '../../shared/marks'
 import { useMarks } from '../lib/marks'
 import { MarkDot } from './MarkDot'
 import { loadCollapsedPages, saveCollapsedPages } from '../lib/pageCollapse'
 import { ApiError } from '../lib/api'
 import { Button } from './ui/button'
-import { ChevronRightIcon, PlusIcon } from './ui/icons'
+import { ChevronRightIcon, PageIcon, PlusIcon } from './ui/icons'
 import { cn } from '../lib/utils'
 import { MenuHint } from './ui/menu'
 import {
@@ -40,11 +40,20 @@ import {
   ContextMenuSubTrigger,
   ContextMenuSubContent,
 } from './ui/context-menu'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
+
+/** The small grey sub-heading over a section of the Layers panel, shared with
+ *  its "Layers" row: the two must read as one family (a browser test checks
+ *  their typography). */
+export const sectionHeading = 'text-[11px] font-normal text-ink-faint'
+const sectionBtn = 'size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink'
 
 /** Horizontal step per nesting level, in px. */
 const INDENT = 14
 /** Width of the chevron gutter that appears once any page has subpages, in px. */
 const GUTTER = 16
+/** The most pages a canvas holds, matching the server. */
+const MAX_PAGES = 100
 
 interface Row {
   page: CanvasPageInfo
@@ -75,11 +84,6 @@ function visibleRows(nodes: PageNode[], collapsed: ReadonlySet<string>): Row[] {
   }
   nodes.forEach(visit)
   return rows
-}
-
-/** Names for a native <option>, which cannot indent with CSS. */
-function indentedName(pages: CanvasPageInfo[], page: CanvasPageInfo) {
-  return `${'— '.repeat(Math.max(pageDepth(pages, page.id) - 1, 0))}${page.name}`
 }
 
 export function PagesPanel({ fill = false }: { fill?: boolean }) {
@@ -114,6 +118,20 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   const nested = pages.some((page) => page.parentId !== undefined)
   const activeAncestors = new Set(pageAncestors(pages, activePageId ?? '').map((page) => page.id))
   const dragged = drag ? new Set([drag.id, ...pageDescendants(pages, drag.id).map((page) => page.id)]) : null
+  const movableIds = canvas.frames.filter((f) => selectedIds.includes(f.id) && !f.locked).map((f) => f.id)
+
+  async function moveSelection(pageId: string) {
+    if (!mayEdit || !canvas || busy || !movableIds.length) return
+    setBusy(true)
+    try {
+      await moveFramesToPage(canvas, movableIds, pageId)
+    } catch {
+      if (useStore.getState().canvas?.id === canvas.id)
+        useStore.getState().pushNotice('Could not move all selected frames to the page')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   function setCollapsed(id: string, collapsed: boolean) {
     if (!canvas || fold.ids.has(id) === collapsed) return
@@ -266,258 +284,290 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
     e.preventDefault()
   }
 
-  async function moveSelection(pageId: string) {
+  async function duplicate(pageId: string) {
     if (!mayEdit || !canvas || busy) return
     setBusy(true)
     try {
-      await moveFramesToPage(canvas, selectedIds, pageId)
-    } catch {
+      await duplicatePage(canvas, pageId)
+    } catch (error) {
       if (useStore.getState().canvas?.id !== canvas.id) return
-      useStore.getState().pushNotice('Could not move all selected frames. Please try again.')
+      useStore
+        .getState()
+        .pushNotice(
+          error instanceof ApiError && typeof error.body.error === 'string'
+            ? error.body.error
+            : 'Could not duplicate the page',
+        )
     } finally {
       setBusy(false)
     }
   }
 
-  return (
-    <div
-      className={cn('overflow-y-auto px-3 py-2', fill ? 'min-h-0 flex-1' : 'max-h-[35vh] border-b border-line-soft')}
+  const addButton = (
+    <Button
+      variant="bare"
+      size="icon-sm"
+      className={sectionBtn}
+      aria-label="Add page"
+      disabled={busy}
+      onClick={() => {
+        const page = { id: nanoid(10), name: `Page ${pages.length + 1}` }
+        void save([...pages, page], page.id)
+      }}
     >
-      <div className="flex items-center justify-between py-1 font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-ink-faint">
-        <span data-slot="page-section-heading">Pages</span>
-        {mayEdit && (
-          <Button
-            variant="bare"
-            size="icon-sm"
-            className="size-5 rounded-[5px] text-ink-faint hover:bg-paper-deep hover:text-ink"
-            aria-label="Add page"
-            disabled={busy}
-            onClick={() => {
-              const page = { id: nanoid(10), name: `Page ${pages.length + 1}` }
-              void save([...pages, page], page.id)
-            }}
-          >
-            <PlusIcon width={12} height={12} />
-          </Button>
-        )}
-      </div>
-      <div role="tree" aria-label="Pages" onKeyDown={onKeyDown}>
-        {rows.map(({ page, depth, childCount, collapsed }) => {
-          const active = page.id === activePageId
-          const holdsActive = collapsed && activeAncestors.has(page.id)
-          const dropHere = drag?.drop
-          const lineHere = dropHere?.lineRowId === page.id ? dropHere : null
-          const moveTargets = pages.filter(
-            (target) => target.id !== page.parentId && canNestPage(pages, page.id, target.id),
-          )
-          const atMaxDepth = depth >= MAX_PAGE_DEPTH
-          /* a collapsed page speaks for the subpages it hides */
-          const pageMark: Mark | undefined = collapsed
-            ? pageDescendants(pages, page.id).reduce<Mark | undefined>(
-                (mark, sub) => strongerMark(mark, marksByPage[sub.id]),
-                marksByPage[page.id],
-              )
-            : marksByPage[page.id]
-          return (
-            <ContextMenu key={page.id}>
-              <ContextMenuTrigger asChild disabled={!mayEdit}>
-                <div
-                  data-page-id={page.id}
-                  role="treeitem"
-                  aria-level={depth}
-                  aria-selected={active}
-                  aria-expanded={childCount ? !collapsed : undefined}
-                  style={{ paddingLeft: (depth - 1) * INDENT }}
-                  onContextMenu={() => useStore.getState().setActivePage(page.id)}
+      <PlusIcon className="size-3.5" />
+    </Button>
+  )
+
+  const list = (
+    <div role="tree" aria-label="Pages" onKeyDown={onKeyDown}>
+      {rows.map(({ page, depth, childCount, collapsed }) => {
+        const active = page.id === activePageId
+        const holdsActive = collapsed && activeAncestors.has(page.id)
+        const dropHere = drag?.drop
+        const lineHere = dropHere?.lineRowId === page.id ? dropHere : null
+        const moveTargets = pages.filter(
+          (target) => target.id !== page.parentId && canNestPage(pages, page.id, target.id),
+        )
+        const atMaxDepth = depth >= MAX_PAGE_DEPTH
+        const subtreeSize = pageDescendants(pages, page.id).length + 1
+        /* a collapsed page speaks for the subpages it hides */
+        const pageMark: Mark | undefined = collapsed
+          ? pageDescendants(pages, page.id).reduce<Mark | undefined>(
+              (mark, sub) => strongerMark(mark, marksByPage[sub.id]),
+              marksByPage[page.id],
+            )
+          : marksByPage[page.id]
+        return (
+          <ContextMenu key={page.id}>
+            <ContextMenuTrigger asChild disabled={!mayEdit}>
+              <div
+                data-page-id={page.id}
+                role="treeitem"
+                aria-level={depth}
+                aria-selected={active}
+                aria-expanded={childCount ? !collapsed : undefined}
+                style={{ paddingLeft: (depth - 1) * INDENT }}
+                onContextMenu={() => useStore.getState().setActivePage(page.id)}
+                className={cn(
+                  'group relative flex h-[27px] items-center gap-1 rounded-[7px] pr-2.5 text-[12px] text-ink-soft hover:bg-sub',
+                  holdsActive && 'bg-brand/10 text-ink hover:bg-brand/15',
+                  active && 'bg-paper-deep text-ink hover:bg-paper-deep',
+                  dragged?.has(page.id) && 'opacity-40',
+                  dropHere?.into && dropHere.targetId === page.id && 'bg-brand/15 ring-1 ring-inset ring-brand',
+                )}
+              >
+                {lineHere && (
+                  <div
+                    className={cn(
+                      'pointer-events-none absolute right-0 h-0.5 rounded-full bg-brand',
+                      lineHere.lineAfter ? 'bottom-0' : 'top-0',
+                    )}
+                    style={{ left: (lineHere.lineDepth - 1) * INDENT }}
+                  />
+                )}
+                {nested && (
+                  <span className="flex shrink-0 items-center justify-center" style={{ width: GUTTER }}>
+                    {childCount > 0 && (
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${page.name}`}
+                        aria-expanded={!collapsed}
+                        className="flex size-4 items-center justify-center rounded-[4px] text-ink-faint hover:text-ink"
+                        onClick={() => setCollapsed(page.id, !collapsed)}
+                      >
+                        <ChevronRightIcon
+                          width={11}
+                          height={11}
+                          className={cn('transition-transform duration-150', !collapsed && 'rotate-90')}
+                        />
+                      </button>
+                    )}
+                  </span>
+                )}
+                <span
                   className={cn(
-                    'group relative flex h-[26px] items-center gap-0.5 rounded-md text-[12.5px] text-ink hover:bg-paper-deep',
-                    holdsActive && 'bg-brand/10 shadow-[inset_2px_0_0_var(--brand)] hover:bg-brand/15',
-                    active && 'bg-brand text-white hover:bg-brand',
-                    dragged?.has(page.id) && 'opacity-40',
-                    dropHere?.into && dropHere.targetId === page.id && 'bg-brand/15 ring-1 ring-inset ring-brand',
+                    'grid size-4 flex-none place-items-center pr-0 box-content text-ink-faint',
+                    nested ? 'pl-0' : 'pl-2.5',
+                    active && 'text-ink',
                   )}
                 >
-                  {lineHere && (
-                    <div
-                      className={cn(
-                        'pointer-events-none absolute right-0 h-0.5 rounded-full bg-brand',
-                        lineHere.lineAfter ? 'bottom-0' : 'top-0',
-                      )}
-                      style={{ left: (lineHere.lineDepth - 1) * INDENT }}
+                  <PageIcon className="size-3.5" />
+                </span>
+                {renaming === page.id ? (
+                  <form
+                    className="min-w-0 flex-1"
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      if (name.trim()) void save(pages.map((p) => (p.id === page.id ? { ...p, name: name.trim() } : p)))
+                    }}
+                  >
+                    <input
+                      autoFocus
+                      aria-label="Page name"
+                      maxLength={100}
+                      disabled={busy}
+                      onFocus={(e) => e.target.select()}
+                      className="w-full rounded-[6px] bg-surface px-2 py-1 text-[12px] text-ink shadow-elevation-1-focus outline-none"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setRenaming(null)
+                      }}
                     />
-                  )}
-                  {nested && (
-                    <span className="flex shrink-0 items-center justify-center" style={{ width: GUTTER }}>
-                      {childCount > 0 && (
-                        <button
-                          type="button"
-                          tabIndex={-1}
-                          aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${page.name}`}
-                          aria-expanded={!collapsed}
-                          className={cn(
-                            'flex size-4 items-center justify-center rounded-[4px] text-ink-soft hover:text-ink',
-                            active && 'text-white/80 hover:text-white',
-                          )}
-                          onClick={() => setCollapsed(page.id, !collapsed)}
-                        >
-                          <ChevronRightIcon
-                            width={11}
-                            height={11}
-                            className={cn('transition-transform duration-150', !collapsed && 'rotate-90')}
-                          />
-                        </button>
-                      )}
-                    </span>
-                  )}
-                  {renaming === page.id ? (
-                    <form
-                      className="min-w-0 flex-1"
-                      onSubmit={(e) => {
+                  </form>
+                ) : (
+                  <button
+                    data-page-name=""
+                    className={cn(
+                      'min-w-0 flex-1 touch-none select-none truncate py-1.5 pl-0.5 text-left text-[12px]',
+                      !mayEdit ? 'cursor-pointer' : drag ? 'cursor-grabbing' : 'cursor-grab',
+                      (active || holdsActive) && 'font-medium',
+                    )}
+                    aria-current={active ? 'page' : undefined}
+                    onPointerDown={(e) => {
+                      didDrag.current = false
+                      startDrag(e, page.id)
+                    }}
+                    onClick={(e) => {
+                      if (didDrag.current) {
                         e.preventDefault()
-                        if (name.trim())
-                          void save(pages.map((p) => (p.id === page.id ? { ...p, name: name.trim() } : p)))
-                      }}
-                    >
-                      <input
-                        autoFocus
-                        aria-label="Page name"
-                        maxLength={100}
-                        disabled={busy}
-                        onFocus={(e) => e.target.select()}
-                        className="w-full rounded border border-line bg-paper px-2 py-1 text-xs text-ink"
-                        value={name}
-                        onChange={(e) => setName(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Escape') setRenaming(null)
-                        }}
-                      />
-                    </form>
-                  ) : (
-                    <button
-                      data-page-name=""
-                      className={`min-w-0 flex-1 touch-none select-none truncate py-1.5 pr-2 text-left text-[12.5px] ${nested ? 'pl-1' : 'pl-2'} ${!mayEdit ? 'cursor-pointer' : drag ? 'cursor-grabbing' : 'cursor-grab'} ${active || holdsActive ? 'font-semibold' : ''}`}
-                      aria-current={active ? 'page' : undefined}
-                      onPointerDown={(e) => {
-                        didDrag.current = false
-                        startDrag(e, page.id)
-                      }}
-                      onClick={(e) => {
-                        if (didDrag.current) {
-                          e.preventDefault()
-                          return
-                        }
-                        useStore.getState().setActivePage(page.id)
-                      }}
-                      onDoubleClick={() => {
-                        if (!mayEdit || busy || didDrag.current) return
-                        setRenaming(page.id)
-                        setName(page.name)
-                      }}
-                    >
-                      {page.name}
-                    </button>
-                  )}
-                  {renaming !== page.id && (
-                    <MarkDot mark={pageMark} className={cn('mr-2', active && 'shadow-[0_0_0_1.5px_var(--surface)]')} />
-                  )}
-                  {collapsed && renaming !== page.id && (
-                    <span
-                      className={cn(
-                        'mr-2 shrink-0 font-mono text-[10px] tabular-nums text-ink-faint',
-                        active && 'text-white/80',
-                      )}
-                      title={`${pageDescendants(pages, page.id).length} hidden subpages`}
-                    >
-                      {pageDescendants(pages, page.id).length}
-                    </span>
-                  )}
-                </div>
-              </ContextMenuTrigger>
-              <ContextMenuContent
-                onCloseAutoFocus={(e) => {
-                  if (renaming) e.preventDefault()
+                        return
+                      }
+                      useStore.getState().setActivePage(page.id)
+                    }}
+                    onDoubleClick={() => {
+                      if (!mayEdit || busy || didDrag.current) return
+                      setRenaming(page.id)
+                      setName(page.name)
+                    }}
+                  >
+                    {page.name}
+                  </button>
+                )}
+                {renaming !== page.id && <MarkDot mark={pageMark} />}
+                {collapsed && renaming !== page.id && (
+                  <span
+                    className="shrink-0 font-mono text-[10px] tabular-nums text-ink-faint"
+                    title={`${pageDescendants(pages, page.id).length} hidden subpages`}
+                  >
+                    {pageDescendants(pages, page.id).length}
+                  </span>
+                )}
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent
+              onCloseAutoFocus={(e) => {
+                if (renaming) e.preventDefault()
+              }}
+            >
+              <ContextMenuItem
+                disabled={busy}
+                onSelect={() => {
+                  setRenaming(page.id)
+                  setName(page.name)
                 }}
               >
-                <ContextMenuItem
-                  disabled={busy}
-                  onSelect={() => {
-                    setRenaming(page.id)
-                    setName(page.name)
-                  }}
-                >
-                  Rename
+                Rename
+              </ContextMenuItem>
+              <ContextMenuItem
+                disabled={busy || pages.length + subtreeSize > MAX_PAGES}
+                title={
+                  pages.length + subtreeSize > MAX_PAGES ? `A canvas holds at most ${MAX_PAGES} pages.` : undefined
+                }
+                onSelect={() => void duplicate(page.id)}
+              >
+                {subtreeSize > 1 ? 'Duplicate page and subpages' : 'Duplicate page'}
+              </ContextMenuItem>
+              <ContextMenuItem
+                disabled={busy || atMaxDepth}
+                title={atMaxDepth ? `Pages can only be nested ${MAX_PAGE_DEPTH} levels deep.` : undefined}
+                onSelect={() => addSubpage(page)}
+              >
+                New subpage
+                {atMaxDepth && <MenuHint>Too deep</MenuHint>}
+              </ContextMenuItem>
+              {page.parentId !== undefined && (
+                <ContextMenuItem disabled={busy} onSelect={() => nestPage(page.id, { type: 'top' })}>
+                  Move to top level
                 </ContextMenuItem>
-                <ContextMenuItem
-                  disabled={busy || atMaxDepth}
-                  title={atMaxDepth ? `Pages can only be nested ${MAX_PAGE_DEPTH} levels deep.` : undefined}
-                  onSelect={() => addSubpage(page)}
-                >
-                  New subpage
-                  {atMaxDepth && <MenuHint>Too deep</MenuHint>}
-                </ContextMenuItem>
-                {page.parentId !== undefined && (
-                  <ContextMenuItem disabled={busy} onSelect={() => nestPage(page.id, { type: 'top' })}>
-                    Move to top level
+              )}
+              {moveTargets.length > 0 && (
+                <ContextMenuSub>
+                  <ContextMenuSubTrigger disabled={busy}>Move into…</ContextMenuSubTrigger>
+                  <ContextMenuSubContent>
+                    {moveTargets.map((target) => (
+                      <ContextMenuItem
+                        key={target.id}
+                        onSelect={() => nestPage(page.id, { type: 'into', targetId: target.id })}
+                      >
+                        <span className="truncate" style={{ paddingLeft: (pageDepth(pages, target.id) - 1) * 10 }}>
+                          {target.name}
+                        </span>
+                      </ContextMenuItem>
+                    ))}
+                  </ContextMenuSubContent>
+                </ContextMenuSub>
+              )}
+              {!guest && slideCount(page.id) > 0 && (
+                <>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    onSelect={() => void downloadDeckPdf(canvasId!, page.id, page.name, slideCount(page.id))}
+                  >
+                    Export deck as PDF
+                    <MenuHint>{slideCount(page.id)} slides</MenuHint>
                   </ContextMenuItem>
-                )}
-                {moveTargets.length > 0 && (
-                  <ContextMenuSub>
-                    <ContextMenuSubTrigger disabled={busy}>Move into…</ContextMenuSubTrigger>
-                    <ContextMenuSubContent>
-                      {moveTargets.map((target) => (
-                        <ContextMenuItem
-                          key={target.id}
-                          onSelect={() => nestPage(page.id, { type: 'into', targetId: target.id })}
-                        >
-                          <span className="truncate">{indentedName(pages, target)}</span>
-                        </ContextMenuItem>
-                      ))}
-                    </ContextMenuSubContent>
-                  </ContextMenuSub>
-                )}
-                {!guest && slideCount(page.id) > 0 && (
-                  <>
-                    <ContextMenuSeparator />
-                    <ContextMenuItem
-                      onSelect={() => void downloadDeckPdf(canvasId!, page.id, page.name, slideCount(page.id))}
-                    >
-                      Export deck as PDF
-                      <MenuHint>{slideCount(page.id)} slides</MenuHint>
-                    </ContextMenuItem>
-                  </>
-                )}
-                <ContextMenuSeparator />
-                <ContextMenuItem
-                  tone="danger"
-                  disabled={busy || pages.length === 1}
-                  onSelect={() => void save(removePage(pages, page.id))}
-                >
-                  Delete page
-                </ContextMenuItem>
-              </ContextMenuContent>
-            </ContextMenu>
-          )
-        })}
+                </>
+              )}
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                tone="danger"
+                disabled={busy || pages.length === 1}
+                onSelect={() => void save(removePage(pages, page.id))}
+              >
+                Delete page
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
+        )
+      })}
+    </div>
+  )
+
+  return (
+    <div className={cn('flex flex-none flex-col', fill && 'min-h-0 flex-1')}>
+      <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
+        <span data-slot="page-section-heading" className={sectionHeading}>
+          Pages
+        </span>
+        {mayEdit && addButton}
       </div>
+      <div className={cn('overflow-y-auto px-2 pb-1', fill ? 'min-h-0 flex-1' : 'max-h-[30vh]')}>{list}</div>
       {mayEdit && selectedIds.length > 0 && pages.length > 1 && (
-        <select
-          aria-label="Move selected frames to page"
-          className="mt-2 w-full rounded border border-line bg-paper p-1 text-xs"
-          value=""
-          disabled={busy}
-          onChange={(e) => void moveSelection(e.target.value)}
-        >
-          <option value="" disabled>
-            Move selection to page…
-          </option>
-          {pages
-            .filter((p) => p.id !== activePageId)
-            .map((p) => (
-              <option key={p.id} value={p.id}>
-                {indentedName(pages, p)}
-              </option>
-            ))}
-        </select>
+        /* the canvas shortcuts listen on window: ⌫ would delete the frames
+           being moved and typed letters would switch tools, so the picker's
+           keys stop here; React bubbles the portalled list's keys through this
+           div too, before the native event reaches window */
+        <div className="px-2 pb-2" onKeyDown={(e) => e.stopPropagation()}>
+          <Select value="" disabled={busy || !movableIds.length} onValueChange={(id) => void moveSelection(id)}>
+            <SelectTrigger size="sm" className="w-full" aria-label="Move selection to page">
+              <SelectValue placeholder="Move selection to page…" />
+            </SelectTrigger>
+            <SelectContent>
+              {pages
+                .filter((page) => page.id !== activePageId)
+                .map((page) => (
+                  <SelectItem key={page.id} value={page.id}>
+                    <span className="truncate" style={{ paddingLeft: (pageDepth(pages, page.id) - 1) * 12 }}>
+                      {page.name}
+                    </span>
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
+        </div>
       )}
     </div>
   )

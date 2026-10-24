@@ -14,12 +14,12 @@ const TRUNCATED = '\n[truncated]'
 
 /* OSC (ESC ] … BEL or ESC \), other string sequences (DCS/SOS/PM/APC), CSI (ESC [ params final byte), then a bare
    two-byte escape; the 8-bit C1 forms of CSI and OSC are covered too */
-/* eslint-disable no-control-regex -- matching control characters is the point of these two patterns */
+/* oxlint-disable no-control-regex -- matching control characters is the point of these two patterns */
 const ANSI_RE =
   /(?:\u001b\][^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)?)|(?:\u001b[PX^_][^\u001b\u009c]*(?:\u001b\\|\u009c)?)|(?:(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~])|(?:\u001b[@-Z\\-_])/g
 /* every ASCII control character except \n (0x0a) and \t (0x09), DEL, and the remaining C1 controls */
 const CONTROL_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g
-/* eslint-enable no-control-regex */
+/* oxlint-enable no-control-regex */
 
 function cap(text: string, max: number): { text: string; cut: boolean } {
   if (text.length <= max) return { text, cut: false }

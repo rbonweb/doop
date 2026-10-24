@@ -13,6 +13,7 @@ import {
 } from '../lib/localAgent'
 import { CLAUDE_MODELS, normalizeClaudeModel, type ClaudeModel } from '../../shared/localAgent'
 import { Button } from './ui/button'
+import { Disclosure } from './ui/collapsible'
 import { AgentIcon } from './AgentIcon'
 import { ToggleChip, ToggleChipGroup, ToggleChipItem } from './ui/toggle-chip'
 import { CheckIcon, DesktopIcon, DownloadIcon } from './ui/icons'
@@ -250,14 +251,15 @@ export function LocalClaudeRow() {
           <p className="mt-[10px] text-[13px] text-ink-faint">Waiting for a connected desktop.</p>
         )}
         {(running || runnerError) && (
-          <details className="mt-[10px] text-[13px] text-ink-soft">
-            <summary className={runnerError ? 'cursor-pointer text-accent-ink' : 'cursor-pointer'}>
-              {running ? 'Working…' : 'Last task failed'}
-            </summary>
-            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap font-sans" aria-live="polite">
+          <Disclosure
+            label={running ? 'Working…' : 'Last task failed'}
+            className="mt-[10px] text-[13px] text-ink-soft"
+            triggerClassName={cn(runnerError && 'text-accent-ink')}
+          >
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-sans" aria-live="polite">
               {runnerError || progress}
             </pre>
-          </details>
+          </Disclosure>
         )}
         {error && (
           <p role="alert" className="mt-[10px] text-[12.5px] text-accent-ink">

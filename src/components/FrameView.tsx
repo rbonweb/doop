@@ -1,15 +1,19 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { CommentAnchor, ElementComment, Frame } from '../../shared/types'
-import { colorFor } from '../../shared/types'
 import { resolveGoto } from '../../shared/gotoLinks'
 import { useStore } from '../lib/store'
+import { isCanvasElement } from '../lib/drawing'
+import { useDrawingMove } from './DrawingMove'
+import { FrameLabelLayer } from './FrameLabelLayer'
+import { PathEditor } from './PathEditor'
+import { loadPathEdit, type PathEditSource } from '../lib/pathEditing'
 import { currentPageCanvas } from '../lib/pages'
 import { registerFrameWindow, unregisterFrameWindow } from '../lib/frameBridge'
 import { api } from '../lib/api'
 import { postComment, postReply } from '../lib/commenting'
 import { canCommentNow, useCanComment, useCanEdit } from '../lib/role'
-import { authClient } from '../lib/auth'
-import { MentionTextarea, mentionIds, type MentionTextareaHandle } from './MentionTextarea'
+import { copyElementLink } from '../lib/elementLink'
 import { sendWs } from '../lib/ws'
 import { throttle } from '../lib/throttle'
 import { getIdentity } from '../lib/identity'
@@ -19,23 +23,24 @@ import { useFrameSleep } from '../lib/frameSleep'
 import { recordCreate, recordUpdate, recordUpdates, trackSave } from '../lib/history'
 import { snapDeviceWidth, snapFrame } from '../lib/snap'
 import { gesture } from '../lib/gesture'
+import { resolvePointerAction } from '../lib/tools'
 import { FrameContextMenu } from './FrameContextMenu'
 import { CodePanel } from './CodePanel'
 import { ContextMenu, ContextMenuTrigger } from './ui/context-menu'
-import { AGENT_ROLES, DEFAULT_ROLE_ID, mentionedRole, roleName } from '../../shared/agents'
+import { DEFAULT_ROLE_ID } from '../../shared/agents'
 import { posthog } from '../lib/posthog'
 import { isResidentLimit } from './TeamAllowance'
 import { MarkDot } from './MarkDot'
 import { useFrameMark } from '../lib/marks'
+import { CommentComposer, CommentPin, CommentThread } from './CommentPopovers'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Tooltip } from './ui/tooltip'
-import { DownloadIcon, GithubIcon, SlideIcon, SyncIcon } from './ui/icons'
-import { EXPORT_SHORTCUT } from '../lib/keys'
+import { EyeClosedIcon, GithubIcon, LockIcon, SlideIcon, SyncIcon } from './ui/icons'
 import { isSyncedFrame } from '../lib/sync'
 import { isGithubFrame, isGithubPlaceholder } from '../lib/github'
 import { AgentIcon } from './AgentIcon'
-import { RoleMark } from './RoleMark'
+import { ElementResizeHandles } from './ElementResizeHandles'
 
 /** ?comment=<rootId> — the link in a comment email. The thread opens once
  *  Stage has selected the linked frame (deselection closes popovers, and on
@@ -45,26 +50,67 @@ function deepLinkedThread(): string | null {
   return new URLSearchParams(location.search).get('comment')
 }
 
+/** Where a pointer event landed relative to an element, in design px (screen
+ *  px over the camera zoom: the frame lives inside the zoomed stage). */
+function designPoint(e: React.MouseEvent, el: Element): { x: number; y: number } {
+  const box = el.getBoundingClientRect()
+  const zoom = useStore.getState().viewport.zoom
+  return { x: (e.clientX - box.left) / zoom, y: (e.clientY - box.top) / zoom }
+}
+
+/** Where a press landed on its target, as `offsetX` measured it; `offsetX`
+ *  itself counts zoomed px in Chromium under the world's CSS zoom. */
+function designOffset(e: React.PointerEvent<HTMLElement>): { x: number; y: number } {
+  return designPoint(e, e.target instanceof HTMLElement ? e.target : e.currentTarget)
+}
+
 /* Counter-scale contract: chrome that keeps constant on-screen size divides
    by the `--zoom` variable the Stage publishes (capped at 2.4× when zoomed
-   far out). Preserve these expressions exactly. */
+   far out, so a pin or label never dwarfs the frame it sits on). Preserve
+   these expressions exactly. */
 const COUNTER_SCALE = '[transform:scale(min(calc(1/var(--zoom,1)),2.4))]'
-/* the inverse of COUNTER_SCALE: a box this wide, once counter-scaled, spans
-   exactly the frame's width on screen */
-const LABEL_WIDTH = '[width:calc(100%*max(var(--zoom,1),calc(1/2.4)))]'
+/* The element toolbar and the composer are not capped, like the rest of the
+   comment UI (CommentPopovers): screen UI the user reads and types in keeps
+   its size at every zoom, the way Figma's comment pins do. */
+const POPOVER_SCALE = '[transform:scale(calc(1/var(--zoom,1)))_translateY(calc(-100%_-_8px))]'
+
+/* screen px between a frame's name and its top edge, at every zoom */
+const LABEL_GAP = 6
 const EDITOR_CHIP =
   'inline-flex items-center gap-1 rounded-full px-[7px] py-0.5 text-[10px] font-bold text-white animate-[chip-in_0.25s_ease]'
 /* the element toolbar's buttons sit on ink and stay compact */
 const EL_TOOLBAR_BTN = 'rounded-[7px] px-2 py-1 text-xs'
 
+/** A hidden frame's place on the stage: nothing, unless it is selected —
+ *  then a dashed box with its name, so a pick from the Layers panel still
+ *  shows where the frame sits. It takes no pointer events: there is nothing
+ *  to drag, and the eye in the Layers panel is the way back. */
+export function HiddenFrameView({ frame }: { frame: Frame }) {
+  const selected = useStore((s) => s.selectedIds.includes(frame.id))
+  if (!selected) return null
+  return (
+    <div
+      className="pointer-events-none absolute"
+      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
+    >
+      <div
+        className={cn(
+          'absolute -top-[26px] left-0 flex origin-bottom-left items-center gap-1.5 whitespace-nowrap text-[12px] font-semibold text-ink-faint',
+          COUNTER_SCALE,
+        )}
+      >
+        <EyeClosedIcon width={11} height={11} />
+        <span>{frame.name}</span>
+      </div>
+      <div className="absolute inset-0 border border-dashed border-ink-faint bg-paper-deep/40 outline-2 outline-offset-1 outline-dashed outline-brand" />
+    </div>
+  )
+}
+
 /* Figma-style ⌥⇧-drag duplicate cursor: a doubled pointer, hotspot on the
    front arrow's tip. `copy` is the fallback where custom cursors fail. */
 const DUP_CURSOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M9 8v12.6l3.4-2.9 2 4.6 2.3-1-2-4.5 4.5-.4z" fill="#000" stroke="#fff" stroke-width="1.2"/><path d="M4 3v12.6l3.4-2.9 2 4.6 2.3-1-2-4.5 4.5-.4z" fill="#000" stroke="#fff" stroke-width="1.2"/></svg>`
 const DUP_CURSOR = `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(DUP_CURSOR_SVG)}") 4 3, copy`
-
-/* comment mode's cursor: a speech bubble, hotspot on its tail */
-const COMMENT_CURSOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M4 21V6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H9z" fill="#fff" stroke="#17171b" stroke-width="1.6" stroke-linejoin="round"/></svg>`
-const COMMENT_CURSOR = `url("data:image/svg+xml;charset=utf-8,${encodeURIComponent(COMMENT_CURSOR_SVG)}") 4 21, crosshair`
 
 /** True while ⌥⇧ is held. The duplicate cursor must be showing BEFORE the
  *  drag starts: Chromium freezes the effective cursor for the duration of a
@@ -109,14 +155,18 @@ interface ProbeHit {
   text: string
   snippet: string
   rect: { x: number; y: number; width: number; height: number }
+  /** whether a width/height applies to the box (not an inline text run) */
+  sizable?: boolean
+  /** inside a locked layer: selectable, but it takes no edits */
+  locked?: boolean
 }
 
 /** where a comment pin sits in frame coords, or 'orphan' when its element
  *  can no longer be found and the pin parks at the frame's corner */
 type PinSpot = { x: number; y: number } | 'orphan'
 
-/** same scale the pins get, so orphan stacking spaces by the pin's rendered size */
-const PIN_SCALE = 'min(calc(1/var(--zoom,1)),2.4)'
+/** same scale the pins get (CommentPopovers), so orphan stacking spaces by the pin's rendered size */
+const PIN_SCALE = 'calc(1/var(--zoom,1))'
 
 type DragRect = { id: string; x: number; y: number; width: number; height: number }
 
@@ -129,10 +179,15 @@ interface HoverHit {
    `--zoom` CSS variable the Stage sets, so a viewport change never re-renders
    this component — memo holds as long as the frame is unchanged. */
 export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
+  const drawingMove = useDrawingMove(frame)
+  const labelLayer = useContext(FrameLabelLayer)
+  const [pathEdit, setPathEdit] = useState<PathEditSource | null>(null)
+  const editRequest = useRef(0)
+  const closePathEdit = useCallback(() => {
+    editRequest.current++
+    setPathEdit(null)
+  }, [])
   const selected = useStore((s) => s.selectedIds.includes(frame.id))
-  /* the title bar offers Export only when this is the one selected frame: with
-     a group, the top bar's Export acts on all of them */
-  const soleSelected = useStore((s) => s.selectedIds.length === 1 && s.selectedIds[0] === frame.id)
   const mark = useFrameMark(frame.id)
   /* below edit a frame can be selected, probed and commented on, never moved */
   const mayEdit = useCanEdit()
@@ -147,11 +202,13 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   /* space held: the shield stays up even in edit mode, so the press reaches
      the Stage and pans instead of vanishing into the editable iframe */
   const panMode = useStore((s) => s.panMode)
+  /* the canvas tool: Hand lets presses fall through to the Stage, Comment
+     turns a click on the surface into a comment on the element under it */
+  const tool = useStore((s) => s.tool)
   const select = useStore((s) => s.select)
   const flash = useStore((s) => s.flashes[frame.id])
-  /* laser and comment mode turn the frame surface from "select" into "inspect" */
+  /* laser turns the frame surface from "select" into "inspect" (the Comment tool has its own cursor, from the Stage) */
   const laser = useStore((s) => s.laser)
-  const commentMode = useStore((s) => s.commentMode)
   const stream = useStore((s) => s.streams[frame.id])
   /* select the stable presences map, derive in render — a selector that
      builds a fresh array re-renders every frame on EVERY store update
@@ -160,6 +217,9 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   const me = getIdentity().clientId
   const editors = Object.values(presences).filter((p) => p.activeFrameId === frame.id && p.clientId !== me)
   const [dragging, setDragging] = useState(false)
+  /* a grip on the selected element is being dragged: no hover outlines
+     meanwhile, and the selection outline follows the element */
+  const [resizing, setResizing] = useState(false)
   /* ⌥⇧-drag (Figma-style duplicate): the original stays behind, the copy
      rides the cursor — the doubled cursor shows from the moment ⌥⇧ is held */
   const [duping, setDuping] = useState(false)
@@ -183,10 +243,58 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     send(f)
   }
 
-  function startDrag(e: React.PointerEvent, mode: 'move' | 'resize', probeOnClick = false, panelOnClick = false) {
-    if (e.button !== 0) return
-    /* space held: let the event reach the Stage, which pans */
-    if (useStore.getState().panMode) return
+  function startDrag(
+    e: React.PointerEvent<HTMLDivElement>,
+    mode: 'move' | 'resize',
+    probeOnClick = false,
+    panelOnClick = false,
+    skipDrawing = false,
+  ): { move: (event: PointerEvent) => void; up: () => void } | undefined {
+    if (pathEdit && probeOnClick) return
+    const s = useStore.getState()
+    const action = resolvePointerAction({
+      tool: s.tool,
+      target: 'frame',
+      button: e.button,
+      pointerType: e.pointerType,
+      spaceHeld: s.panMode,
+    })
+    /* a pan (Hand, space held, middle button): let the event reach the
+       Stage, which pans */
+    if (action === 'pan') return
+    if (action === 'comment') {
+      /* the Comment tool: no drag — the frame is selected and a click on its
+         surface opens the composer on the element under the pointer */
+      e.stopPropagation()
+      e.preventDefault()
+      if (!s.selectedIds.includes(frame.id)) select(frame.id)
+      if (probeOnClick) {
+        const at = designOffset(e)
+        probeAt(at.x, at.y, 'comment')
+      }
+      return
+    }
+    /* a locked frame is not the stage's to select, move or resize: the press
+       falls through to the Stage, which treats it as empty canvas */
+    if (action !== 'frame-drag' || frame.locked) return
+    if (
+      mayEdit &&
+      mode === 'move' &&
+      probeOnClick &&
+      !skipDrawing &&
+      drawingMove.start(
+        e,
+        (press, move, released) => {
+          const drag = startDrag(press, mode, probeOnClick, panelOnClick, true)
+          if (move) drag?.move(move)
+          if (released) drag?.up()
+        },
+        (selector) => {
+          void enterElementEdit({ selector })
+        },
+      )
+    )
+      return
     e.stopPropagation()
     e.preventDefault()
     if (!mayEdit) {
@@ -200,12 +308,10 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
         window.removeEventListener('pointerup', release)
         if (Math.abs(ev.clientX - down.x) + Math.abs(ev.clientY - down.y) > 4) return
         if (probeOnClick) {
-          /* laser is for everyone who can look; comment mode needs the comment role */
-          const mode = useStore.getState()
-          if (mode.laser) {
+          /* laser is for everyone who can look */
+          if (useStore.getState().laser) {
             iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-click', x: at.x, y: at.y }, '*')
-          } else if (mode.commentMode && canCommentNow()) composeAt(at.x, at.y)
-          else probeAt(at.x, at.y)
+          } else probeAt(at.x, at.y)
         }
         if (panelOnClick) useStore.getState().setInspectorOpen(true)
       }
@@ -236,7 +342,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     setDragging(true)
     clearHover()
     const start = { x: e.clientX, y: e.clientY }
-    const off = { x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY }
+    const off = designOffset(e)
     const orig = { x: frame.x, y: frame.y, width: frame.width, height: frame.height }
     /* the drag's baseline: finger position and frame rect the deltas are
        measured from. Starts at pointer-down, and re-anchors while a pinch
@@ -246,11 +352,12 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     let moved = false
     let dupDropped = false
     if (duplicating) setDuping(true)
-    /* a move carries every selected frame along; a resize is this frame only */
+    /* a move carries every selected frame along (locked ones stay put — a
+       Layers-panel selection may hold one); a resize is this frame only */
     const frames = currentPageCanvas()?.frames ?? []
     const selectedIds = mode === 'move' ? useStore.getState().selectedIds : [frame.id]
     const group = frames
-      .filter((f) => selectedIds.includes(f.id))
+      .filter((f) => selectedIds.includes(f.id) && !f.locked)
       .map((f) => ({ id: f.id, orig: { x: f.x, y: f.y, width: f.width, height: f.height } }))
     const groupIds = new Set(group.map((g) => g.id))
 
@@ -292,8 +399,9 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
       /* edges pull onto neighbouring frames' edges/centers; ⌥ drags free —
          except that a ⌥⇧ duplicate-drag holds ⌥ for the whole gesture, and
          the copy should land on the guides like any other move. Frames
-         riding along in the group are not neighbours. */
-      const others = currentPageCanvas()?.frames.filter((f) => !groupIds.has(f.id)) ?? []
+         riding along in the group are not neighbours, and neither is a
+         hidden frame — there is nothing on the stage to line up with. */
+      const others = currentPageCanvas()?.frames.filter((f) => !f.hidden && !groupIds.has(f.id)) ?? []
       const free = ev.altKey && !duplicating
       let snapped = free ? { ...raw, guides: [] } : snapFrame(mode, raw, others, zoom)
       /* a resize also locks onto device widths — unless a neighbour's edge already took the width */
@@ -340,17 +448,17 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
          the cursor: probe it and show the element toolbar */
       if (!moved && probeOnClick) {
         const mode = useStore.getState()
-        if (followLink && !mode.laser && !mode.commentMode) followLinkAt(off.x, off.y)
+        if (followLink && !mode.laser) followLinkAt(off.x, off.y)
         else if (mode.laser) {
           iframeRef.current?.contentWindow?.postMessage({ type: 'doop:laser-click', x: off.x, y: off.y }, '*')
-        } else if (mode.commentMode) composeAt(off.x, off.y)
-        else probeAt(off.x, off.y)
+        } else probeAt(off.x, off.y)
       } else if (moved) closePopovers()
       /* a click (no drag) on the frame name opens the details panel */
       if (!moved && panelOnClick) useStore.getState().setInspectorOpen(true)
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
+    return { move: onMove, up: onUp }
   }
 
   const html = useThrottledValue(frame.html, 150)
@@ -359,6 +467,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   /* The iframe loads a bootstrap once; HTML is posted in and DOM-morphed in
      place, so updates never white-flash the frame with a full reload. */
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  const localHtml = useRef<string | null>(null)
   /* where the last right-click landed, in screen coordinates: Paste drops the
      frame there, and the menu's own box is not that point once Radix has
      flipped or shifted it away from a viewport edge */
@@ -381,9 +490,10 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     return () => unregisterFrameWindow(frame.id, win)
   }, [runtimeReady, frame.id])
   useEffect(() => {
-    if (!runtimeReady || editing || suspendPost) return
+    if (!runtimeReady || editing || suspendPost || html !== frame.html || html === localHtml.current) return
+    localHtml.current = null
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:html', html }, '*')
-  }, [runtimeReady, html, editing, suspendPost])
+  }, [runtimeReady, html, frame.html, editing, suspendPost])
 
   /* laser mode lives in the frame's runtime; a frame that mounts or becomes ready while it is on joins in */
   useEffect(() => {
@@ -427,9 +537,10 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   /* selectors already reported to the server, so a pin heals once per path */
   const healed = useRef(new Set<string>())
   const probeReq = useRef(0)
-  /* the probe request a comment-mode click is waiting on: its answer opens the composer */
-  const commentReq = useRef(0)
   const probeTimer = useRef<number | null>(null)
+  /* what the pending probe is for: the element toolbar, or (Comment tool) a
+     composer opened straight away on the hit */
+  const probeIntent = useRef<'toolbar' | 'comment'>('toolbar')
   const activeSelRef = useRef<string | null>(null)
 
   /* ---- hover inspection (paper.design-style element outlines) ---- */
@@ -458,6 +569,19 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     setHover(null)
   }
 
+  /* a Layers row under the pointer outlines its element here, the same as a
+     hover over the frame: ask the runtime where the element is, and draw the
+     answer (the `doop:located` reply below) as the hover outline. A string
+     selector keeps the selection identity-stable, so memo holds. */
+  const layerHover = useStore((s) => (s.hoveredLayer?.frameId === frame.id ? s.hoveredLayer.selector : null))
+  const [seenLayerHover, setSeenLayerHover] = useState(layerHover)
+  if (seenLayerHover !== layerHover) {
+    setSeenLayerHover(layerHover)
+    /* the row was left: its outline goes (the drawn layer outline already
+       reset the canvas hover's dedup key, so the next pointer hover draws) */
+    if (!layerHover) setHover(null)
+  }
+
   /* source view + composer prefill for the element toolbar */
   const [codeView, setCodeView] = useState<string | null>(null)
   const [composePrefill, setComposePrefill] = useState('')
@@ -468,28 +592,41 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:code', reqId: codeReq.current, selector }, '*')
   }
 
-  function closePopovers() {
+  /* everything hanging off the picked element except the pick itself */
+  function closeElementPopovers() {
     if (probeTimer.current) {
       window.clearTimeout(probeTimer.current)
       probeTimer.current = null
     }
-    setProbe(null)
     setComposing(false)
     setComposePrefill('')
     setCodeView(null)
     setOpenThread(null)
   }
 
+  function closePopovers() {
+    closeElementPopovers()
+    setProbe(null)
+  }
+
   /* delayed slightly so the second click of a double-click (→ edit mode)
-     cancels it instead of flashing the toolbar */
-  function probeAt(x: number, y: number) {
+     cancels it instead of flashing the toolbar; a comment click has no
+     double-click to wait out, so it probes at once */
+  function probeAt(x: number, y: number, intent: 'toolbar' | 'comment' = 'toolbar') {
     if (!frame.html || editing) return
-    closePopovers()
-    probeTimer.current = window.setTimeout(() => {
-      probeTimer.current = null
-      probeReq.current += 1
-      iframeRef.current?.contentWindow?.postMessage({ type: 'doop:probe', reqId: probeReq.current, x, y }, '*')
-    }, 250)
+    /* the current pick stays until the probe answers: clearing it here would
+       close the element panel and reopen it a beat later on the next
+       element. A probe that hits nothing clears it then. */
+    closeElementPopovers()
+    probeIntent.current = intent
+    probeTimer.current = window.setTimeout(
+      () => {
+        probeTimer.current = null
+        probeReq.current += 1
+        iframeRef.current?.contentWindow?.postMessage({ type: 'doop:probe', reqId: probeReq.current, x, y }, '*')
+      },
+      intent === 'comment' ? 0 : 250,
+    )
   }
 
   /* ⌥-click: ask the document what link sits under the pointer; the answer flies the camera to its frame */
@@ -498,15 +635,6 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     if (!frame.html || editing) return
     gotoReq.current += 1
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:goto-at', reqId: gotoReq.current, x, y }, '*')
-  }
-
-  /* comment mode: the click resolves the element at once and opens the composer on it, as the toolbar's Comment button does */
-  function composeAt(x: number, y: number) {
-    if (!frame.html || editing) return
-    closePopovers()
-    probeReq.current += 1
-    commentReq.current = probeReq.current
-    iframeRef.current?.contentWindow?.postMessage({ type: 'doop:probe', reqId: probeReq.current, x, y }, '*')
   }
 
   /* keep comment pins glued to their elements: re-locate whenever the frame's
@@ -529,6 +657,13 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     if (!runtimeReady || !probeSel) return
     iframeRef.current?.contentWindow?.postMessage({ type: 'doop:locate', reqId: '__probe__', selector: probeSel }, '*')
   }, [runtimeReady, html, probeSel])
+  useEffect(() => {
+    if (!runtimeReady || !layerHover) return
+    iframeRef.current?.contentWindow?.postMessage(
+      { type: 'doop:locate', reqId: '__layer-hover__', selector: layerHover },
+      '*',
+    )
+  }, [runtimeReady, html, layerHover])
 
   /* deselecting the frame drops its element selection too, so a stale
      outline never reappears when the frame is picked again */
@@ -543,24 +678,59 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     }
   }
 
+  /* the Comments panel asked for one of this frame's pins to open: the
+     request is consumed once the thread is up, so a remount (a page switch
+     back) never reopens it */
+  const threadRequest = useStore((s) => s.threadRequest)
+  const requestedThread = threadRequest && comments.some((c) => c.id === threadRequest.id) ? threadRequest : null
+  const [seenThreadRequest, setSeenThreadRequest] = useState<typeof requestedThread>(null)
+  if (requestedThread !== seenThreadRequest) {
+    setSeenThreadRequest(requestedThread)
+    if (requestedThread) {
+      setProbe(null)
+      setComposing(false)
+      setOpenThread(requestedThread.id)
+    }
+  }
+  useEffect(() => {
+    if (requestedThread) useStore.getState().clearThreadRequest()
+  }, [requestedThread])
+
   /* the outlined element is shared with the Layers panel through the store:
      what is probed here is picked (which also opens its properties panel,
      the same as a click on its Layers row), and a row picked there is
      resolved into a probe by asking the runtime for the element behind the
      selector */
+  const previousProbe = useRef<string | null>(null)
   useEffect(() => {
+    const previous = previousProbe.current
+    previousProbe.current = probeSel
     const cur = useStore.getState().selectedElement
     if (probeSel) {
-      useStore.getState().pickElement({ frameId: frame.id, selector: probeSel })
-    } else if (cur?.frameId === frame.id) {
+      const el = { frameId: frame.id, selector: probeSel }
+      /* the Comment tool outlines the element without sliding its properties panel in */
+      if (useStore.getState().tool === 'comment') useStore.getState().setSelectedElement(el)
+      else useStore.getState().pickElement(el)
+    } else if (previous && cur?.frameId === frame.id && cur.selector === previous) {
+      /* Only clear a probe we actually removed. A link or Layers pick can
+         select an element before this frame has mounted its runtime. */
       useStore.getState().pickElement(null)
     }
   }, [probeSel, frame.id])
   const wantedSel = useStore((s) => (s.selectedElement?.frameId === frame.id ? s.selectedElement.selector : null))
+  const [seenWantedSel, setSeenWantedSel] = useState(wantedSel)
+  if (seenWantedSel !== wantedSel) {
+    setSeenWantedSel(wantedSel)
+    /* Returning to a frame-only link (or closing the element panel) also
+       removes the previous element's toolbar and outline. */
+    if (!wantedSel) setProbe(null)
+  }
   const selectReq = useRef(0)
   const selectSel = useRef<string | null>(null)
   useEffect(() => {
-    if (!runtimeReady || !wantedSel || wantedSel === probeSel) return
+    // A new drawing can be selected before throttled HTML reaches the iframe.
+    // Wait for that document before asking it to locate the new layer.
+    if (!runtimeReady || !wantedSel || wantedSel === probeSel || html !== frame.html) return
     /* a surface click clears the probe, and the effect above has just cleared
        the store to match — but this render still carries the old selector.
        Re-selecting it here would resurrect the previous element and (via the
@@ -576,7 +746,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
       { type: 'doop:select', reqId: selectReq.current, selector: wantedSel },
       '*',
     )
-  }, [runtimeReady, wantedSel, probeSel, frame.id])
+  }, [runtimeReady, wantedSel, probeSel, frame.id, html, frame.html])
 
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
@@ -600,13 +770,11 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
       if (ev.data?.type === 'doop:probe-result' && ev.data.reqId === probeReq.current) {
         const hit = (ev.data.hit ?? null) as ProbeHit | null
         setProbe(hit)
-        if (commentReq.current === ev.data.reqId) {
-          commentReq.current = 0
-          if (hit) {
-            setComposePrefill('')
-            setComposing(true)
-            useStore.getState().setCommentMode(false)
-          }
+        /* the Comment tool skips the element toolbar: the composer opens on
+           the hit, the same one the toolbar's own Comment button opens */
+        if (hit && probeIntent.current === 'comment') {
+          setComposePrefill('')
+          setComposing(true)
         }
       }
       if (ev.data?.type === 'doop:laser-copy' && typeof ev.data.selector === 'string') {
@@ -619,8 +787,9 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
       }
       /* Esc with focus inside the frame never reaches the window as a key event */
       if (ev.data?.type === 'doop:esc') {
-        useStore.getState().setLaser(false)
-        useStore.getState().setCommentMode(false)
+        const s = useStore.getState()
+        if (s.laser) s.setLaser(false)
+        else if (s.tool !== 'select') s.setTool('select')
       }
       if (ev.data?.type === 'doop:select-result' && ev.data.reqId === selectReq.current) {
         /* the answer is only acted on while the asked-for element is still
@@ -630,7 +799,14 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
         const hit = (ev.data.hit ?? null) as ProbeHit | null
         closePopovers()
         if (hit) setProbe(hit)
-        else useStore.getState().setSelectedElement(null) // the row's element is gone from the live document
+        else {
+          /* The live document is authoritative for linked elements and
+             Layers picks, including nodes created or removed by scripts. */
+          const s = useStore.getState()
+          s.pickElement(null)
+          s.setInspectorOpen(true)
+          s.pushNotice('This element no longer exists. Showing its frame instead.')
+        }
       }
       if (ev.data?.type === 'doop:hover-result' && ev.data.reqId === hoverReq.current) {
         const hit = (ev.data.hit ?? null) as HoverHit | null
@@ -653,10 +829,26 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
         setCodeView(typeof ev.data.html === 'string' ? ev.data.html : null)
       }
       if (ev.data?.type === 'doop:located' && typeof ev.data.reqId === 'string') {
+        if (ev.data.reqId === '__layer-hover__') {
+          /* the pointer may have left the row while the runtime looked: a late
+             reply must not paint an outline nobody is hovering */
+          const hovered = useStore.getState().hoveredLayer
+          if (!hovered || hovered.frameId !== frame.id) return
+          const rect = ev.data.rect as HoverHit['rect'] | null
+          const selector = hovered.selector
+          /* the tag of the selector's last step: "section:nth-of-type(2)" → "section" */
+          const tag = (selector.split('>').at(-1) ?? '').trim().split(/[:.#[]/)[0] ?? ''
+          hoverKey.current = null
+          setHover(rect ? { tag, rect } : null)
+          return
+        }
         if (ev.data.reqId === '__probe__') {
-          /* re-glue the selected element's outline after the html changed */
+          /* Refresh both the outline and handle eligibility after style edits. */
           const rect = ev.data.rect as ProbeHit['rect'] | null
-          setProbe((p) => (p && rect ? { ...p, rect } : rect ? p : null))
+          setProbe((p) => {
+            if (!p || p.selector !== ev.data.selector) return p
+            return rect ? { ...p, rect, sizable: ev.data.sizable === true } : null
+          })
           return
         }
         const rect = ev.data.rect as { x: number; y: number; width: number; height: number } | null
@@ -673,7 +865,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
         setPinPos((m) => ({ ...m, [id]: spot }))
         /* found by a fallback: tell the server the new path so the next load is a direct hit */
         const how = ev.data.how as string | null
-        const path = ev.data.selector as string | null
+        const path = ev.data.path as string | null
         /* healing rewrites the stored pin: it takes an account that may comment (guests and viewers just resolve it locally) */
         const mayHeal = canCommentNow() && !useStore.getState().guest
         if (mayHeal && comment && rect && how && how !== 'path' && path && path !== comment.selector) {
@@ -708,7 +900,35 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---- inline text editing ---- */
-  const canEdit = mayEdit && !!frame.html && !stream && !/<script/i.test(frame.html)
+  const canEdit = mayEdit && !!frame.html && !stream && !frame.locked && !/<script/i.test(frame.html)
+
+  async function enterElementEdit(where: Record<string, unknown>) {
+    if (!mayEdit || !frame.html || stream || frame.locked || editing || pathEdit || !runtimeReady) return
+    if (useStore.getState().tool !== 'select') return
+    const request = ++editRequest.current
+    const canvasId = useStore.getState().canvas?.id
+    const pageId = useStore.getState().activePageId
+    const path = await loadPathEdit(frame, where)
+    const state = useStore.getState()
+    const live = state.canvas?.frames.find((f) => f.id === frame.id)
+    if (
+      request !== editRequest.current ||
+      state.canvas?.id !== canvasId ||
+      state.activePageId !== pageId ||
+      state.tool !== 'select' ||
+      !state.selectedIds.includes(frame.id) ||
+      live?.html !== frame.html ||
+      live.locked ||
+      live.hidden
+    )
+      return
+    if (path) {
+      select(frame.id)
+      closePopovers()
+      clearHover()
+      setPathEdit(path)
+    } else if (canEdit) enterEdit()
+  }
 
   function enterEdit() {
     select(frame.id)
@@ -727,15 +947,28 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     window.setTimeout(() => setSuspendPost(false), 500)
   }
 
+  /* switching to Hand or Comment ends a text-edit session: both put the
+     shield back over the document, and a comment click has to probe the
+     frame, which an open edit blocks. The iframe is told to leave edit mode
+     too, so this is a sync with it rather than a state reset. */
+  useEffect(() => {
+    // eslint-disable-next-line react/set-state-in-effect -- exitEdit syncs the iframe's edit mode
+    if (editing && tool !== 'select') exitEdit()
+  }, [tool]) // eslint-disable-line react-hooks/exhaustive-deps
+
   /* serialized edits stream out of the iframe; save through the human path */
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
       if (ev.source !== iframeRef.current?.contentWindow) return
       if (ev.data?.type === 'doop:edited' && typeof ev.data.html === 'string') {
+        // The runtime already has this document. Echoing it through the HTML
+        // throttle can overwrite a newer style edit still waiting to save.
+        localHtml.current = ev.data.html
         const before = useStore.getState().canvas?.frames.find((f) => f.id === frame.id)?.html
         useStore.getState().patchFrameLocal(frame.id, { html: ev.data.html })
-        api.updateFrame(frame.id, { html: ev.data.html }).catch(console.error)
-        if (before !== undefined) recordUpdate(frame.id, { html: before }, { html: ev.data.html })
+        trackSave(api.updateFrame(frame.id, { html: ev.data.html }).catch(console.error))
+        if (before !== undefined)
+          recordUpdate(frame.id, { html: before }, { html: ev.data.html }, ev.data.discrete === true)
       }
       if (ev.data?.type === 'doop:edit-esc') {
         setEditing(false)
@@ -754,6 +987,12 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- see above
     if (!selected && editing) exitEdit()
   }, [selected]) // eslint-disable-line react-hooks/exhaustive-deps
+  /* so does a lock arriving from a collaborator (or an agent) mid-session:
+     what was typed so far is flushed by the exit, nothing more lands */
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- external-system sync, as above
+    if (frame.locked && editing) exitEdit()
+  }, [frame.locked]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <ContextMenu
@@ -772,10 +1011,12 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
     >
       <ContextMenuTrigger asChild>
         <div
+          /* the Stage reads this: a press on a locked frame is a press on the canvas */
+          data-frame-locked={frame.locked ? '' : undefined}
           className={cn(
             'group absolute',
             stream &&
-              "before:pointer-events-none before:absolute before:-inset-[3px] before:rounded-[9px] before:border-2 before:border-dashed before:border-[var(--editing-color,var(--brand))] before:content-[''] before:animate-[stream-pulse_1.1s_ease-in-out_infinite]",
+              "before:pointer-events-none before:absolute before:-inset-[3px] before:border-2 before:border-dashed before:border-[var(--editing-color,var(--brand))] before:content-[''] before:animate-[stream-pulse_1.1s_ease-in-out_infinite]",
           )}
           style={
             {
@@ -795,136 +1036,146 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
             menuAt.current = { x: e.clientX, y: e.clientY }
           }}
         >
-          <div
-            className={cn(
-              'absolute -top-[26px] left-0 flex origin-bottom-left select-none items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] font-semibold text-ink-soft',
-              mayEdit ? 'cursor-grab' : 'cursor-default',
-              /* the label is counter-scaled from its bottom-left corner, so
-                 its box must be pre-shrunk by the same factor: a full-width
-                 box scaled by 1/zoom would reach far past the frame's right
-                 edge and swallow pointer-downs meant for the frames beside it */
-              LABEL_WIDTH,
-              COUNTER_SCALE,
-            )}
-            style={duping || dupKeyHeld ? { cursor: DUP_CURSOR } : undefined}
-            onPointerDown={(e) => startDrag(e, 'move', false, true)}
-          >
-            {isSyncedFrame(frame.html) && (
-              <Tooltip label="Synced from a live app" side="top" align="start">
-                <span className="flex shrink-0 items-center text-brand">
-                  <SyncIcon width={11} height={11} />
-                </span>
-              </Tooltip>
-            )}
-            {isGithubFrame(frame.html) && (
-              <Tooltip
-                label={
-                  isGithubPlaceholder(frame.html)
-                    ? 'Found in the repo — awaiting capture'
-                    : 'Imported from a GitHub repo'
-                }
-                side="top"
-                align="start"
+          {labelLayer &&
+            createPortal(
+              <div
+                /* the Stage reads this off the press target, which a portal no
+               longer nests inside the frame */
+                data-frame-locked={frame.locked ? '' : undefined}
+                className="pointer-events-auto absolute flex cursor-default select-none items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] font-semibold text-ink-soft"
+                /* screen px, from the camera the Stage publishes: the name sits a
+               fixed gap above the frame's top-left corner and never runs past
+               its right edge, whatever the zoom */
+                style={{
+                  left: `calc(var(--vx, 0px) + ${frame.x}px * var(--zoom, 1))`,
+                  top: `calc(var(--vy, 0px) + ${frame.y}px * var(--zoom, 1))`,
+                  width: `calc(${frame.width}px * var(--zoom, 1))`,
+                  transform: `translateY(calc(-100% - ${LABEL_GAP}px))`,
+                  cursor: duping || dupKeyHeld ? DUP_CURSOR : undefined,
+                }}
+                onPointerDown={(e) => startDrag(e, 'move', false, true)}
               >
-                <span
-                  className={cn(
-                    'flex shrink-0 items-center',
-                    isGithubPlaceholder(frame.html) ? 'text-ink-faint' : 'text-brand',
-                  )}
-                >
-                  <GithubIcon width={11} height={11} />
-                </span>
-              </Tooltip>
-            )}
-            <MarkDot mark={mark} />
-            <span className="overflow-hidden text-ellipsis">{frame.name}</span>
-            {frame.slide && (
-              <Tooltip
-                label="A slide: plays with the other slides on this page in present mode"
-                side="top"
-                align="start"
-              >
-                <span className="flex shrink-0 items-center gap-1 rounded-full bg-ink px-1.5 py-px text-[10px] font-bold text-paper">
-                  <SlideIcon width={10} height={10} aria-hidden />
-                  Slide
-                </span>
-              </Tooltip>
-            )}
-            {soleSelected && !editing && !dragging && (
-              <Button
-                variant="default"
-                size="pill"
-                className="gap-1 border-line bg-surface font-semibold text-ink-soft hover:text-ink"
-                title={`Export this frame as PNG or JPG (${EXPORT_SHORTCUT})`}
-                aria-label={`Export ${frame.name}`}
-                /* a press here is a button press, not the start of a frame drag */
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={() => useStore.getState().openExport([frame.id])}
-              >
-                <DownloadIcon width={10} height={10} strokeWidth={2.2} aria-hidden />
-                Export
-              </Button>
-            )}
-            {pathNote && (
-              <span
-                role="status"
-                className="inline-flex items-center gap-1 rounded-full bg-ink px-[7px] py-0.5 text-[10px] font-bold text-paper animate-[chip-in_0.25s_ease]"
-              >
-                {pathNote}
-              </span>
-            )}
-            <span className="flex gap-1">
-              {stream && (
-                <span className={EDITOR_CHIP} style={{ background: stream.color }}>
-                  <AgentIcon name={stream.name} size={9} color="#fff" />
-                  {stream.name} is designing
-                  <span className="after:content-['…'] after:[animation:ellipsis_1.2s_steps(4)_infinite]" />
-                </span>
-              )}
-              {editors
-                .filter((p) => p.name !== stream?.name)
-                .map((p) => (
-                  <span key={p.clientId} className={EDITOR_CHIP} style={{ background: p.color }}>
-                    {p.kind === 'agent' ? <AgentIcon name={p.name} size={9} color="#fff" /> : '✎'} {p.name}
+                {frame.locked && (
+                  <Tooltip label="Locked — unlock it from the Layers panel or the Inspector" side="top" align="start">
+                    <span className="flex shrink-0 items-center text-ink-faint">
+                      <LockIcon width={11} height={11} />
+                    </span>
+                  </Tooltip>
+                )}
+                {isSyncedFrame(frame.html) && (
+                  <Tooltip label="Synced from a live app" side="top" align="start">
+                    <span className="flex shrink-0 items-center text-brand">
+                      <SyncIcon width={11} height={11} />
+                    </span>
+                  </Tooltip>
+                )}
+                {isGithubFrame(frame.html) && (
+                  <Tooltip
+                    label={
+                      isGithubPlaceholder(frame.html)
+                        ? 'Found in the repo — awaiting capture'
+                        : 'Imported from a GitHub repo'
+                    }
+                    side="top"
+                    align="start"
+                  >
+                    <span
+                      className={cn(
+                        'flex shrink-0 items-center',
+                        isGithubPlaceholder(frame.html) ? 'text-ink-faint' : 'text-brand',
+                      )}
+                    >
+                      <GithubIcon width={11} height={11} />
+                    </span>
+                  </Tooltip>
+                )}
+                <MarkDot mark={mark} />
+                <span className="overflow-hidden text-ellipsis">{frame.name}</span>
+                {frame.slide && (
+                  <Tooltip
+                    label="A slide: plays with the other slides on this page in present mode"
+                    side="top"
+                    align="start"
+                  >
+                    <span className="flex shrink-0 items-center gap-1 rounded-full bg-ink px-1.5 py-px text-[10px] font-bold text-paper">
+                      <SlideIcon width={10} height={10} aria-hidden />
+                      Slide
+                    </span>
+                  </Tooltip>
+                )}
+                {pathNote && (
+                  <span
+                    role="status"
+                    className="inline-flex items-center gap-1 rounded-full bg-ink px-[7px] py-0.5 text-[10px] font-bold text-paper animate-[chip-in_0.25s_ease]"
+                  >
+                    {pathNote}
                   </span>
-                ))}
-            </span>
-          </div>
+                )}
+                <span className="flex gap-1">
+                  {stream && (
+                    <span className={EDITOR_CHIP} style={{ background: stream.color }}>
+                      <AgentIcon name={stream.name} size={9} color="#fff" />
+                      {stream.name} is designing
+                      <span className="after:content-['…'] after:[animation:ellipsis_1.2s_steps(4)_infinite]" />
+                    </span>
+                  )}
+                  {editors
+                    .filter((p) => p.name !== stream?.name)
+                    .map((p) => (
+                      <span key={p.clientId} className={EDITOR_CHIP} style={{ background: p.color }}>
+                        {p.kind === 'agent' ? <AgentIcon name={p.name} size={9} color="#fff" /> : '✎'} {p.name}
+                      </span>
+                    ))}
+                </span>
+              </div>,
+              labelLayer,
+            )}
 
           <div
             className={cn(
-              'absolute inset-0 overflow-hidden rounded-[6px] border border-line',
-              mayEdit ? 'cursor-grab' : 'cursor-default',
+              'absolute inset-0 overflow-hidden',
               /* frames far outside the view are not rendered at all, so a large canvas keeps a bounded set of live iframe layers and tiles however far out it is zoomed */
               '[content-visibility:auto]',
               /* a frame whose document is still on its way is a quiet placeholder, not a stark white box */
-              frame.html && !runtimeReady ? 'bg-paper-deep' : 'bg-white',
-              dragging ? 'shadow-pop' : 'shadow-card',
-              selected && 'outline-2 outline-offset-1 outline-brand',
+              isCanvasElement(frame.html)
+                ? 'bg-transparent'
+                : cn('border border-line', frame.html && !runtimeReady ? 'bg-paper-deep' : 'bg-white'),
+              /* Select keeps the arrow, like Figma: the frame is a thing to
+                 point at, not a handle. The Hand tool's grab and the Comment
+                 tool's bubble come from the Stage, which overrides every
+                 cursor under it. */
+              'cursor-default',
+              !isCanvasElement(frame.html) && (dragging ? 'shadow-pop' : 'shadow-card'),
+              selected && !pathEdit && 'outline-2 outline-offset-1 outline-brand',
               editing && 'cursor-text outline-2 outline-offset-1 outline-dashed outline-brand',
               !stream &&
                 remoteEditor &&
                 'outline-2 outline-offset-1 outline-solid outline-[var(--editing-color,var(--brand))]',
               stream && 'border-transparent outline-none',
-              dragging && 'cursor-grabbing',
             )}
             style={
-              duping || (dupKeyHeld && !editing)
-                ? { cursor: DUP_CURSOR }
-                : laser
-                  ? { cursor: 'crosshair' }
-                  : commentMode
-                    ? { cursor: COMMENT_CURSOR }
-                    : undefined
+              duping || (dupKeyHeld && !editing) ? { cursor: DUP_CURSOR } : laser ? { cursor: 'crosshair' } : undefined
             }
             onPointerDown={(e) => startDrag(e, 'move', true)}
-            onDoubleClick={() => canEdit && !editing && runtimeReady && enterEdit()}
+            onDoubleClick={(e) => {
+              void enterElementEdit(designPoint(e, e.currentTarget))
+            }}
             onPointerMove={(e) => {
-              if (editing || dragging || !frame.html || !runtimeReady) return
-              /* screen px → design px: the frame lives inside the zoomed stage */
-              const r = e.currentTarget.getBoundingClientRect()
-              const zoom = useStore.getState().viewport.zoom
-              sendHover((e.clientX - r.left) / zoom, (e.clientY - r.top) / zoom)
+              /* the Hand only pans, and a locked frame has nothing to pick: no
+                 element outlines in either case */
+              if (
+                editing ||
+                pathEdit ||
+                dragging ||
+                resizing ||
+                frame.locked ||
+                !frame.html ||
+                !runtimeReady ||
+                tool === 'hand'
+              )
+                return
+              const at = designPoint(e, e.currentTarget)
+              sendHover(at.x, at.y)
             }}
             onPointerEnter={() => setHovered(true)}
             onPointerLeave={() => {
@@ -938,7 +1189,8 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
               <iframe
                 ref={iframeRef}
                 className={cn(
-                  'block border-none bg-white',
+                  'block border-none',
+                  isCanvasElement(frame.html) ? 'bg-transparent' : 'bg-white',
                   /* fade the document in once its runtime answers, so a frame mounting into view never pops */
                   runtimeReady ? 'opacity-100 transition-opacity duration-150' : 'opacity-0',
                 )}
@@ -956,10 +1208,12 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
             )}
             {/* shield keeps pointer events on the canvas, not the iframe;
             lifted while editing so clicks land in the editable document */}
-            {(!editing || panMode || laser) && <div className="absolute inset-0" />}
-            {hover && !editing && !dragging && !laser && (
+            {(!editing || panMode || laser || tool !== 'select') && <div className="absolute inset-0" />}
+            {/* above the selection outline (z-[3]), or that outline covers the
+            hovered element's tag */}
+            {hover && !editing && !pathEdit && !dragging && !resizing && !laser && (
               <div
-                className="pointer-events-none absolute z-[3] bg-[rgba(60,130,246,0.06)] shadow-[inset_0_0_0_calc(1.5px/var(--zoom,1))_#3c82f6]"
+                className="pointer-events-none absolute z-[4] bg-[rgba(60,130,246,0.06)] shadow-[inset_0_0_0_calc(1px/var(--zoom,1))_#3c82f6]"
                 style={{ left: hover.rect.x, top: hover.rect.y, width: hover.rect.width, height: hover.rect.height }}
               >
                 <span
@@ -974,15 +1228,38 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                 </span>
               </div>
             )}
-            {probe && selected && !editing && !dragging && (
+            {probe && selected && !editing && !pathEdit && !dragging && (
               <div
-                className="pointer-events-none absolute z-[3] shadow-[inset_0_0_0_calc(1.5px/var(--zoom,1))_#3c82f6,0_0_0_calc(1.5px/var(--zoom,1))_rgba(60,130,246,0.35)]"
+                /* a one-pixel hairline, the way Paper outlines a selection */
+                className="pointer-events-none absolute z-[3] shadow-[inset_0_0_0_calc(1px/var(--zoom,1))_#3c82f6]"
                 style={{ left: probe.rect.x, top: probe.rect.y, width: probe.rect.width, height: probe.rect.height }}
               />
             )}
+            {/* the grips: only where a drag can change the box, and never on
+                a locked layer or frame, or under the Comment tool */}
+            {probe &&
+              selected &&
+              !editing &&
+              !pathEdit &&
+              !dragging &&
+              tool === 'select' &&
+              probe.sizable &&
+              !probe.locked &&
+              !frame.locked && (
+                <ElementResizeHandles
+                  frame={frame}
+                  selector={probe.selector}
+                  rect={probe.rect}
+                  onRect={(rect) => setProbe((p) => (p && p.selector === probe.selector ? { ...p, rect } : p))}
+                  onResizing={(on) => {
+                    if (on) clearHover()
+                    setResizing(on)
+                  }}
+                />
+              )}
             {flash && (
               <div
-                className="pointer-events-none absolute -inset-px rounded-[6px] animate-[frame-flash_1.2s_ease-out_forwards]"
+                className="pointer-events-none absolute -inset-px animate-[frame-flash_1.2s_ease-out_forwards]"
                 style={{ '--editing-color': flash.color } as React.CSSProperties}
               />
             )}
@@ -1011,11 +1288,13 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
 
           {/* element comments: pins + element toolbar + composer, all in frame
           coords. The toolbar anchors to the probed element normally, and to
-          the actively edited element in edit mode. */}
+          the actively edited element in edit mode. `data-comment-ui`: the
+          Comment tool's cursor is forced over the whole stage except inside
+          the comment UI, which keeps its own cursors. */}
           {(() => {
             const anchor = editing ? activeHit : probe
             return (
-              <div className="pointer-events-none absolute inset-0">
+              <div data-comment-ui className="pointer-events-none absolute inset-0">
                 {comments.map((c) => {
                   const spot = pinPos[c.id]
                   if (!spot) return null
@@ -1024,88 +1303,69 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                   const orphanIndex = orphan ? comments.filter((o) => pinPos[o.id] === 'orphan').indexOf(c) : 0
                   const open = openThread === c.id
                   const replies = frameComments.filter((r) => r.parentId === c.id).reverse() // store is newest-first
-                  const thread = [c, ...replies.sort((a, b) => a.at - b.at)]
-                  /* the pin reflects the newest agent request in the thread */
-                  const agentItem = [...thread].reverse().find((x) => x.forAgent && !x.resolvedAt)
-                  const working = agentItem?.claimedBy && !agentItem.failedAt
-                  /* someone @mentioned you in this thread and you have not opened it yet */
-                  const mentioned = c.id in pulses
+                  const thread: [ElementComment, ...ElementComment[]] = [c, ...replies.sort((a, b) => a.at - b.at)]
                   return (
-                    <div
+                    <CommentPin
                       key={c.id}
-                      className={cn(
-                        'pointer-events-auto absolute z-[4] grid h-[26px] w-[26px] cursor-pointer place-items-center rounded-[50%_50%_50%_4px] border-2 border-white text-[13px] text-white [transform:translate(-50%,-50%)_scale(min(calc(1/var(--zoom,1)),2.4))] animate-[chip-in_0.25s_ease]',
-                        agentItem?.failedAt
-                          ? 'bg-accent-ink! font-extrabold shadow-[0_0_0_3px_rgba(208,52,31,0.2),var(--shadow-card)]'
-                          : 'shadow-card',
-                        orphan && 'border-dashed border-ink-soft',
-                        orphan && !open && 'opacity-80',
-                        working &&
-                          "after:absolute after:-inset-1.5 after:rounded-[inherit] after:border-2 after:border-current after:opacity-50 after:content-[''] after:[animation:stream-pulse_1.1s_ease-in-out_infinite]",
-                        mentioned && 'animate-[mention-ring_1.4s_ease-out_infinite]',
-                      )}
-                      style={{
-                        ...(orphan
-                          ? {
-                              left: `calc(${frame.width}px - 16px * ${PIN_SCALE})`,
-                              top: `calc(16px * ${PIN_SCALE} + ${orphanIndex} * 32px * ${PIN_SCALE})`,
-                            }
-                          : {
-                              left: Math.min(Math.max(spot.x, 10), frame.width - 10),
-                              top: Math.min(Math.max(spot.y, 10), frame.height - 10),
-                            }),
-                        background: colorFor(c.from),
-                      }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={() => {
+                      thread={thread}
+                      open={open}
+                      left={
+                        orphan
+                          ? `calc(${frame.width}px - 16px * ${PIN_SCALE})`
+                          : Math.min(Math.max(spot.x, 10), frame.width - 10)
+                      }
+                      top={
+                        orphan
+                          ? `calc(16px * ${PIN_SCALE} + ${orphanIndex} * 32px * ${PIN_SCALE})`
+                          : Math.min(Math.max(spot.y, 10), frame.height - 10)
+                      }
+                      orphan={orphan}
+                      mentioned={c.id in pulses}
+                      onToggle={() => {
                         setProbe(null)
                         setComposing(false)
                         setOpenThread(open ? null : c.id)
                         useStore.getState().clearPulse(c.id)
                       }}
-                      title={`${orphan ? 'The element this was on changed\n' : ''}${c.from}: ${c.text}${thread.length > 1 ? ` (${thread.length - 1} replies)` : ''}`}
                     >
-                      {agentItem?.failedAt ? '!' : working ? '✦' : '💬'}
-                      {open && (
-                        <CommentThread
-                          thread={thread}
-                          alignEnd={orphan}
-                          canvasId={frame.canvasId}
-                          canReply={mayComment}
-                          canResolve={mayComment && !guest}
-                          canRetry={mayEdit}
-                          onReply={(text, mentions) =>
-                            postReply(c.id, text, mentions)
-                              .then(() => posthog.capture('element_comment_replied'))
-                              .catch((err) => {
-                                /* the wall explains a hit limit; anything else
-                                   surfaces in the thread so the draft survives */
-                                if (isResidentLimit(err)) useStore.getState().setLimitWall(true)
-                                throw err
-                              })
-                          }
-                          onResolve={() => {
-                            api
-                              .resolveComment(c.id)
-                              .then(() => posthog.capture('element_comment_resolved'))
-                              .catch(console.error)
-                            setOpenThread(null)
-                          }}
-                          onRetry={(id) =>
-                            api.retryComment(id).catch((err) => {
+                      <CommentThread
+                        thread={thread}
+                        alignEnd={orphan}
+                        canvasId={frame.canvasId}
+                        canReply={mayComment}
+                        canResolve={mayComment && !guest}
+                        canRetry={mayEdit}
+                        onReply={(text, mentions) =>
+                          postReply(c.id, text, mentions)
+                            .then(() => posthog.capture('element_comment_replied'))
+                            .catch((err) => {
+                              /* the wall explains a hit limit; anything else
+                                 surfaces in the thread so the draft survives */
                               if (isResidentLimit(err)) useStore.getState().setLimitWall(true)
-                              else console.error(err)
+                              throw err
                             })
-                          }
-                        />
-                      )}
-                    </div>
+                        }
+                        onResolve={() => {
+                          api
+                            .resolveComment(c.id)
+                            .then(() => posthog.capture('element_comment_resolved'))
+                            .catch(console.error)
+                          setOpenThread(null)
+                        }}
+                        onRetry={(id) =>
+                          api.retryComment(id).catch((err) => {
+                            if (isResidentLimit(err)) useStore.getState().setLimitWall(true)
+                            else console.error(err)
+                          })
+                        }
+                      />
+                    </CommentPin>
                   )
                 })}
 
                 {anchor && selected && (
                   <div
-                    className="pointer-events-auto absolute z-[7] origin-top-left [transform:scale(min(calc(1/var(--zoom,1)),2.4))_translateY(calc(-100%_-_8px))]"
+                    className={cn('pointer-events-auto absolute z-[7] origin-top-left', POPOVER_SCALE)}
                     style={{
                       left: Math.min(Math.max(anchor.rect.x, 4), Math.max(4, frame.width - 60)),
                       top: Math.max(anchor.rect.y, 2),
@@ -1151,6 +1411,14 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
                           >
                             {'</>'} Code
                           </Button>
+                          <Button
+                            variant="inverse"
+                            className={EL_TOOLBAR_BTN}
+                            aria-label="Copy link to element"
+                            onClick={() => void copyElementLink(frame, anchor.selector)}
+                          >
+                            Copy link
+                          </Button>
                           {!editing && canEdit && anchor.text !== '' && (
                             <Button
                               variant="inverse"
@@ -1193,7 +1461,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
             )
           })()}
 
-          {mayEdit && (
+          {mayEdit && !frame.locked && !pathEdit && (
             <div
               className={cn(
                 'absolute -right-[7px] -bottom-[7px] h-3.5 w-3.5 cursor-nwse-resize rounded-[4px] border-[1.5px] border-ink bg-surface opacity-0 [transition:opacity_0.12s] group-hover:opacity-100',
@@ -1202,233 +1470,11 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
               onPointerDown={(e) => startDrag(e, 'resize')}
             />
           )}
+          {drawingMove.preview}
+          {pathEdit && <PathEditor frame={frame} initial={pathEdit} onClose={closePathEdit} />}
         </div>
       </ContextMenuTrigger>
       <FrameContextMenu frame={frame} at={menuAt} />
     </ContextMenu>
   )
 })
-
-function CommentComposer({
-  onSubmit,
-  onCancel,
-  canvasId,
-  initialText = '',
-}: {
-  onSubmit: (text: string, mentions: string[]) => void
-  onCancel: () => void
-  canvasId: string
-  initialText?: string
-}) {
-  const [text, setText] = useState(initialText)
-  const taRef = useRef<MentionTextareaHandle>(null)
-  useEffect(() => taRef.current?.focus(), [])
-  const myId = authClient.useSession().data?.user.id
-  const guest = useStore((s) => s.guest)
-  const mayEdit = useCanEdit()
-  const send = () => text.trim() && onSubmit(text, mentionIds(text, taRef.current?.picked() ?? []))
-  /* @mention a resident agent to route the comment to it; without one the
-     comment is a note for the humans in the room */
-  const mentioned = mayEdit ? mentionedRole(text) : undefined
-  return (
-    <div className="w-[240px] rounded-[10px] border border-line bg-surface p-2 shadow-pop animate-[chip-in_0.18s_ease]">
-      <MentionTextarea
-        ref={taRef}
-        canvasId={canvasId}
-        people={!guest}
-        agents={mayEdit}
-        myId={myId}
-        className="min-h-[58px] md:text-[13px]"
-        value={text}
-        placeholder={guest ? 'Leave a comment on this element…' : 'Leave a comment… @ to mention someone'}
-        onChange={setText}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send()
-          if (e.key === 'Escape') onCancel()
-        }}
-      />
-      {mayEdit && !mentioned && (
-        <div className="mb-2 flex flex-wrap gap-1">
-          {AGENT_ROLES.map((role) => (
-            <Button
-              key={role.id}
-              variant="ghost"
-              size="pill"
-              className="border-dashed px-2 text-[11px] font-semibold text-ink-soft hover:border-brand hover:bg-transparent hover:text-brand"
-              title={`${role.name} — ${role.blurb}`}
-              onClick={() => setText((t) => (t ? t.replace(/\s*$/, ' ') : '') + `@${role.id} `)}
-            >
-              <RoleMark role={role} size={13} /> @{role.id}
-            </Button>
-          ))}
-        </div>
-      )}
-      <div className="flex items-center justify-end gap-2">
-        {mentioned && (
-          <span className="mr-auto inline-flex items-center gap-1 text-[11px] font-semibold text-brand">
-            <RoleMark role={mentioned} size={13} />
-            {mentioned.name} will pick this up
-          </span>
-        )}
-        {guest && <span className="mr-auto text-[11px] text-ink-faint">Posting as a guest</span>}
-        <Button variant="solid" size="pill" className="px-3.5 py-[5px] text-xs" disabled={!text.trim()} onClick={send}>
-          Post
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-/** Where an @agent request in the thread stands, or null for a human note. */
-function agentStatus(c: ElementComment): string | null {
-  const target = c.targetAgent ?? roleName(DEFAULT_ROLE_ID)
-  if (c.failedAt) return `${target} stopped`
-  if (c.resolvedAt) return c.forAgent ? `✓ ${c.resolvedBy ?? target}` : null
-  if (c.claimedBy) return `✦ ${c.claimedBy} is on it`
-  return c.forAgent ? `✦ waiting for ${target}` : null
-}
-
-function CommentThread({
-  thread,
-  alignEnd = false,
-  canvasId,
-  canReply,
-  canResolve,
-  canRetry,
-  onReply,
-  onResolve,
-  onRetry,
-}: {
-  /** root comment first, then its replies oldest → newest */
-  thread: ElementComment[]
-  /** open towards the left: the pin sits at the frame's right edge */
-  alignEnd?: boolean
-  canvasId: string
-  /** below comment the thread is read-only */
-  canReply: boolean
-  /** guests can reply but not close a thread */
-  canResolve: boolean
-  /** retrying a stopped agent request is an editor's call */
-  canRetry: boolean
-  /** rejects when the reply did not land — the draft is kept for a retry */
-  onReply: (text: string, mentions: string[]) => Promise<unknown>
-  onResolve: () => void
-  onRetry: (commentId: string) => void
-}) {
-  const replyRef = useRef<MentionTextareaHandle>(null)
-  const myId = authClient.useSession().data?.user.id
-  const guest = useStore((s) => s.guest)
-  const mayEdit = useCanEdit()
-  const [reply, setReply] = useState('')
-  const [sending, setSending] = useState(false)
-  const [failed, setFailed] = useState(false)
-  const listRef = useRef<HTMLDivElement>(null)
-  /* a long conversation opens (and grows) scrolled to its newest message */
-  useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
-  }, [thread.length])
-  const send = () => {
-    if (!reply.trim() || sending) return
-    const submitted = reply
-    setSending(true)
-    setFailed(false)
-    onReply(submitted, mentionIds(submitted, replyRef.current?.picked() ?? []))
-      /* only clear what was sent — text typed meanwhile is a new draft */
-      .then(() => setReply((current) => (current === submitted ? '' : current)))
-      .catch(() => setFailed(true))
-      .finally(() => setSending(false))
-  }
-  const mentioned = mayEdit ? mentionedRole(reply) : undefined
-  return (
-    <div
-      className={cn(
-        'absolute top-[calc(100%_+_8px)] w-[250px] cursor-default rounded-[10px] border border-line bg-surface p-2.5 text-left shadow-pop animate-[chip-in_0.18s_ease]',
-        alignEnd ? 'right-0' : 'left-1/2 -translate-x-1/2',
-      )}
-      onClick={(e) => e.stopPropagation()}
-    >
-      <div ref={listRef} className="-mx-1 max-h-[240px] overflow-y-auto px-1">
-        {thread.map((c, i) => {
-          const status = agentStatus(c)
-          return (
-            <div key={c.id} className={cn(i > 0 && 'mt-2 border-t border-line-soft pt-2')}>
-              <div className="flex items-center justify-between gap-2 text-[12px]">
-                <b style={{ color: colorFor(c.from) }}>{c.from}</b>
-                {status && <span className="whitespace-nowrap text-[11px] font-semibold text-brand">{status}</span>}
-              </div>
-              <div className="mt-1 break-words text-[13px] leading-[1.45] text-ink">{c.text}</div>
-              {c.failedAt ? (
-                <div className="mt-1 flex items-center gap-2 text-[11px] leading-[1.4] text-accent-ink">
-                  <span>{c.failureReason ?? 'The agent did not finish.'}</span>
-                  {canRetry && (
-                    <Button
-                      variant="danger-solid"
-                      size="pill"
-                      className="shrink-0 px-[9px] py-[3px] text-[11px]"
-                      onClick={() => onRetry(c.id)}
-                    >
-                      ↻ Retry
-                    </Button>
-                  )}
-                </div>
-              ) : null}
-            </div>
-          )
-        })}
-      </div>
-      {canReply ? (
-        <MentionTextarea
-          ref={replyRef}
-          canvasId={canvasId}
-          people={!guest}
-          agents={mayEdit}
-          myId={myId}
-          className="mt-2 min-h-[38px] md:text-[13px]"
-          value={reply}
-          placeholder={mayEdit ? 'Reply… (@ to mention, @doop to ask the agent)' : 'Reply…'}
-          onChange={setReply}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send()
-          }}
-        />
-      ) : null}
-      {failed && (
-        <div className="mt-1 text-[11px] leading-[1.4] text-accent-ink">
-          That reply did not go through — it may be resolved already. Try again.
-        </div>
-      )}
-      <div className="mt-1.5 flex items-center gap-1.5">
-        {canResolve && (
-          <Button
-            variant="ghost"
-            size="pill"
-            className="px-2.5 text-ink-soft hover:border-ink-soft hover:bg-transparent hover:text-ink"
-            onClick={onResolve}
-          >
-            ✓ Resolve
-          </Button>
-        )}
-        {mentioned && (
-          <span
-            className="ml-auto inline-flex min-w-0 items-center gap-1 truncate text-[11px] font-semibold text-brand"
-            title={`${mentioned.name} will pick this up`}
-          >
-            <RoleMark role={mentioned} size={13} />
-            <span className="truncate">{mentioned.name}</span>
-          </span>
-        )}
-        {canReply && (
-          <Button
-            variant="solid"
-            size="pill"
-            className={cn('px-3 py-[4px] text-xs', !mentioned && 'ml-auto')}
-            disabled={!reply.trim() || sending}
-            onClick={send}
-          >
-            {sending ? 'Posting…' : 'Reply'}
-          </Button>
-        )}
-      </div>
-    </div>
-  )
-}

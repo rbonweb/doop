@@ -1,4 +1,5 @@
 import { planRow, planMark, planPill, planAsCode, actionsRow } from './ui/model-plan'
+import { BrandMark } from './ui/brand-mark'
 import { AgentIcon } from './AgentIcon'
 import { LocalClaudeRow } from './LocalClaude'
 import { authClient } from '../lib/auth'
@@ -80,14 +81,13 @@ function planName(plan: string): string {
 }
 
 const planFlow = 'mt-[14px]'
-const maSteps =
-  'mb-3 ml-[18px] mt-[10px] text-[13px] leading-[1.7] text-ink-soft [&_code]:font-mono [&_code]:text-[12px]'
-const maWaiting = 'mt-[10px] flex items-center gap-[9px] text-[13px] text-ink-soft'
+const maSteps = 'mb-3 ml-[18px] mt-[10px] text-body leading-[1.7] text-ink-soft [&_code]:font-mono [&_code]:text-label'
+const maWaiting = 'mt-[10px] flex items-center gap-[9px] text-body text-ink-soft'
 const maActions = 'mt-3 flex items-center gap-[10px] max-md:flex-col max-md:items-stretch'
 /* the "or paste the redirect instead" style link under a flow */
-const maToggle = 'mt-4 block px-0 py-0 text-left text-[12.5px] font-normal text-ink-faint hover:bg-transparent'
+const maToggle = 'mt-4 block px-0 py-0 text-left text-body font-normal text-ink-faint hover:bg-transparent'
 /* the paste-your-redirect field: ink-bordered so it reads as the live step */
-const maInput = 'rounded-[10px] border-ink px-3 py-[10px] font-mono focus:ring-0 md:text-xs'
+const maInput = 'rounded-pill border-ink px-3 py-[10px] font-mono focus:ring-0 md:text-xs'
 /* buttons in the responsive action rows centre their label once stacked */
 const rowBtn = 'max-md:justify-center'
 
@@ -316,7 +316,7 @@ export function ModelAccountPanel({ onChange }: { onChange?: () => void }) {
     if (models.length > 5) {
       if (!live) {
         return (
-          <p className="self-center text-[13px] leading-[1.55] text-ink-faint">
+          <p className="self-center text-body leading-[1.55] text-ink-faint">
             {models
               .slice(0, 6)
               .map((m) => m.name)
@@ -332,7 +332,7 @@ export function ModelAccountPanel({ onChange }: { onChange?: () => void }) {
             <Button
               variant="ghost"
               disabled={busy}
-              className="gap-[7px] rounded-[10px] border border-line px-3 text-[13px] font-medium text-ink"
+              className="gap-[7px] rounded-pill border border-line px-3 text-body font-medium text-ink"
             >
               {current?.name ?? account.model ?? 'Pick a model'}
               {current?.vision === false && <NoVisionBadge />}
@@ -347,7 +347,7 @@ export function ModelAccountPanel({ onChange }: { onChange?: () => void }) {
                     {m.name}
                     {m.vision === false && <NoVisionBadge />}
                   </span>
-                  <span className="text-[12px] leading-[1.45] text-ink-faint">{m.blurb}</span>
+                  <span className="text-label leading-[1.45] text-ink-faint">{m.blurb}</span>
                 </span>
                 {m.id === account.model && <Tick />}
               </DropdownMenuItem>
@@ -397,14 +397,14 @@ export function ModelAccountPanel({ onChange }: { onChange?: () => void }) {
         <span className={planMark(live && !local?.enabled)}>{cfg.mark}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-[10px] max-md:flex-wrap max-md:items-start max-md:gap-x-[9px] max-md:gap-y-[6px]">
-            <h3 className="font-display text-[18px] font-extrabold normal-case tracking-[-0.02em] text-ink max-md:text-[17px]">
+            <h3 className="font-display text-heading font-extrabold normal-case tracking-[-0.02em] text-ink max-md:text-heading">
               {cfg.title}
             </h3>
             <span className={planPill(live)}>
               {live && showKey !== cfg.kind ? (local?.enabled ? 'Connected' : 'Active · Connected') : 'Not connected'}
             </span>
           </div>
-          <p className="mt-1.5 text-[14px] leading-[1.55] text-ink-soft max-md:text-[13.5px]">{cfg.lede}</p>
+          <p className="mt-1.5 text-copy leading-[1.55] text-ink-soft max-md:text-copy">{cfg.lede}</p>
 
           {live && showKey !== cfg.kind ? (
             <>
@@ -436,7 +436,7 @@ export function ModelAccountPanel({ onChange }: { onChange?: () => void }) {
                 </div>
               </div>
               {chosen && (
-                <p className="mt-[10px] text-[13px] text-ink-faint">
+                <p className="mt-[10px] text-body text-ink-faint">
                   {chosen.blurb}
                   {chosen.vision === false && ` ${VISION_NOTE}`}
                 </p>
@@ -444,7 +444,7 @@ export function ModelAccountPanel({ onChange }: { onChange?: () => void }) {
             </>
           ) : showKey === cfg.kind ? (
             <div className={planFlow}>
-              <p className="mb-3 mt-2 text-[13px] leading-[1.55] text-ink-soft">
+              <p className="mb-3 mt-2 text-body leading-[1.55] text-ink-soft">
                 The key is stored on the server and never shown again.
               </p>
               <Input
@@ -494,18 +494,18 @@ export function ModelAccountPanel({ onChange }: { onChange?: () => void }) {
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-[10px] max-md:flex-wrap max-md:items-start max-md:gap-x-[9px] max-md:gap-y-[6px]">
-              <h3 className="font-display text-[18px] font-extrabold normal-case tracking-[-0.02em] text-ink max-md:text-[17px]">
+              <h3 className="font-display text-heading font-extrabold normal-case tracking-[-0.02em] text-ink max-md:text-heading">
                 Codex Plan
               </h3>
               <span className={planPill(onChatgpt)}>
                 {onChatgpt ? (local?.enabled ? 'Connected' : 'Active · Connected') : 'Not connected'}
               </span>
             </div>
-            <p className="mt-1.5 text-[14px] leading-[1.55] text-ink-soft max-md:text-[13.5px]">
+            <p className="mt-1.5 text-copy leading-[1.55] text-ink-soft max-md:text-copy">
               Route OpenAI models through your ChatGPT subscription
             </p>
             {onChatgpt && account.email && (
-              <dl className="mt-[14px] grid grid-cols-[auto_auto] items-center justify-start gap-x-[14px] gap-y-2 text-[13px] text-ink-soft max-md:grid-cols-1 max-md:gap-[3px]">
+              <dl className="mt-[14px] grid grid-cols-[auto_auto] items-center justify-start gap-x-[14px] gap-y-2 text-body text-ink-soft max-md:grid-cols-1 max-md:gap-[3px]">
                 <dt>Connected as</dt>
                 <dd className="min-w-0">
                   <code className={planAsCode}>{account.email}</code>
@@ -536,7 +536,7 @@ export function ModelAccountPanel({ onChange }: { onChange?: () => void }) {
                     </Button>
                   </div>
                 </div>
-                {chosen && <p className="mt-[10px] text-[13px] text-ink-faint">{chosen.blurb}</p>}
+                {chosen && <p className="mt-[10px] text-body text-ink-faint">{chosen.blurb}</p>}
               </>
             ) : device ? (
               <div className={planFlow}>
@@ -670,7 +670,7 @@ export function ModelAccountPanel({ onChange }: { onChange?: () => void }) {
 
       {/* the browser cannot run the local CLI, so the plan closes the list as a pointer to the desktop app */}
       {!desktop && <LocalClaudeRow />}
-      {error && <p className="mt-[10px] text-[12.5px] text-accent-ink">{error}</p>}
+      {error && <p className="mt-[10px] text-body text-accent-ink">{error}</p>}
     </div>
   )
 }
@@ -683,7 +683,7 @@ function Tick() {
 
 function NoVisionBadge() {
   return (
-    <span className="rounded-[5px] bg-paper-deep px-[6px] py-[1px] text-[10.5px] font-medium uppercase tracking-[0.04em] text-ink-faint">
+    <span className="rounded-[5px] bg-paper-deep px-[6px] py-[1px] text-micro font-medium uppercase tracking-[0.04em] text-ink-faint">
       no visual review
     </span>
   )
@@ -711,28 +711,12 @@ function OpenRouterMark() {
   )
 }
 
-/** The Gemini four-point spark, inlined like the other marks. */
-function GeminiMark() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden>
-      <path
-        fill="currentColor"
-        d="M12 1c.55 5.93 5.07 10.45 11 11-5.93.55-10.45 5.07-11 11-.55-5.93-5.07-10.45-11-11C6.93 11.45 11.45 6.93 12 1Z"
-      />
-    </svg>
-  )
-}
-
-/** OpenAI's mark, inlined so the page needs no external request. */
 /* 18 in a 36px tile — the same mark-to-tile ratio the presence avatars use on
    a canvas, so the brand tile reads identically wherever it appears */
+function GeminiMark() {
+  return <BrandMark brand="gemini" size={18} />
+}
+
 function OpenAiMark() {
-  return (
-    <svg viewBox="0 0 256 260" width="18" height="18" aria-hidden>
-      <path
-        fill="currentColor"
-        d="M239.184 106.203a64.72 64.72 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.72 64.72 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.67 64.67 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.77 64.77 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483m-97.56 136.338a48.4 48.4 0 0 1-31.105-11.255l1.535-.87l51.67-29.825a8.6 8.6 0 0 0 4.247-7.367v-72.85l21.845 12.636c.218.111.37.32.409.563v60.367c-.056 26.818-21.783 48.545-48.601 48.601M37.158 197.93a48.35 48.35 0 0 1-5.781-32.589l1.534.921l51.722 29.826a8.34 8.34 0 0 0 8.441 0l63.181-36.425v25.221a.87.87 0 0 1-.358.665l-52.335 30.184c-23.257 13.398-52.97 5.431-66.404-17.803M23.549 85.38a48.5 48.5 0 0 1 25.58-21.333v61.39a8.29 8.29 0 0 0 4.195 7.316l62.874 36.272l-21.845 12.636a.82.82 0 0 1-.767 0L41.353 151.53c-23.211-13.454-31.171-43.144-17.804-66.405zm179.466 41.695l-63.08-36.63L161.73 77.86a.82.82 0 0 1 .768 0l52.233 30.184a48.6 48.6 0 0 1-7.316 87.635v-61.391a8.54 8.54 0 0 0-4.4-7.213m21.742-32.69l-1.535-.922l-51.619-30.081a8.39 8.39 0 0 0-8.492 0L99.98 99.808V74.587a.72.72 0 0 1 .307-.665l52.233-30.133a48.652 48.652 0 0 1 72.236 50.391zM88.061 139.097l-21.845-12.585a.87.87 0 0 1-.41-.614V65.685a48.652 48.652 0 0 1 79.757-37.346l-1.535.87l-51.67 29.825a8.6 8.6 0 0 0-4.246 7.367zm11.868-25.58L128.067 97.3l28.188 16.218v32.434l-28.086 16.218l-28.188-16.218z"
-      />
-    </svg>
-  )
+  return <BrandMark brand="openai" size={18} />
 }

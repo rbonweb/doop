@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { adminApi, ApiError, type AdminModels } from '../lib/api'
-import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Callout } from './ui/callout'
-import { cardVariants } from './ui/card'
+import { CardBody, CardDescription, CardHeader, CardTitle, SettingsCard } from './ui/card'
 import { Field } from './ui/field'
 import { Input } from './ui/input'
+import { StatusLabel } from './ui/status-label'
 
 type Key = 'agent' | 'distill'
 type Check = { state: 'checking' } | { state: 'ok'; model: string } | { state: 'failed'; error: string }
@@ -77,73 +77,69 @@ export function ModelsCard() {
   const changed = draft.agent !== models.agent.value || draft.distill !== models.distill.value
 
   return (
-    <div className={cn(cardVariants(), 'mt-4 flex flex-col gap-4 px-4 py-3.5')}>
-      <div>
-        <div className="font-display text-[14.5px] font-semibold">Models</div>
-        <p className="mt-1 text-[12.5px] text-ink-faint">
+    <SettingsCard>
+      <CardHeader>
+        <CardTitle>Models</CardTitle>
+        <CardDescription>
           {models.serverKey
             ? `The server’s Anthropic key sends its calls to ${models.baseUrl ?? 'Anthropic (api.anthropic.com)'}.`
             : 'This server has no Anthropic key (ANTHROPIC_API_KEY), so these models are not used until one is set.'}
-        </p>
-      </div>
-      {FIELDS.map(({ key, label, hint }) => {
-        const check = checks[key]
-        return (
-          <Field key={key} label={label} labelVariant="form" hint={hint}>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Input
-                value={draft[key]}
-                onChange={(e) => {
-                  setDraft((d) => ({ ...d, [key]: e.target.value }))
-                  setChecks((c) => ({ ...c, [key]: undefined }))
-                }}
-                placeholder={models[key].default}
-                aria-label={label}
-                spellCheck={false}
-                className="font-mono text-[13px] sm:flex-1"
-              />
-              <Button
-                variant="ghost"
-                size="md"
-                disabled={!models.serverKey || !draft[key].trim() || check?.state === 'checking'}
-                onClick={() => void test(key)}
-              >
-                {check?.state === 'checking' ? 'Testing…' : 'Test'}
-              </Button>
-            </div>
-            <p className="mt-1.5 text-xs text-ink-faint">
-              {check?.state === 'ok' && <span className="text-success-ink">Works: answered as {check.model}. </span>}
-              {check?.state === 'failed' && <span className="text-accent-ink">Failed: {check.error} </span>}
-              Default: <code className="font-mono">{models[key].default}</code>
-              {models[key].value !== models[key].default && (
-                <>
-                  {' · '}
-                  <Button
-                    variant="link"
-                    size="sm"
-                    className="h-auto px-0 py-0 text-xs"
-                    disabled={busy}
-                    onClick={() => void save({ [key]: '' })}
-                  >
+        </CardDescription>
+      </CardHeader>
+      <CardBody className="flex flex-col gap-5">
+        {FIELDS.map(({ key, label, hint }) => {
+          const check = checks[key]
+          return (
+            <Field key={key} label={label} labelVariant="form" hint={hint}>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Input
+                  variant="well"
+                  value={draft[key]}
+                  onChange={(e) => {
+                    setDraft((d) => ({ ...d, [key]: e.target.value }))
+                    setChecks((c) => ({ ...c, [key]: undefined }))
+                  }}
+                  placeholder={models[key].default}
+                  aria-label={label}
+                  spellCheck={false}
+                  className="font-mono sm:flex-1"
+                />
+                <Button
+                  variant="ghost"
+                  size="md"
+                  disabled={!models.serverKey || !draft[key].trim() || check?.state === 'checking'}
+                  onClick={() => void test(key)}
+                >
+                  {check?.state === 'checking' ? 'Testing…' : 'Test'}
+                </Button>
+              </div>
+              <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-caption text-ink-faint">
+                {check?.state === 'ok' && <StatusLabel tone="done">Works: answered as {check.model}</StatusLabel>}
+                {check?.state === 'failed' && <span className="text-accent-ink">Failed: {check.error}</span>}
+                <span>
+                  Default: <code className="font-mono">{models[key].default}</code>
+                </span>
+                {models[key].value !== models[key].default && (
+                  <Button variant="link" size="inline" disabled={busy} onClick={() => void save({ [key]: '' })}>
                     use the default
                   </Button>
-                </>
-              )}
-            </p>
-          </Field>
-        )
-      })}
-      {notice && <Callout tone={notice.tone}>{notice.text}</Callout>}
-      <div>
-        <Button
-          variant="primary"
-          size="md"
-          disabled={busy || !changed || !draft.agent.trim() || !draft.distill.trim()}
-          onClick={() => void save({ agent: draft.agent, distill: draft.distill })}
-        >
-          {busy ? '…' : 'Save'}
-        </Button>
-      </div>
-    </div>
+                )}
+              </p>
+            </Field>
+          )
+        })}
+        {notice && <Callout tone={notice.tone}>{notice.text}</Callout>}
+        <div>
+          <Button
+            variant="primary"
+            size="md"
+            disabled={busy || !changed || !draft.agent.trim() || !draft.distill.trim()}
+            onClick={() => void save({ agent: draft.agent, distill: draft.distill })}
+          >
+            {busy ? '…' : 'Save'}
+          </Button>
+        </div>
+      </CardBody>
+    </SettingsCard>
   )
 }

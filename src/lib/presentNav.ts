@@ -23,7 +23,8 @@ export const startNav = (currentId: string): PresentNav => ({ currentId, history
  * every frame of its page in reading order.
  */
 export function presentOrder(canvas: Canvas, current: Frame): Frame[] {
-  const onPage = pageFrames(canvas, framePageId(canvas, current))
+  /* hidden frames are off the canvas for everyone, so the walk skips them */
+  const onPage = pageFrames(canvas, framePageId(canvas, current)).filter((f) => !f.hidden)
   return current.slide ? deckOf(onPage) : readingOrder(onPage)
 }
 

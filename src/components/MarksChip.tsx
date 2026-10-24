@@ -3,7 +3,9 @@ import { useShallow } from 'zustand/react/shallow'
 import { authClient } from '../lib/auth'
 import { bindMarks, markAllSeen, reviewNext, useMarks } from '../lib/marks'
 import { cn } from '@/lib/utils'
+import { IconButton } from './ui/icon-button'
 import { XIcon } from './ui/icons'
+import { Pressable } from './ui/pressable'
 import { Tooltip } from './ui/tooltip'
 import { MarkDot } from './MarkDot'
 
@@ -30,13 +32,14 @@ export function MarksChip() {
   )
   if (ask + fresh === 0) return null
   return (
-    <div className="flex h-8 animate-[chip-in_0.25s_ease] items-center rounded-full border border-line bg-surface text-[12.5px] font-medium text-ink-soft transition-colors hover:border-ink-faint">
+    <div className="flex h-9 animate-[chip-in_0.25s_ease] items-center rounded-pill bg-surface text-body font-medium text-ink-soft shadow-ring transition-shadow hover:shadow-ring-hover">
       <Tooltip label="Jump to the next one (U)" side="bottom">
-        <button
-          type="button"
+        <Pressable
+          layout="inline"
+          focus="ring"
           onClick={reviewNext}
           className={cn(
-            'flex h-full items-center gap-2 rounded-full pl-3 transition-colors hover:bg-paper-deep hover:text-ink',
+            'h-full gap-2 rounded-pill pl-3 transition-colors hover:bg-paper-deep hover:text-ink',
             fresh > 0 ? 'rounded-r-none pr-2' : 'pr-3',
           )}
         >
@@ -57,18 +60,19 @@ export function MarksChip() {
               {fresh} new
             </span>
           )}
-        </button>
+        </Pressable>
       </Tooltip>
       {fresh > 0 && (
         <Tooltip label="Mark all as seen" side="bottom">
-          <button
-            type="button"
+          <IconButton
+            size="sm"
+            shape="round"
             aria-label="Mark all as seen"
             onClick={() => markAllSeen()}
-            className="grid h-full w-7 shrink-0 place-items-center rounded-r-full text-ink-faint transition-colors hover:bg-paper-deep hover:text-ink"
+            className="mx-1 text-ink-faint"
           >
-            <XIcon className="size-3" strokeWidth={2.4} />
-          </button>
+            <XIcon size="rail" />
+          </IconButton>
         </Tooltip>
       )}
     </div>

@@ -1,4 +1,5 @@
 import { startLocalAgent } from './lib/localAgent'
+import { navigate } from './lib/navigate'
 import { useEffect, useRef, useState } from 'react'
 import { Home } from './pages/Home'
 import { Community } from './pages/Community'
@@ -9,6 +10,9 @@ import { PresenterWindow } from './components/PresenterView'
 import { AuthPage } from './pages/AuthPage'
 import { DesktopHandoff } from './pages/DesktopHandoff'
 import { DesktopSignIn } from './pages/DesktopSignIn'
+import { DesktopCodexSetup } from './pages/DesktopCodexSetup'
+import { CODEX_SETUP_PATH } from './lib/codexConnection'
+import { OAuthConsent } from './pages/OAuthConsent'
 import { DESKTOP_HANDOFF_PATH, DESKTOP_SIGNIN_PATH } from './lib/desktopAuth'
 import { Admin } from './pages/Admin'
 import { Automations } from './pages/Automations'
@@ -17,7 +21,7 @@ import { Integrations } from './pages/Integrations'
 import { Workspace } from './pages/Workspace'
 import { authClient } from './lib/auth'
 import { setName } from './lib/identity'
-import { posthog, syncReplayForUser, suspendAnalyticsWhileImpersonating } from './lib/posthog'
+import { posthog, setSupportWidgetVisible, syncReplayForUser, suspendAnalyticsWhileImpersonating } from './lib/posthog'
 import { useMe } from './lib/me'
 import { adminApi } from './lib/api'
 import { Button } from './components/ui/button'
@@ -26,19 +30,17 @@ import { DesktopTabs, ShellDragBar } from './components/DesktopTabs'
 import { setTabsUser } from './lib/desktop'
 import { isDesktopShell } from './lib/shell'
 
-export function navigate(path: string) {
-  history.pushState(null, '', path)
-  window.dispatchEvent(new PopStateEvent('popstate'))
-}
+export { navigate }
 
 export function App() {
-  const [path, setPath] = useState(location.pathname)
+  const [route, setRoute] = useState(location.pathname + location.search)
+  const path = route.split('?')[0]!
   const { data: session, isPending } = authClient.useSession()
   const me = useMe(session?.user.id)
   const identifiedUserId = useRef<string | null>(null)
 
   useEffect(() => {
-    const onPop = () => setPath(location.pathname)
+    const onPop = () => setRoute(location.pathname + location.search)
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
@@ -48,6 +50,11 @@ export function App() {
      being the admin": the borrowed session has no admin access, so rendering
      the page would show its not-found screen. End the impersonation and
      arrive as the admin instead. */
+  const canvasId = path.match(/^\/c\/([^/]+)/)?.[1]
+  /* the support chat bubble stays off the editor, where it would cover the
+     zoom bar; every other page keeps it */
+  useEffect(() => setSupportWidgetVisible(!canvasId), [canvasId])
+
   const returningToAdmin = !!me?.impersonating && path.startsWith('/admin')
   useEffect(() => {
     if (!returningToAdmin) return
@@ -143,7 +150,6 @@ export function App() {
      session back and reloads. */
   if (path.startsWith('/admin') && (!me || returningToAdmin)) return <div className="auth-page" />
 
-  const canvasId = path.match(/^\/c\/([^/]+)/)?.[1]
   /* /c/<id>?presenter=1 is the presenter's own window: notes and the next slide, driven by the presentation (src/components/PresenterView.tsx) */
   const presenterWindow = !!canvasId && new URLSearchParams(location.search).has('presenter')
   const page = canvasId ? (
@@ -152,8 +158,12 @@ export function App() {
     ) : (
       <CanvasPage canvasId={canvasId} key={canvasId} />
     )
+  ) : path === CODEX_SETUP_PATH ? (
+    <DesktopCodexSetup key={route} />
   ) : path === DESKTOP_HANDOFF_PATH ? (
     <DesktopHandoff />
+  ) : path === '/oauth/consent' ? (
+    <OAuthConsent email={session.user.email} />
   ) : path.startsWith('/admin') ? (
     <Admin />
   ) : path.startsWith('/settings') ? (

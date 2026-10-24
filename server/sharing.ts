@@ -1,6 +1,7 @@
 import express from 'express'
 import { eq, inArray } from 'drizzle-orm'
 import { db } from './db/index.ts'
+import { env } from './env.ts'
 import * as authSchema from './db/auth-schema.ts'
 import * as persist from './db/persist.ts'
 import { store } from './store.ts'
@@ -21,6 +22,7 @@ import {
 } from './linkAccess.ts'
 import { clientIp, createRateLimiter } from './rateLimit.ts'
 import { mentionedRole } from '../shared/agents.ts'
+import { canvasPages } from '../shared/pages.ts'
 import {
   AGENT_REQUEST_NOTICE,
   isMemberRole,
@@ -261,7 +263,7 @@ async function notifyManagers(canvas: Canvas, request: AccessRequestInfo) {
   const people = await peopleByIds(managers)
   const note = request.message ? `\n\nThey wrote:\n  “${request.message.replace(/\n/g, '\n  ')}”` : ''
   for (const manager of people.values()) {
-    if (manager.banned || !(mailerConfigured || process.env.NODE_ENV !== 'production')) continue
+    if (manager.banned || !(mailerConfigured || env.NODE_ENV !== 'production')) continue
     sendMail({
       to: manager.email,
       subject: `${request.name} asked for access to “${canvas.name}”`,
@@ -500,7 +502,7 @@ export const MAX_GUEST_NAME = 40
 export function guestDisplayName(raw: unknown): string | null {
   if (typeof raw !== 'string') return null
   const clean = raw
-    // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+    // oxlint-disable-next-line no-control-regex -- stripping control characters is the point
     .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, '')
     .replace(/\(\s*guest\s*\)/gi, '')
     .replace(/\s+/g, ' ')
@@ -593,6 +595,33 @@ publicRouter.post('/frames/:id/comments', (req, res) => {
     { allowAgent: false },
   )
   if (!comment) return res.status(404).json({ error: 'frame not found or empty text' })
+  res.json(withNotice(comment, text))
+})
+
+/* a guest's comment pinned to a point on the canvas rather than to an element: same gate, name, notice and rate limits as a frame comment */
+publicRouter.post('/canvases/:id/comments', (req, res) => {
+  const canvas = guestGate(req, res, req.params.id)
+  if (!canvas) return
+  const name = guestDisplayName(req.body?.name)
+  if (!name) return res.status(400).json({ error: 'tell us your name first' })
+  const { pageId, x, y } = req.body ?? {}
+  if (typeof pageId !== 'string' || !canvasPages(canvas).some((page) => page.id === pageId))
+    return res.status(400).json({ error: 'page not found' })
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return res.status(400).json({ error: 'x and y must be numbers' })
+  const text = String(req.body?.text ?? '')
+    .trim()
+    .slice(0, MAX_GUEST_COMMENT)
+  if (!text) return res.status(400).json({ error: 'empty comment' })
+  if (!guestThrottle(req, res, canvas.id)) return
+  const comment = actions.addCanvasComment(
+    canvas.id,
+    { pageId, x: Number(x), y: Number(y), text },
+    name,
+    undefined,
+    'user',
+    { allowAgent: false },
+  )
+  if (!comment) return res.status(409).json({ error: 'page removed meanwhile' })
   res.json(withNotice(comment, text))
 })
 

@@ -3,8 +3,8 @@ import type { CanvasMeta } from '../../shared/types'
 import type { Automation } from '../../shared/automations'
 import { api, type IntegrationsStatus } from '../lib/api'
 import { posthog } from '../lib/posthog'
-import { AccountMenu } from '../components/DashShell'
-import { MetaTile, WorkspaceRail } from '../components/AutomateShell'
+import { MetaTile } from '../components/AutomateShell'
+import { AppRail, railLayout } from '../components/AppRail'
 import { clientIntegrations } from '../integrations'
 import { DisconnectButton, IntegrationCard } from '../integrations/ui'
 import { Button } from '../components/ui/button'
@@ -101,25 +101,15 @@ export function Integrations() {
   const usedBy = automations.filter((a) => a.steps.some((s) => s.type === 'pull')).length
 
   return (
-    <DashLayout>
-      <WorkspaceRail
-        active="integrations"
-        canvases={canvases}
-        automationCount={automations.length}
-        integrationCount={
-          Number(!!meta?.connected) + (status ? clientIntegrations.filter((i) => i.isConnected(status)).length : 0)
-        }
-      />
-      <DashMain>
-        <DashHeader>
+    <DashLayout className={railLayout}>
+      <AppRail active="integrations" canvases={canvases} />
+      <DashMain className="[background:var(--paper)]">
+        <DashHeader variant="bare">
           <span className="flex-1" />
-          <AccountMenu />
         </DashHeader>
 
-        <DashContent>
-          <DashTitle className="mb-[26px]">
-            Integrations<em className="not-italic text-brand">.</em>
-          </DashTitle>
+        <DashContent className="pt-2 md:pt-3">
+          <DashTitle className="mb-5">Integrations</DashTitle>
 
           {notice && (
             <Callout tone={notice.tone} className="mb-4 max-w-[720px]">
@@ -130,8 +120,8 @@ export function Integrations() {
           <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {!meta || !status ? (
               <>
-                <Skeleton className="min-h-[150px] rounded-[14px]" />
-                <Skeleton className="min-h-[150px] rounded-[14px]" />
+                <Skeleton shape="card" />
+                <Skeleton shape="card" />
               </>
             ) : (
               <>
@@ -212,12 +202,12 @@ export function Integrations() {
                   }
                 >
                   {meta.connected && meta.expiresAt && meta.expiresAt < soon && (
-                    <p className="text-[11.5px] text-accent-ink">
+                    <p className="text-caption text-accent-ink">
                       Meta’s access expires soon — reconnect to keep pulls running.
                     </p>
                   )}
                   {!meta.enabled && (
-                    <p className="text-[11.5px] text-ink-faint">
+                    <p className="text-caption text-ink-faint">
                       Not configured on this server — set META_APP_ID and META_APP_SECRET.
                     </p>
                   )}

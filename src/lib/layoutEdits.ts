@@ -21,13 +21,14 @@ interface Rect {
 const rectOf = (f: Rect): Rect => ({ x: f.x, y: f.y, width: f.width, height: f.height })
 const sameRect = (a: Rect, b: Rect) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
 
-/** The frames a layout key acts on: the selection, or every frame on the page when nothing is selected. */
+/** The frames a layout key acts on: the selection, or every frame on the page when nothing is selected.
+ *  Hidden frames take no part (the canvas is not drawing them) and locked frames are never moved or resized. */
 export function layoutTargets(): Frame[] {
   const s = useStore.getState()
   if (!s.canvas) return []
   const onPage = pageFrames(s.canvas, s.activePageId ?? canvasPages(s.canvas)[0]!.id)
   const picked = onPage.filter((f) => s.selectedIds.includes(f.id))
-  return picked.length ? picked : onPage
+  return (picked.length ? picked : onPage).filter((f) => !f.hidden && !f.locked)
 }
 
 /** Move/resize frames to `after`, as one undo step. Returns how many actually changed. */

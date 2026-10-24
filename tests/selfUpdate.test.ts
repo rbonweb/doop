@@ -35,8 +35,8 @@ beforeAll(async () => {
   updateDir = mkdtempSync(path.join(tmpdir(), 'doop-update-'))
   const common = { DOOP_VERSION: 'v1.2.0-fork.2', DOOP_UPDATE_REPO: 'acme/doop', DOOP_UPDATE_API: api }
   ;[updatable, manual] = await Promise.all([
-    startServer(4983, { ...common, DOOP_UPDATE_DIR: updateDir, ADMIN_EMAILS: 'admin@example.test' }),
-    startServer(4984, { ...common, ADMIN_EMAILS: 'admin@example.test' }),
+    startServer({ ...common, DOOP_UPDATE_DIR: updateDir, ADMIN_EMAILS: 'admin@example.test' }),
+    startServer({ ...common, ADMIN_EMAILS: 'admin@example.test' }),
   ])
   admin = await new Client(updatable).signUp('admin@example.test', 'Admin')
   member = await new Client(updatable).signUp('member@example.test', 'Member')
