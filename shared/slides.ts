@@ -19,9 +19,10 @@ export function defaultFrameSize(slide: boolean | undefined): { width: number; h
 
 type Placed = Pick<Frame, 'x' | 'y' | 'width' | 'height'>
 
-/** The slides of one page in the order a deck plays: reading order, slide frames only. */
-export function deckOf<T extends Placed & { slide?: boolean }>(pageFrames: readonly T[]): T[] {
-  return readingOrder(pageFrames.filter((f) => f.slide))
+/** The slides of one page in the order a deck plays: reading order, slide frames only. A hidden slide is out of the
+ *  deck everywhere (present mode, the PDF, the numbering), so the export never disagrees with the show. */
+export function deckOf<T extends Placed & { slide?: boolean; hidden?: boolean }>(pageFrames: readonly T[]): T[] {
+  return readingOrder(pageFrames.filter((f) => f.slide && !f.hidden))
 }
 
 /** Every slide's 1-based position in its page's deck, by frame id. */

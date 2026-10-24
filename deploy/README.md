@@ -122,7 +122,7 @@ An admin can:
 - ban and unban accounts,
 - install updates.
 
-The Admin page is in the account menu (your name, top right), under **Admin**. It appears only for
+The Admin page is in the account menu, bottom left (the face at the bottom of the left rail), under **Admin**. It appears only for
 admins.
 
 **The first admin** is the account the install created for you.

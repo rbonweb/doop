@@ -432,7 +432,7 @@ ${DESIGN_QUALITY}
 ## Prototypes — screens that link
 
 - Put data-goto="<frameId>" on any element that should take the viewer to another screen: a button, a card, a nav item. create_frame returns the id, so make the target frames first (or create them empty) and link by id. A frame name also works (a case-insensitive exact match, the first frame in reading order wins), but ids do not break when someone renames a frame.
-- Links do nothing on the canvas, where a click selects the element; ⌥-click follows one. In present mode (P) a click follows the link, → and ← walk the page in reading order, and Backspace goes back.
+- Links do nothing on the canvas, where a click selects the element; ⌥-click follows one. In present mode (⇧P) a click follows the link, → and ← walk the page in reading order, and Backspace goes back.
 - Give an element that appears on both screens the same view-transition-name (for example view-transition-name: hero-card) in both frames, and it morphs between them. Names must be unique within a frame.
 - Every interactive element in a flow must lead somewhere or be clearly disabled. Check each data-goto before you finish: it must point at a frame that exists.
 

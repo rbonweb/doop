@@ -181,7 +181,7 @@ describe('history, notes and pages over MCP', () => {
   it('lets an editor key restore a version and manage notes', async () => {
     const restored = vi.spyOn(actions, 'restoreFrameVersion').mockResolvedValue({
       frame: FRAME,
-      replaced: { html: FRAME.html, width: FRAME.width, height: FRAME.height },
+      replaced: { html: FRAME.html, width: FRAME.width, height: FRAME.height, name: FRAME.name },
     })
     const created = vi.spyOn(actions, 'createNote').mockReturnValue({ ok: true, note: NOTE })
     const updated = vi.spyOn(actions, 'updateNote').mockReturnValue({ ok: true, note: NOTE })

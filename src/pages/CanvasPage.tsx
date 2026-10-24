@@ -79,6 +79,9 @@ import {
   XIcon,
 } from '../components/ui/icons'
 import { Badge } from '../components/ui/badge'
+import { Segmented, SegmentedItem } from '../components/ui/segmented'
+import { Board } from '../components/Board'
+import { PagesPanel } from '../components/PagesPanel'
 import { SelectionBar, SelectionBarAction } from '../components/ui/selection-bar'
 import { Input } from '../components/ui/input'
 import { Field } from '../components/ui/field'
@@ -170,6 +173,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
     history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`)
   }, [])
   const [showShare, setShowShare] = useState(false)
+  const [view, setView] = useState<'canvas' | 'board'>('canvas')
   const presenting = useStore((s) => s.presenting)
   const setPresenting = useStore((s) => s.setPresenting)
   const presentFrameId = useStore((s) => s.presentFrameId)
@@ -443,8 +447,19 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
           <span className="contents max-md:hidden">
             <MarksChip />
           </span>
+          {canEdit && (
+            <Segmented
+              className="shrink-0 max-xs:order-2"
+              aria-label="View"
+              value={view}
+              onValueChange={(next) => setView(next as 'canvas' | 'board')}
+            >
+              <SegmentedItem value="canvas">Canvas</SegmentedItem>
+              <SegmentedItem value="board">Board</SegmentedItem>
+            </Segmented>
+          )}
         </div>
-        <div className="absolute top-3.5 left-1/2 -translate-x-1/2 max-[1180px]:hidden">
+        <div className="chrome-layer absolute top-3.5 left-1/2 -translate-x-1/2 max-[1180px]:hidden">
           <LivePresence me={meFace} others={others} onRenameSelf={() => setRenaming(true)} />
         </div>
         <div className="ml-auto flex flex-none items-center gap-2 max-md:hidden">
@@ -472,12 +487,18 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
               </Button>
             </BarPill>
           )}
-          {selectedFrames.length > 0 && (
-            <BarPill className="animate-[chip-in_0.25s_ease]">
+          {/* always in the bar so it can be found; it waits for a selection to know what to export */}
+          {view === 'canvas' && (
+            <BarPill>
               <Button
                 variant="bare"
-                className={barPillBtn}
-                title={`Export ${selectedFrames.length > 1 ? `${selectedFrames.length} frames` : 'the selected frame'} as PNG or JPG (${EXPORT_SHORTCUT})`}
+                className={cn(barPillBtn, 'disabled:opacity-40')}
+                disabled={!selectedFrames.length}
+                title={
+                  selectedFrames.length
+                    ? `Export ${selectedFrames.length > 1 ? `${selectedFrames.length} frames` : 'the selected frame'} as PNG or JPG (${EXPORT_SHORTCUT})`
+                    : 'Select a frame to export it'
+                }
                 onClick={() => useStore.getState().openExport(selectedFrames.map((f) => f.id))}
               >
                 <DownloadIcon className="size-3.5" aria-hidden />
@@ -564,126 +585,135 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
           edge; the floating chrome gets its own layer that starts below the
           bar, so every panel offset stays measured from there */}
       <div className="absolute inset-0 overflow-hidden" style={chromeVars}>
-        <Stage onAddFrame={addFrame} rightInset={isMobile ? 0 : chrome.right} />
-        <div
-          className={cn(
-            'pointer-events-none absolute inset-x-0 bottom-0 top-[50px] max-md:top-14 max-xs:top-[100px]',
-            uiHidden && 'hidden',
-          )}
-        >
-          <div className="pointer-events-none absolute top-3.5 right-[var(--chrome-right)] z-30 flex flex-col items-end gap-2 transition-[right] duration-150 [&>*]:pointer-events-auto max-md:top-[56px] max-md:right-2 max-md:left-2">
-            {canEdit &&
-              pendingProposal &&
-              mutedProposal !== pendingProposal.id &&
-              !(showActivity && panelTab === 'memory') && (
-                <div className="flex items-center rounded-[10px] bg-surface shadow-ring">
+        {view === 'board' && canEdit ? (
+          /* the Board is the canvas's task queue: cards humans leave for agents; it takes the whole area below the bar */
+          <div className="absolute inset-x-0 bottom-0 top-[50px] overflow-auto max-md:top-14 max-xs:top-[100px]">
+            <Board canvasId={canvasId} />
+          </div>
+        ) : (
+          <>
+            <Stage onAddFrame={addFrame} rightInset={isMobile ? 0 : chrome.right} />
+            <div
+              className={cn(
+                'pointer-events-none absolute inset-x-0 bottom-0 top-[50px] max-md:top-14 max-xs:top-[100px]',
+                uiHidden && 'hidden',
+              )}
+            >
+              <div className="chrome-layer pointer-events-none absolute top-3.5 right-[var(--chrome-right)] z-30 flex flex-col items-end gap-2 transition-[right] duration-150 [&>*]:pointer-events-auto max-md:top-[56px] max-md:right-2 max-md:left-2">
+                {canEdit &&
+                  pendingProposal &&
+                  mutedProposal !== pendingProposal.id &&
+                  !(showActivity && panelTab === 'memory') && (
+                    <div className="flex items-center rounded-[10px] bg-surface shadow-ring">
+                      <Button
+                        variant="bare"
+                        className="h-8 pr-1 pl-3 text-[12px] font-medium text-ink hover:bg-transparent hover:text-ink"
+                        onClick={() => {
+                          useStore.getState().setPanelTab('memory')
+                          setShowActivity(true)
+                        }}
+                      >
+                        <DoopMark size={12} /> Memory suggestion — review
+                      </Button>
+                      <Button
+                        variant="bare"
+                        size="icon-sm"
+                        className="mr-1 size-6 rounded-[6px] text-ink-faint"
+                        title="Hide for now"
+                        aria-label="Hide for now"
+                        onClick={() => setMutedProposal(pendingProposal.id)}
+                      >
+                        <XIcon className="size-3" />
+                      </Button>
+                    </div>
+                  )}
+                {canEdit && decisionToast && (
                   <Button
                     variant="bare"
-                    className="h-8 pr-1 pl-3 text-[12px] font-medium text-ink hover:bg-transparent hover:text-ink"
+                    className="max-w-full items-center gap-2.5 whitespace-normal rounded-[12px] bg-surface px-3.5 py-2.5 text-left font-normal shadow-pop transition-shadow hover:bg-surface hover:shadow-ring-hover sm:max-w-[320px] [&_svg]:text-ink-soft"
+                    title="Open Memory"
                     onClick={() => {
                       useStore.getState().setPanelTab('memory')
                       setShowActivity(true)
+                      setDecisionToast(null)
                     }}
                   >
-                    <DoopMark size={12} /> Memory suggestion — review
+                    <BrainIcon className="size-4" />
+                    <span>
+                      <b className="block text-[12.5px] font-medium text-ink">Saved to Memory</b>
+                      <span className="mt-[1px] block text-[12px] leading-[1.4] text-ink-soft">{decisionToast}</span>
+                    </span>
                   </Button>
+                )}
+              </div>
+              {/* the presence pill in the bar already carries each agent's status
+              line; this per-agent stack is only for windows too narrow for it */}
+              <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />
+              {isMobile && selectedFrames.length > 0 && (
+                /* phones have no right-click and no top-bar action group, so a selection brings its own Export */
+                <div className="chrome-layer absolute top-2 left-2 z-30 flex max-w-[calc(100vw-176px)] items-center gap-2 rounded-full bg-surface py-1 pr-1 pl-3.5 text-body font-medium text-ink-soft shadow-float animate-[chip-in_0.25s_ease]">
+                  <span className="truncate">
+                    {selectedFrames.length > 1 ? `${selectedFrames.length} selected` : selectedFrames[0]?.name}
+                  </span>
                   <Button
-                    variant="bare"
-                    size="icon-sm"
-                    className="mr-1 size-6 rounded-[6px] text-ink-faint"
-                    title="Hide for now"
-                    aria-label="Hide for now"
-                    onClick={() => setMutedProposal(pendingProposal.id)}
+                    variant="primary"
+                    className="h-7 shrink-0 gap-1.5 rounded-full px-3 text-body"
+                    onClick={() => useStore.getState().openExport(selectedFrames.map((f) => f.id))}
                   >
-                    <XIcon className="size-3" />
+                    <DownloadIcon className="size-3.5" aria-hidden />
+                    Export
                   </Button>
                 </div>
               )}
-            {canEdit && decisionToast && (
-              <Button
-                variant="bare"
-                className="max-w-full items-center gap-2.5 whitespace-normal rounded-[12px] bg-surface px-3.5 py-2.5 text-left font-normal shadow-pop transition-shadow hover:bg-surface hover:shadow-ring-hover sm:max-w-[320px] [&_svg]:text-ink-soft"
-                title="Open Memory"
-                onClick={() => {
-                  useStore.getState().setPanelTab('memory')
-                  setShowActivity(true)
-                  setDecisionToast(null)
-                }}
-              >
-                <BrainIcon className="size-4" />
-                <span>
-                  <b className="block text-[12.5px] font-medium text-ink">Saved to Memory</b>
-                  <span className="mt-[1px] block text-[12px] leading-[1.4] text-ink-soft">{decisionToast}</span>
-                </span>
-              </Button>
-            )}
-          </div>
-          {/* the presence pill in the bar already carries each agent's status
-              line; this per-agent stack is only for windows too narrow for it */}
-          <WorkingNow style={{ left: chrome.left }} className="min-[1180px]:hidden" />
-          {isMobile && selectedFrames.length > 0 && (
-            /* phones have no right-click and no top-bar action group, so a selection brings its own Export */
-            <div className="absolute top-2 left-2 z-30 flex max-w-[calc(100vw-176px)] items-center gap-2 rounded-full bg-surface py-1 pr-1 pl-3.5 text-body font-medium text-ink-soft shadow-float animate-[chip-in_0.25s_ease]">
-              <span className="truncate">
-                {selectedFrames.length > 1 ? `${selectedFrames.length} selected` : selectedFrames[0]?.name}
-              </span>
-              <Button
-                variant="primary"
-                className="h-7 shrink-0 gap-1.5 rounded-full px-3 text-body"
-                onClick={() => useStore.getState().openExport(selectedFrames.map((f) => f.id))}
-              >
-                <DownloadIcon className="size-3.5" aria-hidden />
-                Export
-              </Button>
-            </div>
-          )}
-          {canEdit && <Onboarding canvasId={canvasId} />}
-          {!isMobile && canEdit && (layersOpen ? <LayersPanel onAddFrame={addFrame} /> : <LayersRailToggle />)}
-          {isMobile && canComment && !showActivity && (
-            <MobilePanelTabs
-              onOpen={(tab) => {
-                useStore.getState().setPanelTab(tab)
-                setShowActivity(true)
-              }}
-            />
-          )}
-          {!isMobile && canEdit && selectedFrame && panelElement && !deferPanel && (
-            <ElementPanel
-              /* keyed by frame, not element: picking the next element swaps
+              {canEdit && <Onboarding canvasId={canvasId} />}
+              {!isMobile && canEdit && (layersOpen ? <LayersPanel onAddFrame={addFrame} /> : <LayersRailToggle />)}
+              {isMobile && canComment && !showActivity && (
+                <MobilePanelTabs
+                  onOpen={(tab) => {
+                    useStore.getState().setPanelTab(tab)
+                    setShowActivity(true)
+                  }}
+                />
+              )}
+              {!isMobile && canEdit && selectedFrame && panelElement && !deferPanel && (
+                <ElementPanel
+                  /* keyed by frame, not element: picking the next element swaps
                  the values in place instead of remounting the panel blank */
-              key={selectedFrame.id}
-              frame={selectedFrame}
-              selector={panelElement.selector}
-              style={{ right: chrome.properties }}
-            />
-          )}
-          {!isMobile && canEdit && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
-            <Inspector frame={selectedFrame} style={{ right: chrome.properties }} />
-          )}
-          {!isMobile && canComment && showActivity && (
-            <ActivityPanel canvasId={canvasId} onClose={() => setShowActivity(false)} style={{ right: EDGE }} />
-          )}
-          {!isMobile && canComment && (
-            <SideRail
-              style={{ right: chrome.island }}
-              agentsOpen={showActivity}
-              onToggleAgents={() => setShowActivity((open) => !open)}
-              inspectorOpen={propertiesShown}
-              inspectorAvailable={!!selectedFrame}
-              onToggleInspector={() => {
-                const s = useStore.getState()
-                if (propertiesShown) {
-                  /* the element panel and the inspector share the slot —
+                  key={selectedFrame.id}
+                  frame={selectedFrame}
+                  selector={panelElement.selector}
+                  style={{ right: chrome.properties }}
+                />
+              )}
+              {!isMobile && canEdit && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
+                <Inspector frame={selectedFrame} style={{ right: chrome.properties }} />
+              )}
+              {!isMobile && canComment && showActivity && (
+                <ActivityPanel canvasId={canvasId} onClose={() => setShowActivity(false)} style={{ right: EDGE }} />
+              )}
+              {!isMobile && canComment && (
+                <SideRail
+                  style={{ right: chrome.island }}
+                  agentsOpen={showActivity}
+                  onToggleAgents={() => setShowActivity((open) => !open)}
+                  inspectorOpen={propertiesShown}
+                  inspectorAvailable={!!selectedFrame}
+                  onToggleInspector={() => {
+                    const s = useStore.getState()
+                    if (propertiesShown) {
+                      /* the element panel and the inspector share the slot —
                      hiding it closes whichever is showing */
-                  s.setElementPanelOpen(false)
-                  s.setInspectorOpen(false)
-                } else s.setInspectorOpen(true)
-              }}
-              me={meFace}
-              onRenameSelf={() => setRenaming(true)}
-            />
-          )}
-        </div>
+                      s.setElementPanelOpen(false)
+                      s.setInspectorOpen(false)
+                    } else s.setInspectorOpen(true)
+                  }}
+                  me={meFace}
+                  onRenameSelf={() => setRenaming(true)}
+                />
+              )}
+            </div>
+          </>
+        )}
       </div>
 
       {isMobile && (
@@ -699,8 +729,10 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
                   Layers, import, export, share, or your account settings.
                 </SheetDescription>
               </div>
-              {/* the same glyphs as the desktop bar and islands; pages live
-                  in the Layers sheet, as on desktop */}
+              {/* the same glyphs as the desktop bar and islands; editors find
+                  pages in the Layers sheet, as on desktop, and everyone else
+                  switches pages here */}
+              {!canEdit && <PagesPanel />}
               <div className="grid gap-2 p-4 [&_svg]:size-3.5 [&_svg]:text-ink-soft">
                 {canEdit && (
                   <Button
@@ -852,6 +884,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
           }}
           onDone={(frameIds, failedCount) => {
             setShowImport(false)
+            setView('canvas')
             select(frameIds[0] ?? null)
             const imported = frameIds.length === 1 ? '1 item imported' : `${frameIds.length} items imported`
             showToast(failedCount ? `${imported} · ${failedCount} failed` : imported)
@@ -859,6 +892,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
           onQueued={(cardCount) => {
             setShowImport(false)
             setGhInstallPass(null)
+            setView('board')
             showToast(`${cardCount} ${cardCount === 1 ? 'card' : 'cards'} queued — Doop is on it`)
           }}
         />

@@ -18,7 +18,7 @@ type Shown = Pick<FrameVersion, 'html' | 'width' | 'height'>
 
 /** A frame's design history: every state a later edit replaced, newest
  *  first, with the live design on top. Pick one to preview it at its own
- *  size; Restore puts it back (HTML and size) through the server, so the
+ *  size; Restore puts it back (HTML, size and name) through the server, so the
  *  whole room sees it land. The server files the current design as a version
  *  first, so a restore can itself be undone from here — and ⌘Z reverts it
  *  locally like any other edit. */
@@ -63,7 +63,7 @@ export function FrameHistoryModal({ frame, onClose }: { frame: Frame; onClose: (
       /* the undo copy is the server's, not this client's: during an agent's
          reveal the local frame holds only the HTML shown so far */
       const { frame: after, replaced } = await api.restoreFrameVersion(frame.id, version.id)
-      recordUpdate(frame.id, replaced, { html: after.html, width: after.width, height: after.height })
+      recordUpdate(frame.id, replaced, { html: after.html, width: after.width, height: after.height, name: after.name })
       useStore.getState().upsertFrame(after)
       useStore.getState().pushNotice(`Restored “${after.name}” to the version from ${timeAgo(version.savedAt)}`)
       onClose()

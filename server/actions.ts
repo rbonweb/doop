@@ -1204,7 +1204,7 @@ export type RestoredFrame = {
   frame: Frame
   /** the complete state the restore replaced — a client mid-reveal only
    *  holds a partial copy, so this is what its undo must put back */
-  replaced: Pick<Frame, 'html' | 'width' | 'height'>
+  replaced: Pick<Frame, 'html' | 'width' | 'height' | 'name'>
 }
 
 /** Put a frame back to one of its recorded versions (HTML, size and, when the
@@ -1220,7 +1220,7 @@ export async function restoreFrameVersion(
   if (!version) return null
   const before = store.getFrame(frameId)
   if (!before) return undefined
-  const replaced = { html: before.html, width: before.width, height: before.height }
+  const replaced = { html: before.html, width: before.width, height: before.height, name: before.name }
   const name = version.name !== undefined && version.name !== before.name ? version.name : undefined
   if (
     before.html === version.html &&
