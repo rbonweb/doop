@@ -18,7 +18,7 @@ function tokenOf(link: string): string {
 
 beforeAll(async () => {
   /* the first admin comes in through the environment's list, as an operator's would */
-  server = await startServer(4991, {
+  server = await startServer({
     DOOP_INVITE_ONLY: '1',
     SIGNUP_ALLOWED_EMAILS: 'admin@example.test',
     ADMIN_EMAILS: 'admin@example.test',

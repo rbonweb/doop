@@ -2,16 +2,15 @@ import { useEffect, useState } from 'react'
 import { api, errorMessage, type AgentKeyInfo } from '../lib/api'
 import { posthog } from '../lib/posthog'
 import { timeAgo } from '../lib/time'
+import { ConfirmDialog } from './ui/alert-dialog'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Note } from './ui/note'
 import { CodeBlock } from './ui/code-block'
-import { Card, CardDescription, CardHeader, CardRow, CardTitle } from './ui/card'
+import { CardDescription, CardHeader, CardRow, CardTitle, SettingsCard } from './ui/card'
 import { TrashIcon } from './ui/icons'
 
 /* same fixed-column-on-desktop rhythm as the other settings cards */
-const settingsCard = 'mt-4 max-w-[1000px] overflow-hidden sm:mt-5'
-const settingsInput = 'w-full sm:w-[280px]'
 
 /** The MCP config a headless client needs, with the key in place. Shown once,
  *  right after minting — the moment the person actually has the secret. */
@@ -38,6 +37,9 @@ export function AgentKeys() {
   const [error, setError] = useState('')
   /* the one moment the full secret exists client-side */
   const [minted, setMinted] = useState<{ id: string; secret: string } | null>(null)
+  /* the key awaiting "are you sure" — an in-app dialog, since window.confirm
+     is a silent "cancel" in the desktop shell's webview */
+  const [confirmRevoke, setConfirmRevoke] = useState<AgentKeyInfo | null>(null)
 
   /* `keys === null` is "still loading", and minting stays disabled until it
      resolves: a list request in flight would otherwise land after the key it
@@ -68,7 +70,6 @@ export function AgentKeys() {
   }
 
   async function revoke(key: AgentKeyInfo) {
-    if (!window.confirm(`Revoke "${key.name}"? Agents using it lose access immediately.`)) return
     try {
       await api.deleteAgentKey(key.id)
       posthog.capture('agent_key_revoked')
@@ -80,7 +81,7 @@ export function AgentKeys() {
   }
 
   return (
-    <Card className={settingsCard}>
+    <SettingsCard>
       <CardHeader>
         <CardTitle>Agent keys</CardTitle>
         <CardDescription>
@@ -97,18 +98,19 @@ export function AgentKeys() {
             {minting ? 'Creating…' : 'Create key'}
           </Button>
         }
+        control={
+          <Input
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value)
+              setError('')
+            }}
+            placeholder="What will use it, e.g. mastra-prod"
+            maxLength={60}
+            aria-label="Agent key name"
+          />
+        }
       >
-        <Input
-          className={settingsInput}
-          value={name}
-          onChange={(e) => {
-            setName(e.target.value)
-            setError('')
-          }}
-          placeholder="What will use it, e.g. mastra-prod"
-          maxLength={60}
-          aria-label="Agent key name"
-        />
         {error && <Note tone="error">{error}</Note>}
       </CardRow>
 
@@ -117,9 +119,7 @@ export function AgentKeys() {
           <div className="min-w-0 flex-1">
             <Note tone="success">Copy it now — it is shown once and stored hashed.</Note>
             <CodeBlock className="mt-2" text={minted.secret} />
-            <p className="mb-1.5 mt-3 text-[11px] font-bold uppercase tracking-[0.14em] text-ink-faint">
-              MCP config for a headless client
-            </p>
+            <p className="mb-1.5 mt-3 text-caption font-medium text-ink-faint">MCP config for a headless client</p>
             <CodeBlock text={headlessConfig(minted.secret)} />
           </div>
         </CardRow>
@@ -130,12 +130,12 @@ export function AgentKeys() {
           key={key.id}
           label={key.name}
           action={
-            <Button size="sm" variant="ghost" aria-label={`Revoke ${key.name}`} onClick={() => void revoke(key)}>
+            <Button size="sm" variant="ghost" aria-label={`Revoke ${key.name}`} onClick={() => setConfirmRevoke(key)}>
               <TrashIcon /> Revoke
             </Button>
           }
         >
-          <span className="font-mono text-[13px] text-ink-soft">{key.start}…</span>
+          <span className="font-mono text-body text-ink-soft">{key.start}…</span>
           <Note>
             created {timeAgo(key.createdAt)}
             {key.lastUsedAt ? ` · last used ${timeAgo(key.lastUsedAt)}` : ' · never used'}
@@ -147,6 +147,19 @@ export function AgentKeys() {
           <Note>Interactive clients (Claude Code, Codex) don’t need one — they sign in with OAuth.</Note>
         </CardRow>
       )}
-    </Card>
+      <ConfirmDialog
+        open={!!confirmRevoke}
+        onOpenChange={(open) => !open && setConfirmRevoke(null)}
+        title={`Revoke “${confirmRevoke?.name ?? ''}”?`}
+        description="Agents using it lose access immediately."
+        confirmLabel="Revoke key"
+        destructive
+        onConfirm={() => {
+          const target = confirmRevoke
+          setConfirmRevoke(null)
+          if (target) void revoke(target)
+        }}
+      />
+    </SettingsCard>
   )
 }

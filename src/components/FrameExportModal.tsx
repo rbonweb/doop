@@ -29,15 +29,15 @@ function SingleExport({ frame, onClose }: { frame: Frame; onClose: () => void })
       <ModalTitle className="break-words">Export “{frame.name}”</ModalTitle>
       <ModalLede>Download this frame as a PNG or JPG image.</ModalLede>
       <div className="mt-5 grid gap-2">
-        <Button variant="ghost" className="justify-start" onClick={() => download('png')}>
+        <Button variant="default" className="justify-start" onClick={() => download('png')}>
           Download PNG
         </Button>
-        <Button variant="ghost" className="justify-start" onClick={() => download('jpg')}>
+        <Button variant="default" className="justify-start" onClick={() => download('jpg')}>
           Download JPG
         </Button>
       </div>
       <ModalActions>
-        <Button variant="ghost" onClick={onClose}>
+        <Button variant="default" onClick={onClose}>
           Cancel
         </Button>
       </ModalActions>
@@ -80,7 +80,7 @@ function BatchExport({ frames, onClose }: { frames: Frame[]; onClose: () => void
           ? 'Download each frame as a PNG or JPG image, one after another. You’ll choose where each one is saved.'
           : 'Download each frame as a PNG or JPG image, one after another.'}
       </ModalLede>
-      <ul className="mt-4 max-h-28 list-none overflow-y-auto rounded-md border border-line-soft bg-paper px-3 py-2 text-[13px] text-ink-soft">
+      <ul className="mt-4 max-h-28 list-none overflow-y-auto rounded-control bg-sub px-3 py-2 text-copy text-ink-soft shadow-ring">
         {frames.map((f) => (
           <li key={f.id} className="truncate py-0.5">
             {f.name}
@@ -89,17 +89,17 @@ function BatchExport({ frames, onClose }: { frames: Frame[]; onClose: () => void
       </ul>
       {state.phase !== 'done' && (
         <div className="mt-5 grid gap-2">
-          <Button variant="ghost" className="justify-start" disabled={running} onClick={() => void start('png')}>
+          <Button variant="default" className="justify-start" disabled={running} onClick={() => void start('png')}>
             Download PNG
           </Button>
-          <Button variant="ghost" className="justify-start" disabled={running} onClick={() => void start('jpg')}>
+          <Button variant="default" className="justify-start" disabled={running} onClick={() => void start('jpg')}>
             Download JPG
           </Button>
         </div>
       )}
       <div role="status" aria-live="polite" className="empty:hidden">
         {state.phase === 'running' && (
-          <p className="mt-4 text-[13px] font-semibold text-ink">
+          <p className="mt-4 text-copy font-medium text-ink">
             Exporting {state.progress.index} of {state.progress.total}…
             <span className="ml-1.5 font-normal text-ink-soft">{state.progress.frame.name}</span>
           </p>
@@ -107,7 +107,7 @@ function BatchExport({ frames, onClose }: { frames: Frame[]; onClose: () => void
         {state.phase === 'done' && <BatchResult total={frames.length} saved={state.saved} failures={state.failures} />}
       </div>
       <ModalActions>
-        <Button variant={state.phase === 'done' ? 'default' : 'ghost'} onClick={onClose}>
+        <Button variant={state.phase === 'done' ? 'primary' : 'default'} onClick={onClose}>
           {state.phase === 'done' ? 'Done' : running ? 'Stop' : 'Cancel'}
         </Button>
       </ModalActions>
@@ -119,16 +119,14 @@ function BatchResult({ total, saved, failures }: { total: number; saved: number;
   const failed = failures.length > 0
   return (
     <div className="mt-5">
-      <p
-        className={failed ? 'text-[13px] font-semibold text-accent-ink' : 'text-[13px] font-semibold text-success-ink'}
-      >
+      <p className={failed ? 'text-copy font-medium text-accent-ink' : 'text-copy font-medium text-success-ink'}>
         {failed ? `${saved} of ${total} exported — ${failures.length} failed` : `All ${total} frames exported`}
       </p>
       {failed && (
-        <ul className="mt-2 list-none space-y-1 text-[12.5px] text-ink-soft">
+        <ul className="mt-2 list-none space-y-1 text-body text-ink-soft">
           {failures.map(({ frame, error }) => (
             <li key={frame.id}>
-              <b className="font-semibold text-ink">{frame.name}</b> — {error}
+              <b className="font-medium text-ink">{frame.name}</b> — {error}
             </li>
           ))}
         </ul>

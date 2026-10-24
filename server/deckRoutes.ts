@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { canvasPages, pageFrames } from '../shared/pages.ts'
 import { deckOf, MAX_DECK_SLIDES } from '../shared/slides.ts'
+import { env } from './env.ts'
 import { requireCanvas } from './sharing.ts'
 
 /** /api/canvases/:id/pages/:pageId/deck.pdf — a page's slides as one PDF. Lives apart from the main server file so it can be tested on its own. */
@@ -8,7 +9,7 @@ export const deckRouter = Router()
 
 /* A deck render boots a page with every slide in it: far heavier than a frame image. The budget is per account. */
 const renderHits = new Map<string, number[]>()
-const DECKS_PER_MIN = Number(process.env.DECK_PDFS_PER_MIN || 4)
+const DECKS_PER_MIN = env.DECK_PDFS_PER_MIN
 
 /** Take one slot of the caller's budget; false when it is spent. */
 function consumeDeckBudget(key: string, now = Date.now()): boolean {

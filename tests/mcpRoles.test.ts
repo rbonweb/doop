@@ -113,7 +113,6 @@ beforeEach(() => {
     feedback: new Map(),
     comments: new Map([[CANVAS.id, [{ ...ROOT }]]]),
     activity: new Map(),
-    chat: new Map(),
     decisions: new Map(),
     proposals: new Map(),
   } as unknown as Parameters<typeof actions.hydrateLogs>[0])

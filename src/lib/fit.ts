@@ -3,7 +3,7 @@
  * fitSelection feed it the frames and the stage size.
  */
 export const MIN_ZOOM = 0.08
-export const MAX_ZOOM = 3
+export const MAX_ZOOM = 8
 
 /* the title bar sits this far above a frame and belongs in the fitted box */
 const TITLE_BAR = 30

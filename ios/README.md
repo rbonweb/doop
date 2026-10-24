@@ -7,16 +7,25 @@ HTML/CSS engine (Stylo + Taffy + Parley), compiled into the app as a static libr
 
 ## Architecture
 
-- **SwiftUI**: email/password sign-in and registration, canvas library, search,
+- **SwiftUI**: email/password sign-in and registration, Google / Microsoft / SSO and native
+  Sign in with Apple (whichever the server advertises on `/api/oidc-config`), canvas library, search,
   workspace filtering, canvas creation/rename/duplicate/delete, navigation,
   account/server settings, frame list and properties, HTML editing, frame and
   element comments, agent tasks, sharing, and HTML export.
 - **Swift networking**: `DoopClient` talks to the existing REST API using session
   cookies. `CanvasModel` owns the canvas state and its authenticated WebSocket room,
   including reconnection, frame updates, agent tasks, comments and presence.
+  The initial WebSocket message supplies the canvas without a second REST download.
+  Messages may be up to 64 MiB; larger messages and invalid payloads report a specific
+  error instead of retrying forever. Backgrounding cancels the current connection,
+  and callbacks from that connection cannot change a later foreground session.
 - **Native canvas** (`Doop/Blitz/BlitzCanvasView.swift`): a UIKit view with one
-  Core Animation layer per frame. Pan, pinch zoom, tap to select, double tap to zoom
-  to a frame, drag a frame by its title. Labels, selection outlines and collaborator
+  Core Animation layer per frame. Pan, pinch zoom, tap to select and dismiss the
+  keyboard, double tap a frame or its title to fit it, then toggle between a closer
+  view at the tapped point and fitting the frame. Double tap empty canvas to fit
+  the board; drag a frame by its title. Dragged frames snap to other frames' edges
+  and centers within eight screen points, with alignment guides matching the web.
+  Labels, selection outlines and collaborator
   cursors are native layers, so a board with many frames costs one small bitmap per
   frame instead of one web document per frame.
 - **Blitz engine** (`Doop/Blitz/BlitzDocument.swift` over `BlitzKit/`): each frame's
@@ -41,10 +50,13 @@ HTML/CSS engine (Stylo + Taffy + Parley), compiled into the app as a static libr
   SVG images are parsed by usvg, which accepts `em`-sized roots such as iconify's.
 - **Device-pixel layout**: Taffy rounds every box to whole CSS pixels after layout,
   which at a paint scale above 1 puts a different number of device pixels on each
-  side of a box sitting on a half pixel (a 1.5px outline, a handle centred on it).
-  The bridge re-rounds the resolved layout on the device-pixel grid before each
-  paint (`round_layout_to_device`), the way browsers snap at paint time; a bridge
-  test checks the two borders of such a box differ by at most one device pixel.
+  side of a box sitting on a half pixel (a 1.5px outline, a handle centred on it),
+  and at a scale below 1 (a fitted board) made a one-device-pixel border one or two
+  CSS pixels wide depending on where its box sat. The bridge re-rounds the resolved
+  layout on the device-pixel grid before each paint (`round_layout_to_device`) at
+  every scale, the way browsers snap at paint time; bridge tests check the two
+  borders of a half-pixel box differ by at most one device pixel and that hairline
+  borders come out the same thickness wherever they sit.
 - **CSS animations**: a frame whose document reports running animations or
   transitions (`doopblitz_doc_is_animating`) is played by a `CADisplayLink` while
   it is on screen: each step paints only the on-screen part of the frame as a tile
@@ -53,16 +65,35 @@ HTML/CSS engine (Stylo + Taffy + Parley), compiled into the app as a static libr
   zoom. Playback pauses during gestures and for frames narrower than 100 pt, at
   most two frames play at once, and when an animation ends the tile is repainted
   at the density the camera wants. Base bitmaps keep the last animation pose.
-- **Element inspection**: with Inspect on, tapping inside the selected frame hit
-  tests the Blitz DOM. The chip shows `tag#id.class` and the element's text, the
+- **Element inspection**: tapping inside any frame selects it and hit tests the
+  Blitz DOM automatically, without a separate mode. The chip shows `tag#id.class` and the element's text, the
   outline shows its box, and Comment posts an element-anchored comment with the
   same `tag:nth-of-type(n)` selector path the web editor and agents use.
+- **Scoped prompts**: as on the web, the selection is the prompt bar's scope. A
+  chip names the selected frame, or the picked element inside it, and the task is
+  queued with that `scope` so the agent edits it in place; the chip's × asks about
+  the whole canvas instead until something else is selected.
+- **Canvas paper**: the board behind the frames is the `CanvasPaper` colour set in
+  `Assets.xcassets`, warm paper in light mode and a charcoal (not black) in dark
+  mode so frame edges, labels and cursors stay readable.
 
 The main app uses the existing backend APIs. Live Activity background updates require
 the server additions and Apple push configuration described below. Use Doop Cloud or an
 HTTPS self-hosted origin. Native session cookies persist; the client can also import
 an existing WKWebView login for the selected host. Passwords are never saved by the app.
 Cookies follow normal domain/path scoping, not port isolation.
+
+Google, Microsoft and SSO sign-in reuse the desktop app's browser handoff
+(`src/lib/desktopAuth.ts`): the app opens `/desktop/signin` in an
+`ASWebAuthenticationSession`, the provider round trip runs there, and the handoff page
+returns a one-time token over `doop://auth`, which the app redeems for its session cookie
+only when the link's challenge matches the attempt it started (`Doop/Core/ProviderSignIn.swift`).
+Accounts without a password delete themselves on a fresh session instead of a password.
+Sign in with Apple is native (`SignInWithAppleButton`, entitlement
+`com.apple.developer.applesignin`): the app hashes a fresh nonce into the request and posts the
+resulting identity token, the raw nonce and, on a first sign-in, the name Apple hands over to
+`/api/auth/sign-in/social`; the server needs `APPLE_APP_BUNDLE_IDENTIFIER` set to the app's
+bundle id to verify the token (`Doop/Core/AppleSignIn.swift`).
 
 ### BlitzKit (the Rust side)
 
@@ -143,6 +174,7 @@ xcrun simctl launch booted design.doop.ios -serverOrigin https://localhost:18443
 
 ```sh
 swift run --package-path ios DoopCoreChecks
+bash ios/ConnectionTests/run.sh # local TLS WebSocket fixture; requires Bun and OpenSSL
 (cd ios/BlitzKit/rust && cargo test --release)
 xcodebuild -project ios/Doop.xcodeproj -scheme Doop \
   -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
@@ -205,7 +237,7 @@ exists only on the local dev database.
 - Frames that depend on scripts render as static HTML. A per-frame WebKit fallback
   for those is the next tier, not built yet.
 - Advanced web workflows such as design memory, GitHub imports, workspace billing,
-  undo/redo and the full element inspector are not yet native features.
+  redo and the full element inspector are not yet native features.
 - Live model-generated tasks require a configured server provider or connected model
   account.
 - App Store/TestFlight release needs signing, device QA, privacy metadata and an archive.
@@ -236,12 +268,34 @@ Still manual: the App Store Connect record, screenshots, the review demo account
 on the public server, and a run on physical iPhone and iPad hardware before the
 first TestFlight build goes out.
 
+## Brand typography
+
+The wordmark matches `src/components/ui/wordmark.tsx`: “Doop” in Inter ExtraBold
+with -0.01em tracking. Sign-in headlines use Inter Medium; the home greeting
+uses Hanken Grotesk Light, matching the web's `HomeHero`. Custom text scales
+with Dynamic Type. The original variable fonts and SIL Open Font Licenses are
+bundled under `Doop/Fonts`, registered through `Doop/Info.plist`, and work offline.
+Sources: [Inter](https://github.com/google/fonts/tree/main/ofl/inter) and
+[Hanken Grotesk](https://github.com/google/fonts/tree/main/ofl/hankengrotesk).
+
 ## Floating controls and Live Activities
 
 The library and canvas use floating capsule controls with native Liquid Glass on
 iOS 26+, material on older systems, and an opaque accessible fallback when Reduce
 Transparency is enabled. The canvas renders underneath the controls; Fit reserves
-space for the dock.
+space for the top-right vertical tool rail and bottom prompt. Undo at the top of
+that rail reverses this session's saved frame additions, property/HTML edits,
+moves and deletions through the normal API. Failed edits do not enter history,
+and a failed undo remains available to retry. Inspection is always active.
+Canvas layers are clipped at the native view boundary, below the header, even
+while panning or zooming. The renderer extends through the bottom safe area;
+the prompt and tools remain inside it, avoiding a black strip at the home indicator.
+Icons use the system foreground color and compact
+44-point targets; glass uses the native regular material without a black tint.
+
+Comments accept both element and canvas anchors in snapshots and live events.
+Successful posts also update locally from the response, deduplicating the socket
+echo, so reconnecting does not hide a comment that has already been saved.
 
 On iOS 16.2+, opening a canvas with active or queued agents starts a Lock Screen
 Live Activity and Dynamic Island status where available. It shows the canvas,

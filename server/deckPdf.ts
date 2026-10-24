@@ -2,6 +2,7 @@ import type { Page } from 'puppeteer-core'
 import type { Frame } from '../shared/types.ts'
 import { guardPublicPageRequests } from './publicUrl.ts'
 import { openIsolatedPage, SETTLE_CAP_MS } from './screenshot.ts'
+import { env } from './env.ts'
 
 /**
  * A deck as one PDF: one page per slide, each page exactly the slide's own width × height, in the order given.
@@ -60,7 +61,7 @@ export async function renderDeckPdf(slides: readonly Frame[]): Promise<Buffer> {
   const loaded = await openIsolatedPage()
   const { page } = loaded
   try {
-    const assetOrigin = new URL(process.env.BETTER_AUTH_URL || 'http://localhost:4300').origin
+    const assetOrigin = new URL(env.BETTER_AUTH_URL).origin
     await guardPublicPageRequests(page, {
       allowUrl: (url) => url.origin === assetOrigin && url.pathname.startsWith('/a/'),
     })

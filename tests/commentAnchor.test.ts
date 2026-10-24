@@ -175,10 +175,12 @@ describe('frame runtime doop:locate', () => {
     mount(`<main><section><h2>Banner</h2></section>${PAGE}</main>`)
     const moved = await locate(selector, anchor)
     expect(moved.how).toBe('scan')
-    expect(typeof moved.selector).toBe('string')
-    expect(document.querySelector(moved.selector as string)?.textContent).toBe('Start free trial')
+    /* the reply echoes the asked selector (the probe matches on it) and carries the element's current path separately */
+    expect(moved.selector).toBe(selector)
+    expect(typeof moved.path).toBe('string')
+    expect(document.querySelector(moved.path as string)?.textContent).toBe('Start free trial')
 
     mount('<main><p>Gone</p></main>')
-    expect(await locate(selector, anchor)).toMatchObject({ rect: null, how: null, selector: null })
+    expect(await locate(selector, anchor)).toMatchObject({ rect: null, how: null, path: null })
   })
 })

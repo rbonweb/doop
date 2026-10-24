@@ -164,7 +164,8 @@ export function markAllSeen(): number {
 export function reviewNext() {
   const { canvas, selectedId, requestFlyTo, select, pushNotice } = useStore.getState()
   if (!canvas) return
-  const target = nextMarked(reviewOrder(canvas), useMarks.getState().marks, selectedId)
+  const order = reviewOrder(canvas).filter((f) => !f.hidden)
+  const target = nextMarked(order, useMarks.getState().marks, selectedId)
   if (!target) {
     pushNotice("You're all caught up")
     return
@@ -198,7 +199,14 @@ export function bindMarks(canvasId: string, viewer: { userId: string; name?: str
     lastSeen = seen
     lastBaseline = baselineAt
     const input = markInput(mine)
-    const marks = input && canvas ? computeMarks(canvas.frames, comments, input) : {}
+    const marks =
+      input && canvas
+        ? computeMarks(
+            canvas.frames.filter((f) => !f.hidden),
+            comments,
+            input,
+          )
+        : {}
     if (sameMarks(marks, useMarks.getState().marks)) return
     useMarks.setState({ marks, pageMarks: canvas ? foldPageMarks(canvas, marks) : {} })
   }

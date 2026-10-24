@@ -9,9 +9,9 @@ import type { CanvasNote, ElementComment, Frame, FrameVersionInfo } from '../sha
  * takes edit, and the realtime socket shows view-only people the notes without letting them send a change.
  */
 
-const PORT = 5072
-
 let server: Server
+
+const REPLACED_HTML = '<section><p>a second design, written over the first</p></section>'
 
 type Msg = { type: string; [key: string]: unknown }
 
@@ -23,7 +23,7 @@ class Room {
   private ready: Promise<void>
 
   constructor(canvasId: string, cookie: string) {
-    this.ws = new WebSocket(`ws://localhost:${PORT}/ws`, { headers: { Cookie: cookie } })
+    this.ws = new WebSocket(`ws://localhost:${server.port}/ws`, { headers: { Cookie: cookie } })
     this.ready = new Promise((resolve) => {
       this.ws.on('open', () =>
         this.ws.send(
@@ -85,8 +85,7 @@ let commentId: string
 let noteId: string
 
 beforeAll(async () => {
-  server = await startServer(PORT, {
-    BETTER_AUTH_URL: `http://localhost:${PORT}`,
+  server = await startServer({
     ANTHROPIC_API_KEY: '',
     OPENAI_API_KEY: '',
     DATABASE_URL: '',
@@ -110,8 +109,8 @@ beforeAll(async () => {
   ]) {
     expect((await owner.post(`/api/canvases/${canvasId}/members`, { email, role })).status).toBe(200)
   }
-  // two edits so the first one leaves a saved version behind
-  expect((await owner.patch(`/api/frames/${frameId}`, { html: '<h1>v1</h1>' })).status).toBe(200)
+  // a full replace (not a small tweak, which would join the burst the creation opened) leaves a saved version behind
+  expect((await owner.patch(`/api/frames/${frameId}`, { html: REPLACED_HTML })).status).toBe(200)
   const versions = await json<FrameVersionInfo[]>(await owner.get(`/api/frames/${frameId}/versions`))
   versionId = versions[0]!.id
   commentId = (
@@ -153,7 +152,7 @@ describe('frame history', () => {
       const res = await who.post(`/api/frames/${frameId}/versions/${versionId}/restore`)
       expect(res.status).toBe(403)
     }
-    expect((await frameNow()).html).toBe('<h1>v1</h1>')
+    expect((await frameNow()).html).toBe(REPLACED_HTML)
   })
 
   it('refuses a stranger and a signed-out caller everywhere', async () => {

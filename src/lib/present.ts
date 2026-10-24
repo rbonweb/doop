@@ -10,9 +10,10 @@ export function presentStart(
   activePageId: string | null,
 ): Frame | undefined {
   const selected = selectedId ? canvas.frames.find((f) => f.id === selectedId) : undefined
-  if (selected) return selected
+  if (selected && !selected.hidden) return selected
   const pageId = activePageId ?? canvasPages(canvas)[0]?.id
-  return pageId ? readingOrder(pageFrames(canvas, pageId))[0] : undefined
+  /* a hidden frame is not on the canvas for anyone else, so it is not a slide of the show either */
+  return pageId ? readingOrder(pageFrames(canvas, pageId).filter((f) => !f.hidden))[0] : undefined
 }
 
 /** Open present mode: on `frameId`, or where `presentStart` says. Says so when there is nothing to show. */
@@ -20,7 +21,7 @@ export function startPresenting(frameId?: string) {
   const s = useStore.getState()
   if (!s.canvas) return
   const start = frameId
-    ? s.canvas.frames.find((f) => f.id === frameId)
+    ? s.canvas.frames.find((f) => f.id === frameId && !f.hidden)
     : presentStart(s.canvas, s.selectedId, s.activePageId)
   if (!start) {
     s.pushNotice('Nothing to present yet. Add a frame first.')

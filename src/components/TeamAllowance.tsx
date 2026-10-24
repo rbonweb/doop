@@ -34,6 +34,27 @@ export function isResidentLimit(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 && err.body.error === 'resident_limit'
 }
 
+/** The meter as one plain sentence, for a tooltip. */
+export function meterText(allowance: Allowance | null): string | null {
+  if (!allowance) return null
+  if (allowance.byoModel) {
+    const on =
+      allowance.byoKind === 'gemini-cloud'
+        ? 'Gemini cloud connection'
+        : allowance.byoKind === 'claude-local'
+          ? 'local Claude CLI'
+          : allowance.byoKind === 'chatgpt' || !allowance.byoKind
+            ? 'ChatGPT'
+            : `${ACCOUNT_KIND_LABELS[allowance.byoKind]} key`
+    return `Doop Agent on your ${on}`
+  }
+  if (allowance.limit <= 0) return 'Connect a plan in Settings to use the Doop Agent'
+  const left = Math.max(0, allowance.limit - allowance.used)
+  return left === 0
+    ? 'Free Doop Agent tasks used up — connect ChatGPT to continue'
+    : `${left} of ${allowance.limit} free Doop Agent task${allowance.limit === 1 ? '' : 's'} left`
+}
+
 export function MeterLine({ allowance }: { allowance: Allowance | null }) {
   if (!allowance) return null
   /* their own account is behind the agent now — say so instead of counting,

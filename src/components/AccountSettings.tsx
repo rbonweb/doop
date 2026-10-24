@@ -8,11 +8,9 @@ import { Input } from './ui/input'
 import { Badge } from './ui/badge'
 import { Note } from './ui/note'
 import { Checkbox } from './ui/checkbox'
-import { Card, CardDescription, CardHeader, CardRow, CardTitle } from './ui/card'
+import { CardDescription, CardHeader, CardRow, CardTitle, SettingsCard } from './ui/card'
 
 /* settings fields are a fixed column on desktop and full width on a phone */
-const settingsCard = 'mt-4 max-w-[1000px] overflow-hidden sm:mt-5'
-const settingsInput = 'w-full sm:w-[280px]'
 
 /** The "Your account" pane of /settings: who you are on a canvas, and how you
  *  get back into one. Everything here is better-auth's own account surface —
@@ -104,7 +102,7 @@ export function AccountSettings() {
 
   return (
     <>
-      <Card className={settingsCard}>
+      <SettingsCard>
         <CardHeader>
           <CardTitle>Profile</CardTitle>
           <CardDescription>
@@ -120,18 +118,19 @@ export function AccountSettings() {
               {savingName ? 'Saving…' : 'Save'}
             </Button>
           }
+          control={
+            <Input
+              value={name}
+              onChange={(e) => {
+                setDraft(e.target.value)
+                setNameNote('')
+                setNameError('')
+              }}
+              maxLength={60}
+              aria-label="Display name"
+            />
+          }
         >
-          <Input
-            className={settingsInput}
-            value={name}
-            onChange={(e) => {
-              setDraft(e.target.value)
-              setNameNote('')
-              setNameError('')
-            }}
-            maxLength={60}
-            aria-label="Display name"
-          />
           {nameError ? (
             <Note tone="error">{nameError}</Note>
           ) : nameNote ? (
@@ -153,17 +152,13 @@ export function AccountSettings() {
             )
           }
         >
-          <span className="min-w-0 font-mono text-[13px] [overflow-wrap:anywhere]">{user?.email}</span>
-          {user?.emailVerified ? (
-            <Badge className="border-success/35 bg-success/10 text-[10.5px] text-success-ink">verified</Badge>
-          ) : (
-            <Badge className="text-[10.5px]">unverified</Badge>
-          )}
+          <span className="min-w-0 font-mono text-body [overflow-wrap:anywhere]">{user?.email}</span>
+          {user?.emailVerified ? <Badge tone="success">verified</Badge> : <Badge>unverified</Badge>}
           {verifyNote && <Note tone="success">{verifyNote}</Note>}
         </CardRow>
-      </Card>
+      </SettingsCard>
 
-      <Card className={settingsCard}>
+      <SettingsCard>
         <CardHeader>
           <CardTitle>Notifications</CardTitle>
           <CardDescription>
@@ -172,7 +167,7 @@ export function AccountSettings() {
           </CardDescription>
         </CardHeader>
         <CardRow label="Comment emails">
-          <label className="relative flex cursor-pointer items-center gap-2.5 text-[13px] text-ink">
+          <label className="relative flex cursor-pointer items-center gap-2.5 text-body text-ink">
             <Checkbox
               checked={notify?.commentEmails ?? true}
               disabled={!notify || !notify.emailConfigured || savingNotify}
@@ -190,28 +185,30 @@ export function AccountSettings() {
             <Note tone="error">{notifyError}</Note>
           ) : null}
         </CardRow>
-      </Card>
+      </SettingsCard>
 
-      <Card className={settingsCard}>
+      <SettingsCard>
         <CardHeader>
           <CardTitle>Password</CardTitle>
           <CardDescription>
             Changing it signs out every other browser and device — this one stays signed in.
           </CardDescription>
         </CardHeader>
-        <CardRow label="Current password">
-          <Input
-            className={settingsInput}
-            type="password"
-            value={current}
-            onChange={(e) => {
-              setCurrent(e.target.value)
-              setPwError('')
-            }}
-            autoComplete="current-password"
-            aria-label="Current password"
-          />
-        </CardRow>
+        <CardRow
+          label="Current password"
+          control={
+            <Input
+              type="password"
+              value={current}
+              onChange={(e) => {
+                setCurrent(e.target.value)
+                setPwError('')
+              }}
+              autoComplete="current-password"
+              aria-label="Current password"
+            />
+          }
+        />
         <CardRow
           label="New password"
           action={
@@ -219,18 +216,19 @@ export function AccountSettings() {
               {savingPw ? 'Updating…' : 'Update password'}
             </Button>
           }
+          control={
+            <Input
+              type="password"
+              value={next}
+              onChange={(e) => {
+                setNext(e.target.value)
+                setPwError('')
+              }}
+              autoComplete="new-password"
+              aria-label="New password"
+            />
+          }
         >
-          <Input
-            className={settingsInput}
-            type="password"
-            value={next}
-            onChange={(e) => {
-              setNext(e.target.value)
-              setPwError('')
-            }}
-            autoComplete="new-password"
-            aria-label="New password"
-          />
           {pwError ? (
             <Note tone="error">{pwError}</Note>
           ) : pwNote ? (
@@ -239,7 +237,7 @@ export function AccountSettings() {
             <Note>At least 8 characters</Note>
           )}
         </CardRow>
-      </Card>
+      </SettingsCard>
     </>
   )
 }

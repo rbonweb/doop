@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/assets/banner.png" alt="doop — the open-source alternative to Paper.design: humans and AI agents designing together, live" width="100%">
+  <img src=".github/assets/banner.png" alt="Doop, the open-source alternative to Paper.design: a live canvas where Claude Code streams a pricing section while ChatGPT and Claude Code cursors move across the frames" width="100%">
 </p>
 
 <p align="center">
@@ -17,8 +17,13 @@ in the browser; AI agents edit through the built-in **MCP server**, streaming th
 live. Everyone sees everything as it happens: cursors, presence, frame edits, agent status, and an
 activity feed.
 
+Think of it as Claude Design for whichever agent you already use: **Claude Code, Codex, ChatGPT,
+Cursor, OpenCode** or any other MCP client designs on the same canvas, and the built-in Doop Agent
+runs on **GPT, Claude, Gemini, DeepSeek, Kimi or Qwen** models
+([every agent and model](#works-with-any-agent)).
+
 <p align="center">
-  <img src=".github/assets/canvas.png" alt="A doop canvas: three frames of a ceramics brand — landing hero, mobile product page and brand tokens" width="100%">
+  <img src=".github/assets/canvas.png" alt="A Doop canvas with three frames for a travel app (landing hero, mobile itinerary and a booking card) and two collaborators' live cursors" width="100%">
 </p>
 
 - **Design with agents, not prompts-and-refresh** — connect Claude Code (or any MCP client) once,
@@ -30,11 +35,11 @@ activity feed.
 - **Pages within a canvas** — organize frames into named pages from the Layers panel, and nest a page under another to group related ones (two levels of subpages, collapsible). Add, rename, drag to reorder or nest, or right-click to add a subpage, rename and delete empty pages. Page edits support Undo/Redo; selected frames can move between pages. Agents list pages with `get_canvas`, manage them with `set_canvas_pages` (a page nests under another with `parent_id`; pass the original list as `expectedPages` to protect collaborators), and target frames with `pageId`.
 - **True multiplayer** — live cursors, presence, per-frame editing indicators, undo/redo, comments pinned to elements, sticky notes, and an activity feed, all over one WebSocket room.
 - **Comment pins that survive edits** — a pin finds its element again by tag, label, test id and text after an agent redesigns the frame, and parks as a dashed orphan if the element is gone. Agents start threads with `add_comment`. See [Review, history and notes](#review-history-and-notes).
-- **Review marks** — a blue dot for frames that changed since you last looked and an orange one where an agent is waiting on your reply, with a "needs you" chip in the top bar and <kbd>U</kbd> to jump to the next one.
+- **Review marks** — a teal dot for frames that changed since you last looked and an orange one where an agent is waiting on your reply, with a "needs you" chip in the top bar and <kbd>U</kbd> to jump to the next one.
 - **Frame version history** — every change an agent or person makes saves the earlier design first; preview and restore any version from the frame menu or over MCP.
 - **Sticky notes** — pin markdown notes beside a frame or free on the page, for people and agents, and show or hide them with <kbd>N</kbd>.
 - **Prototypes, present mode and slide decks** — `data-goto` links, a walkable present mode, slides with speaker notes and a presenter window, and a deck PDF. See [Prototypes, present mode and decks](#prototypes-present-mode-and-decks).
-- **Keyboard first** — one shortcut registry behind <kbd>?</kbd>: select all, fit, copy a frame as an image, laser, comment mode, tidy, device sizes and more. See [Keyboard shortcuts](#keyboard-shortcuts).
+- **Keyboard first** — one shortcut registry behind <kbd>?</kbd>: select all, fit, copy a frame as an image, laser, the comment tool, tidy, device sizes and more. See [Keyboard shortcuts](#keyboard-shortcuts).
 - **Design memory** — pin exemplar frames, capture decisions, and let the distiller propose durable style rules that every agent follows.
 - **Private by default** — invite collaborators by email as viewers, commenters or editors, share by link (signed-in, anyone, or password-protected), grant a whole email domain, let people ask for access and `@mention` teammates in comments; agents inherit exactly their human's access. See [docs/sharing.md](docs/sharing.md).
 - **Self-host in one command** — `docker compose up`, or `bun run dev` with zero configuration
@@ -51,6 +56,30 @@ changing settings and uninstalling.
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rbonweb/doop/main/deploy/doop.sh | sudo bash
 ```
+
+## Works with any agent
+
+Doop isn't tied to one model vendor. Every agent below designs through the same MCP server, works
+as the person who connected it, and shows up live on the canvas with its own cursor, status and
+tasks. **Connect AI** in the top bar walks you through each one.
+
+<p align="center">
+  <img src=".github/assets/connect-ai.png" alt="The Connect AI dialog: choose Claude Code, Claude, ChatGPT, Codex, Cursor or any other MCP client" width="100%">
+</p>
+
+| Agent                                        | How it connects                                                                 |
+| -------------------------------------------- | ------------------------------------------------------------------------------- |
+| Claude Code                                  | `claude mcp add`, OAuth in the browser ([setup](#hook-up-claude-code))          |
+| Claude (web and desktop)                     | **Add to Claude** in Connect AI ([setup](#connect-claude))                      |
+| Codex (CLI and desktop)                      | `codex mcp add`, OAuth in the browser ([setup](#connect-an-ai-agent))           |
+| ChatGPT                                      | A custom MCP server in ChatGPT, guided by **Connect AI → ChatGPT**              |
+| Cursor                                       | **Add to Cursor** in Connect AI                                                 |
+| OpenCode, VS Code Copilot, OpenClaw and more | Any MCP client, over OAuth or with an agent key ([setup](#connect-an-ai-agent)) |
+| Headless agents (n8n, Mastra, CI)            | An agent key as a bearer header ([setup](#headless-agents-agent-keys))          |
+
+No agent of your own? The built-in [Doop Agent](#the-doop-agent) runs on the model account you
+connect: a ChatGPT subscription, or an OpenAI, Claude, Gemini or OpenRouter key. OpenRouter brings
+DeepSeek, Kimi, Qwen, GLM and MiniMax ([details](#past-the-free-tasks-connect-your-own-chatgpt)).
 
 ## Quickstart
 
@@ -83,27 +112,31 @@ everything). Set `DATABASE_URL` to use a real Postgres — same code path as PGl
 
 Prefer not to run anything? **[doop.design](https://doop.design)** is the hosted version.
 
-## Canvas chat, imports and exports
+Once you sign in, Home is where you start: describe what you want and Doop makes a canvas with
+drafts queued for the Doop Agent, or pick up one of your canvases, workspaces and connected agents.
 
-The canvas Chat tab keeps a shared conversation alongside the design. Mention an agent role to
-queue a design card; its reply threads back into the chat.
+<p align="center">
+  <img src=".github/assets/home.png" alt="Doop's home: the agent prompt with suggestion chips over a gradient wave, the canvas grid, and a rail with workspaces and connected agents" width="100%">
+</p>
+
+## Imports and exports
 
 The import source picker offers **Website**, **Live app** (the sync snippet), and **GitHub repo**.
 Select a frame and use **Export** (on the frame, in the top bar, or <kbd>⌘⇧E</kbd>) to download PNG or JPG; with several frames selected the dialog exports them one after another and shows its own progress. Right-click **Export…** works too. A progress toast tracks a single render; the desktop app opens its native save panel. <kbd>I</kbd> and <kbd>⇧I</kbd> copy the selected frame to the clipboard as a PNG at 2× or 4×.
 
 ## Prototypes, present mode and decks
 
-Put `data-goto="<frame id or frame name>"` on any element in a frame and it becomes a prototype link. On the canvas a click still selects the element and ⌥-click follows the link; press **K** to draw an arrow for every link. Press **P** (or the play button) to present from the selected frame, or from the first frame of the page: ← and → walk the page in reading order, a link jumps to its frame, **Backspace** goes back, **Esc** exits. Frames that share a `view-transition-name` morph between screens.
+Put `data-goto="<frame id or frame name>"` on any element in a frame and it becomes a prototype link. On the canvas a click still selects the element and ⌥-click follows the link; press **K** to draw an arrow for every link. Press **⇧P** (or the play button) to present from the selected frame, or from the first frame of the page: ← and → walk the page in reading order, a link jumps to its frame, **Backspace** goes back, **Esc** exits. Frames that share a `view-transition-name` morph between screens.
 
 Mark frames as slides (the Inspector's **Slide** checkbox, or `slide: true` over MCP) and the slides of a page play as a deck, 1280×720 by default: **Space**, a click and → advance, and the runtime sets `data-sl-play` on the document for the whole show and `data-sl-entered` once a slide has arrived, so entrance animations can key off them. **S** opens the presenter view with the slide's speaker notes, the next slide, a timer and the slide number; the toolbar can also open it in a window of its own. **Export deck as PDF** (present toolbar, or right-click a page) renders one PDF page per slide at the slide's own size. Presenting needs only the view role. More in [docs/presenting.md](docs/presenting.md).
 
 ## Review, history and notes
 
-**Comments** pin to an element, not a coordinate. Each pin stores the element's tag, label, test id and text, so it follows the element when a frame is edited and falls back to a dashed orphan pin at the frame's corner if the element is gone; the thread still opens, replies and resolves. `@mention` a teammate to email them, or an agent role to queue work.
+**Comments** are either pinned to an element or dropped anywhere on the page with the comment tool (<kbd>C</kbd>). Element pins stay with the element, not a coordinate. Each pin stores the element's tag, label, test id and text, so it follows the element when a frame is edited and falls back to a dashed orphan pin at the frame's corner if the element is gone; the thread still opens, replies and resolves. `@mention` a teammate to email them, or an agent role to queue work.
 
-**Review marks** tell a returning person what changed. A blue dot on a frame, its Layers row and its page means someone else (or an agent) changed it since you last looked; an orange dot means an agent replied in a thread you are part of and is waiting on you. The top bar chip counts both, and <kbd>U</kbd> flies to the next frame that needs you, then the next new one.
+**Review marks** tell a returning person what changed. A teal dot on a frame, its Layers row and its page means someone else (or an agent) changed it since you last looked; an orange dot means an agent replied in a thread you are part of and is waiting on you. The top bar chip counts both, and <kbd>U</kbd> flies to the next frame that needs you, then the next new one.
 
-**Version history** saves a frame's earlier design before every change (up to 50 per frame, bursts by one actor coalesced). Open **Version history…** from the frame menu or the Inspector, preview a version in place and restore it; the current design is saved first, so a restore can itself be undone. Reading or restoring history needs the edit role.
+**Version history** saves a frame's earlier design before each burst of changes (up to 50 per frame, a burst being the edits one actor makes in quick succession), tagged with who made it and why: an agent, a person, or the state a restore replaced. Open **Version history…** from the frame menu or the Inspector, preview a version and restore it; the current design is saved first, so a restore can itself be undone. Reading or restoring history needs the edit role, and agents get `list_frame_versions` and `restore_frame_version` over MCP.
 
 **Sticky notes** hold markdown beside a frame (they travel with it) or free on a page, in six colours. Notes link to frames with `[label](goto:<frame id>)`. <kbd>N</kbd> shows or hides them.
 
@@ -111,37 +144,60 @@ Mark frames as slides (the Inspector's **Slide** checkbox, or `slide: true` over
 
 Press <kbd>?</kbd> on a canvas for the full list; it is generated from the shortcut registry in [`src/lib/shortcuts.ts`](src/lib/shortcuts.ts). <kbd>⌘</kbd> is <kbd>Ctrl</kbd> outside macOS. Plain keys never fire while you type in a field.
 
-| Keys                                                | Action                                                                       |
-| --------------------------------------------------- | ---------------------------------------------------------------------------- |
-| <kbd>⌘A</kbd>                                       | Select every frame on this page                                              |
-| <kbd>⌘C</kbd> / <kbd>⌘V</kbd> / <kbd>⌘D</kbd>       | Copy, paste and duplicate frames                                             |
-| <kbd>⌫</kbd>                                        | Delete the selected element or frames                                        |
-| <kbd>⌘Z</kbd> / <kbd>⌘⇧Z</kbd>                      | Undo and redo                                                                |
-| <kbd>Esc</kbd>                                      | Leave laser or comment mode, or clear the selection                          |
-| <kbd>⇧1</kbd>                                       | Fit every frame on screen                                                    |
-| <kbd>⇧2</kbd>                                       | Fit the selection                                                            |
-| <kbd>⇧0</kbd> or <kbd>⌘0</kbd>                      | Zoom to 100%                                                                 |
-| <kbd>⌘+</kbd> / <kbd>⌘-</kbd>                       | Zoom in and out                                                              |
-| <kbd>I</kbd> / <kbd>⇧I</kbd>                        | Copy the selected frame as an image, 2× or 4×                                |
-| <kbd>⌘⇧E</kbd>                                      | Export the selected frames                                                   |
-| <kbd>L</kbd>                                        | Laser: outline every element and click one to copy its path                  |
-| <kbd>C</kbd>                                        | Comment mode: click an element to comment on it                              |
-| <kbd>T</kbd>                                        | Tidy the selection, or the page, into rows                                   |
-| <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> | Resize to mobile 390×844, tablet 834×1194, laptop 1280×800, desktop 1440×900 |
-| <kbd>0</kbd>                                        | Restore the sizes and positions from before the device keys                  |
-| <kbd>P</kbd>                                        | Present from the selected frame, or the page's first                         |
-| <kbd>K</kbd>                                        | Show or hide prototype link arrows                                           |
-| <kbd>N</kbd>                                        | Show or hide sticky notes                                                    |
-| <kbd>U</kbd>                                        | Jump to the next frame that needs you, then the next new one                 |
-| <kbd>?</kbd>                                        | Keyboard shortcuts                                                           |
+| Keys                                                             | Action                                                                       |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| <kbd>V</kbd> <kbd>H</kbd>                                        | Select and hand tools                                                        |
+| <kbd>F</kbd> <kbd>R</kbd> <kbd>O</kbd> <kbd>P</kbd> <kbd>T</kbd> | Frame, rectangle, ellipse, pen and text tools                                |
+| <kbd>C</kbd>                                                     | Comment tool: click anywhere, or on an element, to comment                   |
+| <kbd>⌘A</kbd>                                                    | Select every frame on this page                                              |
+| <kbd>⌘C</kbd> / <kbd>⌘V</kbd> / <kbd>⌘D</kbd>                    | Copy, paste and duplicate frames                                             |
+| <kbd>⌫</kbd>                                                     | Delete the selected element or frames                                        |
+| <kbd>⌘Z</kbd> / <kbd>⌘⇧Z</kbd>                                   | Undo and redo                                                                |
+| <kbd>Esc</kbd>                                                   | Leave laser, return to the select tool, or clear the selection               |
+| <kbd>⇧1</kbd>                                                    | Fit every frame on screen                                                    |
+| <kbd>⇧2</kbd>                                                    | Fit the selection                                                            |
+| <kbd>⇧0</kbd> or <kbd>⌘0</kbd>                                   | Zoom to 100%                                                                 |
+| <kbd>⌘+</kbd> / <kbd>⌘-</kbd>                                    | Zoom in and out                                                              |
+| <kbd>I</kbd> / <kbd>⇧I</kbd>                                     | Copy the selected frame as an image, 2× or 4×                                |
+| <kbd>⌘⇧E</kbd>                                                   | Export the selected frames                                                   |
+| <kbd>⌘⇧H</kbd> / <kbd>⌘⇧L</kbd>                                  | Hide or lock the selection                                                   |
+| <kbd>⌘K</kbd>                                                    | Ask the agents                                                               |
+| <kbd>⌘.</kbd>                                                    | Hide the interface                                                           |
+| <kbd>L</kbd>                                                     | Laser: outline every element and click one to copy its path                  |
+| <kbd>⇧T</kbd>                                                    | Tidy the selection, or the page, into rows                                   |
+| <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd>              | Resize to mobile 390×844, tablet 834×1194, laptop 1280×800, desktop 1440×900 |
+| <kbd>0</kbd>                                                     | Restore the sizes and positions from before the device keys                  |
+| <kbd>⇧P</kbd>                                                    | Present from the selected frame, or the page's first                         |
+| <kbd>K</kbd>                                                     | Show or hide prototype link arrows                                           |
+| <kbd>N</kbd>                                                     | Show or hide sticky notes                                                    |
+| <kbd>U</kbd> / <kbd>⇧U</kbd>                                     | Jump to the next frame that needs you, then the next new one; mark all seen  |
+| <kbd>?</kbd>                                                     | Keyboard shortcuts                                                           |
 
-Delete, duplicate, undo, redo, tidy and the device keys need the edit role; comment mode needs the comment role; everything else works for viewers too.
+Delete, duplicate, undo, redo, tidy, the device keys, hide, lock and the drawing tools need the edit role; the comment tool needs the comment role; everything else works for viewers too.
 
-## Linear
+## Integrations
 
-Connect Linear from **Integrations** to read issues through MCP or install Doop as a delegated
-agent. Delegated tickets create a canvas and a design card, then report the result back to Linear.
-See [Linear setup](docs/linear.md) for OAuth and webhook configuration.
+**Integrations** in the rail is where an account connects the outside tools Doop works with:
+
+| Integration | What it does                                                                                                                               |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Linear      | Read issues through MCP, or delegate an issue to Doop: it designs a canvas and reports the result back to Linear ([setup](docs/linear.md)) |
+| Slack       | Mention `@Doop` with a brief; it designs a canvas and posts the result in the thread ([setup](docs/slack.md))                              |
+| Meta Ads    | Pull ad creatives onto a canvas on a schedule with an automation (`/automations`)                                                          |
+| Figma       | Import frames as editable HTML and export frames back to Figma. Doop Cloud only                                                            |
+| Canva       | Import Canva designs as editable frames and send frames back with live text. Doop Cloud only                                               |
+
+<p align="center">
+  <img src=".github/assets/integrations.png" alt="The Integrations page with cards for Figma, Canva, Linear, Slack and Meta Ads" width="100%">
+</p>
+
+To reference a specific element in feedback, select it and choose **Copy link**
+in its floating toolbar, or right-click its Layers row and choose **Copy link to
+element**. Opening the link selects the element and opens its properties on the
+correct page. The URL includes the canvas ID, frame ID and URL-encoded CSS
+`selector`, so an AI agent can locate it in the frame HTML. Canvas access rules
+still apply. Selectors that use element IDs survive layout changes; selectors
+based on sibling positions can change when the HTML is restructured.
 
 ## iPhone and iPad app
 
@@ -149,6 +205,20 @@ The SwiftUI iOS app lives in [`ios/`](ios/README.md). Open `ios/Doop.xcodeproj`
 in Xcode to run it against Doop Cloud or your own HTTPS server. It uses SwiftUI for the app interface and a native canvas that
 renders frames with the Blitz HTML/CSS engine (Rust, no WebKit), over the same REST API and WebSocket rooms. The app is in development;
 see the iOS README for validation status and remaining release requirements.
+
+## Connect Claude
+
+Choose **Connect AI → Claude → Add to Claude**. On hosted Doop, this opens Claude's
+connector form with Doop's name and server URL filled in. Confirm it, sign in to
+Doop, then start a new Claude chat and paste the canvas prompt from the dialog.
+No file download, terminal or API key needed.
+
+The updated Doop desktop app also offers **Add to Claude** for local and self-hosted
+servers: it opens Claude Desktop's extension installer directly, with your server
+URL filled in. Confirm the installation in Claude and approve the Doop sign-in.
+The online connector needs a publicly reachable HTTPS server; localhost connections
+use the desktop app. Manual extension installation remains available as a fallback.
+Build and installation details: [`claude-extension/`](claude-extension/README.md).
 
 ## Hook up Claude Code
 
@@ -440,6 +510,21 @@ ID token includes the `email` and `verified_primary_email` optional claims; with
 Microsoft sign-in still works but only links to an existing account that is already
 verified. Everything else (allowlist, admin promotion) follows the SSO rules above.
 
+### Sign in with Apple
+
+Two independent halves, documented in [.env.example](.env.example). For the web button,
+register a Services ID with Sign in with Apple enabled and
+`<BETTER_AUTH_URL>/api/auth/callback/apple` as a return URL, then set `APPLE_CLIENT_ID` (the
+Services ID) and `APPLE_CLIENT_SECRET` (the client-secret JWT signed with your Sign in with
+Apple key, which Apple caps at six months) together. For the iOS app, set
+`APPLE_APP_BUNDLE_IDENTIFIER` to the app's bundle id: the app shows the native Sign in with
+Apple button and posts the identity token Apple issues for that bundle id to
+`/api/auth/sign-in/social`, which the server verifies against Apple's keys. Apple only sends
+the person's name on their first sign-in, so the app forwards it then; a later sign-in from a
+fresh install leaves the name as stored. Linking and admin promotion follow the SSO rules
+above. Apple's "Hide My Email" addresses are on `privaterelay.appleid.com`, which
+`SIGNUP_EMAIL_DOMAINS` rejects unless listed.
+
 ## Agent auth (MCP OAuth)
 
 The `/mcp` endpoint requires OAuth. Adding the server in Claude Code / Codex triggers
@@ -487,10 +572,32 @@ Claude Code:
 claude mcp add --transport http doop http://localhost:4300/mcp
 ```
 
+Codex:
+
+```bash
+codex mcp add doop --url http://localhost:4300/mcp
+```
+
 Generic MCP config:
 
 ```json
 { "mcpServers": { "doop": { "type": "http", "url": "http://localhost:4300/mcp" } } }
+```
+
+OpenCode takes Doop as a remote MCP server in `opencode.json`. An
+[agent key](#headless-agents-agent-keys) in the header skips the browser sign-in:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "doop": {
+      "type": "remote",
+      "url": "http://localhost:4300/mcp",
+      "headers": { "Authorization": "Bearer dpk_…" }
+    }
+  }
+}
 ```
 
 ### Headless agents (agent keys)

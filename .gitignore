@@ -1,5 +1,6 @@
 node_modules
 dist
+public/claude-extension
 data
 desktop/src-tauri/target
 desktop/src-tauri/gen
@@ -18,3 +19,9 @@ desktop/src-tauri/gen
 
 # agent worktrees (full repo copies made by Claude Code subagents)
 /.claude/worktrees/
+
+chatgpt-plugin/dist/
+
+# the built component catalogue
+storybook-static/
+*storybook.log

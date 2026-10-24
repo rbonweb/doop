@@ -4,6 +4,7 @@ import { api, type MentionPerson } from '../lib/api'
 import { cn } from '@/lib/utils'
 import { Avatar } from './ui/avatar'
 import { RoleMark } from './RoleMark'
+import { Pressable } from './ui/pressable'
 import { Textarea } from './ui/textarea'
 
 /* The comment box with an @ picker. Typing @ lists the people who can see this
@@ -175,14 +176,14 @@ export const MentionTextarea = forwardRef<
         <ul
           role="listbox"
           aria-label="Mention someone"
-          className="absolute left-0 top-full z-10 mt-1 w-full overflow-hidden rounded-[10px] border border-line bg-surface p-1 shadow-pop animate-[chip-in_0.14s_ease]"
+          className="absolute left-0 top-full z-10 mt-1 w-full animate-[chip-in_0.14s_ease] overflow-hidden rounded-pill bg-surface p-1 shadow-pop"
         >
           {options.map((option, index) => (
             <li key={option.key} role="option" aria-selected={index === current}>
-              <button
-                type="button"
+              <Pressable
+                focus="none"
                 className={cn(
-                  'flex w-full items-center gap-2 rounded-[7px] px-2 py-1.5 text-left text-[12.5px] text-ink',
+                  'flex items-center gap-2 rounded-row px-2 py-1.5 text-body text-ink',
                   index === current ? 'bg-paper-deep' : 'hover:bg-paper-deep',
                 )}
                 onMouseDown={(event) => {
@@ -192,15 +193,15 @@ export const MentionTextarea = forwardRef<
                 onMouseEnter={() => setActive(index)}
               >
                 {option.kind === 'person' ? (
-                  <Avatar name={option.label} className="size-5 flex-none border-0 text-[10px]" />
+                  <Avatar name={option.label} size={20} />
                 ) : (
                   <RoleMark role={AGENT_ROLES.find((r) => r.id === option.roleId)!} size={16} />
                 )}
-                <span className="min-w-0 flex-1 truncate font-semibold">{option.label}</span>
-                <span className="flex-none text-[11px] text-ink-faint">
+                <span className="min-w-0 flex-1 truncate font-medium">{option.label}</span>
+                <span className="flex-none text-caption text-ink-faint">
                   {option.kind === 'agent' ? `@${option.roleId} · agent` : 'person'}
                 </span>
-              </button>
+              </Pressable>
             </li>
           ))}
         </ul>

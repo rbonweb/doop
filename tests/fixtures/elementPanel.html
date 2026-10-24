@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      import React from 'react'
+      import { createRoot } from 'react-dom/client'
+      import { FrameView } from '/src/components/FrameView.tsx'
+      import { ElementPanel } from '/src/components/ElementPanel.tsx'
+      import { TooltipProvider } from '/src/components/ui/tooltip.tsx'
+      import { useStore } from '/src/lib/store.ts'
+      import { clearHistory, undo, redo } from '/src/lib/history.ts'
+      import { editElementGeometry } from '/src/lib/frameBridge.ts'
+      import { useFrameMountScheduler } from '/src/lib/frameMounting.ts'
+      import '/src/styles.css'
+      window.elementPanelHarness = {
+        seed: (frame) => {
+          clearHistory()
+          useStore.getState().setSelectedElement(null)
+          useStore.getState().setCanvas({
+            id: 'c',
+            name: 'Typography',
+            frames: [frame],
+            createdAt: 0,
+            updatedAt: 0,
+          })
+        },
+        remote: (frame) => useStore.getState().setCanvas({ ...useStore.getState().canvas, frames: [frame] }),
+        select: (selector) => useStore.getState().setSelectedElement({ frameId: 'f', selector }),
+        geometry: (selector, edit) => editElementGeometry('f', selector, edit),
+        selectFrame: () => useStore.getState().select('f'),
+        deselect: () => useStore.getState().setSelectedElement(null),
+        setTool: (tool) => useStore.getState().setTool(tool),
+        setZoom: (zoom) => {
+          useStore.getState().setViewport({ x: 0, y: 0, zoom })
+          document.documentElement.style.setProperty('--zoom', String(zoom))
+        },
+        undo,
+        redo,
+      }
+      function Fixture() {
+        /* the Stage mounts frame documents through its scheduler, so the fixture runs the same one over a viewport-sized box */
+        const stageRef = React.useRef(null)
+        useFrameMountScheduler(stageRef)
+        const frame = useStore((s) => s.canvas?.frames[0])
+        const selected = useStore((s) => s.selectedElement)
+        return React.createElement(
+          TooltipProvider,
+          null,
+          React.createElement('div', { ref: stageRef, style: { position: 'fixed', inset: 0, pointerEvents: 'none' } }),
+          frame && React.createElement(FrameView, { frame, raster: 1 }),
+          frame &&
+            selected &&
+            React.createElement(ElementPanel, { frame, selector: selected.selector, style: { right: 12 } }),
+        )
+      }
+      createRoot(document.getElementById('root')).render(React.createElement(Fixture))
+    </script>
+  </body>
+</html>

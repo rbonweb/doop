@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { z } from 'zod'
+import { env } from './env.ts'
 
 /**
  * What an instance admin changes from the Admin page without a restart: the
@@ -15,9 +16,6 @@ import { z } from 'zod'
  */
 
 const FILE = path.join(process.cwd(), 'data', 'instance.json')
-
-export const DEFAULT_AGENT_MODEL = 'claude-opus-5'
-export const DEFAULT_DISTILL_MODEL = 'claude-haiku-4-5-20251001'
 
 /** How long an invite link works. */
 const INVITE_TTL_MS = 7 * 24 * 60 * 60_000
@@ -71,17 +69,17 @@ export interface ModelSetting {
 }
 
 export function agentModel(): string {
-  return read().agentModel || process.env.DOOP_AGENT_MODEL || DEFAULT_AGENT_MODEL
+  return read().agentModel || env.DOOP_AGENT_MODEL
 }
 
 export function distillModel(): string {
-  return read().distillModel || process.env.DOOP_DISTILL_MODEL || DEFAULT_DISTILL_MODEL
+  return read().distillModel || env.DOOP_DISTILL_MODEL
 }
 
 export function modelSettings(): { agent: ModelSetting; distill: ModelSetting } {
   return {
-    agent: { value: agentModel(), default: process.env.DOOP_AGENT_MODEL || DEFAULT_AGENT_MODEL },
-    distill: { value: distillModel(), default: process.env.DOOP_DISTILL_MODEL || DEFAULT_DISTILL_MODEL },
+    agent: { value: agentModel(), default: env.DOOP_AGENT_MODEL },
+    distill: { value: distillModel(), default: env.DOOP_DISTILL_MODEL },
   }
 }
 
@@ -111,7 +109,7 @@ export function setModels(change: { agent?: string; distill?: string }): void {
 /* --------------------------------------------------------------- invites */
 
 export function inviteOnly(): boolean {
-  return ['1', 'true'].includes((process.env.DOOP_INVITE_ONLY ?? '').toLowerCase())
+  return env.DOOP_INVITE_ONLY
 }
 
 function live(invites: Invite[]): Invite[] {
@@ -166,7 +164,7 @@ export function consumeInvite(email: string): void {
 }
 
 export function inviteLink(invite: Invite): string {
-  const origin = process.env.BETTER_AUTH_URL || 'http://localhost:4300'
+  const origin = env.BETTER_AUTH_URL
   return `${origin.replace(/\/$/, '')}/?invite=${invite.token}`
 }
 

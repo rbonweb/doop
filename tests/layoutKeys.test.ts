@@ -43,7 +43,7 @@ beforeEach(() => {
     activePageId: null,
     role: 'edit',
     laser: false,
-    commentMode: false,
+    tool: 'select',
     selectedIds: [],
     selectedId: null,
     stageSize: { width: 1200, height: 800 },
@@ -122,7 +122,7 @@ describe('device sizes and 0', () => {
   })
 })
 
-describe('tidy (t)', () => {
+describe('tidy (⇧T)', () => {
   it('moves frames into rows without resizing them and is one undo entry', async () => {
     const before = rects()
     tidyFrames()
@@ -160,7 +160,7 @@ describe('the keys', () => {
   it('does nothing while the board is showing (no stage)', () => {
     useStore.setState({ stageSize: null })
     expect(press({ key: '1', code: 'Digit1' })).toBe(false)
-    expect(press({ key: 't' })).toBe(false)
+    expect(press({ key: 'T', shiftKey: true, code: 'KeyT' })).toBe(false)
     expect(rects()).toEqual(originals().map(({ id, x, y, width, height }) => ({ id, x, y, width, height })))
   })
 
@@ -189,18 +189,42 @@ describe('the keys', () => {
     expect(useStore.getState().selectedIds).toEqual(['b'])
   })
 
-  it('l and c toggle their modes, which exclude each other, and Esc leaves the mode before clearing the selection', () => {
+  it('l is the laser and c the comment tool, which exclude each other, and Esc leaves the mode before clearing the selection', () => {
     useStore.setState({ selectedIds: ['a'], selectedId: 'a' })
     press({ key: 'l' })
     expect(useStore.getState().laser).toBe(true)
     press({ key: 'c' })
-    expect(useStore.getState().commentMode).toBe(true)
+    expect(useStore.getState().tool).toBe('comment')
     expect(useStore.getState().laser).toBe(false)
+    press({ key: 'l' })
+    expect(useStore.getState().laser).toBe(true)
+    expect(useStore.getState().tool).toBe('select')
     press({ key: 'Escape' })
-    expect(useStore.getState().commentMode).toBe(false)
+    expect(useStore.getState().laser).toBe(false)
+    expect(useStore.getState().selectedIds).toEqual(['a'])
+    press({ key: 'c' })
+    press({ key: 'Escape' })
+    expect(useStore.getState().tool).toBe('select')
     expect(useStore.getState().selectedIds).toEqual(['a'])
     press({ key: 'Escape' })
     expect(useStore.getState().selectedIds).toEqual([])
+  })
+
+  it('picks a tool with its key and leaves the select tool when Esc is pressed', () => {
+    for (const [key, tool] of [
+      ['v', 'select'],
+      ['h', 'hand'],
+      ['f', 'frame'],
+      ['r', 'rectangle'],
+      ['o', 'circle'],
+      ['p', 'path'],
+      ['t', 'text'],
+    ] as const) {
+      expect(press({ key }), key).toBe(true)
+      expect(useStore.getState().tool, key).toBe(tool)
+    }
+    press({ key: 'Escape' })
+    expect(useStore.getState().tool).toBe('select')
   })
 
   it('? opens the shortcuts dialog', () => {
@@ -210,19 +234,25 @@ describe('the keys', () => {
 
   describe.each(['view', 'comment'] as const)('with the %s role', (role) => {
     beforeEach(() => {
-      useStore.setState({ role, laser: false, commentMode: false, selectedIds: ['a'], selectedId: 'a' })
+      useStore.setState({ role, laser: false, tool: 'select', selectedIds: ['a'], selectedId: 'a' })
     })
 
-    it('leaves the layout alone: device keys, 0 and t do nothing', () => {
+    it('leaves the layout alone: device keys, 0, ⇧T and the drawing tools do nothing', () => {
       const before = rects()
       for (const init of [
         { key: '1', code: 'Digit1' },
         { key: '2', code: 'Digit2' },
         { key: '0', code: 'Digit0' },
+        { key: 'T', shiftKey: true, code: 'KeyT' },
+        { key: 'f' },
+        { key: 'r' },
+        { key: 'o' },
+        { key: 'p' },
         { key: 't' },
       ]) {
         expect(press(init)).toBe(false)
       }
+      expect(useStore.getState().tool).toBe('select')
       expect(rects()).toEqual(before)
       expect(updateFrame).not.toHaveBeenCalled()
     })
@@ -252,18 +282,19 @@ describe('the keys', () => {
     })
   })
 
-  it('comment mode needs the comment role: view is refused, comment is allowed', () => {
+  it('the comment tool needs the comment role: view is refused, comment is allowed', () => {
     useStore.setState({ role: 'view' })
     expect(press({ key: 'c' })).toBe(false)
-    expect(useStore.getState().commentMode).toBe(false)
+    expect(useStore.getState().tool).toBe('select')
     useStore.setState({ role: 'comment' })
     expect(press({ key: 'c' })).toBe(true)
-    expect(useStore.getState().commentMode).toBe(true)
+    expect(useStore.getState().tool).toBe('comment')
   })
 
   it('a canvas whose role has not arrived yet grants nothing', () => {
     useStore.setState({ role: null })
     expect(press({ key: 't' })).toBe(false)
+    expect(press({ key: 'T', shiftKey: true, code: 'KeyT' })).toBe(false)
     expect(press({ key: 'c' })).toBe(false)
   })
 })

@@ -200,6 +200,10 @@ Viewers watch designs assemble live. Stream with append_frame_html:
 - For small tweaks (copy, a color, one element's spacing) use edit_frame_html — an exact
   find/replace that morphs into the rendered frame in place, with no re-render. Resending
   a whole document via set_frame_html is for genuine redesigns.
+- Every replace and stream files the design it overwrote in the frame's version history.
+  list_frame_versions shows the earlier states; restore_frame_version brings one back (HTML
+  and size). Reach for it when a human asks for the previous version, or when your own
+  rework turned out worse than what was there.
 
 ## Frames and HTML
 

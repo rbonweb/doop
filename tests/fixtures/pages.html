@@ -19,6 +19,7 @@
       import { createRoot } from 'react-dom/client'
       import { Stage } from '/src/components/Stage.tsx'
       import { useStore } from '/src/lib/store.ts'
+      import { TooltipProvider } from '/src/components/ui/tooltip.tsx'
       import '/src/styles.css'
       /* dragging a frame takes the edit role, which the socket's init normally hands the store */
       window.seedPages = (canvas) => {
@@ -29,8 +30,15 @@
         activePageId: useStore.getState().activePageId,
         viewport: useStore.getState().viewport,
         selectedId: useStore.getState().selectedId,
+        selectedElement: useStore.getState().selectedElement,
+        elementPanelOpen: useStore.getState().elementPanelOpen,
+        inspectorOpen: useStore.getState().inspectorOpen,
+        notice: useStore.getState().notice?.text,
       })
-      createRoot(document.getElementById('root')).render(React.createElement(Stage, { onAddFrame: () => {} }))
+      /* mounted as main.tsx mounts it: the toolbar's tooltips need the provider */
+      createRoot(document.getElementById('root')).render(
+        React.createElement(TooltipProvider, null, React.createElement(Stage, { onAddFrame: () => {} })),
+      )
     </script>
   </body>
 </html>

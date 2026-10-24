@@ -4,16 +4,9 @@ import * as persist from './db/persist.ts'
 import * as thumbs from './thumbs.ts'
 import { colorFor } from '../shared/types.ts'
 import { sanitizeAnchor } from '../shared/commentAnchor.ts'
-import {
-  DEFAULT_ROLE_ID,
-  mentionedRole,
-  mentionedRoles,
-  normalizePipeline,
-  roleByAgentName,
-  roleName,
-  stripMentions,
-} from '../shared/agents.ts'
+import { DEFAULT_ROLE_ID, mentionedRole, normalizePipeline, roleByAgentName, roleName } from '../shared/agents.ts'
 import { canvasPages, framePageId } from '../shared/pages.ts'
+import { isCanvasComment } from '../shared/comments.ts'
 import {
   attachedNotePlacement,
   clampNoteHeight,
@@ -33,12 +26,10 @@ import type {
   AgentTask,
   CanvasNote,
   CardScope,
-  ChatMessage,
   CommentAnchor,
   DesignDecision,
   ElementComment,
   Frame,
-  FrameVersion,
   GuidelineDoc,
   MemoryProposal,
   MemoryReference,
@@ -78,7 +69,6 @@ export function hydrateLogs(data: {
   tasks: Map<string, AgentTask[]>
   feedback: Map<string, TaskFeedback[]>
   comments: Map<string, ElementComment[]>
-  chat?: Map<string, ChatMessage[]>
   activity: Map<string, ActivityItem[]>
   decisions: Map<string, DesignDecision[]>
   proposals: Map<string, MemoryProposal[]>
@@ -86,8 +76,6 @@ export function hydrateLogs(data: {
   for (const [canvasId, list] of data.tasks) taskLog.set(canvasId, list)
   for (const [canvasId, list] of data.feedback) feedbackLog.set(canvasId, list)
   for (const [canvasId, list] of data.comments) commentLog.set(canvasId, list)
-  chatLog.clear()
-  for (const [canvasId, list] of data.chat ?? []) chatLog.set(canvasId, list)
   for (const [canvasId, list] of data.activity) activityLog.set(canvasId, list)
   for (const [canvasId, list] of data.decisions) decisionLog.set(canvasId, list)
   for (const [canvasId, list] of data.proposals) proposalLog.set(canvasId, list)
@@ -327,99 +315,6 @@ export function setAgentStatus(canvasId: string, actor: Actor, status: string) {
 
 const feedbackLog = new Map<string, TaskFeedback[]>() // canvasId -> entries (newest first)
 
-/* ---- canvas chat ---- */
-
-const chatLog = new Map<string, ChatMessage[]>() // canvasId -> messages (newest first)
-
-export const MAX_CHAT_CHARS = 4_000
-/** an agent's closing summary is a paragraph, not the whole transcript */
-const MAX_CHAT_REPLY_CHARS = 1_500
-
-export function getChat(canvasId: string): ChatMessage[] {
-  return chatLog.get(canvasId) ?? []
-}
-
-function pushChat(message: ChatMessage) {
-  const list = chatLog.get(message.canvasId) ?? []
-  list.unshift(message)
-  const dropped = list.splice(persist.CHAT_LOG_CAP).map((m) => m.id)
-  chatLog.set(message.canvasId, list)
-  persist.saveChat(message)
-  persist.deleteChat(dropped)
-  broadcast(message.canvasId, { type: 'chat', message })
-}
-
-/** A human says something in the canvas chat. @mentioning resident agents
- *  turns the message into a board card for them, in mention order — the
- *  message keeps the card's id so the chat can show where the work stands. */
-export function addChatMessage(
-  canvasId: string,
-  text: string,
-  from: string,
-  fromUserId?: string,
-  allowAgent = true,
-): ChatMessage | undefined {
-  const clean = text.trim().slice(0, MAX_CHAT_CHARS)
-  if (!clean || !store.getCanvas(canvasId)) return undefined
-  /* an author who may not ask agents to change the canvas posts plain chat */
-  const roles = allowAgent ? mentionedRoles(clean) : []
-  const card =
-    roles.length > 0
-      ? addQueuedCard(
-          canvasId,
-          stripMentions(clean) || clean,
-          from,
-          roles.map((r) => r.id),
-          undefined,
-          fromUserId,
-        )
-      : undefined
-  const list = chatLog.get(canvasId) ?? []
-  const message: ChatMessage = {
-    id: nanoid(8),
-    canvasId,
-    from,
-    fromKind: 'user',
-    ...(fromUserId ? { fromUserId } : {}),
-    color: colorFor(from),
-    text: clean,
-    /* strictly increasing per canvas so the thread order survives a restart */
-    at: Math.max(Date.now(), (list[0]?.at ?? 0) + 1),
-    ...(roles.length > 0 ? { mentions: roles.map((r) => r.id) } : {}),
-    ...(card ? { taskId: card.id } : {}),
-  }
-  pushChat(message)
-  return message
-}
-
-/** An agent answers the chat message that queued one of its cards. Nothing
- *  is posted for cards that came from the board — those have no thread. */
-export function chatReplyForCard(
-  canvasId: string,
-  cardId: string,
-  actor: Actor,
-  text: string,
-): ChatMessage | undefined {
-  const asked = (chatLog.get(canvasId) ?? []).find((m) => m.taskId === cardId && m.fromKind === 'user')
-  if (!asked) return undefined
-  const clean = text.replace(/\s+/g, ' ').trim()
-  if (!clean) return undefined
-  const list = chatLog.get(canvasId) ?? []
-  const message: ChatMessage = {
-    id: nanoid(8),
-    canvasId,
-    from: actor.name,
-    fromKind: 'agent',
-    color: actor.color,
-    text: clean.length > MAX_CHAT_REPLY_CHARS ? clean.slice(0, MAX_CHAT_REPLY_CHARS - 1) + '…' : clean,
-    at: Math.max(Date.now(), (list[0]?.at ?? 0) + 1),
-    taskId: cardId,
-    replyToId: asked.id,
-  }
-  pushChat(message)
-  return message
-}
-
 export function getFeedback(canvasId: string): TaskFeedback[] {
   return feedbackLog.get(canvasId) ?? []
 }
@@ -551,9 +446,9 @@ export function retryTaskFeedback(feedbackId: string, by: string): TaskFeedback 
 }
 
 /* ------------------------------------------------------------------ */
-/* Element comments: pinned to a specific element inside a frame.      */
-/* Comments mentioning @Doop are routed to the resident agent; the     */
-/* rest are notes for the humans in the room.                          */
+/* Comments: pinned to a specific element inside a frame, or to a      */
+/* point on the canvas. Comments mentioning @Doop are routed to the    */
+/* resident agent; the rest are notes for the humans in the room.      */
 /* ------------------------------------------------------------------ */
 
 const commentLog = new Map<string, ElementComment[]>() // canvasId -> entries (newest first)
@@ -579,6 +474,11 @@ export interface CommentOptions {
   mentions?: string[]
 }
 
+/** Where a new comment sits: on an element inside a frame (with the structured anchor that re-finds it after
+ *  edits), or at a world point on one page of the canvas. */
+type CommentPlace =
+  { frame: Frame; selector: string; snippet: string; anchor?: CommentAnchor } | { pageId: string; x: number; y: number }
+
 export function addElementComment(
   frameId: string,
   input: { selector: string; snippet: string; text: string; anchor?: unknown },
@@ -591,8 +491,9 @@ export function addElementComment(
   if (!frame) return undefined
   const anchor = sanitizeAnchor(input.anchor)
   return postComment(
-    frame,
+    frame.canvasId,
     {
+      frame,
       selector: String(input.selector ?? '').slice(0, MAX_SELECTOR_LENGTH),
       snippet: String(input.snippet ?? '').slice(0, 400),
       ...(anchor ? { anchor } : {}),
@@ -605,8 +506,34 @@ export function addElementComment(
   )
 }
 
-/** Reply inside a thread: the reply inherits the root comment's element so an
- *  @mention in it gives the agent the same anchor the conversation is about. */
+/** A comment pinned to a point on the canvas (world coordinates on one of
+ *  its pages) rather than to an element — a note about the layout, a gap
+ *  between frames, or a spot where something should go. */
+export function addCanvasComment(
+  canvasId: string,
+  input: { pageId: string; x: number; y: number; text: string },
+  from: string,
+  fromUserId?: string,
+  kind: ActorKind = 'user',
+  options: CommentOptions = {},
+): ElementComment | undefined {
+  const canvas = store.getCanvas(canvasId)
+  if (!canvas || !canvasPages(canvas).some((page) => page.id === input.pageId)) return undefined
+  if (!Number.isFinite(input.x) || !Number.isFinite(input.y)) return undefined
+  return postComment(
+    canvasId,
+    { pageId: input.pageId, x: input.x, y: input.y },
+    input.text,
+    from,
+    fromUserId,
+    kind,
+    options,
+  )
+}
+
+/** Reply inside a thread: the reply inherits the root comment's anchor (its
+ *  element, or its point on the canvas) so an @mention in it gives the agent
+ *  the same anchor the conversation is about. */
 export function replyToComment(
   commentId: string,
   text: string,
@@ -617,44 +544,41 @@ export function replyToComment(
 ): ElementComment | undefined {
   const open = openThread(commentId)
   if (!open) return undefined
-  const { root, frame } = open
-  return postComment(
-    frame,
-    {
-      selector: root.selector,
-      snippet: root.snippet,
-      parentId: root.id,
-      ...(root.anchor ? { anchor: root.anchor } : {}),
-    },
-    text,
-    from,
-    fromUserId,
-    kind,
-    options,
-  )
+  const place = replyPlace(open)
+  if (!place) return undefined
+  return postComment(open.root.canvasId, place, text, from, fromUserId, kind, options, open.root.id)
 }
 
-/** The root and frame a reply to this comment would land on, or undefined
- *  when the thread is resolved or its frame is gone — checked before any
- *  metering so a rejected reply never costs a resident task. */
-export function openThread(commentId: string): { root: ElementComment; frame: Frame } | undefined {
+function replyPlace({ root, frame }: { root: ElementComment; frame?: Frame }): CommentPlace | undefined {
+  if (frame)
+    return { frame, selector: root.selector, snippet: root.snippet, ...(root.anchor ? { anchor: root.anchor } : {}) }
+  return isCanvasComment(root) ? { pageId: root.pageId, x: root.x, y: root.y } : undefined
+}
+
+/** The root a reply to this comment would land under, with its frame when
+ *  it is an element comment (a canvas comment has none), or undefined when
+ *  the thread is resolved or its frame is gone — checked before any metering
+ *  so a rejected reply never costs a resident task. */
+export function openThread(commentId: string): { root: ElementComment; frame?: Frame } | undefined {
   const parent = findComment(commentId)
   if (!parent) return undefined
   const root = parent.parentId ? findComment(parent.parentId) : parent
   if (!root || root.resolvedAt) return undefined
-  const frame = store.getFrame(root.frameId)
+  if (isCanvasComment(root)) return { root }
+  const frame = root.frameId ? store.getFrame(root.frameId) : undefined
   if (!frame) return undefined
   return { root, frame }
 }
 
 function postComment(
-  frame: Frame,
-  anchor: { selector: string; snippet: string; parentId?: string; anchor?: CommentAnchor },
+  canvasId: string,
+  place: CommentPlace,
   text: string,
   from: string,
   fromUserId?: string,
   kind: ActorKind = 'user',
   options: CommentOptions = {},
+  parentId?: string,
 ): ElementComment | undefined {
   const clean = text.trim()
   if (!clean) return undefined
@@ -662,47 +586,51 @@ function postComment(
      unless the author may not ask agents to change the canvas */
   const mentioned = options.allowAgent === false ? undefined : mentionedRole(clean)
   const people = [...new Set(options.mentions ?? [])]
-  const list = commentLog.get(frame.canvasId) ?? []
+  const list = commentLog.get(canvasId) ?? []
   /* strictly increasing per canvas: thread order is reconstructed from `at`
      after a restart, so two messages must never share a timestamp */
   const at = Math.max(Date.now(), (list[0]?.at ?? 0) + 1)
+  const frame = 'frame' in place ? place.frame : undefined
   const comment: ElementComment = {
     id: nanoid(8),
-    canvasId: frame.canvasId,
-    frameId: frame.id,
-    selector: anchor.selector,
-    snippet: anchor.snippet,
+    canvasId,
+    ...('frame' in place
+      ? { frameId: place.frame.id, selector: place.selector, snippet: place.snippet }
+      : { selector: '', snippet: '', pageId: place.pageId, x: place.x, y: place.y }),
     from,
     ...(fromUserId ? { fromUserId } : {}),
     fromKind: kind,
     text: clean,
     at,
-    ...(anchor.anchor ? { anchor: anchor.anchor } : {}),
+    ...('anchor' in place && place.anchor ? { anchor: place.anchor } : {}),
     ...(mentioned ? { forAgent: true, targetAgent: mentioned.name } : {}),
     ...(people.length ? { mentions: people } : {}),
-    ...(anchor.parentId ? { parentId: anchor.parentId } : {}),
+    ...(parentId ? { parentId } : {}),
   }
   list.unshift(comment)
   if (list.length > 100) list.length = 100
-  commentLog.set(frame.canvasId, list)
+  commentLog.set(canvasId, list)
   persist.saveComment(comment)
-  broadcast(frame.canvasId, { type: 'comment', comment })
+  broadcast(canvasId, { type: 'comment', comment })
   const excerpt = clean.length > 80 ? clean.slice(0, 77) + '…' : clean
+  const where = frame ? `in “${frame.name}”` : 'on the canvas'
   logActivity(
-    frame.canvasId,
+    canvasId,
     resolveActor({ name: from, kind }),
-    anchor.parentId
-      ? `replied to a comment in “${frame.name}”: “${excerpt}”`
-      : `commented on an element in “${frame.name}”: “${excerpt}”`,
-    frame.id,
+    parentId
+      ? `replied to a comment ${where}: “${excerpt}”`
+      : frame
+        ? `commented on an element in “${frame.name}”: “${excerpt}”`
+        : `commented on the canvas: “${excerpt}”`,
+    frame?.id,
   )
   if (comment.forAgent) {
     /* @Doop mention: the resident agent picks it up instantly (no-op without
        an API key). Dynamic import: resident depends on this module. */
-    import('./resident.ts').then((r) => r.onFeedback(frame.canvasId)).catch(() => {})
+    import('./resident.ts').then((r) => r.onFeedback(canvasId)).catch(() => {})
   }
-  emitCanvasEvent(frame.canvasId, {
-    type: anchor.parentId ? 'comment.replied' : 'comment.created',
+  emitCanvasEvent(canvasId, {
+    type: parentId ? 'comment.replied' : 'comment.created',
     comment,
     frame,
     actorKind: kind,
@@ -723,6 +651,8 @@ const healTimers = new Map<string, ReturnType<typeof setTimeout>>()
 export function healCommentSelector(commentId: string, selector: string): ElementComment | undefined {
   const found = findComment(commentId)
   if (!found) return undefined
+  /* a canvas comment is pinned to a point, not an element: nothing to heal */
+  if (isCanvasComment(found)) return found
   const rootId = found.parentId ?? found.id
   const list = commentLog.get(found.canvasId) ?? []
   const pending = pendingHeals.get(found.canvasId) ?? new Map<string, ElementComment>()
@@ -804,7 +734,7 @@ export function retryComment(commentId: string, by: string): ElementComment | un
     delete comment.failureReason
     persist.saveComment(comment)
     broadcast(canvasId, { type: 'comment', comment })
-    logActivity(canvasId, resolveActor({ name: by, kind: 'user' }), 'retried an element comment', comment.frameId)
+    logActivity(canvasId, resolveActor({ name: by, kind: 'user' }), 'retried a comment', comment.frameId)
     import('./resident.ts').then((r) => r.onFeedback(canvasId)).catch(() => {})
     return comment
   }
@@ -836,7 +766,12 @@ export function resolveComment(commentId: string, by: string): ElementComment | 
         })
       }
     }
-    emitCanvasEvent(canvasId, { type: 'comment.resolved', comment: c, frame: store.getFrame(c.frameId), by })
+    emitCanvasEvent(canvasId, {
+      type: 'comment.resolved',
+      comment: c,
+      frame: c.frameId ? store.getFrame(c.frameId) : undefined,
+      by,
+    })
     return c
   }
   return undefined
@@ -1198,98 +1133,119 @@ export function retryCard(canvasId: string, cardId: string, by: string): AgentTa
 }
 
 /* ------------------------------------------------------------------ */
-/* Frame version history.                                              */
-/*                                                                     */
-/* A snapshot saves a frame's state BEFORE a change, so a design can be*/
-/* rolled back later. A burst of edits by one actor becomes one version*/
-/* (2 minutes), and identical html is never saved twice. Streaming     */
-/* chunks never snapshot — only the start of a stream does.            */
+/* Design history: a frame's HTML history is kept per BURST of edits,  */
+/* not per write — a stream's chunks, an agent's tweak right after its  */
+/* redesign, a human typing in the Inspector are each one burst. What  */
+/* gets snapshotted is the state a burst starts from (where the burst  */
+/* before it ended), so an agent's one-shot replace or stream can never */
+/* leave itself as the only copy of a design. A full replace always    */
+/* opens a burst; a small tweak joins the open one when the same actor */
+/* made it within BURST_IDLE_MS.                                        */
 /* ------------------------------------------------------------------ */
 
-export const SNAPSHOT_COALESCE_MS = 2 * 60_000
-
-interface LastSnapshot {
-  at: number
-  /** who took it: kind plus account (people) or name (agents) */
-  by: string
-  /** the html it saved, so an unchanged frame is never saved twice */
-  html: string
+interface Burst {
+  actor: Actor
+  /** when this actor last wrote the frame's HTML */
+  lastAt: number
 }
 
-const lastSnapshots = new Map<string, LastSnapshot>() // frameId -> latest snapshot taken by this process
+const bursts = new Map<string, Burst>() // frameId -> the burst open on it
+const BURST_IDLE_MS = 2 * 60_000
 
-function snapshotReason(actor: Actor): FrameVersion['reason'] {
-  return actor.kind === 'agent' ? 'agent' : 'human'
+type PriorState = Pick<Frame, 'id' | 'canvasId' | 'name' | 'html' | 'width' | 'height' | 'updatedAt' | 'updatedBy'>
+
+/** The store mutates frames in place, so what a write replaces has to be
+ *  captured before the write. */
+function priorState(f: Frame): PriorState {
+  const { id, canvasId, name, html, width, height, updatedAt, updatedBy } = f
+  return { id, canvasId, name, html, width, height, updatedAt, updatedBy }
 }
 
-function snapshotKey(actor: Actor): string {
-  return actor.kind === 'agent' ? `agent:${actor.name}` : `user:${actor.userId ?? actor.name}`
-}
-
-async function saveSnapshot(version: FrameVersion, checkLatest: boolean) {
-  if (checkLatest) {
-    /* first snapshot since the process started: the memory of the last one
-       is gone, so compare against what the database holds */
-    const [latest] = await persist.listFrameVersions(version.frameId)
-    const full = latest && (await persist.getFrameVersion(latest.id))
-    if (full?.html === version.html) return
-  }
-  await persist.saveFrameVersion(version)
-}
-
-/** Save the frame's current state as a version, unless that adds nothing: the
- *  frame is empty, its html matches the latest version, or this actor already
- *  snapshotted it within the last 2 minutes. A restore skips only the time
- *  check. Returns whether a version was saved. */
-export function snapshotFrame(frame: Frame, actor: Actor, reason: FrameVersion['reason']): boolean {
-  if (!frame.html) return false
-  const last = lastSnapshots.get(frame.id)
+/** Record that `actor` has just replaced the frame's HTML. `tweak` marks a
+ *  small edit that may join the open burst; anything else starts a new one
+ *  and files the state it replaced as a version. A version records the frame's
+ *  name in that state and why it was filed: the kind of actor whose burst wrote
+ *  the state (unknown after a restart), or 'restore' for a state a restore replaced. */
+function noteHtmlChange(prior: PriorState, actor: Actor, tweak: boolean, restored = false) {
+  const open = bursts.get(prior.id)
   const now = Date.now()
-  const by = snapshotKey(actor)
-  if (last?.html === frame.html) return false
-  if (reason !== 'restore' && last && last.by === by && now - last.at < SNAPSHOT_COALESCE_MS) return false
-  lastSnapshots.set(frame.id, { at: now, by, html: frame.html })
-  const version: FrameVersion = {
-    id: nanoid(12),
-    frameId: frame.id,
-    canvasId: frame.canvasId,
-    name: frame.name,
-    html: frame.html,
-    width: frame.width,
-    height: frame.height,
-    savedAt: now,
-    savedBy: actor.name,
-    reason,
-  }
-  saveSnapshot(version, !last).catch((err) => console.error('[frame-history] snapshot failed', err))
-  return true
+  const joins =
+    tweak &&
+    open !== undefined &&
+    open.actor.name === actor.name &&
+    open.actor.kind === actor.kind &&
+    now - open.lastAt < BURST_IDLE_MS
+  bursts.set(prior.id, { actor, lastAt: now })
+  if (joins || !prior.html) return
+  /* the open burst wrote this state; without one (first write since boot)
+     the frame's own stamp is the best attribution there is, even though a
+     move or rename since may have refreshed it */
+  persist.saveFrameVersion({
+    id: nanoid(10),
+    frameId: prior.id,
+    canvasId: prior.canvasId,
+    name: prior.name,
+    html: prior.html,
+    width: prior.width,
+    height: prior.height,
+    savedAt: open?.lastAt ?? prior.updatedAt,
+    savedBy: open?.actor.name ?? prior.updatedBy,
+    savedByKind: open?.actor.kind,
+    ...(restored ? { reason: 'restore' as const } : open ? { reason: versionReason(open.actor) } : {}),
+    htmlBytes: prior.html.length,
+  })
 }
 
-function describeVersionTime(savedAt: number): string {
-  return new Date(savedAt).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+function versionReason(author: Actor): 'agent' | 'human' {
+  return author.kind === 'agent' ? 'agent' : 'human'
 }
 
-/** Roll a frame back to a saved version. The current state is snapshotted
- *  first (reason 'restore'), then html, size and name are applied through the
- *  normal update path, so viewers get the change live. */
-export function restoreFrameVersion(version: FrameVersion, actor: Actor): Frame | undefined {
-  const before = store.getFrame(version.frameId)
+export type RestoredFrame = {
+  frame: Frame
+  /** the complete state the restore replaced — a client mid-reveal only
+   *  holds a partial copy, so this is what its undo must put back */
+  replaced: Pick<Frame, 'html' | 'width' | 'height'>
+}
+
+/** Put a frame back to one of its recorded versions (HTML, size and, when the
+ *  version kept one, the name; the position stays). null = no such version on
+ *  this frame. The state being replaced is filed as a version first (reason
+ *  'restore'), so a restore is itself reversible. */
+export async function restoreFrameVersion(
+  frameId: string,
+  versionId: string,
+  actor: Actor,
+): Promise<RestoredFrame | null | undefined> {
+  const version = await persist.getFrameVersion(frameId, versionId)
+  if (!version) return null
+  const before = store.getFrame(frameId)
   if (!before) return undefined
-  snapshotFrame(before, actor, 'restore')
-  const frame = updateFrame(
-    before.id,
-    { html: version.html, width: version.width, height: version.height, name: version.name },
-    actor,
-    { restoring: true },
+  const replaced = { html: before.html, width: before.width, height: before.height }
+  const name = version.name !== undefined && version.name !== before.name ? version.name : undefined
+  if (
+    before.html === version.html &&
+    before.width === version.width &&
+    before.height === version.height &&
+    name === undefined
   )
+    return { frame: before, replaced }
+  /* whoever restores takes over: any live stream or playback ends */
+  finishStream(frameId, false)
+  finishReveal(frameId)
+  const prior = priorState(before)
+  const patch = {
+    html: version.html,
+    width: version.width,
+    height: version.height,
+    ...(name !== undefined ? { name } : {}),
+  }
+  const frame = store.updateFrame(frameId, patch, actor.name, editorOf(actor))
   if (!frame) return undefined
-  logActivity(
-    frame.canvasId,
-    actor,
-    `restored “${frame.name}” to the version from ${describeVersionTime(version.savedAt)}`,
-    frame.id,
-  )
-  return frame
+  noteHtmlChange(prior, actor, false, true)
+  broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
+  logActivity(frame.canvasId, actor, `restored “${frame.name}” to an earlier version by ${version.savedBy}`, frame.id)
+  touch(frame.canvasId, actor, frame.id)
+  return { frame, replaced }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1357,6 +1313,18 @@ function commonPrefixLen(a: string, b: string): number {
   return i
 }
 
+/** Where two documents diverge, and how much they share at the start plus
+ *  the end. An edit in one spot (a find/replace, typing in one element)
+ *  leaves nearly everything shared however early in the document it sits;
+ *  only a rewrite scores low. */
+function sharedSpan(a: string, b: string): { prefix: number; shared: number } {
+  const prefix = commonPrefixLen(a, b)
+  const room = Math.min(a.length, b.length) - prefix
+  let suffix = 0
+  while (suffix < room && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++
+  return { prefix, shared: prefix + suffix }
+}
+
 function startReveal(frame: Frame, actor: Actor, shown: number) {
   reveals.set(frame.id, { actor, shown, deadline: Date.now() + revealDuration(frame.html.length - shown) })
   broadcast(frame.canvasId, { type: 'frame:streaming', frameId: frame.id, active: true, actor })
@@ -1422,16 +1390,16 @@ export function appendFrameHtml(
   if (!before) return undefined
 
   const starting = opts.start || !streams.has(frameId)
-  /* the design as it stood before this stream rewrites it — once per stream,
-     never per chunk */
-  if (starting) snapshotFrame(before, actor, snapshotReason(actor))
   /* an agent that escapes its opening chunk escapes the whole stream, so latch
      the verdict there: a chunk mid-design can hold a legitimate `&lt;` (a code
      sample) and must never be sniffed on its own */
   const escaped = starting ? looksEscapedHtml(chunk) : (streams.get(frameId)?.escaped ?? false)
   const piece = escaped ? decodeEscapedHtml(chunk) : chunk
   const html = opts.start ? piece : before.html + piece
+  const prior = priorState(before)
   const frame = store.updateFrame(frameId, { html }, actor.name, editorOf(actor))!
+  /* the opening chunk replaces the design; every later one extends this burst */
+  noteHtmlChange(prior, actor, !starting)
 
   if (starting) {
     finishReveal(frameId) /* a live stream overrides any one-shot playback in flight */
@@ -1463,6 +1431,21 @@ export function setCanvasPages(canvasId: string, pages: import('../shared/types.
   broadcast(canvasId, { type: 'canvas:pages', pages, actor })
 }
 
+/** Copy a page (and its sub-pages) with its frames and sticky notes; peers get the page list, each new frame and each new note. */
+export async function duplicatePage(canvasId: string, pageId: string, actor: Actor) {
+  const copy = await store.duplicatePage(canvasId, pageId, actor.name)
+  if (!copy) return undefined
+  broadcast(canvasId, { type: 'canvas:pages', pages: copy.pages, actor })
+  for (const frame of copy.frames) {
+    broadcast(canvasId, { type: 'frame:created', frame, actor })
+    emitCanvasEvent(canvasId, { type: 'frame.created', frame, actor })
+  }
+  for (const note of copy.notes) broadcast(canvasId, { type: 'note:upsert', note, actor })
+  logActivity(canvasId, actor, `duplicated page “${copy.source.name}” as “${copy.page.name}”`)
+  touch(canvasId, actor)
+  return copy
+}
+
 export function createFrame(
   canvasId: string,
   input: {
@@ -1476,12 +1459,15 @@ export function createFrame(
     demo?: boolean
     slide?: boolean
     speakerNotes?: string
+    hidden?: boolean
+    locked?: boolean
   },
   actor: Actor,
 ): Frame | undefined {
   if (input.html !== undefined) input = { ...input, html: repairEscapedHtml(input.html) }
   const frame = store.createFrame(canvasId, input, actor.name, editorOf(actor))
   if (!frame) return undefined
+  bursts.set(frame.id, { actor, lastAt: frame.createdAt })
   if (actor.kind === 'agent' && frame.html.length > 0) {
     /* agent one-shot creation still plays back as a reveal */
     broadcast(canvasId, { type: 'frame:created', frame: { ...frame, html: '' }, actor })
@@ -1496,12 +1482,20 @@ export function createFrame(
   return frame
 }
 
+/** `replace` marks a deliberate whole-document write (set_frame_html): it
+ *  always opens a history burst, even when the new document keeps most of
+ *  the old one's wrapper — only the reveal-or-morph choice stays similarity
+ *  based. Without it a write is judged by how much it changed. */
 export function updateFrame(
   frameId: string,
-  patch: Partial<Pick<Frame, 'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html' | 'slide' | 'speakerNotes'>>,
+  patch: Partial<
+    Pick<
+      Frame,
+      'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html' | 'slide' | 'speakerNotes' | 'hidden' | 'locked'
+    >
+  >,
   actor: Actor,
-  /** restoring: a version restore already snapshotted and logs its own activity line */
-  opts: { restoring?: boolean } = {},
+  opts: { replace?: boolean } = {},
 ): Frame | undefined {
   const before = store.getFrame(frameId)
   if (!before) return undefined
@@ -1509,21 +1503,22 @@ export function updateFrame(
   const prevName = before.name
   const prevHtml = before.html
   const prevPos = { x: before.x, y: before.y }
-  /* a live stream's frame holds a half-written design: not worth keeping */
-  if (!opts.restoring && patch.html !== undefined && patch.html !== prevHtml && !streams.has(frameId)) {
-    snapshotFrame(before, actor, snapshotReason(actor))
-  }
+  const prevHidden = !!before.hidden
+  const prevLocked = !!before.locked
+  const prior = priorState(before)
   const frame = store.updateFrame(frameId, patch, actor.name, editorOf(actor))
   if (!frame) return undefined
   carryNotesWithFrame(frame, prevPos, actor)
 
   const htmlChanged = patch.html !== undefined && patch.html !== prevHtml
+  const { prefix, shared } = htmlChanged ? sharedSpan(prevHtml, frame.html) : { prefix: 0, shared: 0 }
+  /* mostly-unchanged replace (small tweak): the client morphs the live DOM
+     in place, so a reveal would only add churn — and the design history
+     files one version per burst of tweaks, not one per keystroke */
+  const smallTweak = htmlChanged && shared >= frame.html.length * 0.5 && shared >= prevHtml.length * 0.5
+  if (htmlChanged) noteHtmlChange(prior, actor, smallTweak && !opts.replace)
   if (htmlChanged && actor.kind === 'agent') {
     finishStream(frameId, false) /* a full replace ends an open append stream */
-    const prefix = commonPrefixLen(prevHtml, frame.html)
-    /* mostly-unchanged replace (small tweak): broadcast at once — the client
-       morphs the live DOM in place, so a reveal would only add churn */
-    const smallTweak = prefix >= frame.html.length * 0.5 && prefix >= prevHtml.length * 0.5
     const openReveal = reveals.get(frameId)
     if (openReveal) {
       /* new content mid-playback: rewind to the divergence and re-arm the deadline */
@@ -1533,11 +1528,11 @@ export function updateFrame(
       trackTaskFrame(frame.canvasId, actor, frameId)
     } else if (smallTweak) {
       broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
-      if (!opts.restoring) logActivity(frame.canvasId, actor, `tweaked the design of “${frame.name}”`, frame.id)
+      logActivity(frame.canvasId, actor, `tweaked the design of “${frame.name}”`, frame.id)
       autoTask(frame.canvasId, actor, `Tweaking “${frame.name}”`, frameId)
     } else {
       startReveal(frame, actor, prefix)
-      if (!opts.restoring) logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
+      logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
       autoTask(frame.canvasId, actor, `Redesigning “${frame.name}”`, frameId)
     }
   } else {
@@ -1548,10 +1543,16 @@ export function updateFrame(
     }
     broadcast(frame.canvasId, { type: 'frame:updated', frame, actor })
     if (htmlChanged) {
-      if (!opts.restoring) logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
+      logActivity(frame.canvasId, actor, `updated the design of “${frame.name}”`, frame.id)
     } else if (patch.name !== undefined && patch.name !== prevName) {
       logActivity(frame.canvasId, actor, `renamed “${prevName}” to “${frame.name}”`, frame.id)
+    } else if (patch.hidden !== undefined && !!patch.hidden !== prevHidden) {
+      logActivity(frame.canvasId, actor, `${frame.hidden ? 'hid' : 'showed'} frame “${frame.name}”`, frame.id)
     }
+  }
+  /* a lock change is its own line, whatever else the same update carried */
+  if (patch.locked !== undefined && !!patch.locked !== prevLocked) {
+    logActivity(frame.canvasId, actor, `${frame.locked ? 'locked' : 'unlocked'} “${frame.name}”`, frame.id)
   }
 
   touch(frame.canvasId, actor, frame.id)
@@ -1565,7 +1566,7 @@ export function deleteFrame(frameId: string, actor: Actor): Frame | undefined {
   finishReveal(frameId)
   const frame = store.deleteFrame(frameId)
   if (!frame) return undefined
-  lastSnapshots.delete(frameId)
+  bursts.delete(frameId)
   thumbs.purge(frameId)
   broadcast(frame.canvasId, { type: 'frame:deleted', frameId, actor })
   logActivity(frame.canvasId, actor, `deleted frame “${frame.name}”`, frame.id)
@@ -1688,13 +1689,12 @@ export function deleteCanvas(canvasId: string): boolean {
   if (!c) return false
   for (const f of c.frames) {
     thumbs.purge(f.id)
-    lastSnapshots.delete(f.id)
+    bursts.delete(f.id)
   }
   broadcast(canvasId, { type: 'canvas:deleted' })
   taskLog.delete(canvasId)
   feedbackLog.delete(canvasId)
   commentLog.delete(canvasId)
-  chatLog.delete(canvasId)
   activityLog.delete(canvasId)
   decisionLog.delete(canvasId)
   proposalLog.delete(canvasId)

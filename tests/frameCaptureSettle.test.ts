@@ -4,6 +4,7 @@ import sharp from 'sharp'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Frame } from '../shared/types.ts'
 import { findBrowserPath, getBrowser, renderFrame } from '../server/screenshot.ts'
+import { stubEnv, unstubAllEnvs } from './envStub.ts'
 
 /**
  * A server capture must show a design at rest. The load event fires before an entrance animation ends, and before fonts and images that layout asks for afterwards, so a capture taken at load showed sections half faded in and text in a fallback font. Here nothing slow is requested before load: the fade-in starts at once, and a load handler switches on a font and a background image that the local stand-in for the asset origin (the one origin the capture browser fetches directly) serves late. */
@@ -18,7 +19,6 @@ const FONT = [
 ].find((p) => existsSync(p))
 
 let server: http.Server
-let previousOrigin: string | undefined
 
 beforeAll(async () => {
   const tile = await sharp({ create: { width: 10, height: 10, channels: 3, background: '#ff3b30' } })
@@ -33,12 +33,11 @@ beforeAll(async () => {
     }, DELAY_MS)
   })
   await new Promise<void>((resolve) => server.listen(PORT, resolve))
-  previousOrigin = process.env.BETTER_AUTH_URL
-  process.env.BETTER_AUTH_URL = `http://localhost:${PORT}`
+  stubEnv('BETTER_AUTH_URL', `http://localhost:${PORT}`)
 })
 
 afterAll(async () => {
-  process.env.BETTER_AUTH_URL = previousOrigin
+  unstubAllEnvs()
   server?.close()
   if (findBrowserPath()) await (await getBrowser()).close()
 })

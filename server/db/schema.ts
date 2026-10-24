@@ -209,8 +209,42 @@ export const frames = pgTable(
     /** true when the frame is a slide in the canvas's presentation; null = not a slide */
     slide: boolean('slide'),
     speakerNotes: text('speaker_notes'),
+    /** hidden from the stage via the Layers panel; null = shown */
+    hidden: boolean('hidden'),
+    /** Figma-style lock; null = unlocked */
+    locked: boolean('locked'),
   },
   (t) => [index('frames_canvas_idx').on(t.canvasId)],
+)
+
+/** Frame design history: the HTML (and size) a frame had before a burst of
+ *  edits replaced it, so an agent's one-shot redesign or stream is never the
+ *  only copy left. Append-only, pruned to the newest MAX_FRAME_VERSIONS per
+ *  frame; `saved_by`/`saved_at` name who authored that state and when. Cold
+ *  path: written on each burst boundary, read only by the history UI. */
+export const frameVersions = pgTable(
+  'frame_versions',
+  {
+    id: text('id').primaryKey(),
+    frameId: text('frame_id').notNull(),
+    canvasId: text('canvas_id').notNull(),
+    html: text('html').notNull(),
+    width: doublePrecision('width').notNull(),
+    height: doublePrecision('height').notNull(),
+    savedAt: bigint('saved_at', { mode: 'number' }).notNull(),
+    savedBy: text('saved_by').notNull(),
+    /** 'user' | 'agent'; null when the author's kind was not known (a state
+     *  authored before the server last booted) */
+    savedByKind: text('saved_by_kind'),
+    /** the frame's name in that state; null on versions filed before names were kept */
+    name: text('name'),
+    /** why the version was filed: 'agent' | 'human' | 'restore'; null on older rows */
+    reason: text('reason'),
+  },
+  (t) => [
+    index('frame_versions_frame_idx').on(t.frameId, t.savedAt),
+    index('frame_versions_canvas_idx').on(t.canvasId),
+  ],
 )
 
 /** Design-sync keys: the write-only capability behind the /ingest endpoint.
@@ -380,9 +414,14 @@ export const comments = pgTable(
   {
     id: text('id').primaryKey(),
     canvasId: text('canvas_id').notNull(),
-    frameId: text('frame_id').notNull(),
+    /* element comment: the frame + selector + snippet; canvas comment: no
+       frame, a page and a world point instead (selector/snippet empty) */
+    frameId: text('frame_id'),
     selector: text('selector').notNull(),
     snippet: text('snippet').notNull(),
+    pageId: text('page_id'),
+    x: doublePrecision('x'),
+    y: doublePrecision('y'),
     fromName: text('from_name').notNull(),
     fromUserId: text('from_user_id'),
     text: text('text').notNull(),
@@ -404,27 +443,6 @@ export const comments = pgTable(
     mentions: text('mentions'),
   },
   (t) => [index('comments_canvas_idx').on(t.canvasId)],
-)
-
-/** The canvas chat. Rows are immutable: a message that queued a card points
- *  at it through task_id, an agent's answer points back through reply_to_id. */
-export const chatMessages = pgTable(
-  'chat_messages',
-  {
-    id: text('id').primaryKey(),
-    canvasId: text('canvas_id').notNull(),
-    fromName: text('from_name').notNull(),
-    fromKind: text('from_kind').notNull(),
-    fromUserId: text('from_user_id'),
-    color: text('color').notNull(),
-    text: text('text').notNull(),
-    at: bigint('at', { mode: 'number' }).notNull(),
-    /** comma-joined agent-role ids the text @mentions, in order */
-    mentions: text('mentions'),
-    taskId: text('task_id'),
-    replyToId: text('reply_to_id'),
-  },
-  (t) => [index('chat_messages_canvas_idx').on(t.canvasId)],
 )
 
 /** Uploaded image assets: metadata only — bytes live in object storage (or
@@ -518,26 +536,6 @@ export const canvasVisits = pgTable(
     baselineAt: bigint('baseline_at', { mode: 'number' }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.userId, t.canvasId] })],
-)
-
-/** Append-only snapshots of a frame's HTML and geometry, capped per frame at
- *  write time. Read on demand (cold path — no in-memory mirror). */
-export const frameVersions = pgTable(
-  'frame_versions',
-  {
-    id: text('id').primaryKey(),
-    frameId: text('frame_id').notNull(),
-    canvasId: text('canvas_id').notNull(),
-    name: text('name').notNull(),
-    html: text('html').notNull(),
-    width: doublePrecision('width').notNull(),
-    height: doublePrecision('height').notNull(),
-    savedAt: bigint('saved_at', { mode: 'number' }).notNull(),
-    savedBy: text('saved_by').notNull(),
-    /** 'agent' | 'human' | 'restore' */
-    reason: text('reason').notNull(),
-  },
-  (t) => [index('frame_versions_frame_idx').on(t.frameId, t.savedAt)],
 )
 
 /** Sticky notes on the canvas: markdown cards pinned to the world, to a page,
@@ -848,4 +846,58 @@ export const linearSessions = pgTable(
     updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
   },
   (t) => [index('linear_sessions_status_idx').on(t.status)],
+)
+
+/** One bot installation per Slack workspace, billed to its Doop installer. */
+export const slackInstallations = pgTable('slack_installations', {
+  teamId: text('team_id').primaryKey(),
+  userId: text('user_id').notNull().unique(),
+  botUserId: text('bot_user_id').notNull(),
+  name: text('name').notNull(),
+  botToken: text('bot_token').notNull(),
+  connectedAt: bigint('connected_at', { mode: 'number' }).notNull(),
+})
+
+export const slackOAuthStates = pgTable('slack_oauth_states', {
+  hash: text('hash').primaryKey(),
+  userId: text('user_id').notNull(),
+  expiresAt: bigint('expires_at', { mode: 'number' }).notNull(),
+})
+
+/** A durable inbox and result outbox, one row per Slack mention or slash
+ *  command. Slack's event_id / trigger_id is the row id, so a redelivery
+ *  never starts a second run. */
+export const slackSessions = pgTable(
+  'slack_sessions',
+  {
+    id: text('id').primaryKey(),
+    teamId: text('team_id').notNull(),
+    userId: text('user_id').notNull(),
+    channelId: text('channel_id').notNull(),
+    /** the thread Doop answers in; a slash command has none until Doop posts */
+    threadTs: text('thread_ts'),
+    requesterId: text('requester_id').notNull(),
+    /** slash commands only: Slack's response_url fallback when the bot is not in the channel */
+    responseUrl: text('response_url'),
+    title: text('title').notNull(),
+    prompt: text('prompt').notNull(),
+    status: text('status').notNull().default('pending'),
+    canvasId: text('canvas_id'),
+    taskId: text('task_id'),
+    /** a follow-up mention in a thread Doop already designed for: reuse that canvas */
+    followUp: boolean('follow_up').notNull().default(false),
+    error: text('error'),
+    /** ts of the "Doop is on it" message, updated in place with the canvas link */
+    ackTs: text('ack_ts'),
+    nextAttemptAt: bigint('next_attempt_at', { mode: 'number' }).notNull().default(0),
+    acknowledged: boolean('acknowledged').notNull().default(false),
+    linked: boolean('linked').notNull().default(false),
+    reported: boolean('reported').notNull().default(false),
+    createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [
+    index('slack_sessions_status_idx').on(t.status),
+    index('slack_sessions_thread_idx').on(t.teamId, t.channelId, t.threadTs),
+  ],
 )

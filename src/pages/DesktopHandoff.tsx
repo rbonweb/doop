@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { authClient } from '../lib/auth'
 import { desktopAuthDeepLink, parseDesktopHandoffQuery } from '../lib/desktopAuth'
-import { AuthScreen } from '../components/ui/screen'
-import { Wordmark } from '../components/ui/wordmark'
+import { AuthCard, AuthCardText, AuthScreen } from '../components/ui/screen'
 import { Button } from '../components/ui/button'
 import { Callout } from '../components/ui/callout'
 
@@ -37,20 +36,14 @@ export function DesktopHandoff() {
 
   return (
     <AuthScreen>
-      <div className="flex w-[min(400px,100%)] flex-col gap-3.5 rounded-[12px] border border-line bg-surface p-6 pt-[30px] shadow-pop sm:p-9 sm:pb-7">
-        <Wordmark className="mb-1.5" />
-        <h1 className="font-serif text-[34px] font-normal leading-[1.05] tracking-[-0.015em]">
-          {failed ? 'Something went wrong.' : "You're signed in."}
-        </h1>
+      <AuthCard title={failed ? 'Something went wrong.' : "You're signed in."}>
         {failed ? (
           <Callout tone="error">
             Could not hand the sign-in over to the doop app. Go back to the app and try again.
           </Callout>
         ) : (
           <>
-            <p className="text-sm text-ink-soft">
-              Sending you back to the doop app… You can close this tab afterwards.
-            </p>
+            <AuthCardText>Sending you back to the doop app… You can close this tab afterwards.</AuthCardText>
             {link && (
               <Button asChild className="mt-1">
                 <a href={link}>Open doop</a>
@@ -58,7 +51,7 @@ export function DesktopHandoff() {
             )}
           </>
         )}
-      </div>
+      </AuthCard>
     </AuthScreen>
   )
 }

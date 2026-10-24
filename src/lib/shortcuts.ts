@@ -7,7 +7,7 @@ import { MOD_KEY } from './keys'
  */
 
 export type ShortcutMod = 'mod' | 'shift' | 'alt'
-export type ShortcutGroup = 'Canvas' | 'Selection' | 'View' | 'Modes'
+export type ShortcutGroup = 'Tools' | 'Canvas' | 'Selection' | 'View' | 'Modes'
 
 export interface Shortcut {
   id: string
@@ -26,7 +26,12 @@ export interface Shortcut {
   /** An alias of another entry: works, but is not listed in the help dialog. */
   hidden?: boolean
   /** Skipped (the next matching entry gets a turn) when this returns false. */
-  when?: () => boolean
+  when?: (e: KeyboardEvent) => boolean
+  /**
+   * Fires while a text field has the focus too: true for every field, or a test of the focused one. Left off, a key
+   * typed into a field is never ours.
+   */
+  inFields?: boolean | ((target: HTMLElement) => boolean)
   /**
    * The action. The key's default is prevented afterwards unless this returns false.
    */
@@ -100,16 +105,25 @@ const noteOverlay = () => {
   overlayAtKeydown = isOverlayOpen()
 }
 
+function allowedInField(s: Shortcut, e: KeyboardEvent): boolean {
+  if (!s.inFields) return false
+  return s.inFields === true || (e.target instanceof HTMLElement && s.inFields(e.target))
+}
+
 /** Handle one keydown against the table. Returns whether an entry took it. */
 export function dispatchShortcut(e: KeyboardEvent): boolean {
-  if (e.isComposing || isTypingTarget(e.target)) return false
+  if (e.isComposing) return false
+  const typing = isTypingTarget(e.target)
+  /* a key typed into a field is the field's, unless an entry says otherwise below */
+  if (typing && ![...entries.values()].some((s) => s.inFields && matches(s, e))) return false
   const hasMod = e.metaKey || e.ctrlKey
   /* bare keys (including Delete and Esc) stay out of an open dialog's way; ⌘ combos have always passed through */
   const overlay = overlayAtKeydown ?? isOverlayOpen()
   overlayAtKeydown = null
   if (!hasMod && overlay) return false
   for (const s of entries.values()) {
-    if (!matches(s, e) || (s.when && !s.when())) continue
+    if (!matches(s, e) || (s.when && !s.when(e))) continue
+    if (typing && !allowedInField(s, e)) continue
     if (e.repeat && !s.repeat) {
       if (hasMod) e.preventDefault()
       return true

@@ -1,20 +1,19 @@
 import { useEffect, useState } from 'react'
 import { authClient } from '../lib/auth'
+import { BrandMark } from '../components/ui/brand-mark'
 import { setName } from '../lib/identity'
 import { beginBrowserSignIn, supportsBrowserSignIn } from '../lib/desktop'
-import type { DesktopSignInProvider } from '../lib/desktopAuth'
+import type { DesktopSignInProvider, ProviderRedirects } from '../lib/desktopAuth'
 import { safeRelativeTarget } from '../lib/safeTarget'
+import { CODEX_SETUP_PATH } from '../lib/codexConnection'
+import { FIRST_CANVAS_PATH } from '../../shared/firstCanvas'
 import { isDesktopShell } from '../lib/shell'
 import { posthog } from '../lib/posthog'
-import { AuthScreen } from '../components/ui/screen'
-import { Wordmark } from '../components/ui/wordmark'
+import { AuthCard, AuthCardText, AuthScreen } from '../components/ui/screen'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Field } from '../components/ui/field'
 import { Callout } from '../components/ui/callout'
-
-/* the auth form's fields sit on paper and soften their focus ring */
-const authInput = 'rounded-lg bg-paper focus:border-ink-soft focus:ring-0 md:text-sm'
 
 /* If login interrupted an MCP OAuth authorize redirect, send the browser
    back into the flow so the agent connection completes. */
@@ -35,62 +34,55 @@ async function accountExists(email: string): Promise<boolean> {
   }
 }
 
-function resumeOAuthFlow(): boolean {
+function interruptedTarget(): string | null {
+  if (location.pathname === '/oauth/consent' || location.pathname === CODEX_SETUP_PATH)
+    return location.pathname + location.search
   const params = new URLSearchParams(location.search)
   const target = safeRelativeTarget(params.get('redirect_to') || params.get('redirect_uri'))
-  if (target) {
-    location.href = target
-    return true
-  }
-  if (params.has('client_id') && params.has('response_type')) {
-    location.href = `/api/auth/mcp/authorize${location.search}`
-    return true
-  }
-  return false
+  if (target) return target
+  if (params.has('client_id') && params.has('response_type')) return `/api/auth/mcp/authorize${location.search}`
+  return null
+}
+
+/* Where the verification link lands a signup that had to confirm its email
+   first (SMTP on): the interrupted flow if there was one, else the first
+   canvas — the same landing an instantly signed-in signup gets below. */
+function verifiedLanding(): string {
+  return interruptedTarget() ?? FIRST_CANVAS_PATH
+}
+
+function resumeOAuthFlow(): boolean {
+  const target = interruptedTarget()
+  if (target) location.href = target
+  return target !== null
 }
 
 type AuthMode = 'signin' | 'signup' | 'forgot' | 'reset'
 
+/** the card's title for each mode */
+const TITLES: Record<AuthMode, string> = {
+  signin: 'Welcome back.',
+  signup: 'Create your account.',
+  forgot: 'Reset your password.',
+  reset: 'Pick a new password.',
+}
+
 /** The redirect knobs shared by better-auth's social and oauth2 sign-ins. */
-interface ProviderStart {
-  callbackURL: string
+interface ProviderStart extends ProviderRedirects {
   errorCallbackURL: string
 }
 
-/** Microsoft's four-square logo, per its sign-in branding guidelines (inline for the same reason). */
+/* The providers' marks at the 18px their sign-in guidelines draw them, from the registry. */
 function MicrosoftMark() {
-  return (
-    <svg viewBox="0 0 21 21" width="18" height="18" aria-hidden="true" className="shrink-0">
-      <rect x="1" y="1" width="9" height="9" fill="#F25022" />
-      <rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
-      <rect x="1" y="11" width="9" height="9" fill="#00A4EF" />
-      <rect x="11" y="11" width="9" height="9" fill="#FFB900" />
-    </svg>
-  )
+  return <BrandMark brand="microsoft" size={18} className="shrink-0" />
 }
 
-/** Google's four-colour "G", per its sign-in branding guidelines (kept inline: no icon set ships it). */
+function AppleMark() {
+  return <BrandMark brand="apple" size={18} className="shrink-0" />
+}
+
 function GoogleMark() {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" className="shrink-0">
-      <path
-        fill="#4285F4"
-        d="M23.52 12.27c0-.85-.08-1.67-.22-2.45H12v4.64h6.46a5.52 5.52 0 0 1-2.4 3.62v3h3.88c2.27-2.09 3.58-5.17 3.58-8.81Z"
-      />
-      <path
-        fill="#34A853"
-        d="M12 24c3.24 0 5.96-1.07 7.94-2.91l-3.88-3c-1.07.72-2.45 1.15-4.06 1.15-3.13 0-5.77-2.11-6.72-4.95H1.28v3.09A12 12 0 0 0 12 24Z"
-      />
-      <path
-        fill="#FBBC05"
-        d="M5.28 14.29A7.2 7.2 0 0 1 4.9 12c0-.8.14-1.57.38-2.29V6.62H1.28a12 12 0 0 0 0 10.76l4-3.09Z"
-      />
-      <path
-        fill="#EA4335"
-        d="M12 4.77c1.76 0 3.34.61 4.59 1.8l3.44-3.44C17.95 1.19 15.24 0 12 0A12 12 0 0 0 1.28 6.62l4 3.09C6.23 6.88 8.87 4.77 12 4.77Z"
-      />
-    </svg>
-  )
+  return <BrandMark brand="google" size={18} className="shrink-0" />
 }
 
 /* Human copy for the OAuth error codes better-auth's callback can redirect
@@ -132,17 +124,18 @@ function ssoErrorFromUrl(): string | null {
   return SSO_ERROR_MESSAGES[code] ?? 'Sign-in failed — try again or use email/password.'
 }
 
-/* Where the SSO redirect should land, mirroring resumeOAuthFlow() below —
-   but handed to the server as callbackURL rather than navigated to
-   directly. The browser leaves for the IdP and returns already carrying a
-   session, so this component's own resumeOAuthFlow() never gets to run for
-   this path; the equivalent logic has to travel with the request instead. */
-function ssoCallbackURL(): string {
-  const params = new URLSearchParams(location.search)
-  const target = safeRelativeTarget(params.get('redirect_to') || params.get('redirect_uri'))
-  if (target) return target
-  if (params.has('client_id') && params.has('response_type')) return `/api/auth/mcp/authorize${location.search}`
-  return location.pathname + location.search
+/* Where a provider sign-in should land, mirroring what the email form does
+   after submit — but handed to the server as redirect URLs rather than
+   navigated to directly. The browser leaves for the IdP and returns already
+   carrying a session, so this component's own resumeOAuthFlow() never gets
+   to run for this path; the equivalent logic has to travel with the
+   request instead. An interrupted flow wins for everyone; otherwise a
+   returning user comes back to this page and a new account lands on its
+   first canvas, the same place the email signup goes. */
+function ssoRedirects(): ProviderRedirects {
+  const target = interruptedTarget()
+  if (target) return { callbackURL: target, newUserCallbackURL: target }
+  return { callbackURL: location.pathname + location.search, newUserCallbackURL: FIRST_CANVAS_PATH }
 }
 
 /** Matches server/auth.ts loginProvidersConfig's response shape. */
@@ -151,16 +144,23 @@ interface OidcClientConfig {
   displayName?: string
   google: boolean
   microsoft: boolean
+  /** the browser "Sign in with Apple" (the iOS app's native one is appleNative, not shown here) */
+  apple: boolean
 }
 
 /* The client bundle is static and shared across self-hosted deploys — it
    can't know at build time whether the operator configured SSO, so it asks
    the server. See server/auth.ts loginProvidersConfig. */
 function useOidcConfig(): OidcClientConfig {
-  const [config, setConfig] = useState<OidcClientConfig>({ enabled: false, google: false, microsoft: false })
+  const [config, setConfig] = useState<OidcClientConfig>({
+    enabled: false,
+    google: false,
+    microsoft: false,
+    apple: false,
+  })
   useEffect(() => {
     fetch('/api/oidc-config')
-      .then((res) => (res.ok ? res.json() : { enabled: false, google: false, microsoft: false }))
+      .then((res) => (res.ok ? res.json() : { enabled: false, google: false, microsoft: false, apple: false }))
       .then(setConfig)
       .catch(() => {}) // SSO button just doesn't appear — email/password still works
   }, [])
@@ -270,7 +270,7 @@ export function AuthPage() {
            signs in through the system browser and gets the session handed
            back over a doop:// link (src/lib/desktopAuth.ts). The browser
            starts the provider round trip itself, from a doop page. */
-        if (!(await beginBrowserSignIn(provider, ssoCallbackURL()))) {
+        if (!(await beginBrowserSignIn(provider, ssoRedirects()))) {
           setError(startFailed)
           return
         }
@@ -278,7 +278,7 @@ export function AuthPage() {
         setNotice(browserSignInNotice)
         return
       }
-      const res = await start({ callbackURL: ssoCallbackURL(), errorCallbackURL: '/auth' })
+      const res = await start({ ...ssoRedirects(), errorCallbackURL: '/auth' })
       if (res.error) setError(res.error.message ?? startFailed)
     } finally {
       setBusy(false)
@@ -289,14 +289,14 @@ export function AuthPage() {
     return providerSignIn('oidc', (opts) => authClient.signIn.oauth2({ providerId: 'oidc', ...opts }))
   }
 
-  function socialSignIn(provider: 'google' | 'microsoft') {
+  function socialSignIn(provider: 'google' | 'microsoft' | 'apple') {
     return providerSignIn(provider, (opts) => authClient.signIn.social({ provider, ...opts }))
   }
 
   async function resendVerification() {
     setBusy(true)
     try {
-      await authClient.sendVerificationEmail({ email, callbackURL: '/' })
+      await authClient.sendVerificationEmail({ email, callbackURL: verifiedLanding() })
       setError(null)
       setUnverified(false)
       setNotice('Verification email sent — check your inbox.')
@@ -336,6 +336,7 @@ export function AuthPage() {
               name: name.trim() || email.split('@')[0] || email,
               email,
               password,
+              callbackURL: verifiedLanding(),
               ...(inviteToken ? { fetchOptions: { headers: { [INVITE_HEADER]: inviteToken } } } : {}),
             })
           : await authClient.signIn.email({ email, password })
@@ -367,17 +368,9 @@ export function AuthPage() {
         }
         posthog.capture(mode === 'signup' ? 'account_signed_up' : 'account_signed_in')
         setName(res.data.user.name) // keep cursor/feed identity in sync with the account
-        if (!resumeOAuthFlow() && mode === 'signup') {
-          /* land new users on their auto-created first canvas, where the
-             demo agent is waiting to perform */
-          try {
-            const canvases: { id: string; ownerId?: string }[] = await (await fetch('/api/canvases')).json()
-            const own = canvases.find((c) => c.ownerId)
-            if (own) location.href = `/c/${own.id}`
-          } catch {
-            /* fall through to the session-gated re-render */
-          }
-        }
+        /* land new users on their auto-created first canvas, where the
+           demo agent is waiting to perform */
+        if (!resumeOAuthFlow() && mode === 'signup') location.href = FIRST_CANVAS_PATH
       }
     } finally {
       setBusy(false)
@@ -386,18 +379,8 @@ export function AuthPage() {
 
   return (
     <AuthScreen>
-      <form
-        className="flex w-[min(400px,100%)] flex-col gap-3.5 rounded-[12px] border border-line bg-surface p-6 pt-[30px] shadow-pop sm:p-9 sm:pb-7"
-        onSubmit={submit}
-      >
-        <Wordmark className="mb-1.5" />
-        <h1 className="font-serif text-[34px] font-normal leading-[1.05] tracking-[-0.015em]">
-          {mode === 'signin' && 'Welcome back.'}
-          {mode === 'signup' && 'Create your account.'}
-          {mode === 'forgot' && 'Reset your password.'}
-          {mode === 'reset' && 'Pick a new password.'}
-        </h1>
-        <p className="mb-2 text-[14px] leading-[1.5] text-ink-soft">
+      <AuthCard as="form" title={TITLES[mode]} onSubmit={submit}>
+        <AuthCardText className="mb-2">
           {mode === 'forgot' ? (
             <>Enter your account email and we&rsquo;ll send you a reset link.</>
           ) : mode === 'reset' ? (
@@ -408,8 +391,8 @@ export function AuthPage() {
               {mode === 'signin' ? 'in to your canvases' : 'up to start designing'}.
             </>
           )}
-        </p>
-        {(oidc.enabled || oidc.google || oidc.microsoft) &&
+        </AuthCardText>
+        {(oidc.enabled || oidc.google || oidc.microsoft || oidc.apple) &&
           (mode === 'signin' || (mode === 'signup' && !inviteOnly)) && (
             <>
               {oidc.google && (
@@ -440,6 +423,20 @@ export function AuthPage() {
                   {mode === 'signup' ? 'Sign up' : 'Sign in'} with Microsoft
                 </Button>
               )}
+              {oidc.apple && (
+                <Button
+                  variant="default"
+                  size="lg"
+                  block
+                  className="border-line"
+                  type="button"
+                  onClick={() => socialSignIn('apple')}
+                  disabled={busy}
+                >
+                  <AppleMark />
+                  {mode === 'signup' ? 'Sign up' : 'Sign in'} with Apple
+                </Button>
+              )}
               {oidc.enabled && (
                 <Button
                   variant="default"
@@ -463,7 +460,7 @@ export function AuthPage() {
         {mode === 'signup' && (
           <Field label="Name" labelVariant="form">
             <Input
-              className={authInput}
+              variant="well"
               value={name}
               onChange={(e) => setNameField(e.target.value)}
               placeholder="Kevin"
@@ -474,7 +471,7 @@ export function AuthPage() {
         {mode !== 'reset' && (
           <Field label="Email" labelVariant="form">
             <Input
-              className={authInput}
+              variant="well"
               type="email"
               required
               value={email}
@@ -488,7 +485,7 @@ export function AuthPage() {
         {mode !== 'forgot' && (
           <Field label={mode === 'reset' ? 'New password' : 'Password'} labelVariant="form">
             <Input
-              className={authInput}
+              variant="well"
               type="password"
               required
               minLength={8}
@@ -502,8 +499,8 @@ export function AuthPage() {
         {mode === 'signin' && (
           <Button
             variant="link"
-            size="sm"
-            className="-mt-1.5 self-end px-0 py-0 text-xs font-normal text-ink-faint hover:text-ink"
+            size="inline"
+            className="-mt-1.5 self-end font-normal text-ink-faint hover:text-ink"
             onClick={() => switchMode('forgot')}
           >
             Forgot password?
@@ -516,8 +513,8 @@ export function AuthPage() {
             {suggestMode && (
               <Button
                 variant="link"
-                size="sm"
-                className="mt-1.5 block px-0 py-0 text-accent-ink underline underline-offset-[3px]"
+                size="inline"
+                className="mt-1.5 block text-accent-ink underline"
                 onClick={() => switchMode(suggestMode)}
               >
                 {suggestMode === 'signup' ? 'Create an account instead →' : 'Sign in instead →'}
@@ -526,8 +523,8 @@ export function AuthPage() {
             {unverified && (
               <Button
                 variant="link"
-                size="sm"
-                className="mt-1.5 block px-0 py-0 text-accent-ink underline underline-offset-[3px]"
+                size="inline"
+                className="mt-1.5 block text-accent-ink underline"
                 onClick={resendVerification}
                 disabled={busy}
               >
@@ -548,9 +545,9 @@ export function AuthPage() {
                   : 'Set new password'}
         </Button>
         {mode === 'signin' && !canSignUp ? (
-          <p className="p-1.5 text-center text-[13px] text-ink-faint">
+          <AuthCardText className="p-1.5 text-center text-[13px] text-ink-faint">
             No account yet? Ask an admin of this Doop for an invite link.
-          </p>
+          </AuthCardText>
         ) : (
           <Button
             variant="link"
@@ -561,7 +558,7 @@ export function AuthPage() {
             {mode === 'signin' ? 'No account yet? Sign up' : 'Have an account? Sign in'}
           </Button>
         )}
-      </form>
+      </AuthCard>
     </AuthScreen>
   )
 }

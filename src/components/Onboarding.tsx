@@ -139,7 +139,7 @@ export function Onboarding({ canvasId }: { canvasId: string }) {
           <SheetTrigger asChild>
             <Button
               variant="ghost"
-              className="absolute left-3 top-3 z-30 h-10 gap-2 rounded-full bg-surface px-3 text-xs font-semibold shadow-card"
+              className="pointer-events-auto absolute left-3 top-3 z-30 h-10 gap-2 rounded-full bg-surface px-3 text-xs font-semibold shadow-card"
             >
               <span className="text-brand">✦</span> Getting started
               <span className="font-mono text-[10px] text-ink-faint">{done}/2</span>
@@ -171,9 +171,11 @@ export function Onboarding({ canvasId }: { canvasId: string }) {
   }
 
   return (
-    <div className="absolute right-4 bottom-4 z-40 md:right-[72px] flex w-[300px] flex-col gap-2.5 rounded-[12px] border border-line bg-surface px-4 pt-3.5 pb-4 shadow-pop">
+    /* bottom left of the open canvas, beside the Layers panel and tool rail
+       (--chrome-left) — clear of the zoom control on the right */
+    <div className="pointer-events-auto absolute bottom-3.5 left-[var(--chrome-left,14px)] z-40 flex w-[300px] flex-col gap-2.5 rounded-[14px] bg-surface px-4 pt-3.5 pb-4 shadow-pop transition-[left] duration-150 max-md:right-4 max-md:bottom-4 max-md:left-auto">
       <header className="flex items-center justify-between">
-        <span className="font-display text-[14px] font-semibold tracking-[-0.01em]">Getting started</span>
+        <span className="text-[13px] font-medium">Getting started</span>
         <Button variant="bare" size="icon-sm" className="text-xs" onClick={dismiss} title="Dismiss">
           ✕
         </Button>
@@ -193,7 +195,7 @@ function Step({ done, label, children }: { done: boolean; label: string; childre
       </span>
       <div className="flex flex-col gap-[5px]">
         <span
-          className={cn('text-[13px] font-semibold', done ? 'text-ink-faint line-through decoration-1' : 'text-ink')}
+          className={cn('text-[12.5px] font-medium', done ? 'text-ink-faint line-through decoration-1' : 'text-ink')}
         >
           {label}
         </span>

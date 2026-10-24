@@ -15,7 +15,6 @@ import type {
   CanvasNote,
   CardScope,
   Canvas,
-  ChatMessage,
   DesignDecision,
   DomainGrant,
   ElementComment,
@@ -88,28 +87,7 @@ export async function saveCanvasCopy(c: Canvas): Promise<void> {
     await tx.insert(t.canvases).values({ id: c.id, ...canvasColumns(c), createdAt: c.createdAt })
 
     if (c.frames.length) {
-      await tx.insert(t.frames).values(
-        c.frames.map((frame) => ({
-          id: frame.id,
-          canvasId: frame.canvasId,
-          pageId: frame.pageId ?? null,
-          name: frame.name,
-          x: frame.x,
-          y: frame.y,
-          width: frame.width,
-          height: frame.height,
-          html: frame.html,
-          createdAt: frame.createdAt,
-          updatedAt: frame.updatedAt,
-          contentUpdatedAt: frame.contentUpdatedAt ?? null,
-          updatedBy: frame.updatedBy,
-          demo: frame.demo ?? null,
-          updatedByUserId: frame.updatedByUserId ?? null,
-          updatedByKind: frame.updatedByKind ?? null,
-          slide: frame.slide ?? null,
-          speakerNotes: frame.speakerNotes ?? null,
-        })),
-      )
+      await tx.insert(t.frames).values(c.frames.map(frameRow))
     }
 
     if (c.notes?.length) await tx.insert(t.canvasNotes).values(c.notes.map(noteRow))
@@ -327,6 +305,22 @@ export function saveProposal(canvasId: string, p: MemoryProposal) {
 const frameTimers = new Map<string, NodeJS.Timeout>()
 const FRAME_DEBOUNCE_MS = 400
 
+/** Persist a duplicated page as one unit: the canvas's new page list, every
+ * copied frame and every copied sticky note land together or not at all, so a
+ * copy is never half there after a crash. Like saveCanvasCopy, success means durable. */
+export async function savePageCopy(c: Canvas, frames: Frame[], notes: CanvasNote[] = []): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.update(t.canvases).set(canvasColumns(c)).where(eq(t.canvases.id, c.id))
+    if (!frames.length && !notes.length) return
+    if (frames.length) await tx.insert(t.frames).values(frames.map(frameRow))
+    if (notes.length) await tx.insert(t.canvasNotes).values(notes.map(noteRow))
+    const refs = frames.flatMap((frame) =>
+      [...extractAssetIds(frame.html)].map((assetId) => ({ assetId, frameId: frame.id })),
+    )
+    if (refs.length) await tx.insert(t.assetRefs).values(refs)
+  })
+}
+
 export function saveFrame(f: Frame, immediate = false) {
   const existing = frameTimers.get(f.id)
   if (existing) clearTimeout(existing)
@@ -344,8 +338,9 @@ export function saveFrame(f: Frame, immediate = false) {
   )
 }
 
-async function writeFrame(f: Frame) {
-  const row = {
+/** The frames row for a frame: every persisted field, in one place for the live write and both copy paths. */
+function frameRow(f: Frame) {
+  return {
     id: f.id,
     canvasId: f.canvasId,
     pageId: f.pageId ?? null,
@@ -359,15 +354,165 @@ async function writeFrame(f: Frame) {
     updatedAt: f.updatedAt,
     contentUpdatedAt: f.contentUpdatedAt ?? null,
     updatedBy: f.updatedBy,
-    demo: f.demo ?? null,
     updatedByUserId: f.updatedByUserId ?? null,
     updatedByKind: f.updatedByKind ?? null,
+    demo: f.demo ?? null,
     slide: f.slide ?? null,
     speakerNotes: f.speakerNotes ?? null,
+    hidden: f.hidden ?? null,
+    locked: f.locked ?? null,
   }
+}
+
+async function writeFrame(f: Frame) {
+  const row = frameRow(f)
   const { id, createdAt, ...set } = row
   await db.insert(t.frames).values(row).onConflictDoUpdate({ target: t.frames.id, set })
   await syncAssetRefs(f.id, f.html)
+}
+
+/* Frame design history: one row per burst boundary (see actions.ts), newest
+   kept to MAX_FRAME_VERSIONS per frame. Appends are fire-and-forget like every
+   other write; reads happen only when someone opens the history. */
+const MAX_FRAME_VERSIONS = 50
+
+/* A version write reads the newest row before it inserts, so a frame's
+   deletion must queue behind its pending writes (and they behind each
+   other), or a late insert could put back history the delete just removed.
+   One queue per frame; deleteCanvas waits for every frame of the canvas. */
+const versionWrites = new Map<string, { canvasId: string; queued: Promise<unknown> }>()
+
+function queueVersionWrite(frameId: string, canvasId: string, work: () => Promise<unknown>) {
+  const previous = versionWrites.get(frameId)?.queued ?? Promise.resolve()
+  const queued = previous.then(work, work)
+  versionWrites.set(frameId, { canvasId, queued })
+  swallow(queued.finally(() => versionWrites.get(frameId)?.queued === queued && versionWrites.delete(frameId)))
+}
+
+export function saveFrameVersion(version: FrameVersion) {
+  queueVersionWrite(version.frameId, version.canvasId, () => appendFrameVersion(version))
+}
+
+/** Settles once every queued version write the filter picks has landed. */
+function pendingVersionWrites(pick: (frameId: string, canvasId: string) => boolean) {
+  const queued = [...versionWrites].filter(([frameId, e]) => pick(frameId, e.canvasId)).map(([, e]) => e.queued)
+  return Promise.allSettled(queued)
+}
+
+async function appendFrameVersion(version: FrameVersion) {
+  /* a burst that ended where it began (an edit typed and reverted) would
+     snapshot the same state twice — the newest row already holds it. Size
+     counts: the same document at another frame size is a state of its own */
+  const [latest] = await db
+    .select({ html: t.frameVersions.html, width: t.frameVersions.width, height: t.frameVersions.height })
+    .from(t.frameVersions)
+    .where(eq(t.frameVersions.frameId, version.frameId))
+    .orderBy(desc(t.frameVersions.savedAt))
+    .limit(1)
+  if (latest && latest.html === version.html && latest.width === version.width && latest.height === version.height)
+    return
+  await db.insert(t.frameVersions).values({
+    id: version.id,
+    frameId: version.frameId,
+    canvasId: version.canvasId,
+    html: version.html,
+    width: version.width,
+    height: version.height,
+    savedAt: version.savedAt,
+    savedBy: version.savedBy,
+    savedByKind: version.savedByKind ?? null,
+    name: version.name ?? null,
+    reason: version.reason ?? null,
+  })
+  const excess = await db
+    .select({ id: t.frameVersions.id })
+    .from(t.frameVersions)
+    .where(eq(t.frameVersions.frameId, version.frameId))
+    .orderBy(desc(t.frameVersions.savedAt))
+    .offset(MAX_FRAME_VERSIONS)
+  if (excess.length) {
+    await db.delete(t.frameVersions).where(
+      inArray(
+        t.frameVersions.id,
+        excess.map((e) => e.id),
+      ),
+    )
+  }
+}
+
+function frameVersionKind(kind: string | null): ActorKind | undefined {
+  return kind === 'user' || kind === 'agent' ? kind : undefined
+}
+
+function frameVersionReason(reason: string | null): FrameVersion['reason'] {
+  return reason === 'agent' || reason === 'human' || reason === 'restore' ? reason : undefined
+}
+
+/** The optional fields of a version row: the frame's name in that state and why it was filed. */
+function frameVersionExtras(row: { name: string | null; reason: string | null }) {
+  const reason = frameVersionReason(row.reason)
+  return { ...(row.name != null ? { name: row.name } : {}), ...(reason ? { reason } : {}) }
+}
+
+/** Newest first, without the HTML — the list stays light however large the
+ *  designs are; `getFrameVersion` fetches one in full. */
+export async function listFrameVersions(frameId: string): Promise<FrameVersionInfo[]> {
+  /* a replace files its version behind the response; the list that follows
+     it must show it */
+  await pendingVersionWrites((id) => id === frameId)
+  const rows = await db
+    .select({
+      id: t.frameVersions.id,
+      frameId: t.frameVersions.frameId,
+      canvasId: t.frameVersions.canvasId,
+      width: t.frameVersions.width,
+      height: t.frameVersions.height,
+      savedAt: t.frameVersions.savedAt,
+      savedBy: t.frameVersions.savedBy,
+      savedByKind: t.frameVersions.savedByKind,
+      name: t.frameVersions.name,
+      reason: t.frameVersions.reason,
+      htmlBytes: sql<number>`length(${t.frameVersions.html})`,
+    })
+    .from(t.frameVersions)
+    .where(eq(t.frameVersions.frameId, frameId))
+    .orderBy(desc(t.frameVersions.savedAt))
+  return rows.map((row) => ({
+    id: row.id,
+    frameId: row.frameId,
+    canvasId: row.canvasId,
+    width: row.width,
+    height: row.height,
+    savedAt: row.savedAt,
+    savedBy: row.savedBy,
+    savedByKind: frameVersionKind(row.savedByKind),
+    htmlBytes: Number(row.htmlBytes),
+    ...frameVersionExtras(row),
+  }))
+}
+
+/** One version in full; undefined when the id is unknown OR belongs to
+ *  another frame, so a caller can never read across frames by id alone. */
+export async function getFrameVersion(frameId: string, versionId: string): Promise<FrameVersion | undefined> {
+  const [row] = await db
+    .select()
+    .from(t.frameVersions)
+    .where(and(eq(t.frameVersions.id, versionId), eq(t.frameVersions.frameId, frameId)))
+    .limit(1)
+  if (!row) return undefined
+  return {
+    id: row.id,
+    frameId: row.frameId,
+    canvasId: row.canvasId,
+    width: row.width,
+    height: row.height,
+    savedAt: row.savedAt,
+    savedBy: row.savedBy,
+    savedByKind: frameVersionKind(row.savedByKind),
+    htmlBytes: row.html.length,
+    ...frameVersionExtras(row),
+    html: row.html,
+  }
 }
 
 /* asset_refs is a projection of frame HTML: recompute this frame's full ref
@@ -400,15 +545,18 @@ export function deleteCanvas(canvasId: string) {
   swallow(db.delete(t.tasks).where(eq(t.tasks.canvasId, canvasId)))
   swallow(db.delete(t.feedback).where(eq(t.feedback.canvasId, canvasId)))
   swallow(db.delete(t.comments).where(eq(t.comments.canvasId, canvasId)))
-  swallow(db.delete(t.chatMessages).where(eq(t.chatMessages.canvasId, canvasId)))
   swallow(db.delete(t.activity).where(eq(t.activity.canvasId, canvasId)))
   swallow(db.delete(t.guidelines).where(eq(t.guidelines.canvasId, canvasId)))
   swallow(db.delete(t.guidelineVersions).where(eq(t.guidelineVersions.canvasId, canvasId)))
+  swallow(
+    pendingVersionWrites((_, c) => c === canvasId).then(() =>
+      db.delete(t.frameVersions).where(eq(t.frameVersions.canvasId, canvasId)),
+    ),
+  )
   swallow(db.delete(t.memoryReferences).where(eq(t.memoryReferences.canvasId, canvasId)))
   swallow(db.delete(t.decisions).where(eq(t.decisions.canvasId, canvasId)))
   swallow(db.delete(t.memoryProposals).where(eq(t.memoryProposals.canvasId, canvasId)))
   swallow(db.delete(t.canvasMembers).where(eq(t.canvasMembers.canvasId, canvasId)))
-  swallow(db.delete(t.frameVersions).where(eq(t.frameVersions.canvasId, canvasId)))
   swallow(db.delete(t.frameSeen).where(eq(t.frameSeen.canvasId, canvasId)))
   swallow(db.delete(t.canvasVisits).where(eq(t.canvasVisits.canvasId, canvasId)))
   swallow(db.delete(t.canvasDomainGrants).where(eq(t.canvasDomainGrants.canvasId, canvasId)))
@@ -425,7 +573,9 @@ export function deleteFrame(frameId: string) {
   }
   swallow(db.delete(t.frames).where(eq(t.frames.id, frameId)))
   swallow(db.delete(t.assetRefs).where(eq(t.assetRefs.frameId, frameId)))
-  swallow(db.delete(t.frameVersions).where(eq(t.frameVersions.frameId, frameId)))
+  queueVersionWrite(frameId, versionWrites.get(frameId)?.canvasId ?? '', () =>
+    db.delete(t.frameVersions).where(eq(t.frameVersions.frameId, frameId)),
+  )
   swallow(db.delete(t.frameSeen).where(eq(t.frameSeen.frameId, frameId)))
 }
 
@@ -543,9 +693,12 @@ export function saveComment(c: ElementComment) {
   const row = {
     id: c.id,
     canvasId: c.canvasId,
-    frameId: c.frameId,
+    frameId: c.frameId ?? null,
     selector: c.selector,
     snippet: c.snippet,
+    pageId: c.pageId ?? null,
+    x: c.x ?? null,
+    y: c.y ?? null,
     fromName: c.from,
     fromUserId: c.fromUserId ?? null,
     text: c.text,
@@ -582,31 +735,6 @@ export function saveComment(c: ElementComment) {
   )
 }
 
-export function saveChat(m: ChatMessage) {
-  swallow(
-    db.insert(t.chatMessages).values({
-      id: m.id,
-      canvasId: m.canvasId,
-      fromName: m.from,
-      fromKind: m.fromKind,
-      fromUserId: m.fromUserId ?? null,
-      color: m.color,
-      text: m.text,
-      at: m.at,
-      mentions: m.mentions?.length ? m.mentions.join(',') : null,
-      taskId: m.taskId ?? null,
-      replyToId: m.replyToId ?? null,
-    }),
-  )
-}
-
-/** Messages that fell off the in-memory cap leave the table too, so the
- *  history stays bounded on disk and boot never reads more than it keeps. */
-export function deleteChat(ids: string[]) {
-  if (ids.length === 0) return
-  swallow(db.delete(t.chatMessages).where(inArray(t.chatMessages.id, ids)))
-}
-
 export function saveActivity(canvasId: string, item: ActivityItem) {
   swallow(
     db.insert(t.activity).values({
@@ -623,7 +751,7 @@ export function saveActivity(canvasId: string, item: ActivityItem) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Review state, frame history, sharing grants and notes               */
+/* Review state, sharing grants and notes                              */
 /* ------------------------------------------------------------------ */
 
 /** "Changed since you were here": record that a user has seen a frame at
@@ -681,60 +809,6 @@ export async function getCanvasVisit(userId: string, canvasId: string): Promise<
 export async function ensureCanvasVisit(userId: string, canvasId: string, now: number): Promise<number> {
   await db.insert(t.canvasVisits).values({ userId, canvasId, baselineAt: now }).onConflictDoNothing()
   return (await getCanvasVisit(userId, canvasId)) ?? now
-}
-
-/* Append-only frame history, capped per frame like the guideline history. */
-export const MAX_FRAME_VERSIONS = 50
-
-export function saveFrameVersion(v: FrameVersion): Promise<void> {
-  return settled(appendFrameVersion(v))
-}
-
-async function appendFrameVersion(v: FrameVersion) {
-  await db.insert(t.frameVersions).values(v)
-  const excess = await db
-    .select({ id: t.frameVersions.id })
-    .from(t.frameVersions)
-    .where(eq(t.frameVersions.frameId, v.frameId))
-    .orderBy(desc(t.frameVersions.savedAt))
-    .offset(MAX_FRAME_VERSIONS)
-  if (excess.length) {
-    await db.delete(t.frameVersions).where(
-      inArray(
-        t.frameVersions.id,
-        excess.map((e) => e.id),
-      ),
-    )
-  }
-}
-
-/** Newest first, without the HTML. Cold path — read straight from the database on demand. */
-export async function listFrameVersions(frameId: string): Promise<FrameVersionInfo[]> {
-  const rows = await db
-    .select({
-      id: t.frameVersions.id,
-      frameId: t.frameVersions.frameId,
-      canvasId: t.frameVersions.canvasId,
-      name: t.frameVersions.name,
-      width: t.frameVersions.width,
-      height: t.frameVersions.height,
-      savedAt: t.frameVersions.savedAt,
-      savedBy: t.frameVersions.savedBy,
-      reason: t.frameVersions.reason,
-    })
-    .from(t.frameVersions)
-    .where(eq(t.frameVersions.frameId, frameId))
-    .orderBy(desc(t.frameVersions.savedAt))
-  return rows.map((row) => ({ ...row, reason: row.reason as FrameVersion['reason'] }))
-}
-
-export async function getFrameVersion(id: string): Promise<FrameVersion | undefined> {
-  const [row] = await db.select().from(t.frameVersions).where(eq(t.frameVersions.id, id))
-  return row && { ...row, reason: row.reason as FrameVersion['reason'] }
-}
-
-export function deleteFrameVersions(frameId: string): Promise<void> {
-  return settled(db.delete(t.frameVersions).where(eq(t.frameVersions.frameId, frameId)))
 }
 
 /* Sharing by email domain. Hot path: hydrated into the store at boot. */
@@ -853,7 +927,8 @@ export function deleteNote(id: string): Promise<void> {
   return settled(db.delete(t.canvasNotes).where(eq(t.canvasNotes.id, id)))
 }
 
-/** Flush pending debounced frame writes (called on shutdown). */
+/** Flush pending debounced frame writes and queued version writes (called
+ *  on shutdown): a design must not survive a restart without its history. */
 export async function flush(getFrame: (id: string) => Frame | undefined): Promise<void> {
   const ids = [...frameTimers.keys()]
   for (const [, timer] of frameTimers) clearTimeout(timer)
@@ -864,6 +939,7 @@ export async function flush(getFrame: (id: string) => Frame | undefined): Promis
       return f ? writeFrame(f) : Promise.resolve()
     }),
   )
+  await pendingVersionWrites(() => true)
 }
 
 /* ------------------------------------------------------------------ */
@@ -875,7 +951,6 @@ export interface Hydrated {
   tasks: Map<string, AgentTask[]> // canvasId -> newest first
   feedback: Map<string, TaskFeedback[]>
   comments: Map<string, ElementComment[]>
-  chat: Map<string, ChatMessage[]>
   activity: Map<string, ActivityItem[]>
   decisions: Map<string, DesignDecision[]>
   proposals: Map<string, MemoryProposal[]>
@@ -886,8 +961,6 @@ export interface Hydrated {
 }
 
 const LOG_CAP = 100
-/** the chat keeps more history than the other logs — it is the conversation */
-export const CHAT_LOG_CAP = 300
 
 /** 'none' and anything unrecognised read as unset: private is the default. */
 function linkAccessFromColumn(value: string | null): LinkAccess | undefined {
@@ -914,6 +987,8 @@ function frameFromRow(f: typeof t.frames.$inferSelect): Frame {
     ...(f.demo != null ? { demo: f.demo } : {}),
     ...(f.slide != null ? { slide: f.slide } : {}),
     ...(f.speakerNotes != null ? { speakerNotes: f.speakerNotes } : {}),
+    ...(f.hidden != null ? { hidden: f.hidden } : {}),
+    ...(f.locked != null ? { locked: f.locked } : {}),
   }
 }
 
@@ -944,7 +1019,6 @@ export async function hydrate(): Promise<Hydrated> {
     taskRows,
     feedbackRows,
     commentRows,
-    chatRows,
     activityRows,
     guidelineRows,
     referenceRows,
@@ -959,7 +1033,6 @@ export async function hydrate(): Promise<Hydrated> {
     db.select().from(t.tasks).orderBy(desc(t.tasks.startedAt)),
     db.select().from(t.feedback).orderBy(desc(t.feedback.at)),
     db.select().from(t.comments).orderBy(desc(t.comments.at)),
-    db.select().from(t.chatMessages).orderBy(desc(t.chatMessages.at)),
     db.select().from(t.activity).orderBy(desc(t.activity.at)),
     db.select().from(t.guidelines).orderBy(t.guidelines.name),
     db.select().from(t.memoryReferences).orderBy(desc(t.memoryReferences.pinnedAt)),
@@ -1127,9 +1200,12 @@ export async function hydrate(): Promise<Hydrated> {
     list.push({
       id: row.id,
       canvasId: row.canvasId,
-      frameId: row.frameId,
+      ...(row.frameId != null ? { frameId: row.frameId } : {}),
       selector: row.selector,
       snippet: row.snippet,
+      ...(row.pageId != null ? { pageId: row.pageId } : {}),
+      ...(row.x != null ? { x: row.x } : {}),
+      ...(row.y != null ? { y: row.y } : {}),
       from: row.fromName,
       ...(row.fromUserId != null ? { fromUserId: row.fromUserId } : {}),
       text: row.text,
@@ -1148,26 +1224,6 @@ export async function hydrate(): Promise<Hydrated> {
       ...(row.mentions ? { mentions: row.mentions.split(',').filter(Boolean) } : {}),
     })
     comments.set(row.canvasId, list)
-  }
-
-  const chat = new Map<string, ChatMessage[]>()
-  for (const row of chatRows) {
-    const list = chat.get(row.canvasId) ?? []
-    if (list.length >= CHAT_LOG_CAP) continue
-    list.push({
-      id: row.id,
-      canvasId: row.canvasId,
-      from: row.fromName,
-      fromKind: row.fromKind === 'agent' ? 'agent' : 'user',
-      ...(row.fromUserId != null ? { fromUserId: row.fromUserId } : {}),
-      color: row.color,
-      text: row.text,
-      at: row.at,
-      ...(row.mentions ? { mentions: row.mentions.split(',') } : {}),
-      ...(row.taskId != null ? { taskId: row.taskId } : {}),
-      ...(row.replyToId != null ? { replyToId: row.replyToId } : {}),
-    })
-    chat.set(row.canvasId, list)
   }
 
   const activity = new Map<string, ActivityItem[]>()
@@ -1223,7 +1279,7 @@ export async function hydrate(): Promise<Hydrated> {
     proposals.set(row.canvasId, list)
   }
 
-  return { canvases, tasks, feedback, comments, chat, activity, decisions, proposals, domainGrants, linkPasswordHashes }
+  return { canvases, tasks, feedback, comments, activity, decisions, proposals, domainGrants, linkPasswordHashes }
 }
 
 /** One-time import of the pre-DB data/store.json so existing canvases survive. */

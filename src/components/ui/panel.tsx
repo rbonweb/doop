@@ -16,7 +16,7 @@ import { XIcon } from './icons'
 const panelVariants = cva('flex min-w-0 flex-col overflow-hidden bg-surface', {
   variants: {
     surface: {
-      floating: 'chrome-layer absolute z-[35] rounded-[14px] border border-line shadow-pop',
+      floating: 'chrome-layer pointer-events-auto absolute z-[35] rounded-panel shadow-float',
       /* filling a Sheet: no chrome of its own, the sheet provides it */
       inline: 'h-full w-full rounded-none border-0 shadow-none',
     },
@@ -28,13 +28,14 @@ function Panel({ className, surface, ...props }: React.ComponentProps<'div'> & V
   return <div data-slot="panel" className={cn(panelVariants({ surface, className }))} {...props} />
 }
 
-/** Sticky header: title or tabs on the left, actions on the right. */
+/** Sticky header: title or tabs on the left, actions on the right. Sentence
+ *  case in the UI sans — the white system has no uppercase mono headers. */
 function PanelHeader({ className, ...props }: React.ComponentProps<'header'>) {
   return (
     <header
       data-slot="panel-header"
       className={cn(
-        'sticky top-0 z-[2] flex shrink-0 items-center justify-between gap-1 border-b border-line-soft bg-surface px-4 py-[13px] font-mono text-[11.5px] font-medium uppercase tracking-[0.1em] text-ink-soft',
+        'sticky top-0 z-[2] flex h-[42px] shrink-0 items-center justify-between gap-2 border-b border-line-soft bg-surface pr-2.5 pl-3.5 text-[12.5px] font-medium text-ink',
         className,
       )}
       {...props}
@@ -52,8 +53,8 @@ function PanelBody({ className, ...props }: React.ComponentProps<'div'>) {
   )
 }
 
-/** The uppercase tab strip some panel headers carry instead of a title. Goes
- *  inside a <PanelTabsRoot> together with the PanelTabPanels it switches. */
+/** The tab strip some panel headers carry instead of a title. Goes inside a
+ *  <PanelTabsRoot> together with the PanelTabPanels it switches. */
 function PanelTabsRoot({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.Root>) {
   return (
     <TabsPrimitive.Root
@@ -70,18 +71,57 @@ function PanelTabs({ className, ...props }: React.ComponentProps<typeof TabsPrim
   return <TabsPrimitive.List data-slot="panel-tabs" className={cn('flex min-w-0 gap-0.5', className)} {...props} />
 }
 
-function PanelTab({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.Trigger>) {
+/* forwards its ref so a Tooltip can anchor on an icon-only tab */
+const PanelTab = React.forwardRef<
+  React.ComponentRef<typeof TabsPrimitive.Trigger>,
+  React.ComponentProps<typeof TabsPrimitive.Trigger>
+>(function PanelTab({ className, ...props }, ref) {
   return (
     <TabsPrimitive.Trigger
+      ref={ref}
       data-slot="panel-tab"
       className={cn(
-        'rounded-sm px-[7px] py-[3px] font-mono text-[11px] font-medium uppercase tracking-[0.07em] text-ink-faint transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ink data-[state=active]:bg-paper-deep data-[state=active]:text-ink',
+        'inline-flex h-[26px] items-center gap-[7px] whitespace-nowrap rounded-[8px] px-2 text-[12px] text-ink-soft transition-colors hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ink data-[state=active]:bg-paper-deep data-[state=active]:font-medium data-[state=active]:text-ink',
         className,
       )}
       {...props}
     />
   )
-}
+})
+
+/** A tab with an icon, and a label that unfolds beside it while the tab is the
+ *  active one (an icon strip). The label stays in the DOM when folded, so
+ *  the tab keeps its accessible name; `title` covers the sighted hover. */
+const PanelIconTab = React.forwardRef<
+  HTMLButtonElement,
+  React.ComponentProps<typeof TabsPrimitive.Trigger> & {
+    icon: React.ReactNode
+    /** a count pinned to the tab's corner, outside the folding label */
+    badge?: React.ReactNode
+  }
+>(function PanelIconTab({ className, icon, badge, children, ...props }, ref) {
+  return (
+    <TabsPrimitive.Trigger
+      ref={ref}
+      data-slot="panel-icon-tab"
+      className={cn(
+        'group relative inline-flex h-[26px] shrink-0 items-center rounded-[8px] px-2 font-sans text-[12px] font-normal normal-case tracking-normal text-ink-soft transition-[background-color,color] duration-200 hover:bg-paper-deep/60 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ink data-[state=active]:bg-paper-deep data-[state=active]:font-medium data-[state=active]:text-ink motion-reduce:transition-none',
+        className,
+      )}
+      {...props}
+    >
+      <span className="grid size-3.5 shrink-0 place-items-center [&>svg]:size-3.5">{icon}</span>
+      {/* a 0fr → 1fr grid track is the one width animation CSS can run without
+          knowing the label's width */}
+      <span className="grid grid-cols-[0fr] opacity-0 transition-[grid-template-columns,opacity] duration-200 ease-out group-data-[state=active]:grid-cols-[1fr] group-data-[state=active]:opacity-100 motion-reduce:transition-none">
+        <span className="min-w-0 overflow-hidden">
+          <span className="block whitespace-nowrap pl-[7px]">{children}</span>
+        </span>
+      </span>
+      {badge}
+    </TabsPrimitive.Trigger>
+  )
+})
 
 function PanelTabPanel({ className, ...props }: React.ComponentProps<typeof TabsPrimitive.Content>) {
   return (
@@ -100,7 +140,7 @@ function PanelDisclosure({ className, ...props }: React.ComponentProps<typeof Co
     <CollapsibleTrigger
       data-slot="panel-disclosure"
       className={cn(
-        'w-full border-t border-line-soft bg-transparent px-3.5 py-2.5 font-mono text-[11.5px] text-ink-faint hover:text-ink',
+        'flex w-full items-center gap-2 border-t border-line-soft bg-transparent px-3 py-2.5 text-left text-[12px] text-ink-soft hover:text-ink',
         className,
       )}
       {...props}
@@ -122,10 +162,10 @@ function PanelClose({
         variant="bare"
         size="icon-sm"
         aria-label={label}
-        className={cn('shrink-0 text-ink-faint hover:bg-paper-deep hover:text-ink', className)}
+        className={cn('size-7 shrink-0 rounded-[7px] text-ink-faint hover:bg-paper-deep hover:text-ink', className)}
         {...props}
       >
-        <XIcon className="size-[13px]" strokeWidth={2.2} />
+        <XIcon className="size-3.5" />
       </Button>
     </Tooltip>
   )
@@ -138,6 +178,7 @@ export {
   PanelTabsRoot,
   PanelTabs,
   PanelTab,
+  PanelIconTab,
   PanelTabPanel,
   PanelClose,
   PanelDisclosure,

@@ -15,8 +15,13 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   test: {
     setupFiles: ['tests/setup.ts'],
-    /* agent worktrees under .claude/ are full repo copies; their tests are not this checkout's */
-    exclude: ['**/node_modules/**', '**/dist/**', '.claude/**'],
+    globalSetup: ['tests/globalSetup.ts'],
+    /* seven files drive a real Chromium; closing one under a full parallel
+       run can outlast the 10s default */
+    hookTimeout: 30_000,
+    /* agent worktrees live under .claude/ inside the repo; their copies of the
+       suite must not run as ours */
+    exclude: ['**/node_modules/**', '**/dist/**', '**/.claude/**'],
   },
   resolve: {
     alias: {

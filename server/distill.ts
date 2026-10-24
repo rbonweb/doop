@@ -1,3 +1,4 @@
+import { env } from './env.ts'
 import Anthropic from '@anthropic-ai/sdk'
 import { store } from './store.ts'
 import * as actions from './actions.ts'
@@ -22,7 +23,7 @@ const MAX_WINDOW = 15
 let client: Anthropic | null = null
 
 function getClient(): Anthropic | null {
-  if (!process.env.ANTHROPIC_API_KEY) return null
+  if (!env.ANTHROPIC_API_KEY) return null
   if (!client) client = new Anthropic()
   return client
 }

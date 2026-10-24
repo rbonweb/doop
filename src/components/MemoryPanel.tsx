@@ -318,8 +318,9 @@ function GuideModal({ canvasId, name, onClose }: { canvasId: string; name: strin
           <>
             <ModalTitle className="sr-only">{creating ? 'New rule' : 'Edit rule'}</ModalTitle>
             <Input
+              variant="well"
               inputSize="lg"
-              className="rounded-[10px] bg-paper font-display font-extrabold focus:ring-0 md:text-[19px]"
+              className="font-display font-extrabold md:text-[19px]"
               autoFocus={creating}
               placeholder="Name, e.g. “Featured Images”"
               value={titleDraft}

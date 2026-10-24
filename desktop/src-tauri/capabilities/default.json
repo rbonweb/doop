@@ -27,6 +27,8 @@
     "allow-claude-login",
     "allow-claude-install",
     "allow-claude-run",
-    "allow-claude-stop"
+    "allow-claude-stop",
+    "allow-claude-add-extension",
+    "allow-codex-add-mcp"
   ]
 }

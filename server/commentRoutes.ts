@@ -13,6 +13,8 @@ commentAnchorRouter.patch('/:id/anchor', (req, res) => {
   if (!found) return res.status(404).json({ error: 'comment not found' })
   /* healing rewrites the stored pin, so it takes the right to comment, not just to look */
   if (!requireCanvas(req, res, found.canvasId, 'comment')) return
+  /* a canvas comment is pinned to a point, not an element: nothing to heal */
+  if (!found.frameId) return res.status(400).json({ error: 'a canvas comment has no element to re-anchor' })
   const selector: unknown = req.body?.selector
   if (typeof selector !== 'string' || !selector.trim() || selector.length > actions.MAX_SELECTOR_LENGTH) {
     return res.status(400).json({ error: `selector must be a string of 1-${actions.MAX_SELECTOR_LENGTH} characters` })

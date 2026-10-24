@@ -5,7 +5,6 @@ import type { WebhookDeliveryResult, WebhookEventType, WebhookInfo } from '../..
 import type {
   AccessRequestInfo,
   ActivityItem,
-  ChatMessage,
   Canvas,
   CanvasMeta,
   CanvasNote,
@@ -401,6 +400,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ password }),
     }),
+  guestCanvasComment: (canvasId: string, input: { pageId: string; x: number; y: number; text: string; name: string }) =>
+    req<PostedComment>(`/api/public/canvases/${canvasId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
   guestComment: (frameId: string, input: { selector: string; snippet: string; text: string; name: string }) =>
     req<PostedComment>(`/api/public/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
   guestReply: (commentId: string, text: string, name: string) =>
@@ -486,6 +487,15 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ pages, expectedPages }),
     }),
+  duplicatePage: (canvasId: string, pageId: string) =>
+    req<{
+      page: import('../../shared/types').CanvasPageInfo
+      pages: import('../../shared/types').CanvasPageInfo[]
+      /** every page made: the copy and, for a page with sub-pages, the copies of its subtree */
+      copiedPages?: import('../../shared/types').CanvasPageInfo[]
+      frames: Frame[]
+      notes?: import('../../shared/types').CanvasNote[]
+    }>(`/api/canvases/${canvasId}/pages/${pageId}/duplicate`, { method: 'POST' }),
   createFrame: (canvasId: string, input: Partial<Frame> & { name: string }) =>
     req<Frame>(`/api/canvases/${canvasId}/frames`, {
       method: 'POST',
@@ -496,15 +506,26 @@ export const api = {
         actor: actor(),
       }),
     }),
-  updateFrame: (frameId: string, patch: Partial<Frame>) =>
-    req<Frame>('/api/frames/' + frameId, { method: 'PATCH', body: JSON.stringify({ ...patch, actor: actor() }) }),
+  updateFrame: (frameId: string, patch: Partial<Frame>, expectedUpdatedAt?: number) =>
+    req<Frame>('/api/frames/' + frameId, {
+      method: 'PATCH',
+      body: JSON.stringify({ ...patch, expectedUpdatedAt, actor: actor() }),
+    }),
+  deleteFrame: (frameId: string, expectedUpdatedAt?: number) =>
+    req('/api/frames/' + frameId, { method: 'DELETE', body: JSON.stringify({ expectedUpdatedAt, actor: actor() }) }),
+  /* design history: the states earlier edits replaced, newest first (no HTML) */
   frameVersions: (frameId: string) => req<FrameVersionInfo[]>(`/api/frames/${frameId}/versions`),
   frameVersion: (frameId: string, versionId: string) =>
     req<FrameVersion>(`/api/frames/${frameId}/versions/${versionId}`),
+  /* `replaced` is the complete state the server swapped out — the undo copy */
   restoreFrameVersion: (frameId: string, versionId: string) =>
-    req<Frame>(`/api/frames/${frameId}/versions/${versionId}/restore`, { method: 'POST' }),
-  deleteFrame: (frameId: string) =>
-    req('/api/frames/' + frameId, { method: 'DELETE', body: JSON.stringify({ actor: actor() }) }),
+    req<{ frame: Frame; replaced: Pick<Frame, 'html' | 'width' | 'height'> }>(
+      `/api/frames/${frameId}/versions/${versionId}/restore`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ actor: actor() }),
+      },
+    ),
   createNote: (canvasId: string, input: NoteDraft) =>
     req<CanvasNote>(`/api/canvases/${canvasId}/notes`, { method: 'POST', body: JSON.stringify(input) }),
   updateNote: (noteId: string, patch: NotePatch) =>
@@ -556,12 +577,15 @@ export const api = {
     req(`/api/canvases/${canvasId}/cards/${cardId}/done`, { method: 'POST' }),
   retryCard: (canvasId: string, cardId: string) =>
     req(`/api/canvases/${canvasId}/cards/${cardId}/retry`, { method: 'POST' }),
-  sendChat: (canvasId: string, text: string) =>
-    req<ChatMessage>(`/api/canvases/${canvasId}/chat`, { method: 'POST', body: JSON.stringify({ text }) }),
   addComment: (
     frameId: string,
     input: { selector: string; snippet: string; text: string; anchor?: CommentAnchor; mentions?: string[] },
   ) => req<PostedComment>(`/api/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
+  /** a comment pinned to a point on the canvas (world coordinates on a page) rather than to an element */
+  addCanvasComment: (
+    canvasId: string,
+    input: { pageId: string; x: number; y: number; text: string; mentions?: string[] },
+  ) => req<PostedComment>(`/api/canvases/${canvasId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
   replyComment: (commentId: string, text: string, mentions?: string[]) =>
     req<PostedComment>(`/api/comments/${commentId}/replies`, {
       method: 'POST',

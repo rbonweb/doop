@@ -1,3 +1,4 @@
+import { env } from './env.ts'
 import type Anthropic from '@anthropic-ai/sdk'
 import { store } from './store.ts'
 import { ModelAuthError, ModelConfigurationError, ModelUnavailableError, pickModel } from './agentModel.ts'
@@ -10,18 +11,19 @@ import * as imageSearch from './imageSearch.ts'
 import * as imageGen from './imageGen.ts'
 import * as assets from './assets.ts'
 import * as backgrounds from './backgrounds.ts'
-import { PUBLIC_ORIGIN } from './auth.ts'
 import * as ingest from './ingest.ts'
 import { viewWebsite, referencedUrls } from './website.ts'
 import { createImportedWebpageFrame, findImportedWebpageFrame } from './webpageImport.ts'
 import { DESIGN_BRIEF, DESIGN_QUALITY } from './guide.ts'
 import { describeInspiration, INSPIRATION_USAGE_NOTE, searchInspiration } from './inspiration.ts'
-import type { Actor, AgentTask, Frame } from '../shared/types.ts'
+import type { Actor, AgentTask, Canvas, ElementComment, Frame } from '../shared/types.ts'
+import { canvasPages, framePageId, pageFrames } from '../shared/pages.ts'
+import { isCanvasComment } from '../shared/comments.ts'
 import { websiteAccessErrorMessage } from './websiteAccess.ts'
 import { executeGuardedBatch } from './guardedBatch.ts'
 import { runRepoCards } from './githubRecon.ts'
 import { retryModelTurn } from './modelTurnRetry.ts'
-import { sanitizeInline, untrustedBlock } from './promptSafety.ts'
+import { sanitizeInline, sanitizeUntrusted, untrustedBlock } from './promptSafety.ts'
 import { cardsSection, commentsSection, feedbackSection, guidelinesText, inlineCode, quoted } from './residentPrompt.ts'
 import type { FeedbackItem } from './residentPrompt.ts'
 
@@ -109,6 +111,7 @@ Rules:
 - Choose a size-aware strategy. For documents over 60,000 characters, call inspect_frame before reading HTML. Use get_frame_html with a query or bounded range only when markup is needed.
 - For requests to copy, match, or borrow another frame's design: screenshot and inspect BOTH the target and reference before editing. Use the reference screenshot and computed design tokens as the source of visual truth. Read target HTML only when you need to preserve its content; do not load a large reference document just to learn its style. For a full redesign, use begin_frame_rewrite, append_frame_rewrite in chunks under 12,000 characters, and commit_frame_rewrite; then screenshot the changed frame.
 - Element comments are pinned to ONE element (you get its CSS selector and an HTML excerpt). Change that element or its immediate context — never rework unrelated parts of the frame because of an element comment.
+- Canvas comments are pinned to a point on the page, not to an element (you get the point and the frames nearest to it). The request is about what sits around that point: edit those frames in place, or add a new frame near the point when the comment asks for something new — never rework the whole page because of a canvas comment.
 - Frames are complete HTML documents with inline CSS. Keep each frame's existing style and structure; change what the feedback requires.
 - Prefer edit_frame_html (exact find/replace) for small changes; use set_frame_html only when the change is structural.
 - After any visual change, call screenshot_frame and LOOK at the result. If it doesn't clearly satisfy the feedback, fix it before finishing.
@@ -151,6 +154,67 @@ interface RunState {
   payerId?: string
   /** images actually produced in this run — capped, since each one spends the payer's quota or money */
   imagesGenerated: number
+  /** where a new frame goes unless the model says otherwise: the page (and,
+   *  for a canvas comment, the point) of the comment this run is about */
+  placement?: FramePlacement
+}
+
+export interface FramePlacement {
+  pageId: string
+  /** a canvas comment's pin — a new frame lands beside it */
+  near?: { x: number; y: number }
+}
+
+/** The page a comment's work belongs on, and the point it was pinned to
+ *  when it is a canvas comment. A reply inherits its root's anchor, so the
+ *  first claimed comment decides for the run. */
+export function placementFor(comment: ElementComment, canvas: Canvas | undefined): FramePlacement | undefined {
+  if (isCanvasComment(comment)) return { pageId: comment.pageId, near: { x: comment.x, y: comment.y } }
+  const frame = comment.frameId ? store.getFrame(comment.frameId) : undefined
+  return frame && canvas ? { pageId: framePageId(canvas, frame) } : undefined
+}
+
+/* a new frame beside a pin: this far to its right, and this far down from
+   anything it would otherwise overlap */
+const BESIDE_PIN = 40
+const PLACE_STEP = 40
+
+/** A spot for a `width`×`height` frame to the right of `near` that does not
+ *  overlap any frame already on the page: it moves down in steps until it
+ *  is clear, so a crowded spot never hides the new frame under an old one. */
+export function placeBeside(
+  near: { x: number; y: number },
+  size: { width: number; height: number },
+  frames: Frame[],
+): { x: number; y: number } {
+  const x = near.x + BESIDE_PIN
+  const overlaps = (y: number) =>
+    frames.some((f) => x < f.x + f.width && x + size.width > f.x && y < f.y + f.height && y + size.height > f.y)
+  let y = near.y
+  while (overlaps(y)) y += PLACE_STEP
+  return { x, y }
+}
+
+/** What the create_frame tool asks for, placed: the model's own x/y win,
+ *  otherwise the run's placement (the comment's page, and beside its pin). */
+export function createFrameInput(
+  raw: { name?: string; width?: number; height?: number; html: string; x?: number; y?: number },
+  placement: FramePlacement | undefined,
+  canvas: Canvas | undefined,
+) {
+  const size = { width: Number(raw.width) || 800, height: Number(raw.height) || 500 }
+  const chosen = Number.isFinite(raw.x) && Number.isFinite(raw.y) ? { x: Number(raw.x), y: Number(raw.y) } : undefined
+  const beside =
+    !chosen && placement?.near && canvas
+      ? placeBeside(placement.near, size, pageFrames(canvas, placement.pageId))
+      : undefined
+  return {
+    name: String(raw.name || 'Frame'),
+    ...size,
+    html: raw.html,
+    ...(placement ? { pageId: placement.pageId } : {}),
+    ...(chosen ?? beside ?? {}),
+  }
 }
 
 /* enough for a hero plus a retry or two; a run that wants more is looping */
@@ -204,6 +268,35 @@ function strategyFor(text: string, frames: NonNullable<ReturnType<typeof store.g
 
 type RunOutcome = 'ran' | 'idle' | 'no-model'
 
+/** Where a comment is pinned, for the kickoff: the element inside its frame
+ *  (with the HTML it had at comment time), or a point on the canvas with the
+ *  frames under or nearest to it, so the agent knows what the human was
+ *  looking at when they wrote it. */
+export function describeCommentAnchor(c: ElementComment, canvas: Canvas | undefined): string {
+  /* names, selectors and ids are written by people (or pages), so each goes through the sanitizers */
+  if (!isCanvasComment(c)) {
+    const fname = (c.frameId && store.getFrame(c.frameId)?.name) || 'unknown frame'
+    return `on frame ${inlineCode(c.frameId ?? '')} ${quoted(fname)}, element ${inlineCode(c.selector)}\n  element HTML at comment time: ${sanitizeUntrusted(c.snippet)}`
+  }
+  const pageName = canvas ? canvasPages(canvas).find((page) => page.id === c.pageId)?.name : undefined
+  const near = canvas ? framesAround(pageFrames(canvas, c.pageId), c.x, c.y) : []
+  const nearText = near.length
+    ? `; nearest frames: ${near.map((f) => `${inlineCode(f.id)} (${quoted(f.name)})`).join(', ')}`
+    : ''
+  return `on the canvas at (${Math.round(c.x)}, ${Math.round(c.y)}) on page ${quoted(pageName ?? c.pageId)} — not pinned to any element${nearText}`
+}
+
+/** The frames a canvas point falls inside, or failing that the two closest
+ *  to it (demo frames are product content, never the subject of a comment). */
+function framesAround(frames: Frame[], x: number, y: number): Frame[] {
+  const real = frames.filter((f) => !f.demo)
+  const inside = real.filter((f) => x >= f.x && x <= f.x + f.width && y >= f.y && y <= f.y + f.height)
+  if (inside.length) return inside
+  const gap = (f: Frame) =>
+    Math.hypot(Math.max(f.x - x, 0, x - (f.x + f.width)), Math.max(f.y - y, 0, y - (f.y + f.height)))
+  return [...real].sort((a, b) => gap(a) - gap(b)).slice(0, 2)
+}
+
 /**
  * Work one requester's queue for one agent. A run bills exactly one person:
  * the account behind the oldest claimable item, resolved BEFORE anything is
@@ -231,10 +324,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
       'The Doop Agent needs a connected account — connect your ChatGPT subscription or an OpenAI, OpenRouter, Gemini or Claude API key in Settings, then retry.'
     for (const f of actions.takeFeedbackFor(canvasId, role.name, payer)) actions.failTaskFeedback(f.id, reason)
     for (const c of actions.takeAgentCommentsFor(canvasId, role.name, payer)) actions.failComment(c.id, reason)
-    for (const c of actions.takeQueuedCardsFor(canvasId, role.name, payer)) {
-      actions.chatReplyForCard(canvasId, c.id, actor, reason)
-      actions.failCard(canvasId, c.id, reason)
-    }
+    for (const c of actions.takeQueuedCardsFor(canvasId, role.name, payer)) actions.failCard(canvasId, c.id, reason)
     stalled.add(payer)
     return 'no-model'
   }
@@ -374,6 +464,12 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
             /* a reply carries the conversation it answers, so "make it
                bigger" reads against what was said before */
             const history = actions.commentThread(c)
+            const earlier = history.slice(
+              0,
+              history.findIndex((x) => x.id === c.id),
+            )
+            if (isCanvasComment(c) || !c.frameId)
+              return { from: c.from, location: describeCommentAnchor(c, canvas), text: c.text, earlier }
             return {
               from: c.from,
               frameId: c.frameId,
@@ -382,10 +478,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
               snippet: c.snippet,
               quote: c.anchor?.quote,
               text: c.text,
-              earlier: history.slice(
-                0,
-                history.findIndex((x) => x.id === c.id),
-              ),
+              earlier,
             }
           }),
         ),
@@ -419,7 +512,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
         : '') +
       `\n\nAddress everything above now.` +
       (comments.length > 0
-        ? ` For element comments, use the selector and HTML excerpt to find the exact element in the frame's HTML — the live document may have drifted since the comment was left, so match on content, not position.`
+        ? ` For element comments, use the selector and HTML excerpt to find the exact element in the frame's HTML — the live document may have drifted since the comment was left, so match on content, not position. A canvas comment is about the frames around its point, not about one element.`
         : '')
 
     console.log(
@@ -438,6 +531,8 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
       vision: model.vision !== false,
       ...(model.userId ? { payerId: model.userId } : {}),
       imagesGenerated: 0,
+      /* a run about a comment delivers on that comment's page */
+      ...(comments[0] ? { placement: placementFor(comments[0], canvas) } : {}),
     }
     let refused = false
     let crashed = false
@@ -700,12 +795,8 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
     if (finished && !blockedWebsiteAccess && !noMutation && !unverifiedMutation) {
       for (const f of claimed) actions.completeTaskFeedback(f.id)
       for (const c of comments) actions.resolveComment(c.id, role.name)
-      /* a card moves to the next agent in its pipeline, or finishes here —
-         and one that was asked for in the chat gets its answer there */
-      for (const c of cards) {
-        actions.chatReplyForCard(canvasId, c.id, actor, summary || 'Done.')
-        actions.advanceCard(canvasId, c.id, actor)
-      }
+      /* a card moves to the next agent in its pipeline, or finishes here */
+      for (const c of cards) actions.advanceCard(canvasId, c.id, actor)
     } else {
       let reason: string
       if (staleAccount) {
@@ -730,7 +821,6 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
       for (const f of claimed) actions.failTaskFeedback(f.id, reason)
       for (const c of comments) actions.failComment(c.id, reason)
       for (const c of cards) {
-        actions.chatReplyForCard(canvasId, c.id, actor, reason)
         actions.failCard(canvasId, c.id, reason)
       }
     }
@@ -769,6 +859,12 @@ const TOOLS: Anthropic.Tool[] = [
         width: { type: 'number', description: 'px, e.g. 1200' },
         height: { type: 'number', description: 'px, e.g. 630' },
         html: { type: 'string', description: 'Complete HTML document with inline CSS' },
+        x: {
+          type: 'number',
+          description:
+            'Canvas position in px. Optional: left out, the frame lands on the page the request is about — beside the pin of a canvas comment, else to the right of the existing frames.',
+        },
+        y: { type: 'number', description: 'Canvas position in px. Optional, see x.' },
       },
       required: ['name', 'width', 'height', 'html'],
     },
@@ -1115,7 +1211,14 @@ async function execTool(
         return ok('ok')
       }
       case 'create_frame': {
-        const raw = block.input as { name?: string; width?: number; height?: number; html?: string }
+        const raw = block.input as {
+          name?: string
+          width?: number
+          height?: number
+          html?: string
+          x?: number
+          y?: number
+        }
         const html = completeHtml(raw.html)
         if (!html) return fail('create_frame requires a complete non-empty HTML document ending in </html>')
         if (html.length > MAX_REWRITE_CHUNK_CHARS) {
@@ -1123,12 +1226,7 @@ async function execTool(
         }
         const f = actions.createFrame(
           canvasId,
-          {
-            name: String(raw.name || 'Frame'),
-            width: Number(raw.width) || 800,
-            height: Number(raw.height) || 500,
-            html,
-          },
+          createFrameInput({ ...raw, html }, runState.placement, store.getCanvas(canvasId)),
           actor,
         )
         if (!f) return fail('canvas not found')
@@ -1308,7 +1406,7 @@ async function execTool(
         /* counted once an image actually exists: a refusal or a transient
            failure spent nothing and must not lock the tool for the run */
         runState.imagesGenerated++
-        const url = `${PUBLIC_ORIGIN}/a/${asset.id}.${asset.ext}`
+        const url = `${env.BETTER_AUTH_URL}/a/${asset.id}.${asset.ext}`
         return ok([
           { type: 'image', source: { type: 'base64', media_type: image.preview.mime, data: image.preview.data } },
           {
@@ -1334,7 +1432,7 @@ async function execTool(
             slot: pick(backgrounds.BACKGROUND_SLOTS, raw.slot),
             count: Number(raw.count) || undefined,
           },
-          PUBLIC_ORIGIN,
+          env.BETTER_AUTH_URL,
         )
         const { results } = listing
         if (results.length === 0)

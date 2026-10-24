@@ -53,7 +53,7 @@ function stageViewportSize(): { width: number; height: number } {
  * Create a frame centered in the current view (issue #98), like Figma,
  * instead of always to the right of the right-most frame - which can be
  * off-screen on a large canvas. Pulled out of CanvasPage so the Stage-bounds
- * and viewport wiring driving "+ Frame" has something to test directly, the
+ * and viewport wiring driving the Layers panel's "New frame" has something to test directly, the
  * same way frameClipboard.ts's paste helpers already do.
  */
 export async function createCenteredFrame(canvasId: string, name: string, html: string): Promise<Frame> {

@@ -10,8 +10,13 @@ per package, driven by conventional commits (`release-please-config.json`,
   merging it creates the `vX.Y.Z` tag and a GitHub Release. Tag + notes only - nothing is built
   or deployed from it.
 - `desktop/` -> "chore(desktop): release x.y.z" bumps `desktop/package.json`,
-  `src-tauri/tauri.conf.json`, `Cargo.toml`, `Cargo.lock` + `desktop/CHANGELOG.md`. It does NOT
-  tag: the `desktop-v*` tag is pushed by hand after merging (next section).
+  `src-tauri/tauri.conf.json`, `Cargo.toml` + `desktop/CHANGELOG.md`. It cannot bump
+  `Cargo.lock`, so `desktop.yml` copies the shell's version line from `Cargo.toml` into the
+  lock ahead of `cargo test --locked`; the lock catches up in the next commit that builds the shell. It does NOT
+  tag: the `desktop-v*` tag is pushed by hand after merging (next section). Since no GitHub
+  Release is cut, the workflow's last step flips the merged desktop PR's label from
+  `autorelease: pending` to `autorelease: tagged` itself; a merged PR left `pending` makes every
+  later run abort with "untagged, merged release PRs outstanding".
 
 Both packages are 0.x, so breaking changes bump the minor, not the major. With the default
 `GITHUB_TOKEN` the release PR gets no CI run; a `RELEASE_PLEASE_TOKEN` PAT secret fixes that.
@@ -23,6 +28,9 @@ No container release pipeline for the server app. Self-hosting is
 on port 4400 alongside a `postgres:16-alpine` container, and applies DB migrations at boot
 (`server/db/index.ts`). CI (`ci.yml`) validates every push/PR to `main` (typecheck, lint,
 format:check, build, test) but does not build or push a container image.
+The CI build uses `bun run --bun build` to match the `oven/bun` Docker build stage,
+where `node` commands run with Bun. Extension tests also build with both runtimes
+and run the Bun-built archive under Node, including its nested runtime dependencies.
 
 ## Desktop app (Tauri: macOS DMG + Windows NSIS installer)
 
@@ -46,6 +54,56 @@ in `.github/actions/setup-desktop`:
   `src/lib/shell.ts`); only macOS gets the overlay title bar / traffic-light inset.
 - Desktop app version is tracked separately from the root `package.json` and bumped by
   release-please (see above); after the release PR merges, tag as `desktop-vX.Y.Z`.
+
+## Claude Desktop extension
+
+`bun run build:claude-extension` packages `claude-extension/manifest.json`, the Doop logo,
+license and pinned `mcp-remote` runtime into `public/claude-extension/doop.mcpb`. Both `dev`
+and `build` run it automatically; Vite copies the download into the production `dist/`.
+Connect AI → Claude offers a prefilled **Add to Claude** link for public HTTPS servers.
+The shared endpoint check filters common local addresses while allowing public IPv6
+and numeric-prefixed DNS names; the connecting client checks actual reachability.
+In updated desktop shells it prepares the extension, prefills the current `/mcp` URL,
+and invokes `claude_add_extension` to open Claude's installer. Native installation
+requires a desktop release; the online link ships with the web app. Manual downloads
+remain a collapsed fallback for older shells and local browser sessions.
+OAuth requests for consent open `/oauth/consent`. The approval screen resolves the client
+from a code bound to the signed-in account; `/api/mcp-consent/:code` handles approval and
+denial through better-auth. This also supports other MCP clients that request consent.
+
+`tests/claudeExtension.test.ts` extracts the actual archive outside the repository and checks
+tools, resources, OAuth and reconnecting against a fresh Doop server. Before releasing,
+also install it in Claude Desktop on macOS and Windows. Installation, build and release
+notes live in [`claude-extension/README.md`](../claude-extension/README.md). No directory
+submission or publication is performed by the build.
+
+## Codex desktop setup
+
+Connect AI → Codex can register Doop directly in the shared Codex config through
+`codex_add_mcp`. Browser sessions hand off to the installed app with a `doop://connect/codex`
+link; the app opens a review screen and writes only after the user clicks Add to Codex.
+The native capability marker gates older shells. Release the updated desktop binary
+and frontend together; no downloadable integration bundle is built. Codex still owns
+the separate OAuth approval. Config preservation, conflict handling and handoff checks
+are covered by Rust/frontend tests; desktop CI now runs the Rust tests on both platforms.
+See [`desktop/README.md`](../desktop/README.md#add-to-codex) for release smoke checks.
+
+## Cursor marketplace plugin
+
+`cursor-plugin/` is a standalone Cursor plugin directory; `.cursor-plugin/marketplace.json` at
+repo root indexes it. It contains the hosted MCP connection, the scoped `doop-design` skill,
+metadata, logo, and license. It needs no build artifact or release download. The app's
+**Connect AI → Cursor → Add to Cursor** uses Cursor's MCP install link for the current Doop
+instance and is available independently of marketplace publication.
+
+After local Cursor smoke testing, sync the plugin commit to public `kgoedecke/doop` through the
+existing cherry-pick workflow. Confirm the root marketplace manifest and `cursor-plugin/` are
+present at the same paths. The OSS export script was removed; do not recreate a wipe-and-export
+step. This development repository is private and cannot serve as a public listing source. A maintainer submits the public repository
+at `https://cursor.com/marketplace/publish`. Cursor must approve the plugin before it appears in
+the public marketplace. No workflow submits or publishes it automatically. Bump the version
+in `cursor-plugin/.cursor-plugin/plugin.json` for plugin updates; full setup and reviewer steps
+live in `cursor-plugin/README.md`.
 
 ## Other workflows
 

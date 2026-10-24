@@ -20,18 +20,9 @@ import {
 import { api, ApiError, type IntegrationsStatus } from '../lib/api'
 import { navigate } from '../App'
 import { posthog } from '../lib/posthog'
+import { FrameThumb } from '../components/FramePreview'
 import { BarDivider, TopBar, TopBarHome, TopBarTitle, barGhostBtn, barPrimaryBtn } from '../components/TopBar'
-import {
-  CanvasThumb,
-  Chevron,
-  ClockTile,
-  MetaTile,
-  RunDot,
-  Sel,
-  StepChain,
-  Toggle,
-  formatRunTime,
-} from '../components/AutomateShell'
+import { ClockTile, MetaTile, RunDot, StepChain, formatRunTime } from '../components/AutomateShell'
 import { RoleMark } from '../components/RoleMark'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
@@ -46,7 +37,10 @@ import {
   PanelTabsRoot,
 } from '../components/ui/panel'
 import { ListItem, ListMeta, ListSummary, ListTitle } from '../components/ui/list'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Skeleton } from '../components/ui/skeleton'
+import { Switch } from '../components/ui/switch'
+import { StatusLabel } from '../components/ui/status-label'
 import { Toast } from '../components/ui/toast'
 import { Tooltip } from '../components/ui/tooltip'
 import {
@@ -56,7 +50,14 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from '../components/ui/dropdown-menu'
-import { PanelCollapseRightIcon, PanelExpandRightIcon, PlayIcon, PulseIcon, XIcon } from '../components/ui/icons'
+import {
+  ChevronDownIcon,
+  PanelCollapseRightIcon,
+  PanelExpandRightIcon,
+  PlayIcon,
+  PulseIcon,
+  XIcon,
+} from '../components/ui/icons'
 import { cn } from '@/lib/utils'
 
 /** A draft is the automation minus what the server owns. */
@@ -148,7 +149,11 @@ function usePan() {
         if (!atTop && !atBottom) return
       }
       e.preventDefault()
-      offset.current = { x: offset.current.x - e.deltaX, y: offset.current.y - e.deltaY }
+      if (e.shiftKey && e.deltaX === 0) {
+        offset.current = { x: offset.current.x - e.deltaY, y: offset.current.y }
+      } else {
+        offset.current = { x: offset.current.x - e.deltaX, y: offset.current.y - e.deltaY }
+      }
       apply()
     }
     el.addEventListener('click', onClick, true)
@@ -347,7 +352,10 @@ export function AutomationEditor({ automationId }: { automationId: string }) {
         </div>
         {automation && (
           <div className="ml-auto flex items-center gap-2.5">
-            <Toggle caption on={automation.enabled} onChange={setEnabled} label="Automation on or off" />
+            <span className="inline-flex items-center gap-2">
+              <span className="text-caption text-ink-soft">{automation.enabled ? 'On' : 'Off'}</span>
+              <Switch checked={automation.enabled} onCheckedChange={setEnabled} aria-label="Automation on or off" />
+            </span>
             <BarDivider />
             <Button
               variant="ghost"
@@ -372,15 +380,15 @@ export function AutomationEditor({ automationId }: { automationId: string }) {
       >
         {missing ? (
           <div className="mx-auto max-w-[360px] pt-14 text-center">
-            <p className="text-[13.5px] text-ink-soft">That automation doesn’t exist any more.</p>
+            <p className="text-copy text-ink-soft">That automation doesn’t exist any more.</p>
             <Button variant="ghost" className="mt-3" onClick={() => navigate('/automations')}>
               Back to automations
             </Button>
           </div>
         ) : !draft || !automation ? (
           <div className="mx-auto flex w-[360px] flex-col gap-11 pt-14">
-            <Skeleton className="h-[94px] rounded-[10px]" />
-            <Skeleton index={1} className="h-[240px] rounded-[10px]" />
+            <Skeleton shape="card" />
+            <Skeleton index={1} shape="card" />
           </div>
         ) : (
           <>
@@ -420,31 +428,29 @@ export function AutomationEditor({ automationId }: { automationId: string }) {
                   <Button
                     variant="bare"
                     disabled={draft.steps.length >= MAX_STEPS}
-                    className="mt-5 justify-center text-[12.5px] font-semibold text-ink-faint hover:bg-transparent hover:text-ink"
+                    className="mt-5 justify-center text-body font-semibold text-ink-faint hover:bg-transparent hover:text-ink"
                     onClick={() => setAdding(true)}
                   >
                     + Add step
                   </Button>
                 )}
                 {incomplete && draft.steps.length > 0 && (
-                  <p className="mt-3 text-center text-[12px] text-ink-faint">{incomplete} to turn it on.</p>
+                  <p className="mt-3 text-center text-label text-ink-faint">{incomplete} to turn it on.</p>
                 )}
               </div>
               {draft.steps.length === 0 && (
                 <aside className="absolute left-[calc(50%+240px)] top-14 hidden w-[260px] lg:block">
-                  <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-ink-faint">
-                    Or start from an example
-                  </div>
+                  <div className="mb-2 text-caption text-ink-faint">Or start from an example</div>
                   {AUTOMATION_EXAMPLES.map((e) => (
                     <button
                       key={e.id}
                       type="button"
-                      className="mb-1.5 flex w-full items-center gap-2 rounded-[9px] border border-line bg-surface px-2.5 py-2 text-left text-[12.5px] font-semibold tracking-[-0.01em] transition-colors hover:border-ink-faint"
+                      className="mb-1.5 flex w-full items-center gap-2 rounded-[9px] border border-line bg-surface px-2.5 py-2 text-left text-body font-semibold tracking-[-0.01em] transition-colors hover:border-ink-faint"
                       onClick={() => applyExample(e)}
                     >
                       <StepChain steps={e.steps} size={18} joined={false} />
                       <span className="min-w-0 truncate">{e.name}</span>
-                      <small className="ml-auto font-mono text-[9.5px] font-normal text-ink-faint">
+                      <small className="ml-auto text-micro font-normal text-ink-faint">
                         {e.schedule.kind === 'daily'
                           ? 'daily'
                           : e.schedule.kind === 'weekdays'
@@ -469,7 +475,7 @@ export function AutomationEditor({ automationId }: { automationId: string }) {
                 ) : (
                   <nav
                     aria-label="Runs"
-                    className="absolute right-3 top-3 z-[38] flex w-12 flex-col items-center gap-1.5 rounded-[14px] border border-line bg-surface p-1.5 shadow-card max-lg:hidden"
+                    className="absolute right-3 top-3 z-[38] flex w-12 flex-col items-center gap-1.5 rounded-panel border border-line bg-surface p-1.5 shadow-card max-lg:hidden"
                   >
                     <Tooltip label="Expand panel" side="left">
                       <Button
@@ -515,8 +521,8 @@ export function AutomationEditor({ automationId }: { automationId: string }) {
 /* ------------------------------------------------------------------ */
 /* Nodes                                                               */
 
-const nodeCls = 'relative rounded-[10px] border border-line bg-surface px-3.5 py-3 shadow-card'
-const kCls = 'font-mono text-[10px] uppercase tracking-[0.12em] text-ink-faint'
+const nodeCls = 'relative rounded-pill border border-line bg-surface px-3.5 py-3 shadow-card'
+const kCls = 'text-caption text-ink-faint'
 
 /** A port: the small circle where an edge meets a node. */
 function Port({ side, dashed }: { side: 'in' | 'out'; dashed?: boolean }) {
@@ -562,42 +568,49 @@ function WhenNode({ schedule, onChange }: { schedule: Schedule; onChange: (s: Sc
       <div className="flex items-center gap-[9px]">
         <ClockTile size={24} />
         <span className={kCls}>When</span>
-        <span className="ml-auto text-[10.5px] text-ink-faint">{schedule.tz.replace(/_/g, ' ')}</span>
+        <span className="ml-auto text-micro text-ink-faint">{schedule.tz.replace(/_/g, ' ')}</span>
       </div>
-      <div className="mt-2.5 flex items-center gap-2 text-[14px]">
+      <div className="mt-2.5 flex items-center gap-2 text-copy">
         <span className="text-ink-soft">Every</span>
-        <Sel
-          aria-label="Which days"
+        <Select
           value={dayValue}
-          onChange={(e) => {
-            const v = e.target.value
+          onValueChange={(v) => {
             if (v === 'daily' || v === 'weekdays') onChange({ ...schedule, kind: v })
             else onChange({ ...schedule, kind: 'weekly', weekday: Number(v) })
           }}
         >
-          {WEEKDAYS.map((d, i) => (
-            <option key={d} value={i}>
-              {d}
-            </option>
-          ))}
-          <option value="weekdays">weekday</option>
-          <option value="daily">day</option>
-        </Sel>
+          <SelectTrigger size="sm" aria-label="Which days">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {WEEKDAYS.map((d, i) => (
+              <SelectItem key={d} value={String(i)}>
+                {d}
+              </SelectItem>
+            ))}
+            <SelectItem value="weekdays">weekday</SelectItem>
+            <SelectItem value="daily">day</SelectItem>
+          </SelectContent>
+        </Select>
         <span className="text-ink-soft">at</span>
-        <Sel
-          aria-label="Time"
+        <Select
           value={time}
-          onChange={(e) => {
-            const [h, m] = e.target.value.split(':').map(Number)
+          onValueChange={(v) => {
+            const [h, m] = v.split(':').map(Number)
             onChange({ ...schedule, hour: h ?? 9, minute: m ?? 0 })
           }}
         >
-          {times.map((t) => (
-            <option key={t} value={t}>
-              {clockLabel(t)}
-            </option>
-          ))}
-        </Sel>
+          <SelectTrigger size="sm" aria-label="Time">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {times.map((t) => (
+              <SelectItem key={t} value={t}>
+                {clockLabel(t)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
     </div>
   )
@@ -618,25 +631,25 @@ function CanvasPicker({
 }) {
   const current = canvases.find((c) => c.id === value)
   return (
-    <div className="mt-2.5 flex items-center gap-2 text-[12.5px] text-ink-soft">
+    <div className="mt-2.5 flex items-center gap-2 text-body text-ink-soft">
       <span>{word}</span>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button
             type="button"
             className={cn(
-              'flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border border-line bg-surface px-2.5 text-left text-[13.5px] font-semibold tracking-[-0.01em] text-ink transition-colors hover:border-ink-faint focus-visible:outline-2 focus-visible:outline-brand',
+              'flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border border-line bg-surface px-2.5 text-left text-copy font-semibold tracking-[-0.01em] text-ink transition-colors hover:border-ink-faint focus-visible:outline-2 focus-visible:outline-brand',
               !current && 'font-medium text-ink-faint',
             )}
           >
-            {current && <CanvasThumb canvas={current} />}
+            {current && <FrameThumb size="xs" frameId={current.previewFrameId} />}
             <span className="min-w-0 flex-1 truncate">{current?.name ?? 'Choose a canvas'}</span>
-            <Chevron className="text-ink-faint" />
+            <ChevronDownIcon width={12} height={12} className="flex-none text-ink-faint" />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="max-h-[320px] w-[300px] overflow-y-auto">
+        <DropdownMenuContent align="start" width="lg" className="max-h-[320px] overflow-y-auto">
           {canvases.length === 0 && (
-            <DropdownMenuLabel className="text-[12px] font-normal text-ink-faint">No canvases yet</DropdownMenuLabel>
+            <DropdownMenuLabel className="text-label font-normal text-ink-faint">No canvases yet</DropdownMenuLabel>
           )}
           {canvases.map((c) => (
             <DropdownMenuItem
@@ -644,7 +657,7 @@ function CanvasPicker({
               onSelect={() => onChange(c.id)}
               className={cn(c.id === value && 'bg-paper-deep')}
             >
-              <CanvasThumb canvas={c} />
+              <FrameThumb size="xs" frameId={c.previewFrameId} />
               <span className="min-w-0 flex-1 truncate">{c.name}</span>
             </DropdownMenuItem>
           ))}
@@ -693,53 +706,48 @@ function PullNode({
         <MetaTile size={24} />
         <div className="min-w-0">
           <div className={kCls}>Pull · Meta Ads</div>
-          <div className="text-[13.5px] font-semibold tracking-[-0.012em]">Ad creatives</div>
+          <div className="text-copy font-semibold tracking-[-0.012em]">Ad creatives</div>
         </div>
         {meta && (
-          <span
-            className={cn(
-              'ml-auto inline-flex items-center gap-1.5 font-mono text-[10px] tracking-[0.06em]',
-              meta.connected ? 'text-ink-soft' : 'text-ink-faint',
-            )}
-          >
-            <span className={cn('size-[6px] rounded-full', meta.connected ? 'bg-success' : 'bg-line')} />
+          <StatusLabel tone={meta.connected ? 'done' : 'muted'} className="ml-auto">
             {meta.connected ? 'connected' : 'not connected'}
-          </span>
+          </StatusLabel>
         )}
         <RemoveStep onRemove={onRemove} />
       </div>
       {!meta ? (
-        <div className="mt-2.5 text-[12.5px] text-ink-faint">…</div>
+        <div className="mt-2.5 text-body text-ink-faint">…</div>
       ) : !meta.connected ? (
         <div className="mt-2.5 flex items-center gap-3">
-          <span className="text-[13px] text-ink-soft">Not connected yet</span>
+          <span className="text-body text-ink-soft">Not connected yet</span>
           <Button variant="solid" size="sm" className="ml-auto h-8" onClick={() => navigate('/integrations')}>
             Connect Meta
           </Button>
         </div>
       ) : (
         <div className="mt-2.5 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2.5">
-          <Sel
-            aria-label="Ad account"
-            className={cn(!step.accountId && '[&>select]:text-ink-faint')}
-            value={step.accountId}
-            onChange={(e) => onChange({ accountId: e.target.value })}
-          >
-            <option value="">Ad account</option>
-            {accounts.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name} · {a.id.replace(/^act_/, '')}
-              </option>
-            ))}
-          </Sel>
-          <Sel
-            aria-label="Which ads"
-            value={step.filter}
-            onChange={(e) => onChange({ filter: e.target.value as PullStep['filter'] })}
-          >
-            <option value="active">Active ads</option>
-            <option value="all">All ads</option>
-          </Sel>
+          {/* an unset account is '' — Radix shows the placeholder for it */}
+          <Select value={step.accountId} onValueChange={(accountId) => onChange({ accountId })}>
+            <SelectTrigger size="sm" className="w-full" aria-label="Ad account">
+              <SelectValue placeholder="Ad account" />
+            </SelectTrigger>
+            <SelectContent>
+              {accounts.map((a) => (
+                <SelectItem key={a.id} value={a.id}>
+                  {a.name} · {a.id.replace(/^act_/, '')}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={step.filter} onValueChange={(filter) => onChange({ filter: filter as PullStep['filter'] })}>
+            <SelectTrigger size="sm" className="w-full" aria-label="Which ads">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="active">Active ads</SelectItem>
+              <SelectItem value="all">All ads</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       )}
       <CanvasPicker
@@ -780,14 +788,14 @@ function AgentNode({
             variant="bare"
             inputSize="auto"
             placeholder="Untitled task"
-            className="w-full text-[13.5px] font-semibold tracking-[-0.012em] md:text-[13.5px]"
+            className="w-full text-copy font-semibold tracking-[-0.012em] md:text-copy"
             onChange={(e) => onChange({ title: e.target.value })}
           />
         </div>
         <RemoveStep onRemove={onRemove} />
       </div>
       <Textarea
-        className="mt-2.5 min-h-[74px] w-full rounded-lg px-[11px] py-2.5 text-[13.5px] leading-[1.5] md:text-[13.5px]"
+        className="mt-2.5 min-h-[74px] w-full rounded-lg px-[11px] py-2.5 text-copy leading-[1.5] md:text-copy"
         value={step.prompt}
         maxLength={MAX_PROMPT}
         placeholder="What should the agent do on this canvas?"
@@ -804,7 +812,7 @@ function AgentNode({
               role="radio"
               aria-checked={on}
               className={cn(
-                'gap-1 rounded-full px-2 py-1 text-[11.5px] text-ink-soft hover:border-ink-soft hover:bg-transparent',
+                'gap-1 rounded-full px-2 py-1 text-caption text-ink-soft hover:border-ink-soft hover:bg-transparent',
                 on && 'border-ink bg-ink text-paper hover:border-ink hover:bg-ink hover:text-paper',
               )}
               title={role.blurb}
@@ -816,7 +824,7 @@ function AgentNode({
           )
         })}
       </div>
-      <p className="mt-2 text-[11.5px] text-ink-faint">{roleName(roles[0])} picks it up right away</p>
+      <p className="mt-2 text-caption text-ink-faint">{roleName(roles[0])} picks it up right away</p>
       <CanvasPicker
         word="on"
         value={step.canvasId}
@@ -834,12 +842,12 @@ function StepPicker({ onPick, onCancel }: { onPick: (type: Step['type']) => void
     'flex flex-col items-start gap-2 rounded-[9px] border border-line bg-surface px-3 pb-[11px] pt-3 text-left shadow-card transition-colors hover:border-ink-faint focus-visible:outline-2 focus-visible:outline-brand'
   return (
     <div
-      className="relative rounded-[10px] border-[1.5px] border-dashed border-line bg-paper-deep/60 p-3.5"
+      className="relative rounded-pill border-[1.5px] border-dashed border-line bg-paper-deep/60 p-3.5"
       onKeyDown={(e) => e.key === 'Escape' && onCancel?.()}
     >
       <Port side="in" dashed />
       <div className="flex items-center">
-        <span className="flex-1 text-center text-[13.5px] font-semibold tracking-[-0.012em]">What should run?</span>
+        <span className="flex-1 text-center text-copy font-semibold tracking-[-0.012em]">What should run?</span>
         {onCancel && (
           <Button
             variant="bare"
@@ -855,8 +863,8 @@ function StepPicker({ onPick, onCancel }: { onPick: (type: Step['type']) => void
       <div className="mt-3 grid grid-cols-2 gap-2">
         <button type="button" className={tile} autoFocus={!!onCancel} onClick={() => onPick('pull')}>
           <MetaTile size={22} />
-          <b className="text-[13px] font-semibold tracking-[-0.012em]">Integrations</b>
-          <span className="text-[11.5px] leading-[1.45] text-ink-soft">Pull Meta ad creatives onto a canvas.</span>
+          <b className="text-body font-semibold tracking-[-0.012em]">Meta Ads</b>
+          <span className="text-caption leading-[1.45] text-ink-soft">Pull Meta ad creatives onto a canvas.</span>
         </button>
         <button type="button" className={tile} onClick={() => onPick('agent')}>
           <span className="flex">
@@ -864,8 +872,8 @@ function StepPicker({ onPick, onCancel }: { onPick: (type: Step['type']) => void
               <RoleMark key={r.id} role={r} size={22} className={cn(i > 0 && '-ml-1.5 ring-[1.5px] ring-surface')} />
             ))}
           </span>
-          <b className="text-[13px] font-semibold tracking-[-0.012em]">Agent task</b>
-          <span className="text-[11.5px] leading-[1.45] text-ink-soft">
+          <b className="text-body font-semibold tracking-[-0.012em]">Agent task</b>
+          <span className="text-caption leading-[1.45] text-ink-soft">
             Give Doop, UX Lead or another role a brief on a canvas.
           </span>
         </button>
@@ -943,7 +951,7 @@ function RunsPanel({
                 <ListTitle className="text-ink-soft">
                   {automation.nextRunAt && !dirty ? 'Next run' : automation.enabled ? 'Next run' : 'Paused'}
                 </ListTitle>
-                <ListMeta className="ml-auto font-mono">
+                <ListMeta className="ml-auto">
                   {automation.nextRunAt && !dirty ? formatRunTime(automation.nextRunAt) : ''}
                 </ListMeta>
               </span>
@@ -955,7 +963,7 @@ function RunsPanel({
             </ListItem>
             {runs === null ? (
               <div className="px-4 py-3">
-                <Skeleton className="h-10 rounded-md" />
+                <Skeleton shape="row" />
               </div>
             ) : runs.length === 0 ? (
               <div className="px-4 py-3 text-xs leading-[1.5] text-ink-faint">
@@ -975,9 +983,7 @@ function RunsPanel({
                   <span className="flex items-center gap-2">
                     <RunDot status={r.status} />
                     <ListTitle>{formatRunTime(r.startedAt)}</ListTitle>
-                    <ListMeta className="ml-auto font-mono">
-                      {r.endedAt ? duration(r.endedAt - r.startedAt) : ''}
-                    </ListMeta>
+                    <ListMeta className="ml-auto">{r.endedAt ? duration(r.endedAt - r.startedAt) : ''}</ListMeta>
                   </span>
                   <ListSummary
                     className={cn('whitespace-normal', r.status === 'failed' && 'text-accent-ink')}

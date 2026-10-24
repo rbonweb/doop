@@ -23,6 +23,12 @@ public struct CanvasDocument: Codable, Identifiable {
     public var name: String
     public var ownerId: String?
     public var frames: [DesignFrame]
+    public var pages: [CanvasPage]?
+}
+
+public struct CanvasPage: Codable, Identifiable {
+    public var id: String
+    public var name: String
 }
 
 public struct DesignFrame: Codable, Identifiable, Equatable {
@@ -34,6 +40,30 @@ public struct DesignFrame: Codable, Identifiable, Equatable {
     public var width: Double
     public var height: Double
     public var html: String
+    public var pageId: String?
+    public var hidden: Bool?
+    public var locked: Bool?
+}
+
+/// What a prompt is about: the frame the person had selected when they asked, and
+/// the element inside it when one was picked. The agent edits that in place.
+/// Mirrors `CardScope` in `shared/types.ts`.
+public struct CardScope: Codable, Equatable {
+    public var frameId: String
+    /// Element selector inside the frame; absent means the whole frame.
+    public var selector: String?
+
+    public init(frameId: String, selector: String? = nil) {
+        self.frameId = frameId
+        self.selector = selector
+    }
+
+    /// The `scope` field of a `POST /api/canvases/:id/cards` body.
+    public var body: [String: Any] {
+        var body: [String: Any] = ["frameId": frameId]
+        if let selector { body["selector"] = selector }
+        return body
+    }
 }
 
 public struct CanvasTask: Codable, Identifiable, Hashable {
@@ -53,7 +83,11 @@ public struct CanvasTask: Codable, Identifiable, Hashable {
 
 public struct CanvasComment: Codable, Identifiable {
     public var id: String
-    public var frameId: String
+    /// Canvas-pinned comments (and their replies) have no frame ID.
+    public var frameId: String?
+    public var pageId: String?
+    public var x: Double?
+    public var y: Double?
     public var from: String
     public var text: String
     public var at: Double
@@ -88,6 +122,7 @@ public struct CanvasEvent: Decodable {
     public var frame: DesignFrame?
     public var frameId: String?
     public var name: String?
+    public var pages: [CanvasPage]?
     public var task: CanvasTask?
     public var tasks: [CanvasTask]?
     public var comment: CanvasComment?

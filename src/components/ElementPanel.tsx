@@ -1,20 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { Frame } from '../../shared/types'
 import { useStore } from '../lib/store'
-import { inspectElement, onFrameReady, styleElement, type ElementInfo, type StylePatch } from '../lib/frameBridge'
+import {
+  editElementGeometry,
+  inspectElement,
+  onFrameChange,
+  styleElement,
+  styleGesture,
+  type ElementInfo,
+  type GeometryEdit,
+  type StylePatch,
+} from '../lib/frameBridge'
 import { ancestorsOf, buildLayerTree, elementHtml, findLayer, layerName } from '../lib/layers'
 import { replaceLayerHtml } from '../lib/layerEdits'
 import {
+  aspectRatio,
   borderSummary,
-  compactBox,
+  colorAlpha,
+  colorWithAlpha,
   lengthValue,
   rgbToHex,
-  shorthandValue,
   sizeMode,
   type SizeMode,
 } from '../lib/cssValues'
+import { flexSizeAxis } from '../lib/flexLayout'
 import { cn } from '@/lib/utils'
 import { LayerKindIcon } from './LayerKindIcon'
+import { FlexLayoutControls, PaddingControls } from './FlexLayoutControls'
 import {
   Panel,
   PanelBody,
@@ -28,17 +40,40 @@ import {
 import { Button } from './ui/button'
 import { Textarea } from './ui/textarea'
 import { Tooltip } from './ui/tooltip'
-import { ArrowUpIcon } from './ui/icons'
+import {
+  AlignCenterIcon,
+  AlignJustifyIcon,
+  AlignLeftIcon,
+  AlignRightIcon,
+  ArrowUpIcon,
+  LinkIcon,
+  UnlinkIcon,
+  AlignStartVerticalIcon,
+  AlignCenterVerticalIcon,
+  AlignEndVerticalIcon,
+  AlignStartHorizontalIcon,
+  AlignCenterHorizontalIcon,
+  AlignEndHorizontalIcon,
+  FlipHorizontal2Icon,
+  FlipVertical2Icon,
+  CircleDashedIcon,
+  DropletIcon,
+  RadiusIcon,
+  EyeIcon,
+  EyeClosedIcon,
+} from './ui/icons'
+import { Switch } from './ui/switch'
+import { Segmented, SegmentedItem } from './ui/segmented'
 import {
   ColorField,
   FieldUnit,
   NumberField,
+  LengthField,
+  PropertyScrubContext,
   PropertyRow,
   PropertySection,
   SelectField,
   StaticField,
-  TextField,
-  ToggleField,
 } from './ui/property-field'
 
 const TAB_KEY = 'doop:element-panel-tab'
@@ -60,18 +95,35 @@ function readTab(): Tab {
 /** The element properties rail — the second panel at the right, opened from
  *  a Layers row. Reads the element's computed styles out of the live frame
  *  and writes edits back as inline styles; the HTML tab edits its markup. */
-export function ElementPanel({ frame, selector, className }: { frame: Frame; selector: string; className?: string }) {
+export function ElementPanel({
+  frame,
+  selector,
+  className,
+  style,
+}: {
+  frame: Frame
+  selector: string
+  className?: string
+  /** carries `right`, so it opens beside the Agents panel at the edge */
+  style?: CSSProperties
+}) {
   /* the tab sticks across elements and visits: walking the tree in HTML
      view must not snap back to Design on every row */
   const [tab, setTab] = useState<Tab>(readTab)
-  const [info, setInfo] = useState<ElementInfo | null>(null)
+  /* the values carry the selector they were read from: switching elements
+     keeps the panel mounted (no blank flash), but the old element's values
+     are shown dimmed and locked until the new element's read lands, so a
+     quick edit can never write them onto the new selection */
+  const [read, setRead] = useState<{ selector: string; info: ElementInfo } | null>(null)
+  const info = read?.selector === selector ? read.info : null
+  const stale = read && !info ? read.info : null
 
   const tree = useMemo(() => buildLayerTree(frame.html), [frame.html])
   const node = useMemo(() => findLayer(tree, selector), [tree, selector])
   const parentNode = useMemo(() => ancestorsOf(tree, selector)?.at(-1) ?? null, [tree, selector])
 
   /* re-read after every html change — remote edits and our own saves alike —
-     and again if the frame's runtime comes up after the panel did */
+     and when the runtime finishes rendering or loading fonts */
   useEffect(() => {
     let live = true
     let timer: number | null = null
@@ -80,13 +132,13 @@ export function ElementPanel({ frame, selector, className }: { frame: Frame; sel
       timer = window.setTimeout(() => {
         inspectElement(frame.id, selector)
           .then((next) => {
-            if (live) setInfo(next)
+            if (live && next) setRead({ selector, info: next })
           })
           .catch(console.error)
       }, INSPECT_DELAY_MS)
     }
     read()
-    const off = onFrameReady(frame.id, read)
+    const off = onFrameChange(frame.id, read)
     return () => {
       live = false
       off()
@@ -94,12 +146,24 @@ export function ElementPanel({ frame, selector, className }: { frame: Frame; sel
     }
   }, [frame.id, frame.html, selector])
 
-  function apply(styles: StylePatch) {
-    styleElement(frame.id, selector, styles)
+  function updateRead(request: Promise<ElementInfo | null>) {
+    request
       .then((next) => {
-        if (next) setInfo(next)
+        if (next) setRead((r) => (r && r.selector !== selector ? r : { selector, info: next }))
       })
       .catch(console.error)
+  }
+
+  function apply(styles: StylePatch) {
+    if (info) updateRead(styleElement(frame.id, selector, styles))
+  }
+
+  function editGeometry(edit: GeometryEdit) {
+    if (info) updateRead(editElementGeometry(frame.id, selector, edit))
+  }
+
+  function scrub(phase: 'begin' | 'commit' | 'cancel') {
+    updateRead(styleGesture(frame.id, selector, phase))
   }
 
   function selectTab(next: Tab) {
@@ -119,9 +183,12 @@ export function ElementPanel({ frame, selector, className }: { frame: Frame; sel
   const parentLabel = parentNode ? `${parentNode.tag}${parentNode.detail}` : 'body'
 
   return (
-    <Panel className={cn('right-3 top-3 max-h-[calc(100%-24px)] w-[260px] transition-[right] duration-150', className)}>
+    <Panel
+      className={cn('top-2.5 max-h-[calc(100%-24px)] w-[244px] transition-[right] duration-150', className)}
+      style={style}
+    >
       <PanelTabsRoot value={tab} onValueChange={(v) => selectTab(v === 'html' ? 'html' : 'design')}>
-        <PanelHeader className="px-2.5 py-2">
+        <PanelHeader className="pl-2">
           <PanelTabs>
             <PanelTab value="design">Design</PanelTab>
             <PanelTab value="html">HTML</PanelTab>
@@ -129,12 +196,12 @@ export function ElementPanel({ frame, selector, className }: { frame: Frame; sel
           <PanelClose onClick={close} />
         </PanelHeader>
         <div className="flex flex-none items-center gap-[7px] border-b border-line-soft px-3 py-2.5">
-          <span className="grid size-5 flex-none place-items-center rounded-[5px] bg-paper-deep text-ink-soft">
+          <span className="grid size-5 flex-none place-items-center text-ink-faint">
             <LayerKindIcon kind={node?.kind ?? 'box'} />
           </span>
-          <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">
+          <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-ink">
             {name}
-            <small className="ml-[5px] font-mono text-[9.5px] font-normal text-ink-faint">in {parentLabel}</small>
+            <small className="ml-[5px] text-[11px] font-normal text-ink-faint">in {parentLabel}</small>
           </span>
           {parentNode && (
             <Tooltip label="Select parent" side="bottom" align="end">
@@ -147,13 +214,27 @@ export function ElementPanel({ frame, selector, className }: { frame: Frame; sel
                   useStore.getState().setSelectedElement({ frameId: frame.id, selector: parentNode.selector })
                 }
               >
-                <ArrowUpIcon width={12} height={12} />
+                <ArrowUpIcon className="size-3.5" />
               </Button>
             </Tooltip>
           )}
         </div>
         <PanelTabPanel value="design">
-          <PanelBody>{info ? <DesignTab info={info} apply={apply} /> : <Waiting />}</PanelBody>
+          <PanelBody>
+            {info ? (
+              <PropertyScrubContext.Provider
+                value={{ onStart: () => scrub('begin'), onEnd: (cancel) => scrub(cancel ? 'cancel' : 'commit') }}
+              >
+                <DesignTab key={`${frame.id}:${selector}`} info={info} apply={apply} editGeometry={editGeometry} />
+              </PropertyScrubContext.Provider>
+            ) : stale ? (
+              <div aria-busy className="pointer-events-none opacity-50" title="Reading the element…">
+                <DesignTab info={stale} apply={apply} editGeometry={editGeometry} />
+              </div>
+            ) : (
+              <Waiting />
+            )}
+          </PanelBody>
         </PanelTabPanel>
         <PanelTabPanel value="html">
           <HtmlTab key={selector} frame={frame} selector={selector} />
@@ -171,8 +252,7 @@ function Waiting() {
 
 const DISPLAYS: { value: string; label: string }[] = [
   { value: 'block', label: 'block' },
-  { value: 'flex-row', label: 'flex · row' },
-  { value: 'flex-column', label: 'flex · column' },
+  { value: 'flex', label: 'flex' },
   { value: 'grid', label: 'grid' },
   { value: 'inline-block', label: 'inline-block' },
   { value: 'inline-flex', label: 'inline-flex' },
@@ -180,16 +260,68 @@ const DISPLAYS: { value: string; label: string }[] = [
   { value: 'none', label: 'none' },
 ]
 const POSITIONS = ['static', 'relative', 'absolute', 'fixed', 'sticky']
-const WEIGHTS = ['300', '400', '500', '600', '700', '800']
-const ALIGNS = ['left', 'center', 'right', 'justify']
+const WEIGHTS = ['100', '200', '300', '400', '500', '600', '700', '800', '900']
+const LAYER_ALIGNS = [
+  { axis: 'x', edge: 'start', label: 'Align layer left', Icon: AlignStartVerticalIcon },
+  { axis: 'x', edge: 'center', label: 'Center layer horizontally', Icon: AlignCenterVerticalIcon },
+  { axis: 'x', edge: 'end', label: 'Align layer right', Icon: AlignEndVerticalIcon },
+  { axis: 'y', edge: 'start', label: 'Align layer top', Icon: AlignStartHorizontalIcon },
+  { axis: 'y', edge: 'center', label: 'Center layer vertically', Icon: AlignCenterHorizontalIcon },
+  { axis: 'y', edge: 'end', label: 'Align layer bottom', Icon: AlignEndHorizontalIcon },
+] as const
+const ALIGNS = [
+  { value: 'left', label: 'Align left', Icon: AlignLeftIcon },
+  { value: 'center', label: 'Align center', Icon: AlignCenterIcon },
+  { value: 'right', label: 'Align right', Icon: AlignRightIcon },
+  { value: 'justify', label: 'Justify', Icon: AlignJustifyIcon },
+]
+const SYSTEM_FONTS = [
+  { value: 'system-ui, sans-serif', label: 'System UI' },
+  { value: 'Arial, sans-serif', label: 'Arial' },
+  { value: 'Helvetica, sans-serif', label: 'Helvetica' },
+  { value: 'Verdana, sans-serif', label: 'Verdana' },
+  { value: 'Trebuchet MS, sans-serif', label: 'Trebuchet MS' },
+  { value: 'Georgia, serif', label: 'Georgia' },
+  { value: 'Times New Roman, serif', label: 'Times New Roman' },
+  { value: 'Courier New, monospace', label: 'Courier New' },
+  { value: 'ui-monospace, monospace', label: 'Monospace' },
+]
+
+function fontName(value: string) {
+  return (
+    value
+      .match(/^(?:"([^"]+)"|'([^']+)'|([^,]+))/)
+      ?.slice(1)
+      .find(Boolean)
+      ?.trim() ?? value
+  )
+}
+
+/** Keep the current stack intact, and offer fonts already supplied by the
+ *  frame alongside system faces that need no additional font download. */
+function fontOptions(info: ElementInfo) {
+  const seen = new Set<string>()
+  return [
+    ...[info.fontFamily, ...info.fontFamilies].map((value) => ({
+      value,
+      label: fontName(value),
+    })),
+    ...SYSTEM_FONTS,
+  ].filter(({ value }) => {
+    const family = fontName(value).toLowerCase()
+    if (seen.has(family)) return false
+    seen.add(family)
+    return true
+  })
+}
 const SIZE_MODES: { value: SizeMode; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
   { value: 'fixed', label: 'Fixed' },
   { value: 'fill', label: 'Fill' },
   { value: 'hug', label: 'Hug' },
 ]
 
 function displayValue(info: ElementInfo): string {
-  if (info.display === 'flex') return info.flexDirection.startsWith('column') ? 'flex-column' : 'flex-row'
   return DISPLAYS.some((d) => d.value === info.display) ? info.display : 'block'
 }
 
@@ -201,25 +333,176 @@ function parentLayout(info: ElementInfo): string {
   return p.display
 }
 
-function DesignTab({ info, apply }: { info: ElementInfo; apply: (styles: StylePatch) => void }) {
+function DesignTab({
+  info,
+  apply,
+  editGeometry,
+}: {
+  info: ElementInfo
+  apply: (styles: StylePatch) => void
+  editGeometry: (edit: GeometryEdit) => void
+}) {
+  const ratio = aspectRatio(info.aspectRatio, info.naturalAspectRatio)
+  const canLink = (info.width ?? 0) > 0 && (info.height ?? 0) > 0
   const visible = info.visibility !== 'hidden'
-  const fill = rgbToHex(info.backgroundColor)
+  const fill = rgbToHex(info.backgroundColor, true)
+  const fillAlpha = colorAlpha(info.backgroundColor)
   const borderColor = rgbToHex(info.borderColor)
-  const gapMixed = info.rowGap !== info.columnGap
+  const isFlex = info.display === 'flex' || info.display === 'inline-flex'
   const border = borderSummary(info.borderWidths)
-  function setSize(axis: 'width' | 'height', mode: SizeMode) {
-    if (mode === 'fixed') apply({ [axis]: `${info[axis] ?? 0}px` })
-    else if (mode === 'fill') apply({ [axis]: '100%' })
-    else apply({ [axis]: null })
+  const textAlign =
+    info.textAlign === 'start'
+      ? info.direction === 'rtl'
+        ? 'right'
+        : 'left'
+      : info.textAlign === 'end'
+        ? info.direction === 'rtl'
+          ? 'left'
+          : 'right'
+        : info.textAlign
+  const flexAxis = flexSizeAxis(info)
+  function modeFor(axis: 'width' | 'height') {
+    return flexAxis === axis && info.flexGrow > 0 ? 'fill' : sizeMode(info[`${axis}Value`])
+  }
+  function fixedSize(axis: 'width' | 'height', value: number): StylePatch {
+    return {
+      [axis]: `${Math.round(Math.max(0, value) * 100) / 100}px`,
+      ...(axis === flexAxis ? { 'flex-grow': '0', 'flex-shrink': '0', 'flex-basis': 'auto' } : {}),
+    }
+  }
+  function automaticSize(axis: 'width' | 'height'): StylePatch {
+    return {
+      [axis]: 'auto',
+      ...(axis === flexAxis ? { 'flex-grow': '0', 'flex-shrink': '0', 'flex-basis': 'auto' } : {}),
+    }
+  }
+  function setSize(axis: 'width' | 'height', mode: SizeMode, value = info[axis] ?? 0) {
+    const other = axis === 'width' ? 'height' : 'width'
+    const paired = ratio === null ? {} : automaticSize(other)
+    const flex: StylePatch = axis === flexAxis ? { 'flex-grow': '0', 'flex-shrink': '0', 'flex-basis': 'auto' } : {}
+    if (mode === 'fixed') {
+      apply({
+        ...fixedSize(axis, value),
+        ...(ratio === null ? {} : fixedSize(other, axis === 'width' ? value / ratio : value * ratio)),
+      })
+    } else if (mode === 'fill' && axis === flexAxis) {
+      apply({
+        ...paired,
+        [axis]: 'auto',
+        'flex-grow': '1',
+        'flex-shrink': '1',
+        'flex-basis': '0px',
+        [`min-${axis}`]: '0px',
+      })
+    } else if (mode === 'fill') {
+      // A 100% content box would overflow by its own padding and borders.
+      const extra = info.boxSizing === 'border-box' ? 0 : info.boxExtras[axis]
+      apply({ ...paired, [axis]: extra ? `calc(100% - ${extra}px)` : '100%' })
+    } else apply({ ...paired, ...flex, [axis]: mode === 'hug' ? 'fit-content' : 'auto' })
+  }
+  function toggleRatio() {
+    if (ratio === null) {
+      apply({
+        'aspect-ratio': `${info.width} / ${info.height}`,
+        ...(modeFor('width') === 'fill'
+          ? automaticSize('height')
+          : modeFor('height') === 'fill'
+            ? automaticSize('width')
+            : {}),
+      })
+      return
+    }
+    // Preserve dimensions that CSS derived from the ratio, including authored
+    // auto/fit-content, while keeping existing fixed and Fill sizes responsive.
+    apply({
+      'aspect-ratio': 'auto',
+      ...(['auto', 'hug'].includes(modeFor('width')) && info.width !== null ? fixedSize('width', info.width) : {}),
+      ...(['auto', 'hug'].includes(modeFor('height')) && info.height !== null ? fixedSize('height', info.height) : {}),
+    })
   }
   return (
     <>
+      <PropertySection title="Alignment">
+        <div className="flex gap-1" role="group" aria-label="Layer alignment within parent">
+          {LAYER_ALIGNS.map(({ axis, edge, label, Icon }) => (
+            <Button
+              key={label}
+              variant="bare"
+              size="icon-sm"
+              className="h-[26px] min-w-0 flex-1 rounded-[7px] bg-sub text-ink-soft hover:bg-paper-deep"
+              aria-label={label}
+              title={`${label} within parent`}
+              disabled={!info.geometry.canAlign}
+              onClick={() => editGeometry({ kind: 'align', axis, edge })}
+            >
+              <Icon size="rail" />
+            </Button>
+          ))}
+        </div>
+      </PropertySection>
       <PropertySection title="Position">
+        <div className="grid grid-cols-2 gap-1.5" title="Rendered position relative to parent, in frame pixels">
+          <NumberField
+            label="X position"
+            min={-Infinity}
+            prefix="X"
+            value={info.geometry.x}
+            unit="px"
+            disabled={!info.geometry.enabled}
+            onCommit={(value) => editGeometry({ kind: 'position', axis: 'x', value })}
+          />
+          <NumberField
+            label="Y position"
+            min={-Infinity}
+            prefix="Y"
+            value={info.geometry.y}
+            unit="px"
+            disabled={!info.geometry.enabled}
+            onCommit={(value) => editGeometry({ kind: 'position', axis: 'y', value })}
+          />
+        </div>
+        <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+          <NumberField
+            label="Rotation"
+            min={-Infinity}
+            prefix={<CircleDashedIcon size="rail" />}
+            value={info.geometry.rotation}
+            unit="°"
+            disabled={!info.geometry.enabled}
+            onCommit={(value) => editGeometry({ kind: 'rotate', value })}
+          />
+          <div className="grid grid-cols-2 gap-1.5">
+            {(['x', 'y'] as const).map((axis) => {
+              const Icon = axis === 'x' ? FlipHorizontal2Icon : FlipVertical2Icon
+              const label = axis === 'x' ? 'Flip horizontally' : 'Flip vertically'
+              const pressed = (axis === 'x' ? info.geometry.scaleX : info.geometry.scaleY) < 0
+              return (
+                <Button
+                  key={axis}
+                  variant="bare"
+                  size="icon-sm"
+                  aria-label={label}
+                  title={label}
+                  aria-pressed={pressed}
+                  disabled={!info.geometry.enabled}
+                  className={cn(
+                    'h-[26px] w-full rounded-[7px] bg-sub text-ink-soft hover:bg-paper-deep',
+                    pressed && 'bg-paper-deep text-ink',
+                  )}
+                  onClick={() => editGeometry({ kind: 'flip', axis })}
+                >
+                  <Icon size="rail" />
+                </Button>
+              )
+            })}
+          </div>
+        </div>
         <PropertyRow label="Type">
           <SelectField
+            label="Position type"
             value={info.position}
             options={POSITIONS.map((p) => ({ value: p, label: p }))}
-            onChange={(v) => apply({ position: v === 'static' ? null : v })}
+            onChange={(v) => apply({ position: v })}
           />
         </PropertyRow>
         <PropertyRow label="Order">
@@ -232,118 +515,208 @@ function DesignTab({ info, apply }: { info: ElementInfo; apply: (styles: StylePa
           </StaticField>
         </PropertyRow>
       </PropertySection>
-      <PropertySection title="Size">
-        <PropertyRow label="Width">
-          <NumberField value={info.width} unit="px" onCommit={(v) => apply({ width: `${v}px` })} />
-          <SelectField
-            className="flex-[0_0_66px]"
-            value={sizeMode(info.inline['width'])}
-            options={SIZE_MODES}
-            onChange={(v) => setSize('width', v)}
-          />
-        </PropertyRow>
-        <PropertyRow label="Height">
-          <NumberField value={info.height} unit="px" onCommit={(v) => apply({ height: `${v}px` })} />
-          <SelectField
-            className="flex-[0_0_66px]"
-            value={sizeMode(info.inline['height'])}
-            options={SIZE_MODES}
-            onChange={(v) => setSize('height', v)}
-          />
-        </PropertyRow>
+      <PropertySection
+        title="Layout"
+        action={
+          <Tooltip
+            label={
+              ratio !== null
+                ? 'Unlink width and height'
+                : canLink
+                  ? 'Link width and height'
+                  : 'Set a positive width and height to link them'
+            }
+          >
+            <span>
+              <Button
+                variant="bare"
+                size="icon-sm"
+                className={cn(
+                  'size-5 rounded-tag',
+                  ratio !== null ? 'bg-ink text-paper hover:bg-ink/85 hover:text-paper' : 'text-ink-faint',
+                )}
+                aria-label="Link width and height"
+                aria-pressed={ratio !== null}
+                disabled={ratio === null && !canLink}
+                onClick={toggleRatio}
+              >
+                {ratio !== null ? <LinkIcon size="rail" /> : <UnlinkIcon size="rail" />}
+              </Button>
+            </span>
+          </Tooltip>
+        }
+      >
+        <div className="grid grid-cols-2 gap-1.5">
+          {(['width', 'height'] as const).map((axis) => (
+            <div key={axis} className="flex min-w-0 flex-col gap-1">
+              <NumberField
+                label={axis === 'width' ? 'Width' : 'Height'}
+                prefix={axis === 'width' ? 'W' : 'H'}
+                value={info[axis]}
+                unit="px"
+                onCommit={(v) => setSize(axis, 'fixed', v)}
+              />
+              <SelectField
+                label={`${axis === 'width' ? 'Width' : 'Height'} sizing`}
+                value={modeFor(axis)}
+                options={SIZE_MODES}
+                onChange={(v) => setSize(axis, v)}
+              />
+            </div>
+          ))}
+        </div>
         <PropertyRow label="Min width">
-          <TextField
+          <LengthField
+            label="Minimum width"
             value={info.inline['min-width'] ?? (info.minWidth === '0px' ? '' : info.minWidth)}
             placeholder="auto"
             onCommit={(v) => apply({ 'min-width': lengthValue(v) })}
           />
         </PropertyRow>
-      </PropertySection>
-      <PropertySection title="Layout">
         <PropertyRow label="Display">
           <SelectField
+            label="Display"
             value={displayValue(info)}
             options={DISPLAYS}
-            onChange={(v) =>
-              v.startsWith('flex-')
-                ? apply({ display: 'flex', 'flex-direction': v === 'flex-column' ? 'column' : 'row' })
-                : apply({ display: v, 'flex-direction': null })
-            }
+            onChange={(v) => apply({ display: v })}
           />
         </PropertyRow>
-        <PropertyRow label="Gap">
-          <NumberField
-            value={info.rowGap ?? 0}
-            unit={gapMixed ? 'row' : 'px'}
-            onCommit={(v) => apply({ gap: `${v}px` })}
-          />
-          <TextField
-            className="flex-[0_0_78px]"
-            value={compactBox(info.padding)}
-            unit="pad"
-            onCommit={(v) => apply({ padding: shorthandValue(v) })}
-          />
-        </PropertyRow>
+        {!isFlex && (
+          <>
+            {info.display.includes('grid') && (
+              <PropertyRow label="Gap">
+                <NumberField
+                  label="Row gap"
+                  value={info.rowGap ?? 0}
+                  unit="px"
+                  onCommit={(v) => apply({ 'row-gap': `${Math.max(0, v)}px` })}
+                />
+                <NumberField
+                  label="Column gap"
+                  value={info.columnGap ?? 0}
+                  unit="px"
+                  onCommit={(v) => apply({ 'column-gap': `${Math.max(0, v)}px` })}
+                />
+              </PropertyRow>
+            )}
+            <PaddingControls info={info} apply={apply} />
+          </>
+        )}
       </PropertySection>
-      <PropertySection title="Styles">
-        <PropertyRow label="Opacity">
+      {isFlex && <FlexLayoutControls info={info} apply={apply} />}
+      <PropertySection
+        title="Appearance"
+        action={
+          <Button
+            variant="bare"
+            size="icon-sm"
+            className="size-5 rounded-tag text-ink-faint"
+            aria-label={visible ? 'Hide element' : 'Show element'}
+            title={visible ? 'Hide element' : 'Show element'}
+            aria-pressed={!visible}
+            onClick={() => apply({ visibility: visible ? 'hidden' : 'visible' })}
+          >
+            {visible ? <EyeIcon size="rail" /> : <EyeClosedIcon size="rail" />}
+          </Button>
+        }
+      >
+        <div className="grid grid-cols-2 gap-1.5">
           <NumberField
-            className="flex-[0_0_52px]"
+            label="Element opacity"
+            max={100}
+            prefix={<DropletIcon size="rail" />}
             value={info.opacity === null ? null : Math.round(info.opacity * 100)}
             unit="%"
             onCommit={(v) => apply({ opacity: String(Math.min(100, Math.max(0, v)) / 100) })}
           />
-          <input
-            type="range"
-            min={0}
-            max={100}
-            aria-label="Opacity"
-            className="h-6 min-w-0 flex-1 accent-ink"
-            value={info.opacity === null ? 100 : Math.round(info.opacity * 100)}
-            onChange={(e) => apply({ opacity: String(Number(e.target.value) / 100) })}
+          <NumberField
+            label="Corner radius"
+            prefix={<RadiusIcon size="rail" />}
+            value={info.borderRadius}
+            unit="px"
+            onCommit={(v) => apply({ 'border-radius': `${Math.max(0, v)}px` })}
           />
-        </PropertyRow>
-        <PropertyRow label="Visible">
-          <ToggleField
-            value={visible}
-            labels={['Yes', 'No']}
-            onChange={(on) => apply({ visibility: on ? null : 'hidden' })}
+        </div>
+        <label className="mt-2 flex h-5 cursor-pointer items-center justify-between text-[11.5px] text-ink-soft">
+          Clip content
+          <Switch
+            size="sm"
+            aria-label="Clip content"
+            className="data-[state=checked]:bg-ink"
+            checked={info.clipsContent}
+            onCheckedChange={(on) => apply({ overflow: on ? 'hidden' : 'visible' })}
           />
-        </PropertyRow>
-        <PropertyRow label="Fill">
-          <ColorField value={fill} onCommit={(v) => apply({ 'background-color': v ?? 'transparent' })} />
-        </PropertyRow>
-        <PropertyRow label="Border">
+        </label>
+      </PropertySection>
+      <PropertySection title="Fill">
+        <div className="grid grid-cols-[minmax(0,1fr)_64px] gap-1.5">
           <ColorField
+            label="Fill color"
+            value={fillAlpha === 0 && fill === '#000000' ? null : fill}
+            onCommit={(v) =>
+              apply({
+                'background-color': v
+                  ? colorWithAlpha(v, fillAlpha === 0 && (!fill || fill === '#000000') ? 1 : fillAlpha)
+                  : 'transparent',
+              })
+            }
+          />
+          <NumberField
+            label="Fill opacity"
+            max={100}
+            value={Math.round(fillAlpha * 100)}
+            unit="%"
+            onCommit={(v) => apply({ 'background-color': colorWithAlpha(fill ?? info.backgroundColor, v / 100) })}
+          />
+        </div>
+      </PropertySection>
+      <PropertySection title="Stroke">
+        <div className="grid grid-cols-[minmax(0,1fr)_64px] gap-1.5">
+          <ColorField
+            label="Border color"
             value={borderColor}
             onCommit={(v) =>
               apply({ 'border-color': v, ...(v && info.borderStyle === 'none' ? { 'border-style': 'solid' } : {}) })
             }
           />
           <NumberField
-            className="flex-[0_0_78px]"
+            label="Border width"
             value={border.width}
-            unit={border.sides || 'px'}
+            unit="px"
             onCommit={(v) =>
               apply({
-                'border-width': `${v}px`,
+                'border-width': `${Math.max(0, v)}px`,
                 ...(v > 0 && info.borderStyle === 'none' ? { 'border-style': 'solid' } : {}),
               })
             }
           />
-        </PropertyRow>
-        <PropertyRow label="Radius">
-          <NumberField value={info.borderRadius} unit="px" onCommit={(v) => apply({ 'border-radius': `${v}px` })} />
-        </PropertyRow>
+        </div>
+        {border.sides && <p className="mt-1 text-[10.5px] text-ink-faint">Sides: {border.sides}</p>}
       </PropertySection>
       {info.hasText && (
         <PropertySection title="Text">
+          <PropertyRow label="Font">
+            <SelectField
+              label="Font family"
+              value={info.fontFamily}
+              options={fontOptions(info)}
+              onChange={(v) => apply({ 'font-family': v })}
+            />
+          </PropertyRow>
           <PropertyRow label="Size">
-            <NumberField value={info.fontSize} unit="px" onCommit={(v) => apply({ 'font-size': `${v}px` })} />
+            <NumberField
+              label="Font size"
+              value={info.fontSize}
+              unit="px"
+              onCommit={(v) => apply({ 'font-size': `${v}px` })}
+            />
             <SelectField
               className="flex-[0_0_66px]"
-              value={WEIGHTS.includes(info.fontWeight) ? info.fontWeight : '400'}
-              options={WEIGHTS.map((w) => ({ value: w, label: w }))}
+              label="Font weight"
+              value={info.fontWeight}
+              options={[...new Set([...WEIGHTS, info.fontWeight])]
+                .sort((a, b) => Number(a) - Number(b))
+                .map((w) => ({ value: w, label: w }))}
               onChange={(v) => apply({ 'font-weight': v })}
             />
           </PropertyRow>
@@ -351,11 +724,24 @@ function DesignTab({ info, apply }: { info: ElementInfo; apply: (styles: StylePa
             <ColorField value={rgbToHex(info.color)} onCommit={(v) => apply({ color: v })} />
           </PropertyRow>
           <PropertyRow label="Align">
-            <SelectField
-              value={ALIGNS.includes(info.textAlign) ? info.textAlign : 'left'}
-              options={ALIGNS.map((a) => ({ value: a, label: a }))}
-              onChange={(v) => apply({ 'text-align': v })}
-            />
+            <Segmented
+              aria-label="Text alignment"
+              className="w-full gap-1 rounded-none bg-transparent p-0"
+              value={textAlign}
+              onValueChange={(v) => apply({ 'text-align': v })}
+            >
+              {ALIGNS.map(({ value, label, Icon }) => (
+                <SegmentedItem
+                  key={value}
+                  value={value}
+                  aria-label={label}
+                  title={label}
+                  className="grid h-[26px] min-h-0 flex-1 place-items-center rounded-[7px] bg-sub p-0 hover:bg-paper-deep sm:flex-1"
+                >
+                  <Icon size="rail" />
+                </SegmentedItem>
+              ))}
+            </Segmented>
           </PropertyRow>
         </PropertySection>
       )}
@@ -400,8 +786,8 @@ function HtmlTab({ frame, selector }: { frame: Frame; selector: string }) {
 
   return (
     <Textarea
-      variant="bare"
-      className="min-h-[320px] flex-1 bg-[#17171b] p-3 font-mono text-[11.5px] leading-[1.55] text-[#e9e9ee] [tab-size:2] md:text-[11.5px]"
+      variant="code"
+      className="min-h-[320px] flex-1"
       value={draft}
       spellCheck={false}
       onFocus={() => setTyping(true)}

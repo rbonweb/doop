@@ -36,6 +36,19 @@ export async function postComment(
   return surface(await api.addComment(frameId, { ...input, mentions }))
 }
 
+/** A comment pinned to a point on the canvas rather than to a frame element. */
+export async function postCanvasComment(
+  canvasId: string,
+  input: { pageId: string; x: number; y: number; text: string },
+  mentions: string[],
+): Promise<PostedComment> {
+  if (useStore.getState().guest) {
+    const name = await ensureGuestName()
+    return surface(await api.guestCanvasComment(canvasId, { ...input, name }))
+  }
+  return surface(await api.addCanvasComment(canvasId, { ...input, mentions }))
+}
+
 export async function postReply(commentId: string, text: string, mentions: string[]): Promise<PostedComment> {
   if (useStore.getState().guest) {
     const name = await ensureGuestName()

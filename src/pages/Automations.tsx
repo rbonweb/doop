@@ -9,23 +9,19 @@ import {
   type Step,
 } from '../../shared/automations'
 import { api } from '../lib/api'
-import { clientIntegrations } from '../integrations'
 import { navigate } from '../App'
 import { posthog } from '../lib/posthog'
-import { AccountMenu, IconGrid } from '../components/DashShell'
-import {
-  CanvasThumb,
-  ClockTile,
-  MetaTile,
-  RunDot,
-  StepChain,
-  Toggle,
-  WorkspaceRail,
-  formatRunTime,
-} from '../components/AutomateShell'
+import { AppRail, railLayout } from '../components/AppRail'
+import { ClockTile, MetaTile, RunDot, StepChain, formatRunTime } from '../components/AutomateShell'
+import { FrameThumb } from '../components/FramePreview'
 import { RoleMark } from '../components/RoleMark'
 import { Button } from '../components/ui/button'
+import { EmptyState } from '../components/ui/empty-state'
+import { IconButton } from '../components/ui/icon-button'
+import { GridIcon, PlusIcon } from '../components/ui/icons'
+import { Pressable } from '../components/ui/pressable'
 import { Skeleton } from '../components/ui/skeleton'
+import { Switch } from '../components/ui/switch'
 import { Toast } from '../components/ui/toast'
 import { ConfirmDialog } from '../components/ui/alert-dialog'
 import {
@@ -63,7 +59,6 @@ function everyLine(a: Automation): string {
 export function Automations() {
   const [items, setItems] = useState<Automation[] | null>(null)
   const [canvases, setCanvases] = useState<CanvasMeta[]>([])
-  const [integrationCount, setIntegrationCount] = useState(0)
   const [busy, setBusy] = useState(false)
   const [remove, setRemove] = useState<Automation | null>(null)
   const [toast, setToast] = useState<string | null>(null)
@@ -71,12 +66,6 @@ export function Automations() {
   useEffect(() => {
     api.listAutomations().then(setItems).catch(console.error)
     api.listCanvases().then(setCanvases).catch(console.error)
-    api
-      .integrations()
-      .then((s) =>
-        setIntegrationCount(Number(s.meta.connected) + clientIntegrations.filter((i) => i.isConnected(s)).length),
-      )
-      .catch(console.error)
   }, [])
 
   function showToast(message: string) {
@@ -137,58 +126,53 @@ export function Automations() {
   const empty = items !== null && items.length === 0
 
   return (
-    <DashLayout>
-      <WorkspaceRail
-        active="automations"
-        canvases={canvases}
-        automationCount={items?.length}
-        integrationCount={integrationCount}
-      />
-      <DashMain>
-        <DashHeader>
+    <DashLayout className={railLayout}>
+      <AppRail active="automations" canvases={canvases} />
+      <DashMain className="[background:var(--paper)]">
+        <DashHeader variant="bare">
           <span className="flex-1" />
-          <Button variant="primary" className="min-h-10 md:min-h-0" disabled={busy} onClick={() => create()}>
-            + New automation
+          <Button variant="primary" size="bar" disabled={busy} onClick={() => create()}>
+            <PlusIcon width={15} height={15} strokeWidth={1.75} /> New automation
           </Button>
-          <AccountMenu />
         </DashHeader>
 
-        <DashContent>
-          <DashTitle className="mb-[26px]">
-            Automations<em className="not-italic text-brand">.</em>
-          </DashTitle>
+        <DashContent className="pt-2 md:pt-3">
+          <DashTitle className="mb-5">Automations</DashTitle>
 
           {items === null ? (
             <div className="flex flex-col gap-2">
               {[0, 1, 2].map((i) => (
-                <Skeleton key={i} index={i} className="h-14 rounded-[12px]" />
+                <Skeleton key={i} index={i} shape="row" />
               ))}
             </div>
           ) : empty ? (
             <>
-              <div className="flex flex-col items-center gap-2.5 rounded-[18px] border-[1.5px] border-dashed border-line px-6 py-[34px] text-center">
-                <div className="mb-2.5 flex items-center gap-2.5">
-                  <ClockTile size={36} />
-                  <span className="h-px w-[22px] bg-[#b9b5ac]" aria-hidden />
-                  <MetaTile size={36} className="border border-line bg-surface" />
-                  <span className="h-px w-[22px] bg-[#b9b5ac]" aria-hidden />
-                  <span className="grid size-9 place-items-center rounded-[10px] border border-line bg-surface text-ink">
-                    <IconGrid />
-                  </span>
-                </div>
-                <h3 className="text-[18px] font-semibold tracking-[-0.015em]">Nothing runs on its own yet</h3>
-                <p className="max-w-[420px] text-[13.5px] leading-[1.5] text-ink-soft">
-                  Pull designs in on a schedule, or hand a canvas to an agent every week.
-                </p>
-                <Button variant="primary" className="mt-2.5" disabled={busy} onClick={() => create()}>
-                  + New automation
-                </Button>
-              </div>
+              <EmptyState
+                variant="dashed"
+                illustration={
+                  <>
+                    <ClockTile size={36} />
+                    <span className="h-px w-[22px] bg-ink-ghost" aria-hidden />
+                    <MetaTile size={36} className="border border-line bg-surface" />
+                    <span className="h-px w-[22px] bg-ink-ghost" aria-hidden />
+                    <span className="grid size-9 place-items-center rounded-pill border border-line bg-surface text-ink">
+                      <GridIcon />
+                    </span>
+                  </>
+                }
+                title="Nothing runs on its own yet"
+                description="Pull designs in on a schedule, or hand a canvas to an agent every week."
+                action={
+                  <Button variant="primary" disabled={busy} onClick={() => create()}>
+                    + New automation
+                  </Button>
+                }
+              />
               <Examples onUse={create} busy={busy} />
             </>
           ) : (
-            <div className="overflow-hidden rounded-[14px] border border-line bg-surface shadow-card">
-              <div className="hidden grid-cols-[52px_minmax(0,1.7fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_36px] items-center gap-3 border-b border-line-soft px-4 py-2.5 font-mono text-[10px] uppercase tracking-[0.12em] text-ink-faint md:grid">
+            <div className="overflow-hidden rounded-panel border border-line bg-surface shadow-card">
+              <div className="hidden grid-cols-[52px_minmax(0,1.7fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_36px] items-center gap-3 border-b border-line-soft px-4 py-2.5 text-caption text-ink-faint md:grid">
                 <span />
                 <span>Automation</span>
                 <span>Canvas</span>
@@ -203,33 +187,48 @@ export function Automations() {
                 return (
                   <div
                     key={a.id}
-                    role="link"
-                    tabIndex={0}
                     className="grid cursor-pointer grid-cols-[52px_minmax(0,1fr)_36px] items-center gap-3 border-b border-line-soft px-4 py-3 transition-colors last:border-b-0 hover:bg-paper md:grid-cols-[52px_minmax(0,1.7fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_36px]"
                     onClick={() => navigate(`/automations/${a.id}`)}
-                    onKeyDown={(e) => e.key === 'Enter' && navigate(`/automations/${a.id}`)}
                   >
-                    <Toggle on={a.enabled} onChange={(on) => toggle(a, on)} label={`${a.name} on or off`} />
+                    {/* a click anywhere on the row opens the automation, and its name is
+                        the keyboard's way in; flipping the switch must not open it */}
+                    <Switch
+                      checked={a.enabled}
+                      onCheckedChange={(on) => toggle(a, on)}
+                      aria-label={`${a.name} on or off`}
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    />
                     <div className="flex min-w-0 items-center gap-2.5">
                       {first?.type === 'pull' ? (
                         <MetaTile size={24} className="border border-line bg-surface" />
                       ) : first ? (
-                        <span className="grid size-6 flex-none place-items-center rounded-[7px] border border-line bg-surface">
+                        <span className="grid size-6 flex-none place-items-center rounded-row border border-line bg-surface">
                           <RoleMark role={roleById(first.roles[0])} size={14} />
                         </span>
                       ) : (
                         <ClockTile size={24} />
                       )}
-                      <span className="min-w-0 truncate text-[13.5px] text-ink-soft">
-                        <b className="font-semibold text-ink">{a.name}</b>
+                      <span className="min-w-0 truncate text-copy text-ink-soft">
+                        <Pressable
+                          layout="inline"
+                          focus="ring"
+                          className="inline font-medium text-ink"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            navigate(`/automations/${a.id}`)
+                          }}
+                        >
+                          {a.name}
+                        </Pressable>
                         {first?.type === 'agent' && first.roles.length === 1 && <> · @{first.roles[0]}</>} ·{' '}
                         {everyLine(a)}
                       </span>
                     </div>
-                    <span className="hidden min-w-0 items-center gap-2.5 text-[13px] text-ink-soft md:flex">
+                    <span className="hidden min-w-0 items-center gap-2.5 text-body text-ink-soft md:flex">
                       {canvasIds.length ? (
                         <>
-                          <CanvasThumb canvas={canvas} className="h-[22px] w-[34px]" />
+                          <FrameThumb size="xs" frameId={canvas?.previewFrameId} />
                           <span className="truncate">
                             {canvas?.name ?? 'Canvas'}
                             {canvasIds.length > 1 ? ` +${canvasIds.length - 1}` : ''}
@@ -239,7 +238,7 @@ export function Automations() {
                         <em className="not-italic text-ink-faint">Pick a canvas</em>
                       )}
                     </span>
-                    <span className="hidden min-w-0 items-center gap-2 text-[13px] text-ink-soft md:flex">
+                    <span className="hidden min-w-0 items-center gap-2 text-body text-ink-soft md:flex">
                       {a.lastRun ? (
                         <>
                           <RunDot status={a.lastRun.status} />
@@ -268,25 +267,22 @@ export function Automations() {
                       )}
                     </span>
                     <span
-                      className={cn(
-                        'hidden font-mono text-[11px] md:block',
-                        a.nextRunAt ? 'text-ink-soft' : 'text-ink-faint',
-                      )}
+                      className={cn('hidden text-caption md:block', a.nextRunAt ? 'text-ink-soft' : 'text-ink-faint')}
                     >
                       {a.nextRunAt ? formatRunTime(a.nextRunAt) : a.enabled ? 'finish setup' : 'paused'}
                     </span>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <button
-                          type="button"
+                        <IconButton
                           aria-label={`Actions for ${a.name}`}
-                          className="grid size-8 place-items-center rounded-full text-ink-faint transition-colors hover:bg-paper-deep hover:text-ink"
+                          shape="round"
+                          className="text-ink-faint"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <MoreHorizontalIcon className="size-4" />
-                        </button>
+                        </IconButton>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent className="w-[170px]" onClick={(e) => e.stopPropagation()}>
+                      <DropdownMenuContent width="sm" onClick={(e) => e.stopPropagation()}>
                         <DropdownMenuItem tone="danger" onSelect={() => setRemove(a)}>
                           <TrashIcon className="size-4" /> Delete
                         </DropdownMenuItem>
@@ -321,32 +317,23 @@ export function Automations() {
 export function Examples({ onUse, busy }: { onUse: (example: AutomationExample) => void; busy?: boolean }) {
   return (
     <section className="mt-[30px]">
-      <h2 className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-faint">Start from an example</h2>
+      <h2 className="text-caption text-ink-faint">Start from an example</h2>
       <div className="mt-3 grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-3">
         {AUTOMATION_EXAMPLES.map((e) => (
-          <div
+          <Pressable
             key={e.id}
-            role="button"
-            tabIndex={0}
-            className="group flex cursor-pointer flex-col gap-2 rounded-[12px] border border-line bg-surface px-4 pb-3.5 pt-4 shadow-card transition-[translate,border-color] duration-150 hover:-translate-y-[3px] hover:border-ink-faint focus-visible:outline-2 focus-visible:outline-brand"
+            focus="ring"
+            className="group flex flex-col gap-2 rounded-card border border-line bg-surface px-4 pb-3.5 pt-4 shadow-card transition-[translate,border-color] duration-150 hover:-translate-y-[3px] hover:border-ink-faint"
             onClick={() => !busy && onUse(e)}
-            onKeyDown={(ev) => {
-              if (ev.key === 'Enter' || ev.key === ' ') {
-                ev.preventDefault()
-                if (!busy) onUse(e)
-              }
-            }}
           >
             <StepChain steps={e.steps} size={26} />
-            <b className="mt-1 text-[14px] font-semibold tracking-[-0.012em]">{e.name}</b>
-            <p className="text-[12.5px] leading-[1.5] text-ink-soft">{e.blurb}</p>
-            <div className="mt-auto flex items-center pt-1.5 font-mono text-[10.5px] text-ink-faint">
+            <b className="mt-1 text-copy font-semibold">{e.name}</b>
+            <span className="text-body text-ink-soft">{e.blurb}</span>
+            <div className="mt-auto flex items-center pt-1.5 text-caption text-ink-faint">
               {describeSchedule({ ...e.schedule, tz: 'UTC' }).replace(' at ', ' ')}
-              <b className="ml-auto font-sans text-[12.5px] font-semibold text-ink group-hover:text-accent-ink">
-                Use →
-              </b>
+              <b className="ml-auto font-sans text-body font-semibold text-ink group-hover:text-accent-ink">Use →</b>
             </div>
-          </div>
+          </Pressable>
         ))}
       </div>
     </section>
