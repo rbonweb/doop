@@ -1,11 +1,14 @@
 import { nanoid } from 'nanoid'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { db } from './db/index.ts'
 import * as t from './db/schema.ts'
 import * as storage from './storage.ts'
+import { store } from './store.ts'
 
 /**
  * Uploaded assets: images, plus CSS stylesheets for the callers that opt in. Bytes live in object storage (server/storage.ts), one metadata row per asset in the assets table (including the canvas it was uploaded for). Frame HTML is the ground truth for which assets are still in use, tracked as a projection in asset_refs: every durable frame write re-extracts that frame's /a/<id> references (db/persist.ts), and boot rebuilds the whole table from hydrated frames — so a failed fire-and-forget write self-heals. Nothing is ever deleted; if cleanup is wanted some day, asset_refs is the ledger to build it on.
+ *
+ * Images are immutable. A stylesheet can be replaced in place (replaceAsset): same id and URL, a bumped `version`. Version 1 stays at `<id>.<ext>`; version n > 1 lives at `<id>-v<n>.<ext>`. An object served under a version number is never overwritten, so `?v=<n>` is safe to cache forever.
  */
 
 export const MAX_ASSET_BYTES = 5 * 1024 * 1024
@@ -96,13 +99,35 @@ function hasRuleBlock(css: string): boolean {
   return !body.trim() || DECLARATION.test(body)
 }
 
-/** Response headers for serving an asset. Every type gets nosniff, so a browser never second-guesses the sniffed type. Documents are neutered: an svg can script, and a stylesheet opened in a tab is a document too. Neither affects embedding, because <img>, CSS backgrounds and <link rel="stylesheet"> ignore a resource's own CSP. Stylesheets also allow any origin, so a <link crossorigin integrity> in a frame loads as well. */
-export function assetResponseHeaders(mime: string): Record<string, string> {
+/** Which revision of an asset a response carries. A stylesheet can be replaced in place, so unless the request pinned a version (`?v=<n>`) it is revalidated against a strong ETag of `<id>-<version>` instead of cached forever. */
+export interface AssetRevision {
+  id: string
+  version: number
+  /** the request named a version: those bytes never change */
+  pinned?: boolean
+}
+
+/** The ETag of a stylesheet revision. `coding` tells the compressed variants apart, because a strong validator names one exact byte sequence. */
+export function assetEtag(rev: Pick<AssetRevision, 'id' | 'version'>, coding?: string): string {
+  return `"${rev.id}-${rev.version}${coding ? `-${coding}` : ''}"`
+}
+
+/** Whether an If-None-Match header names this ETag (weak comparison, as for a GET). Checked here rather than through Express's `req.fresh`, which treats a request's `Cache-Control: no-cache` (what fetch() sends with a conditional request) as never fresh, although a 304 is exactly the answer a revalidation wants. */
+export function etagMatches(ifNoneMatch: string | undefined, etag: string): boolean {
+  if (!ifNoneMatch) return false
+  const bare = (tag: string) => tag.trim().replace(/^W\//, '')
+  return ifNoneMatch.split(',').some((tag) => bare(tag) === '*' || bare(tag) === etag)
+}
+
+/** Response headers for serving an asset. Every type gets nosniff, so a browser never second-guesses the sniffed type. Documents are neutered: an svg can script, and a stylesheet opened in a tab is a document too. Neither affects embedding, because <img>, CSS backgrounds and <link rel="stylesheet"> ignore a resource's own CSP. Stylesheets also allow any origin, so a <link crossorigin integrity> in a frame loads as well. Images are immutable and cached for a year; so is a stylesheet fetched at a pinned version, while the unpinned URL revalidates (`no-cache` plus an ETag) so a replacement shows up at once. */
+export function assetResponseHeaders(mime: string, rev?: AssetRevision): Record<string, string> {
+  const mutable = mime === CSS_MIME && !rev?.pinned
   const headers: Record<string, string> = {
     'Content-Type': mime === CSS_MIME ? 'text/css; charset=utf-8' : mime,
-    'Cache-Control': 'public, max-age=31536000, immutable',
+    'Cache-Control': mutable ? 'no-cache' : 'public, max-age=31536000, immutable',
     'X-Content-Type-Options': 'nosniff',
   }
+  if (mutable && rev) headers['ETag'] = assetEtag(rev)
   if (mime === 'image/svg+xml') headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'"
   if (mime === CSS_MIME) {
     headers['Content-Security-Policy'] = "default-src 'none'"
@@ -131,13 +156,20 @@ const TICKET_TTL_MS = 15 * 60 * 1000
 interface UploadTicket {
   canvasId: string
   ownerId?: string
+  /** set when the upload replaces this stylesheet in place instead of creating an asset */
+  replaceAssetId?: string
   uploadedBy: string
   expiresAt: number
   inFlight: boolean
 }
 const tickets = new Map<string, UploadTicket>()
 
-export function createUploadTicket(meta: { canvasId: string; ownerId?: string; uploadedBy: string }): {
+export function createUploadTicket(meta: {
+  canvasId: string
+  ownerId?: string
+  uploadedBy: string
+  replaceAssetId?: string
+}): {
   token: string
   expiresAt: number
 } {
@@ -208,12 +240,130 @@ export async function createAsset(
   return { id, mime, ext, size: buf.length }
 }
 
-export async function getAsset(id: string): Promise<{ meta: AssetMeta; buf: Buffer } | null> {
+/** Where a revision's bytes live: version 1 is the original upload at `<id>.<ext>`, later versions get a key of their own, so no key ever changes content once it is served. */
+const revisionKey = (id: string, version: number, ext: string) =>
+  version <= 1 ? `${id}.${ext}` : `${id}-v${version}.${ext}`
+
+export type AssetVersionMeta = AssetMeta & { version: number }
+
+/** An asset's bytes. Without `version` this is the latest. With one, a stylesheet answers that exact revision and null when the revision never existed; images have one revision and ignore it. `latest` is the newest version either way. */
+export async function getAsset(
+  id: string,
+  version?: number,
+): Promise<{ meta: AssetVersionMeta; buf: Buffer; latest: number } | null> {
   const [row] = await db.select().from(t.assets).where(eq(t.assets.id, id))
   if (!row) return null
-  const buf = await storage.getObject(`${row.id}.${row.ext}`)
+  const wanted = row.mime === CSS_MIME && version !== undefined ? version : row.version
+  if (!Number.isInteger(wanted) || wanted < 1 || wanted > row.version) return null
+  const buf = await storage.getObject(revisionKey(row.id, wanted, row.ext))
   if (!buf) return null
-  return { meta: { id: row.id, mime: row.mime, ext: row.ext, size: row.size }, buf }
+  return {
+    meta: { id: row.id, mime: row.mime, ext: row.ext, size: buf.length, version: wanted },
+    buf,
+    latest: row.version,
+  }
+}
+
+/** The asset id in an uploaded asset's URL: `https://host/a/<id>.css`, `/a/<id>.css`, either with `?v=` or a fragment. */
+export function assetIdFromUrl(url: string): string | undefined {
+  const path = url.trim().replace(/^https?:\/\/[^/?#]+/i, '')
+  return /^\/a\/([A-Za-z0-9_-]+)\.[a-z0-9]+(?:[?#].*)?$/.exec(path)?.[1]
+}
+
+/** Ids of the frames whose HTML links this asset: the asset_refs projection, plus a scan of the frames in memory. persist writes asset_refs on a debounce, so a frame created just before a replace is only in the scan. */
+export async function framesReferencingAsset(id: string): Promise<string[]> {
+  const rows = await db.select({ frameId: t.assetRefs.frameId }).from(t.assetRefs).where(eq(t.assetRefs.assetId, id))
+  const ids = new Set(rows.map((r) => r.frameId))
+  const needle = `/a/${id}.`
+  for (const canvas of store.canvases.values())
+    for (const frame of canvas.frames) if (frame.html.includes(needle)) ids.add(frame.id)
+  return [...ids]
+}
+
+export interface AssetReplacement {
+  assetId: string
+  version: number
+  frameIds: string[]
+}
+
+type ReplacedListener = (replacement: AssetReplacement) => void
+let replacedListener: ReplacedListener | undefined
+
+/** server/index.ts registers the one listener that tells open canvases and drops cached screenshots; assets.ts stays free of the websocket room. */
+export function onAssetReplaced(listener: ReplacedListener): void {
+  replacedListener = listener
+}
+
+const REPLACE_IMAGES_ERROR =
+  'only stylesheets can be replaced in place — images are immutable. Upload the new image and point the frames at its URL'
+const REPLACE_NOT_CSS_ERROR = 'the new file is not a stylesheet — a stylesheet can only be replaced with valid CSS'
+
+/* Replacements of one asset run one after another within this process, so two racing updates cannot interleave their object writes. The version check on the row guards the rest. */
+const replacing = new Map<string, Promise<unknown>>()
+
+function serialized<T>(id: string, job: () => Promise<T>): Promise<T> {
+  const run = (replacing.get(id) ?? Promise.resolve()).then(job, job)
+  const tail = run.catch(() => {})
+  replacing.set(id, tail)
+  void tail.then(() => {
+    if (replacing.get(id) === tail) replacing.delete(id)
+  })
+  return run
+}
+
+/** Replace an uploaded stylesheet's bytes in place: same id, extension and URL, `version` + 1. The new bytes are written to `<id>-v<next>.css` before the row moves, so a request never sees new bytes under an old version number; the previous versions keep their own keys and stay served at `?v=<n>`. Fires the registered listener with the frames that link it. Replacing with identical bytes changes nothing and answers `unchanged: true`. A caller that knows who is asking passes `ownerId` and/or `canvasId`: the asset may then be replaced only by its uploader, or from the canvas it was uploaded for. */
+export async function replaceAsset(
+  id: string,
+  buf: Buffer,
+  meta: { uploadedBy: string; ownerId?: string; canvasId?: string },
+): Promise<{ ok: true; asset: AssetVersionMeta; unchanged: boolean } | { ok: false; error: string }> {
+  return serialized(id, async () => {
+    const fail = (error: string) => ({ ok: false as const, error })
+    const [row] = await db.select().from(t.assets).where(eq(t.assets.id, id))
+    if (!row) return fail('asset not found')
+    if (row.mime !== CSS_MIME) return fail(REPLACE_IMAGES_ERROR)
+    /* asset URLs are public, so knowing one proves nothing: the caller must be its uploader or work on its canvas (an internal caller passes neither) */
+    const internal = meta.ownerId === undefined && meta.canvasId === undefined
+    const sameOwner = !!row.ownerId && row.ownerId === meta.ownerId
+    const sameCanvas = !!meta.canvasId && row.canvasId === meta.canvasId
+    if (!internal && !sameOwner && !sameCanvas)
+      return fail('this asset belongs to someone else on another canvas — it cannot be replaced from here')
+    if (buf.length === 0) return fail('empty file')
+    if (buf.length > MAX_ASSET_BYTES)
+      return fail(`file is ${(buf.length / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB`)
+    if (!looksLikeCss(buf)) return fail(REPLACE_NOT_CSS_ERROR)
+
+    const current = await storage.getObject(revisionKey(row.id, row.version, row.ext))
+    if (!current) return fail('the stored stylesheet is missing')
+    const asset = (version: number): AssetVersionMeta => ({
+      id: row.id,
+      mime: row.mime,
+      ext: row.ext,
+      size: buf.length,
+      version,
+    })
+    if (current.equals(buf)) return { ok: true, asset: asset(row.version), unchanged: true }
+
+    const next = row.version + 1
+    const nextKey = revisionKey(row.id, next, row.ext)
+    /* object first, row second: until the row moves nothing points at the new key, and a failed row update only leaves an object to clean up */
+    await storage.putObject(nextKey, buf, row.mime)
+    try {
+      const moved = await db
+        .update(t.assets)
+        .set({ version: next, size: buf.length })
+        .where(and(eq(t.assets.id, row.id), eq(t.assets.version, row.version)))
+        .returning({ id: t.assets.id })
+      /* another writer took this version number first, and the object at nextKey is now theirs: leave it */
+      if (!moved.length) return fail('the stylesheet changed while it was being replaced — try again')
+    } catch (e) {
+      await storage.deleteObject(nextKey).catch(() => {})
+      return fail(e instanceof Error ? e.message : 'replace failed')
+    }
+    const frameIds = await framesReferencingAsset(row.id).catch(() => [])
+    replacedListener?.({ assetId: row.id, version: next, frameIds })
+    return { ok: true, asset: asset(next), unchanged: false }
+  })
 }
 
 /** Fetch a remote file through the SSRF guard, validating every redirect

@@ -91,7 +91,11 @@ export function useFrameSleep(
   const evaluate = useRef<() => void>(() => {})
 
   useEffect(() => {
-    if (!ready) return
+    /* the document went away (a remount): its replacement starts awake whatever the last message said */
+    if (!ready) {
+      asleep.current = false
+      return
+    }
     const box = { id, x, y, width, height }
     const disabled = sleepDisabled()
     evaluate.current = () => {

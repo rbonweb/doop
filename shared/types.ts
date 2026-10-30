@@ -677,6 +677,8 @@ export type ServerMessage =
   /** the distiller proposed a rule, or a proposal was accepted/dismissed */
   | { type: 'proposal'; proposal: MemoryProposal }
   | { type: 'canvas:deleted' }
+  /** an uploaded stylesheet was replaced in place: the frames that link it (frameIds, in this canvas) should reload it */
+  | { type: 'asset:updated'; assetId: string; version: number; frameIds: string[] }
   | { type: 'activity'; item: ActivityItem }
 
 export const CURSOR_PALETTE = [

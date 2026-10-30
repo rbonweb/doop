@@ -23,8 +23,13 @@ const pending = new Map<string, Promise<Buffer>>()
  *  must not turn each dashboard poll into a Chromium render */
 const lastAttempt = new Map<string, number>()
 const MIN_REVALIDATE_MS = 30_000
+/** bumped by invalidate(): a render that began under an older generation was drawn with a stylesheet that has since been replaced, so its result is neither persisted nor cached */
+const generations = new Map<string, number>()
 /** frames purged mid-render — a pending create must not re-persist them */
 const dead = new Set<string>()
+
+/** The frame's current invalidation generation; capture it when a render starts and compare when it ends. */
+export const generation = (frameId: string): number => generations.get(frameId) ?? 0
 
 const keyFor = (frameId: string) => `thumb/${frameId}.jpg`
 
@@ -65,11 +70,13 @@ export function create(frame: Frame): Promise<Buffer> {
   const inflight = pending.get(frame.id)
   if (inflight) return inflight
   lastAttempt.set(frame.id, Date.now())
+  const started = generation(frame.id)
   const p = render(frame).then(async (buf) => {
     /* persist is best-effort: a bucket hiccup must not fail the response
-       that only needed the bytes */
+       that only needed the bytes. A render started before an invalidation is
+       not stored: it shows the old stylesheet. */
     try {
-      if (!dead.has(frame.id)) {
+      if (!dead.has(frame.id) && generation(frame.id) === started) {
         await storage.putObject(keyFor(frame.id), buf, 'image/jpeg')
         written.set(frame.id, frame.updatedAt)
         /* purge may have run during the put — its delete can land before
@@ -82,7 +89,10 @@ export function create(frame: Frame): Promise<Buffer> {
     return buf
   })
   pending.set(frame.id, p)
-  p.catch(() => {}).finally(() => pending.delete(frame.id))
+  p.catch(() => {}).finally(() => {
+    /* invalidate() may have replaced this entry with a newer render */
+    if (pending.get(frame.id) === p) pending.delete(frame.id)
+  })
   return p
 }
 
@@ -110,6 +120,14 @@ export async function getStored(frame: Frame): Promise<Buffer | null> {
   if (!fresh && !throttled && !pending.has(frame.id))
     create(frame).catch((e) => console.error(`thumb revalidate failed for ${frame.id}:`, e))
   return buf
+}
+
+/** The frame looks different without its html changing (a stylesheet it links was replaced): forget that the stored thumbnail is fresh and lift the revalidation throttle, so the next preview request re-renders it in the background. A render already in flight is orphaned: it finishes without persisting, and the next request starts a new one. */
+export function invalidate(frameId: string): void {
+  generations.set(frameId, generation(frameId) + 1)
+  pending.delete(frameId)
+  written.delete(frameId)
+  lastAttempt.delete(frameId)
 }
 
 /** Frame (or its whole canvas) is gone — drop the derived object too, so the

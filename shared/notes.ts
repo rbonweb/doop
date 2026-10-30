@@ -36,13 +36,69 @@ export function clampNoteHeight(height: number): number {
   return Math.round(clamp(height, NOTE_HEIGHT.min, NOTE_HEIGHT.max))
 }
 
-/** Where a note attached to a frame lands when nobody picked a spot: beside
- *  the frame's left edge, level with its top. */
+interface Rect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** True when two rectangles share area; touching edges do not count. */
+function rectsOverlap(a: Rect, b: Rect): boolean {
+  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+}
+
+/** Where a note attached to a frame lands when nobody picked a spot. It sits beside the frame like a margin note, and never overlaps an obstacle (every other frame and note on the page), keeping NOTE_ATTACH_GAP clear of each. */
 export function attachedNotePlacement(
-  frame: Pick<Frame, 'x' | 'y'>,
-  width: number = NOTE_DEFAULT_SIZE.width,
+  frame: Pick<Frame, 'id' | 'x' | 'y' | 'width' | 'height'>,
+  size: { width: number; height: number },
+  obstacles: readonly Rect[] = [],
 ): { x: number; y: number } {
-  return { x: frame.x - width - NOTE_ATTACH_GAP, y: frame.y }
+  const { width, height } = size
+  const gap = NOTE_ATTACH_GAP
+  /* the obstacles a note at (x, y) would crowd, judged with the gap around the note */
+  const collisions = (x: number, y: number): Rect[] => {
+    const padded = { x: x - gap, y: y - gap, width: width + gap * 2, height: height + gap * 2 }
+    return obstacles.filter((o) => rectsOverlap(padded, o))
+  }
+
+  /* 1 and 2: a column beside the frame, sliding down past whatever is in the way while the note still starts within the frame's height */
+  const maxY = Math.max(frame.y, frame.y + frame.height - height)
+  const column = (x: number): { x: number; y: number } | undefined => {
+    let y = frame.y
+    while (y <= maxY) {
+      const hits = collisions(x, y)
+      if (hits.length === 0) return { x, y }
+      y = Math.max(...hits.map((o) => o.y + o.height)) + gap
+    }
+    return undefined
+  }
+
+  /* 3: above the frame, sliding right past whatever is in the way while the note still starts within the frame's width */
+  const above = (): { x: number; y: number } | undefined => {
+    const y = frame.y - height - gap
+    const maxX = Math.max(frame.x, frame.x + frame.width - width)
+    let x = frame.x
+    while (x <= maxX) {
+      const hits = collisions(x, y)
+      if (hits.length === 0) return { x, y }
+      x = Math.max(...hits.map((o) => o.x + o.width)) + gap
+    }
+    return undefined
+  }
+
+  /* 4: the gutter lane, left of everything in the frame's vertical band, sliding further left past anything in the way; always ends in a free spot */
+  const gutter = (): { x: number; y: number } => {
+    const band = obstacles.filter((o) => o.y < frame.y + frame.height && frame.y < o.y + o.height)
+    let x = Math.min(frame.x, ...band.map((o) => o.x)) - width - gap
+    for (;;) {
+      const hits = collisions(x, frame.y)
+      if (hits.length === 0) return { x, y: frame.y }
+      x = Math.min(...hits.map((o) => o.x)) - width - gap
+    }
+  }
+
+  return column(frame.x - width - gap) ?? column(frame.x + frame.width + gap) ?? above() ?? gutter()
 }
 
 /** The page a note shows on: its frame's page when attached, otherwise its

@@ -14,7 +14,7 @@ import { toNodeHandler, fromNodeHeaders } from 'better-auth/node'
 import { oAuthDiscoveryMetadata } from 'better-auth/plugins'
 import { WebSocketServer, WebSocket } from 'ws'
 import { PageLimitError, store } from './store.ts'
-import { getImage } from './previews.ts'
+import { getImage, invalidateFrameImages } from './previews.ts'
 import { parseImageScale } from '../shared/imageScale.ts'
 import * as actions from './actions.ts'
 import { liveActivitiesRouter, logLiveActivityRequests, startLiveActivityDelivery } from './liveActivities.ts'
@@ -65,8 +65,12 @@ import {
   endTicketUpload,
   createAsset,
   MAX_ASSET_BYTES,
+  assetEtag,
+  etagMatches,
   assetResponseHeaders,
   assetUsage,
+  onAssetReplaced,
+  replaceAsset,
   isTextAsset,
 } from './assets.ts'
 import { compressedBundle, compressedOnce, immutableAssets, negotiateCoding } from './compression.ts'
@@ -345,6 +349,17 @@ function publicCanvasView(canvas: Canvas, guest: boolean): Canvas {
 }
 
 actions.wire(broadcast, agentTouch)
+/* a stylesheet was replaced in place: open canvases reload it in the frames that link it, and those frames' cached screenshots are dropped (their html and updatedAt did not change, so nothing else would) */
+onAssetReplaced(({ assetId, version, frameIds }) => {
+  const byCanvas = new Map<string, string[]>()
+  for (const frameId of frameIds) {
+    invalidateFrameImages(frameId)
+    const frame = store.getFrame(frameId)
+    if (frame) byCanvas.set(frame.canvasId, [...(byCanvas.get(frame.canvasId) ?? []), frameId])
+  }
+  for (const [canvasId, ids] of byCanvas)
+    broadcast(canvasId, { type: 'asset:updated', assetId, version, frameIds: ids })
+})
 wireSharing({ refreshAccess: refreshRoomAccess, sendToUsers })
 startAccessRequestExpiry()
 /* after the room has been told: email for the people who were not in it */
@@ -488,23 +503,32 @@ app.get('/i/:id.:ext', async (req, res) => {
 })
 
 /* ------------------------------------------------------------------ */
-/* Uploaded assets: /a/<assetId>.<ext> — images, and stylesheets that frames link with <link rel="stylesheet">. Written once by the upload_asset MCP tool, immutable thereafter, so far-future caching is safe. Public by the same unguessable-id logic as /i/ (frame HTML embedding these URLs renders for anyone who can see the canvas). */
+/* Uploaded assets: /a/<assetId>.<ext> — images, and stylesheets that frames link with <link rel="stylesheet">. Images are immutable, so far-future caching is safe. A stylesheet can be replaced in place (replaceAsset in assets.ts): its plain URL always serves the latest and revalidates against an ETag of <id>-<version>, while /a/<id>.css?v=<n> serves revision n and is immutable. Public by the same unguessable-id logic as /i/ (frame HTML embedding these URLs renders for anyone who can see the canvas). */
 /* ------------------------------------------------------------------ */
 
 app.get('/a/:id.:ext', async (req, res) => {
   const { id, ext } = req.params as { id: string; ext: string }
   try {
-    const found = await getAsset(id)
+    const pinned = typeof req.query.v === 'string' && /^\d{1,9}$/.test(req.query.v) ? Number(req.query.v) : undefined
+    const found = await getAsset(id, pinned)
     if (!found || found.meta.ext !== ext) return res.status(404).end()
-    res.set(assetResponseHeaders(found.meta.mime))
+    const { mime, version } = found.meta
+    const revision = { id, version, pinned: pinned !== undefined }
+    res.set(assetResponseHeaders(mime, revision))
     if (req.query.download !== undefined) res.set('Content-Disposition', `attachment; filename="${id}.${ext}"`)
     /* Sandboxed frames have opaque origins, so the browser never caches what they load: a logo or theme stylesheet linked from 50 frames is fetched 50 times per canvas open. Text assets therefore go out compressed. */
-    if (!isTextAsset(found.meta.mime)) return res.send(found.buf)
-    res.vary('Accept-Encoding')
-    const coding = negotiateCoding(req.headers['accept-encoding'])
+    const textAsset = isTextAsset(mime)
+    if (textAsset) res.vary('Accept-Encoding')
+    const coding = textAsset ? negotiateCoding(req.headers['accept-encoding']) : undefined
+    /* a validator names one exact byte sequence, so each content coding gets its own */
+    if (res.getHeader('ETag')) {
+      const etag = assetEtag(revision, coding ?? undefined)
+      res.set('ETag', etag)
+      if (etagMatches(req.headers['if-none-match'], etag)) return res.status(304).end()
+    }
     if (!coding) return res.send(found.buf)
     res.set('Content-Encoding', coding)
-    res.send(await compressedOnce(`asset:${id}`, found.buf, coding))
+    res.send(await compressedOnce(`asset:${id}:${version}`, found.buf, coding))
   } catch (e) {
     res.status(500).json({ error: e instanceof Error ? e.message : 'asset fetch failed' })
   }
@@ -537,6 +561,12 @@ app.get('/bg/:file', async (req, res) => {
 /* capability: unguessable, single-use, 15-minute TTL.                  */
 /* ------------------------------------------------------------------ */
 
+/* What a replacement answers with. The previous version is only worth a URL when this call made a new version, and version 1 has no predecessor. */
+function replacementLinks(asset: { id: string; ext: string; version: number }, unchanged: boolean) {
+  const url = `${env.BETTER_AUTH_URL}/a/${asset.id}.${asset.ext}`
+  return { url, ...(!unchanged && asset.version > 1 ? { previous_url: `${url}?v=${asset.version - 1}` } : {}) }
+}
+
 app.put('/u/:token', async (req, res) => {
   const { token } = req.params
   const ticket = beginTicketUpload(token)
@@ -563,6 +593,30 @@ app.put('/u/:token', async (req, res) => {
         return
       }
       chunks.push(chunk as Buffer)
+    }
+    if (ticket.replaceAssetId) {
+      /* a ticket minted to replace a stylesheet in place: same id and URL, a new version */
+      const replaced = await replaceAsset(ticket.replaceAssetId, Buffer.concat(chunks), {
+        uploadedBy: ticket.uploadedBy,
+        ownerId: ticket.ownerId,
+        canvasId: ticket.canvasId,
+      })
+      if (!replaced.ok) return res.status(400).json({ error: replaced.error })
+      success = true
+      const { url, previous_url } = replacementLinks(replaced.asset, replaced.unchanged)
+      return res.json({
+        ok: true,
+        replaced: true,
+        unchanged: replaced.unchanged,
+        url,
+        version: replaced.asset.version,
+        ...(previous_url ? { previous_url } : {}),
+        mime: replaced.asset.mime,
+        size_bytes: replaced.asset.size,
+        note: replaced.unchanged
+          ? `The file is identical to version ${replaced.asset.version} — nothing changed.`
+          : `Replaced in place — the same URL now serves version ${replaced.asset.version}. Open canvases reload it${previous_url ? `; ${previous_url} still serves the previous version` : ''}.`,
+      })
     }
     /* tickets come only from upload_asset, which takes theme stylesheets as well as images */
     const asset = await createAsset(
@@ -1580,6 +1634,34 @@ app.post(
   },
 )
 
+/* Replace an uploaded stylesheet's bytes in place (same /a/ URL, next version): raw CSS in, the new version out. The caller needs the edit role on the canvas the asset was uploaded for, or to own the asset. */
+app.put(
+  '/api/canvases/:id/assets/:assetId',
+  express.raw({ type: () => true, limit: MAX_ASSET_BYTES + 1024 }),
+  async (req, res) => {
+    const c = requireCanvas(req, res, req.params.id, 'edit')
+    if (!c) return
+    try {
+      const replaced = await replaceAsset(req.params.assetId, Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0), {
+        canvasId: c.id,
+        ownerId: req.user!.id,
+        uploadedBy: req.user!.name,
+      })
+      if (!replaced.ok)
+        return res.status(replaced.error === 'asset not found' ? 404 : 400).json({ error: replaced.error })
+      res.json({
+        ...replacementLinks(replaced.asset, replaced.unchanged),
+        unchanged: replaced.unchanged,
+        mime: replaced.asset.mime,
+        size: replaced.asset.size,
+        version: replaced.asset.version,
+      })
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : 'replace failed' })
+    }
+  },
+)
+
 app.put('/api/canvases/:id/pages', (req, res) => {
   const canvas = requireCanvas(req, res, req.params.id, 'edit')
   if (!canvas) return
@@ -1702,6 +1784,27 @@ app.patch('/api/frames/:id', (req, res) => {
   const frame = actions.updateFrame(req.params.id, clean, actor)
   if (!frame) return res.status(404).json({ error: 'frame not found' })
   res.json(frame)
+})
+
+/* Move a frame to another canvas: it keeps its id, history and sticky notes. The edit role is needed on both ends,
+   the frame's canvas it leaves and the canvas it joins. */
+app.post('/api/frames/:id/move', (req, res) => {
+  if (!requireFrame(req, res, req.params.id, 'edit')) return
+  const { canvasId, pageId, x, y } = req.body ?? {}
+  if (typeof canvasId !== 'string' || !canvasId) return res.status(400).json({ error: 'canvasId is required' })
+  if (pageId !== undefined && typeof pageId !== 'string') return res.status(400).json({ error: 'pageId must be text' })
+  for (const [key, value] of [
+    ['x', x],
+    ['y', y],
+  ] as const) {
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value)))
+      return res.status(400).json({ error: `${key} must be a finite number` })
+  }
+  if (!requireCanvas(req, res, canvasId, 'edit')) return
+  const actor = actions.resolveActor({ name: req.user!.name, kind: 'user', userId: req.user!.id })
+  const result = actions.moveFrameToCanvas(req.params.id, canvasId, { pageId, x, y }, actor)
+  if (!result.ok) return res.status(result.status).json({ error: result.error })
+  res.json({ frame: result.frame, notes: result.notes })
 })
 
 app.post('/api/frames/:id/append', (req, res) => {

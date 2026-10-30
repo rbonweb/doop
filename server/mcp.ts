@@ -1,6 +1,7 @@
 import { env } from './env.ts'
-import { canvasPages, normalizePageTree, samePages, validatePageTree } from '../shared/pages.ts'
-import { MAX_NOTE_CHARS, NOTE_COLORS, noteExcerpt } from '../shared/notes.ts'
+import { canvasPages, framePageId, normalizePageTree, samePages, validatePageTree } from '../shared/pages.ts'
+import { MAX_NOTE_CHARS, NOTE_COLORS, noteExcerpt, notePageId } from '../shared/notes.ts'
+import { nanoid } from 'nanoid'
 import { MAX_SPEAKER_NOTES_CHARS } from '../shared/slides.ts'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -19,7 +20,13 @@ import { capture, captureThrottled } from './analytics.ts'
 import { renderFrame } from './screenshot.ts'
 import { primeImage } from './previews.ts'
 import { DOOP_GUIDE, GUIDE_TOPICS } from './guide.ts'
-import { describeInspiration, INSPIRATION_USAGE_NOTE, searchInspiration } from './inspiration.ts'
+import {
+  describeInspiration,
+  INSPIRATION_USAGE_NOTE,
+  InspirationUnavailable,
+  inspirationFallback,
+  searchInspiration,
+} from './inspiration.ts'
 import { ESCAPED_HTML_NOTE, looksEscapedHtml } from './escapedHtml.ts'
 import { describeSyncFlow, getSyncFlow } from './ingest.ts'
 import * as assets from './assets.ts'
@@ -149,16 +156,46 @@ function deliverFeedback<T extends { content: { type: 'text' | 'image'; [k: stri
   return result
 }
 
-/** Attaches the data behind the ChatGPT preview card (server/chatgptApp.ts):
- *  the frames a tool touched, as `structuredContent`. Clients without a
- *  component host ignore it; the model keeps reading `content` as before. */
+/** The whole tool result as one object: the JSON payload of the first text block, with every other text block (nudges, human feedback) under `messages`. */
+function resultPayload(content: unknown[]): Record<string, unknown> {
+  const texts = content.flatMap((block) =>
+    typeof block === 'object' && block !== null && 'type' in block && block.type === 'text' && 'text' in block
+      ? [String(block.text)]
+      : [],
+  )
+  let payload: Record<string, unknown> = {}
+  const [first, ...rest] = texts
+  const messages = [...rest]
+  if (first !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(first)
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed))
+        payload = parsed as Record<string, unknown>
+      else messages.unshift(first)
+    } catch {
+      messages.unshift(first)
+    }
+  }
+  return messages.length ? { ...payload, messages } : payload
+}
+
+/** Attaches the data behind the ChatGPT preview card (server/chatgptApp.ts) as `structuredContent`. Clients such as Claude Code show `structuredContent` in place of the text blocks, so it carries the full tool payload too: the preview's `canvas` and `frames` are merged into it (a frame the payload already lists keeps its fields, with the preview's cache-busted image_url, url and empty on top), and nudges and feedback ride along as `messages`. */
 function withPreview<T extends { content: unknown[] }>(
   result: T,
   canvasId: string,
   frames: Frame[],
-): T & { structuredContent: CanvasPreview } {
+): T & { structuredContent: CanvasPreview & Record<string, unknown> } {
   const canvas = store.getCanvas(canvasId)
-  return { ...result, structuredContent: previewOf({ id: canvasId, name: canvas?.name ?? '' }, frames) }
+  const preview = previewOf({ id: canvasId, name: canvas?.name ?? '' }, frames)
+  const payload = resultPayload(result.content)
+  const listed = Array.isArray(payload.frames) ? (payload.frames as Record<string, unknown>[]) : undefined
+  const merged = listed
+    ? listed.map((frame) => ({ ...frame, ...preview.frames.find((p) => p.id === frame.id) }))
+    : preview.frames
+  return {
+    ...result,
+    structuredContent: { ...payload, canvas: preview.canvas, frames: merged as CanvasPreview['frames'] },
+  }
 }
 
 /* Per-connecting-user rate limits, each overridable by environment variable
@@ -192,6 +229,13 @@ function toMcpPage(page: CanvasPageInfo): { id: string; name: string; parent_id?
   return page.parentId === undefined
     ? { id: page.id, name: page.name }
     : { id: page.id, name: page.name, parent_id: page.parentId }
+}
+
+/** A page id the canvas does not have: the error names the pages it does have, so the agent can retry without another read. */
+function noPage(canvas: Pick<Canvas, 'id' | 'pages'>, pageId: string) {
+  return err(
+    `no page with id ${pageId} on this canvas. Its pages: ${JSON.stringify(canvasPages(canvas).map(toMcpPage))}`,
+  )
 }
 
 function fromMcpPage(page: { id: string; name: string; parent_id?: string | undefined }): CanvasPageInfo {
@@ -390,6 +434,10 @@ export function buildMcpServer(
         const result = { content }
         return canvas_id ? withFeedback(result, canvas_id, actorFrom(agent_name)) : result
       } catch (e) {
+        if (e instanceof InspirationUnavailable) {
+          const result = text(inspirationFallback(query, e.message))
+          return canvas_id ? withFeedback(result, canvas_id, actorFrom(agent_name)) : result
+        }
         return err(e instanceof Error ? e.message : 'inspiration search failed')
       }
     },
@@ -472,13 +520,21 @@ export function buildMcpServer(
       title: 'Get a canvas and its frames',
       _meta: previewToolMeta('Reading the canvas…', 'Canvas loaded'),
       description:
-        'Get a canvas: its name, its pages (a nested page carries parent_id, the page it sits under; parents are listed before their subpages) and every frame with position, size and metadata (not the HTML — use get_frame for that). Use this to see the current layout before adding or editing frames. Pass your agent_name so any human feedback waiting for you is delivered with the result.',
+        'Get a canvas: its name, its pages (a nested page carries parent_id, the page it sits under; parents are listed before their subpages), every frame with its pageId, position, size and metadata (not the HTML — use get_frame for that), and every sticky note (id, page_id, frame_id when attached, position, size and a text excerpt). Pass page_id to list only one page’s frames and notes. Use this to see the current layout before adding or editing frames. Pass your agent_name so any human feedback waiting for you is delivered with the result.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      inputSchema: { canvas_id: z.string(), agent_name: agentName.optional() },
+      inputSchema: {
+        canvas_id: z.string(),
+        page_id: z.string().optional().describe('Only list the frames and notes on this page'),
+        agent_name: agentName.optional(),
+      },
     },
-    async ({ canvas_id, agent_name }) => {
+    async ({ canvas_id, page_id, agent_name }) => {
       const c = canvasFor(canvas_id)
       if (!c) return noCanvas(canvas_id)
+      if (page_id && !canvasPages(c).some((p) => p.id === page_id)) return noPage(c, page_id)
+      const onPage = (pageId: string) => !page_id || pageId === page_id
+      const frames = c.frames.filter((f) => !f.demo && onPage(framePageId(c, f)))
+      const canvasNotes = (c.notes ?? []).filter((n) => onPage(notePageId(c, n)))
       arrive(canvas_id, agent_name)
       const docs = store.getGuidelines(canvas_id)
       const refs = store.getReferences(canvas_id)
@@ -507,12 +563,12 @@ export function buildMcpServer(
           text({
             id: c.id,
             name: c.name,
-            pages: c.pages?.map(toMcpPage),
+            pages: canvasPages(c).map(toMcpPage),
             /* demo frames (the Doop welcome show, seeded examples) are product
              content, not user work — hidden so agents never mistake them for
              the canvas's established style */
-            frames: c.frames.filter((f) => !f.demo).map(frameSummary),
-            ...(c.notes?.length ? { notes: c.notes.map(noteSummary) } : {}),
+            frames: frames.map((f) => frameSummary({ ...f, pageId: framePageId(c, f) })),
+            notes: canvasNotes.map((n) => noteSummary({ ...n, pageId: notePageId(c, n) })),
             guidelines: docs.map((d) => ({
               name: d.name,
               title: actions.guidelineTitle(d),
@@ -533,7 +589,7 @@ export function buildMcpServer(
           agent_name ? actorFrom(agent_name) : undefined,
         ),
         canvas_id,
-        c.frames.filter((f) => !f.demo),
+        frames,
       )
     },
   )
@@ -1041,8 +1097,15 @@ export function buildMcpServer(
     async ({ canvas_id, pages: requested, expectedPages, agent_name }) => {
       const canvas = canvasFor(canvas_id, 'edit')
       if (!canvas) return noCanvas(canvas_id, 'edit')
-      if (!samePages(expectedPages.map(fromMcpPage), canvasPages(canvas)))
-        return err('Pages changed. Read get_canvas again before saving.')
+      const current = canvasPages(canvas)
+      if (!samePages(expectedPages.map(fromMcpPage), current)) {
+        const known = new Set(expectedPages.map((p) => p.id))
+        const added = current.filter((p) => !known.has(p.id)).map((p) => p.id)
+        const removed = expectedPages.filter((p) => !current.some((c) => c.id === p.id)).map((p) => p.id)
+        return err(
+          `expectedPages does not match the canvas: another collaborator changed its pages since you read them${added.length ? ` (added: ${added.join(', ')})` : ''}${removed.length ? ` (removed: ${removed.join(', ')})` : ''}. Current pages, in order: ${JSON.stringify(current.map(toMcpPage))}. Re-apply your change to this list and send it as expectedPages, or call add_canvas_page to add a page without the full list.`,
+        )
+      }
       const treeError = validatePageTree(requested.map(fromMcpPage))
       if (treeError) return err(treeError)
       const pages = normalizePageTree(requested.map(fromMcpPage))
@@ -1052,6 +1115,35 @@ export function buildMcpServer(
       const actor = actorFrom(agent_name)
       actions.setCanvasPages(canvas_id, pages, actor)
       return text({ ok: true, pages: pages.map(toMcpPage) })
+    },
+  )
+
+  server.registerTool(
+    'add_canvas_page',
+    {
+      title: 'Add a canvas page',
+      description:
+        'Add one page to a canvas without sending the whole page list, so many agents can add pages at the same time without conflicts. The page goes at the end of the list, or at the end of parent_id’s subpages when nested. Returns the new page id and the full page list. Use set_canvas_pages to rename, reorder or delete pages.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z.string(),
+        name: z.string().trim().min(1).max(100),
+        parent_id: z.string().trim().min(1).max(100).optional().describe('Nest the new page under this page'),
+        agent_name: agentName,
+      },
+    },
+    async ({ canvas_id, name, parent_id, agent_name }) => {
+      const canvas = canvasFor(canvas_id, 'edit')
+      if (!canvas) return noCanvas(canvas_id, 'edit')
+      /* read, append and save run in one synchronous step, so concurrent calls never lose a page */
+      const current = canvasPages(canvas)
+      if (parent_id && !current.some((p) => p.id === parent_id)) return noPage(canvas, parent_id)
+      const page: CanvasPageInfo = parent_id ? { id: nanoid(10), name, parentId: parent_id } : { id: nanoid(10), name }
+      const treeError = validatePageTree([...current, page])
+      if (treeError) return err(treeError)
+      const pages = normalizePageTree([...current, page])
+      actions.setCanvasPages(canvas_id, pages, actorFrom(agent_name))
+      return text({ ok: true, page: toMcpPage(page), pages: pages.map(toMcpPage) })
     },
   )
 
@@ -1119,16 +1211,27 @@ export function buildMcpServer(
     'get_frame',
     {
       title: 'Get a frame and its HTML',
-      description: 'Get a frame including its full HTML content.',
+      description:
+        'Get a frame: its canvas, page, position, size and metadata, and by default its full HTML. Pass include_html: false to get only the metadata (htmlBytes tells you the size) when you do not need the markup.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      inputSchema: { frame_id: z.string(), agent_name: agentName.optional() },
+      inputSchema: {
+        frame_id: z.string(),
+        include_html: z.boolean().optional().describe('Default true; false leaves the HTML out'),
+        agent_name: agentName.optional(),
+      },
     },
-    async ({ frame_id, agent_name }) => {
+    async ({ frame_id, include_html, agent_name }) => {
       const f = frameFor(frame_id)
       if (!f) return noFrame(frame_id)
       arrive(f.canvasId, agent_name)
+      const canvas = store.getCanvas(f.canvasId)
       return withFeedback(
-        text({ ...frameSummary(f), ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}), html: f.html }),
+        text({
+          canvasId: f.canvasId,
+          ...frameSummary({ ...f, pageId: canvas ? framePageId(canvas, f) : f.pageId }),
+          ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}),
+          ...(include_html === false ? {} : { html: f.html }),
+        }),
         f.canvasId,
         agent_name ? actorFrom(agent_name) : undefined,
       )
@@ -1215,16 +1318,25 @@ export function buildMcpServer(
           .optional()
           .describe('The file as base64 (raw base64 or a data: URL). Last resort, tiny files only.'),
         canvas_id: z.string().describe('The canvas this asset belongs to'),
+        replace_url: z
+          .string()
+          .optional()
+          .describe(
+            'URL of a stylesheet (/a/<id>.css) uploaded earlier to replace in place: the URL stays the same, every frame linking it picks up the new file, and the old file stays at <url>?v=<n>. Stylesheets only.',
+          ),
         agent_name: agentName,
       },
     },
-    async ({ data, source_url, local_file, canvas_id, agent_name }) => {
+    async ({ data, source_url, local_file, canvas_id, replace_url, agent_name }) => {
       const provided = [data, source_url, local_file].filter(Boolean).length
       if (provided !== 1)
         return err(
           'provide exactly one of: source_url (remote file), local_file=true (local file — returns a curl command), or data (small base64)',
         )
       if (!canvasFor(canvas_id, 'edit')) return noCanvas(canvas_id, 'edit')
+      const replaceId = replace_url === undefined ? undefined : assets.assetIdFromUrl(replace_url)
+      if (replace_url !== undefined && !replaceId)
+        return err(`replace_url is not an uploaded asset URL: ${replace_url}`)
       const now = Date.now()
       const limitKey = ownerId ?? agent_name
       const hits = (uploadHits.get(limitKey) ?? []).filter((t) => now - t < 60_000)
@@ -1236,6 +1348,7 @@ export function buildMcpServer(
           canvasId: canvas_id,
           ownerId,
           uploadedBy: agent_name,
+          ...(replaceId ? { replaceAssetId: replaceId } : {}),
         })
         const upload_url = `${env.BETTER_AUTH_URL}/u/${token}`
         return withFeedback(
@@ -1254,6 +1367,33 @@ export function buildMcpServer(
         const buf = data
           ? Buffer.from(data.replace(/^data:[^,]*;base64,/, ''), 'base64')
           : await assets.fetchRemote(source_url!)
+        if (replaceId) {
+          const replaced = await assets.replaceAsset(replaceId, buf, {
+            uploadedBy: agent_name,
+            ownerId,
+            canvasId: canvas_id,
+          })
+          if (!replaced.ok) return err(replaced.error)
+          const url = `${env.BETTER_AUTH_URL}/a/${replaced.asset.id}.${replaced.asset.ext}`
+          return withFeedback(
+            text({
+              ok: true,
+              replaced: !replaced.unchanged,
+              unchanged: replaced.unchanged,
+              url,
+              version: replaced.asset.version,
+              ...(!replaced.unchanged && replaced.asset.version > 1
+                ? { previous_url: `${url}?v=${replaced.asset.version - 1}` }
+                : {}),
+              size_bytes: replaced.asset.size,
+              note: replaced.unchanged
+                ? 'The new file is identical to the current one, so nothing changed.'
+                : 'Same URL, new content: open frames that link it reload it now, so no frame HTML needs to change.',
+            }),
+            canvas_id,
+            actorFrom(agent_name),
+          )
+        }
         const asset = await assets.createAsset(
           buf,
           { canvasId: canvas_id, ownerId, uploadedBy: agent_name },
@@ -1863,6 +2003,48 @@ export function buildMcpServer(
   )
 
   server.registerTool(
+    'move_frame',
+    {
+      title: 'Move a frame to another canvas',
+      _meta: previewToolMeta('Moving the frame…', 'Frame moved'),
+      description:
+        'Move a frame to another canvas you can edit. The frame keeps its id, design, version history, attached sticky notes and comment threads; it leaves the source canvas. Pass page_id for a page on the target canvas (default: its first page) and x/y for its spot (default: right of that page’s frames). To move a frame between pages of the same canvas, use update_frame with pageId instead.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        frame_id: z.string(),
+        canvas_id: z.string().describe('The canvas to move the frame to'),
+        page_id: z.string().optional().describe('Page on the target canvas; defaults to its first page'),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        agent_name: agentName,
+      },
+    },
+    async ({ frame_id, canvas_id, page_id, x, y, agent_name }) => {
+      if (!frameFor(frame_id, 'edit')) return noFrame(frame_id, 'edit')
+      const target = canvasFor(canvas_id, 'edit')
+      if (!target) return noCanvas(canvas_id, 'edit')
+      if (page_id && !canvasPages(target).some((p) => p.id === page_id)) return noPage(target, page_id)
+      const actor = actorFrom(agent_name)
+      const moved = actions.moveFrameToCanvas(frame_id, canvas_id, { pageId: page_id, x, y }, actor)
+      if (!moved.ok) return err(moved.error)
+      const { frame, notes } = moved
+      return withPreview(
+        withFeedback(
+          text({
+            ok: true,
+            frame: { canvasId: frame.canvasId, ...frameSummary({ ...frame, pageId: framePageId(target, frame) }) },
+            notes: notes.map((n) => noteSummary({ ...n, pageId: notePageId(target, n) })),
+          }),
+          frame.canvasId,
+          actor,
+        ),
+        frame.canvasId,
+        [frame],
+      )
+    },
+  )
+
+  server.registerTool(
     'list_frame_versions',
     {
       title: 'List a frame’s version history',
@@ -1936,12 +2118,42 @@ export function buildMcpServer(
   )
 
   server.registerTool(
+    'list_notes',
+    {
+      title: 'List sticky notes',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      description:
+        'List the sticky notes on a canvas with their full markdown: id, page_id, frame_id when attached to a frame, position and size. Filter by page_id or frame_id. get_canvas lists the same notes with a short excerpt.',
+      inputSchema: {
+        canvas_id: z.string(),
+        page_id: z.string().optional().describe('Only notes on this page'),
+        frame_id: z.string().optional().describe('Only notes attached to this frame'),
+        agent_name: agentName.optional(),
+      },
+    },
+    async ({ canvas_id, page_id, frame_id, agent_name }) => {
+      const c = canvasFor(canvas_id)
+      if (!c) return noCanvas(canvas_id)
+      if (page_id && !canvasPages(c).some((p) => p.id === page_id)) return noPage(c, page_id)
+      arrive(canvas_id, agent_name)
+      const notes = (c.notes ?? [])
+        .map((n) => ({ note: n, pageId: notePageId(c, n) }))
+        .filter(({ note, pageId }) => (!page_id || pageId === page_id) && (!frame_id || note.frameId === frame_id))
+        .map(({ note, pageId }) => {
+          const { text: _excerpt, chars: _chars, ...summary } = noteSummary({ ...note, pageId })
+          return { ...summary, markdown: note.markdown }
+        })
+      return withFeedback(text({ notes }), canvas_id, agent_name ? actorFrom(agent_name) : undefined)
+    },
+  )
+
+  server.registerTool(
     'create_note',
     {
       title: 'Pin a sticky note',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       description:
-        'Pin a sticky note (markdown) to the canvas. Pass frame_id to attach it beside a frame — it lands to the left of the frame, level with its top, and travels with the frame when someone moves it. Omit frame_id for a free-floating note (set x/y, or it is placed near the origin). Use notes to explain the intent of a frame, how variants differ, or an open question. A question that needs a decision should still be a comment. Link to a frame from the text with [label](goto:<frame_id>).',
+        'Pin a sticky note (markdown) to the canvas. Pass frame_id to attach it beside a frame — it lands in free space next to the frame (left of it first, then right, then above), never over another frame or note, and travels with the frame when someone moves it. Omit frame_id for a free-floating note (set x/y, or it is placed near the origin). Use notes to explain the intent of a frame, how variants differ, or an open question. A question that needs a decision should still be a comment. Link to a frame from the text with [label](goto:<frame_id>).',
       inputSchema: {
         canvas_id: z.string(),
         text: z.string().describe(`Markdown, at most ${MAX_NOTE_CHARS} characters`),

@@ -128,7 +128,7 @@ describe('serving and usage', () => {
   it('serves stylesheets as UTF-8 CSS that cannot run as a document', () => {
     expect(assetResponseHeaders('text/css')).toEqual({
       'Content-Type': 'text/css; charset=utf-8',
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Cache-Control': 'no-cache',
       'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy': "default-src 'none'",
       'Access-Control-Allow-Origin': '*',
