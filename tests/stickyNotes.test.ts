@@ -36,6 +36,11 @@ const { store } = await import('../server/store.ts')
 const { buildMcpServer } = await import('../server/mcp.ts')
 const { shiftAttachedNotes, attachedNotePlacement, noteExcerpt } = await import('../shared/notes.ts')
 
+type Rect = { x: number; y: number; width: number; height: number }
+const rectsTouch = (a: Rect, b: Rect) =>
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+const hero = { id: 'hero', x: 600, y: 300, width: 400, height: 300 }
+
 const OWNER = 'owner-1'
 const human = actions.resolveActor({ name: 'Ada', kind: 'user', userId: OWNER })
 
@@ -130,7 +135,46 @@ describe('attached notes', () => {
   it('lands beside the frame when no spot is given, on the frame page', () => {
     const result = actions.createNote(canvasId, { frameId, markdown: 'why' }, human)
     expect(result.ok && result.note).toMatchObject({ frameId, x: 600 - 240 - 24, y: 300 })
-    expect(attachedNotePlacement({ x: 600, y: 300 }, 300)).toEqual({ x: 276, y: 300 })
+    expect(attachedNotePlacement(hero, { width: 300, height: 180 })).toEqual({ x: 276, y: 300 })
+  })
+
+  it('keeps clear of neighbouring frames and notes', () => {
+    const size = { width: 240, height: 180 }
+    const clear = (spot: { x: number; y: number }, obstacles: readonly Rect[]) =>
+      obstacles.every((o) => !rectsTouch({ ...spot, ...size }, o))
+    /* free on the left: the old spot */
+    expect(attachedNotePlacement(hero, size)).toEqual({ x: 336, y: 300 })
+    /* a neighbour 80px away on the left leaves no room, so it goes right */
+    const left: Rect = { x: 280, y: 300, width: 240, height: 300 }
+    expect(attachedNotePlacement(hero, size, [left])).toEqual({ x: 1024, y: 300 })
+    /* both sides blocked: above the frame */
+    const right: Rect = { x: 1080, y: 300, width: 280, height: 300 }
+    expect(attachedNotePlacement(hero, size, [left, right])).toEqual({ x: 600, y: 96 })
+    /* everything blocked: the gutter lane left of the whole row */
+    const top: Rect = { x: 600, y: -100, width: 400, height: 200 }
+    const blocked = [left, right, top]
+    const lane = attachedNotePlacement(hero, size, blocked)
+    expect(lane).toEqual({ x: 16, y: 300 })
+    expect(clear(lane, blocked)).toBe(true)
+  })
+
+  it('stacks a second note on the same frame below the first', () => {
+    const tall = { ...hero, height: 600 }
+    const size = { width: 240, height: 180 }
+    const first = attachedNotePlacement(tall, size)
+    const second = attachedNotePlacement(tall, size, [{ ...first, ...size }])
+    expect(first).toEqual({ x: 336, y: 300 })
+    expect(second).toEqual({ x: 336, y: 504 })
+    expect(rectsTouch({ ...second, ...size }, { ...first, ...size })).toBe(false)
+  })
+
+  it('places two notes made for a tall frame without overlap', () => {
+    const tall = actions.createFrame(canvasId, { name: 'Tall', x: 2000, y: 0, width: 400, height: 800 }, human)!
+    const a = actions.createNote(canvasId, { frameId: tall.id }, human)
+    const b = actions.createNote(canvasId, { frameId: tall.id }, human)
+    if (!a.ok || !b.ok) throw new Error('notes were not created')
+    expect(rectsTouch(a.note, b.note)).toBe(false)
+    expect(rectsTouch(b.note, tall)).toBe(false)
   })
 
   it('moves with the frame through updateFrame, whoever moves it', () => {

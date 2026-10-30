@@ -15,7 +15,13 @@ import * as ingest from './ingest.ts'
 import { viewWebsite, referencedUrls } from './website.ts'
 import { createImportedWebpageFrame, findImportedWebpageFrame } from './webpageImport.ts'
 import { DESIGN_BRIEF, DESIGN_QUALITY } from './guide.ts'
-import { describeInspiration, INSPIRATION_USAGE_NOTE, searchInspiration } from './inspiration.ts'
+import {
+  describeInspiration,
+  INSPIRATION_USAGE_NOTE,
+  InspirationUnavailable,
+  inspirationFallback,
+  searchInspiration,
+} from './inspiration.ts'
 import type { Actor, AgentTask, Canvas, ElementComment, Frame } from '../shared/types.ts'
 import { canvasPages, framePageId, pageFrames } from '../shared/pages.ts'
 import { isCanvasComment } from '../shared/comments.ts'
@@ -1597,7 +1603,13 @@ async function execTool(
         const raw = block.input as { query?: string; count?: number }
         const query = String(raw.query || '').trim()
         if (!query) return fail('query must be a non-empty string')
-        const results = await searchInspiration(query, Number(raw.count) || 4)
+        let results: Awaited<ReturnType<typeof searchInspiration>>
+        try {
+          results = await searchInspiration(query, Number(raw.count) || 4)
+        } catch (e) {
+          if (e instanceof InspirationUnavailable) return ok(inspirationFallback(query, e.message))
+          throw e
+        }
         if (results.length === 0) return ok(`no inspiration for "${query}" — try a broader category`)
         const thumbs = await Promise.all(results.map((r) => imageSearch.fetchThumb(r.thumb_url)))
         const blocks: NonNullable<Exclude<Anthropic.ToolResultBlockParam['content'], string>> = [

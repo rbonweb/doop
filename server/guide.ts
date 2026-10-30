@@ -225,9 +225,10 @@ Viewers watch designs assemble live. Stream with append_frame_html:
 - Nesting is at most 3 levels in total (a top-level page, its subpage, and that subpage's
   subpage). List every parent before its subpages; subpages keep the list order among
   themselves. get_canvas shows each nested page's parent_id.
-- set_canvas_pages takes the complete list plus the expectedPages you read from
-  get_canvas, so re-read get_canvas first and send parent_id back unchanged for pages you
-  are not moving.
+- To add a page, call add_canvas_page (name, optional parent_id): it appends without the full list, so it never conflicts with other agents adding pages at the same time.
+- set_canvas_pages (rename, reorder, nest, delete) takes the complete list plus the expectedPages you read from get_canvas, so re-read get_canvas first and send parent_id back unchanged for pages you are not moving. If someone changed the pages meanwhile, the error lists the current pages: re-apply your change to that list and retry.
+- move_frame moves a frame to another canvas you can edit, keeping its id, version history, attached notes and comment threads (update_frame pageId moves it between pages of the same canvas).
+- get_canvas takes an optional page_id to list one page's frames and notes, which keeps the result small on a large canvas. get_frame with include_html: false returns a frame's metadata without its markup.
 
 ## GitHub-imported frames — the repo is the source of truth
 
@@ -314,7 +315,7 @@ any public image URL. Source images in this order:
     context, so it is fast and cannot corrupt.
   - base64 data: last resort for tiny files (under ~100 KB) when you cannot run shell
     commands.
-  Either way you get a permanent URL on this origin (/a/<id>.<ext>) to use in <img> or CSS. A stylesheet comes back as /a/<id>.css: link it from each frame's <head> with <link rel="stylesheet" href="…"> — one shared theme file instead of the same large <style> block pasted into every frame. url() paths inside it resolve against its own URL, so it can reference other uploaded assets.
+  Either way you get a permanent URL on this origin (/a/<id>.<ext>) to use in <img> or CSS. A stylesheet comes back as /a/<id>.css: link it from each frame's <head> with <link rel="stylesheet" href="…"> — one shared theme file instead of the same large <style> block pasted into every frame. url() paths inside it resolve against its own URL, so it can reference other uploaded assets. To fix a shared stylesheet, call upload_asset again with replace_url set to its URL: the URL stays the same, every frame that links it reloads it, and the previous file stays at <url>?v=<n>. Never patch the fix inline into individual frames.
 - **When to use them.** Enumerated content — feature cards, step lists, capability
   grids, value rows — needs a visual anchor per item: an icon (search_icons), a big
   number, or a mono label. Naked text lists read as drafts. Pick ONE anchor style per
@@ -449,7 +450,7 @@ ${DESIGN_QUALITY}
 
 ## Sticky notes — say why, not just what
 
-A sticky note is a short markdown card pinned to the canvas. create_note attaches it beside a frame (pass frame_id: it sits left of the frame and moves with it) or leaves it free-floating. Use one to explain the intent of a frame, how two variants differ, or an open question the team should see at a glance, and link to a frame with [label](goto:<frame_id>). Keep notes to a few lines. A question that needs a decision from someone is still a comment, not a note, because comments can be answered and resolved. get_canvas lists existing notes (id, frame, text excerpt): update_note revises one instead of adding a second, and delete_note removes one that went stale.
+A sticky note is a short markdown card pinned to the canvas. create_note attaches it beside a frame (pass frame_id: it sits in the free space next to the frame, left first, never over another frame or note, and moves with it) or leaves it free-floating. Use one to explain the intent of a frame, how two variants differ, or an open question the team should see at a glance, and link to a frame with [label](goto:<frame_id>). Keep notes to a few lines. A question that needs a decision from someone is still a comment, not a note, because comments can be answered and resolved. get_canvas lists existing notes (id, page, frame, position, size, text excerpt) and list_notes returns their full markdown: update_note revises one instead of adding a second, and delete_note removes one that went stale.
 
 ## Exporting frames as images
 

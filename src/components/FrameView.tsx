@@ -478,6 +478,16 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
      flipped or shifted it away from a viewport edge */
   const menuAt = useRef({ x: 0, y: 0 })
   const [runtimeReady, setRuntimeReady] = useState(false)
+  /* a replaced asset remounts the iframe (see `key` below): the fresh document must announce itself again and be sent the HTML again. A remount drops the document's edit mode, path editor and any grip drag with their unsaved work, so a reload that arrives meanwhile waits until they end */
+  const reload = useStore((s) => s.frameReloads[frame.id] ?? 0)
+  const [appliedReload, setAppliedReload] = useState(reload)
+  if (appliedReload !== reload && !editing && !pathEdit && !resizing) {
+    setAppliedReload(reload)
+    setRuntimeReady(false)
+  }
+  useEffect(() => {
+    localHtml.current = null
+  }, [appliedReload])
   useEffect(() => {
     function onMsg(ev: MessageEvent) {
       if (ev.data?.type === 'doop:frame-ready' && ev.source === iframeRef.current?.contentWindow) {
@@ -1207,6 +1217,7 @@ export const FrameView = memo(function FrameView({ frame }: { frame: Frame }) {
           >
             {mounted && (
               <iframe
+                key={appliedReload}
                 ref={iframeRef}
                 className={cn(
                   'block border-none',

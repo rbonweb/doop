@@ -460,6 +460,8 @@ export const assets = pgTable(
     size: integer('size').notNull(),
     uploadedBy: text('uploaded_by').notNull(),
     createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+    /** bumped each time a stylesheet is replaced in place (server/assets.ts replaceAsset); earlier bytes stay under `<id>-v<n>.<ext>` */
+    version: integer('version').notNull().default(1),
   },
   (t) => [index('assets_canvas_idx').on(t.canvasId)],
 )

@@ -131,6 +131,8 @@ interface State {
   flashes: Record<string, { color: string; at: number }>
   /** frameId -> actor currently streaming a design into it */
   streams: Record<string, { name: string; color: string }>
+  /** frameId -> how many times its iframe must be remounted (a replaced asset such as a stylesheet) */
+  frameReloads: Record<string, number>
   /** a transient toast — in the store so long actions fired from surfaces
    *  that close at once (a context menu) can still report back. A `busy`
    *  notice (an export in flight) stays up until the next notice replaces it.
@@ -210,6 +212,7 @@ interface State {
   setComments(comments: ElementComment[]): void
   upsertComment(c: ElementComment): void
   upsertFrame(f: Frame): void
+  reloadFrames(frameIds: string[]): void
   patchFrameLocal(frameId: string, patch: Partial<Frame>): void
   removeFrame(frameId: string): void
   renameCanvasLocal(name: string): void
@@ -394,6 +397,7 @@ export const useStore = create<State>((set, get) => ({
   notice: null,
   flashes: {},
   streams: {},
+  frameReloads: {},
 
   setCanvas: (canvas) =>
     set((s) => ({
@@ -592,6 +596,10 @@ export const useStore = create<State>((set, get) => ({
       const selectedIds = s.selectedIds.filter((id) => id !== frameId)
       const notes = s.canvas.notes?.filter((n) => n.frameId !== frameId)
       return {
+        /* so do the comment threads pinned to it (a deleted frame, or one moved to another canvas) */
+        ...(s.comments.some((c) => c.frameId === frameId)
+          ? { comments: s.comments.filter((c) => c.frameId !== frameId) }
+          : {}),
         canvas: {
           ...s.canvas,
           frames: s.canvas.frames.filter((f) => f.id !== frameId),
@@ -842,6 +850,12 @@ export const useStore = create<State>((set, get) => ({
       if (actor) streams[frameId] = actor
       else delete streams[frameId]
       return { streams }
+    }),
+  reloadFrames: (frameIds) =>
+    set((s) => {
+      const frameReloads = { ...s.frameReloads }
+      for (const id of frameIds) frameReloads[id] = (frameReloads[id] ?? 0) + 1
+      return { frameReloads }
     }),
   flash: (frameId, color) => {
     set((s) => ({ flashes: { ...s.flashes, [frameId]: { color, at: Date.now() } } }))

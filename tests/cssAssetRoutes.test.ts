@@ -111,14 +111,14 @@ describe('the browser upload route', () => {
 })
 
 describe('serving a stylesheet', () => {
-  it('sends UTF-8 CSS with nosniff, a locked-down CSP, immutable caching and open CORS', async () => {
+  it('sends UTF-8 CSS with nosniff, a locked-down CSP, revalidated caching and open CORS', async () => {
     const { body } = await uploadTool({ data: Buffer.from(THEME).toString('base64') })
     const res = await fetch(`${server.base}${pathOf((body as { url: string }).url)}`)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('text/css; charset=utf-8')
     expect(res.headers.get('x-content-type-options')).toBe('nosniff')
     expect(res.headers.get('content-security-policy')).toBe("default-src 'none'")
-    expect(res.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+    expect(res.headers.get('cache-control')).toBe('no-cache')
     expect(res.headers.get('access-control-allow-origin')).toBe('*')
     expect(await res.text()).toBe(THEME)
   })

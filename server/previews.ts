@@ -52,6 +52,8 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
   const preview = req.preview && req.ext === 'jpg'
   const scale = clampImageScale(req.scale, frame)
   const key = imageKey(frame.id, req.ext, scale, req.ext === 'jpg' ? req.quality : '', preview)
+  /* an invalidation while a render is in flight makes its result stale: it is served to the request that asked, never cached */
+  const generation = thumbs.generation(frame.id)
   const cached = imgCache.get(key)
   let pending =
     cached && cached.updatedAt === frame.updatedAt && Date.now() - cached.at < IMG_CACHE_MS ? cached.buf : null
@@ -63,19 +65,20 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
     const stored = await thumbs.getStored(frame)
     if (stored) {
       pending = Promise.resolve(stored)
-      remember(key, pending, frame.updatedAt)
+      if (thumbs.generation(frame.id) === generation) remember(key, pending, frame.updatedAt)
     }
   }
 
   if (!pending) {
     if (!(await consumeRenderBudget(req.ip, req.isAuthenticated))) return { status: 'rate-limited' }
+    const started = thumbs.generation(frame.id)
     pending = preview
       ? /* renders AND persists — the next cold start serves from storage */
         thumbs.create(frame)
       : loadScreenshot().then(({ renderFrame }) =>
           renderFrame(frame, scale, { type: req.ext === 'jpg' ? 'jpeg' : 'png', quality: req.quality }),
         )
-    remember(key, pending, frame.updatedAt)
+    remember(key, pending, frame.updatedAt, () => thumbs.generation(frame.id) === started)
   }
 
   return { status: 'ok', buf: await pending }
@@ -94,13 +97,23 @@ export function primeImage(frame: Frame, scale: ImageScale, png: Buffer): void {
   remember(imageKey(frame.id, 'png', scale, '', false), Promise.resolve(png), frame.updatedAt)
 }
 
-function remember(key: string, pending: Promise<Buffer>, updatedAt: number) {
+/** Drops every cached render of a frame, for a change the frame's own html and updatedAt do not show (a stylesheet it links was replaced). The persisted dashboard thumbnail is marked stale, so the next preview request serves it and re-renders in the background. */
+export function invalidateFrameImages(frameId: string): void {
+  for (const key of imgCache.keys()) if (key.startsWith(`${frameId}:`)) imgCache.delete(key)
+  thumbs.invalidate(frameId)
+}
+
+function remember(key: string, pending: Promise<Buffer>, updatedAt: number, stillCurrent: () => boolean = () => true) {
   imgCache.set(key, { buf: pending, updatedAt, at: Date.now() })
   /* a failed render must not be served for IMG_CACHE_MS — drop it so the
      next request retries */
-  pending.catch(() => {
+  const drop = () => {
     if (imgCache.get(key)?.buf === pending) imgCache.delete(key)
-  })
+  }
+  pending.then(() => {
+    /* the frame was invalidated while this rendered: its pixels are from before the change */
+    if (!stillCurrent()) drop()
+  }, drop)
   if (imgCache.size > IMG_CACHE_MAX) {
     const oldest = [...imgCache.entries()].sort((a, b) => a[1].at - b[1].at)[0]
     if (oldest) imgCache.delete(oldest[0])

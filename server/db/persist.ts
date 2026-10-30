@@ -579,6 +579,23 @@ export function deleteFrame(frameId: string) {
   swallow(db.delete(t.frameSeen).where(eq(t.frameSeen.frameId, frameId)))
 }
 
+/** A frame moved to another canvas: write its row (canvas and page) now, and carry what hangs off it to the new
+ *  canvas: its attached sticky notes (already translated in memory), its design history, its review state and the
+ *  comment threads pinned to it. Version re-pointing queues behind the frame's pending version writes, so a version
+ *  filed a moment ago under the old canvas is moved too; the asset refs are keyed by frame and need nothing. */
+export function saveFrameMove(f: Frame, notes: CanvasNote[]) {
+  saveFrame(f, true)
+  for (const note of notes) {
+    const { id, createdBy, createdByUserId, createdAt, ...set } = noteRow(note)
+    swallow(db.insert(t.canvasNotes).values(noteRow(note)).onConflictDoUpdate({ target: t.canvasNotes.id, set }))
+  }
+  queueVersionWrite(f.id, f.canvasId, () =>
+    db.update(t.frameVersions).set({ canvasId: f.canvasId }).where(eq(t.frameVersions.frameId, f.id)),
+  )
+  swallow(db.update(t.frameSeen).set({ canvasId: f.canvasId }).where(eq(t.frameSeen.frameId, f.id)))
+  swallow(db.update(t.comments).set({ canvasId: f.canvasId }).where(eq(t.comments.frameId, f.id)))
+}
+
 /** The frame/element a prompt card was scoped to, or nothing when the row
  *  carries none or it no longer parses. */
 function scopeField(scope: string | null): Pick<AgentTask, 'scope'> {

@@ -178,6 +178,9 @@ function handle(msg: ServerMessage) {
     case 'frame:deleted':
       s.removeFrame(msg.frameId)
       break
+    case 'asset:updated':
+      s.reloadFrames(msg.frameIds)
+      break
     case 'note:upsert':
       s.upsertNote(msg.note)
       break

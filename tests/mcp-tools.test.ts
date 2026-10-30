@@ -130,7 +130,8 @@ it('requires the original page list and rejects stale agent replacements', async
       },
     })
     expect(result.isError).toBe(true)
-    expect(JSON.stringify(result)).toContain('Pages changed')
+    expect(JSON.stringify(result)).toContain('expectedPages does not match the canvas')
+    expect(JSON.stringify(result)).toContain('added: collaborator')
     expect(canvas.pages).toHaveLength(2)
   } finally {
     store.canvases.delete(canvas.id)

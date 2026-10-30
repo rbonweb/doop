@@ -43,12 +43,27 @@ interface ReferoStyle {
   northStar: string | null
 }
 
+/** The gallery refused or could not be reached. Refero began answering server-side searches with HTTP 403 ("Please refresh the page and try again") in October 2026, for every caller alike; the tools catch this and hand the agent a fallback instead of an error. */
+export class InspirationUnavailable extends Error {
+  constructor(reason: string) {
+    super(`the inspiration gallery is unavailable right now (${reason})`)
+    this.name = 'InspirationUnavailable'
+  }
+}
+
 export async function searchInspiration(query: string, count = 4): Promise<InspirationResult[]> {
   const take = Math.max(1, Math.min(count, 6))
-  const res = await fetch(`${REFERO_ENDPOINT}?q=${encodeURIComponent(query)}`, {
-    headers: UA,
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  })
+  let res: Response
+  try {
+    res = await fetch(`${REFERO_ENDPOINT}?q=${encodeURIComponent(query)}`, {
+      headers: UA,
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    })
+  } catch (e) {
+    throw new InspirationUnavailable(e instanceof Error ? e.message : 'network error')
+  }
+  if (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500)
+    throw new InspirationUnavailable(`HTTP ${res.status}`)
   if (!res.ok) throw new Error(`inspiration search failed: HTTP ${res.status}`)
   const body = (await res.json()) as { styles?: ReferoStyle[] }
   return (body.styles ?? [])
@@ -69,6 +84,11 @@ export async function searchInspiration(query: string, count = 4): Promise<Inspi
 
 export const INSPIRATION_USAGE_NOTE =
   'Study these pages closely — ground and accent discipline, type contrast, density, mood, what carries the hero. Pick the ONE that fits your brief best and follow it; do not blend several into a composite. Name it in the brief. Do not embed these screenshots in a frame.'
+
+/** What an agent does instead when the gallery is unavailable: the "look at real pages first" step still runs, through view_website on real sites the agent picks. */
+export function inspirationFallback(query: string, reason: string): string {
+  return `Inspiration search for "${query}" did not run: ${reason}. This is not a problem with your access, and retrying will not help. Do the "look at real pages first" step yourself instead: name 2 or 3 real, well-designed live sites you know in this category and register, open each with view_website, read them like a moodboard (what carries the hero, ground and accent discipline, type contrast, density), pick the ONE that fits the brief best and name it in the brief as the exemplar. Do not embed their screenshots in a frame.`
+}
 
 export function describeInspiration(r: InspirationResult, index: number): string {
   const palette = r.palette.length > 0 ? r.palette.map((c) => `${c.hex} (${c.name})`).join(', ') : 'n/a'

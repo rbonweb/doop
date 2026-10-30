@@ -15,6 +15,7 @@ import {
   MAX_NOTE_CHARS,
   NOTE_COLORS,
   NOTE_DEFAULT_SIZE,
+  notePageId,
   shiftAttachedNotes,
 } from '../shared/notes.ts'
 import { decodeEscapedHtml, looksEscapedHtml, repairEscapedHtml } from './escapedHtml.ts'
@@ -1574,6 +1575,71 @@ export function deleteFrame(frameId: string, actor: Actor): Frame | undefined {
   return frame
 }
 
+export type MoveFrameResult =
+  { ok: true; frame: Frame; notes: CanvasNote[] } | { ok: false; error: string; status: 400 | 404 | 409 }
+
+const moveFail = (error: string, status: 400 | 404 | 409): MoveFrameResult => ({ ok: false, error, status })
+
+/** Move a frame to a page of another canvas. It keeps its id, design, history and attached sticky notes (shifted by
+ *  the frame's own delta) and the comment threads pinned to it. Without `x`/`y` it lands to the right of the target
+ *  page's frames, like a new frame; without `pageId` it joins the target's first page. A locked frame may move (the
+ *  lock only holds it still on the stage); a demo frame may not. */
+export function moveFrameToCanvas(
+  frameId: string,
+  targetCanvasId: string,
+  opts: { pageId?: string; x?: number; y?: number },
+  actor: Actor,
+): MoveFrameResult {
+  const before = store.getFrame(frameId)
+  if (!before) return moveFail('frame not found', 404)
+  const target = store.getCanvas(targetCanvasId)
+  if (!target) return moveFail('target canvas not found', 404)
+  if (before.canvasId === targetCanvasId) return moveFail('the frame is already on that canvas', 409)
+  if (before.demo) return moveFail('demo frames cannot be moved to another canvas', 400)
+  if (opts.pageId !== undefined && !canvasPages(target).some((page) => page.id === opts.pageId))
+    return moveFail(`no page with id ${opts.pageId} on the target canvas`, 400)
+  for (const key of ['x', 'y'] as const) {
+    const value = opts[key]
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value)))
+      return moveFail(`${key} must be a finite number`, 400)
+  }
+
+  /* a live stream or playback ends with the frame leaving the room it was streaming into */
+  finishStream(frameId, false)
+  finishReveal(frameId)
+  const sourceId = before.canvasId
+  const moved = store.moveFrame(frameId, targetCanvasId, opts, actor.name, editorOf(actor))
+  if (!moved) return moveFail('could not move the frame', 400)
+  const { frame, source, notes } = moved
+
+  /* the comment threads pinned to the frame change rooms with it */
+  const pinned = (commentLog.get(sourceId) ?? []).filter((c) => c.frameId === frameId)
+  if (pinned.length) {
+    commentLog.set(
+      sourceId,
+      (commentLog.get(sourceId) ?? []).filter((c) => c.frameId !== frameId),
+    )
+    for (const comment of pinned) comment.canvasId = targetCanvasId
+    /* the same newest-100 cap `addComment` holds, so a move cannot grow the target's list past it */
+    const merged = [...pinned, ...(commentLog.get(targetCanvasId) ?? [])].sort((a, b) => b.at - a.at)
+    if (merged.length > 100) merged.length = 100
+    commentLog.set(targetCanvasId, merged)
+  }
+
+  /* the source room sees what a delete shows it, the target what a create shows it */
+  broadcast(sourceId, { type: 'frame:deleted', frameId, actor })
+  for (const note of notes) broadcast(sourceId, { type: 'note:delete', id: note.id, actor })
+  broadcast(targetCanvasId, { type: 'frame:created', frame, actor })
+  for (const note of notes) broadcast(targetCanvasId, { type: 'note:upsert', note, actor })
+  for (const comment of pinned) broadcast(targetCanvasId, { type: 'comment', comment })
+  logActivity(sourceId, actor, `moved “${frame.name}” to ${target.name}`, frame.id)
+  logActivity(targetCanvasId, actor, `moved in “${frame.name}” from ${source.name}`, frame.id)
+  touch(sourceId, actor, null)
+  touch(targetCanvasId, actor, frame.id)
+  emitCanvasEvent(targetCanvasId, { type: 'frame.created', frame, actor })
+  return { ok: true, frame, notes }
+}
+
 /* ------------------------------------------------------------------ */
 /* Sticky notes: markdown cards on the canvas, free-floating or       */
 /* attached beside a frame. Validated here so REST and MCP agree.     */
@@ -1623,8 +1689,17 @@ export function createNote(canvasId: string, raw: Record<string, unknown>, actor
   if (pageId && !canvasPages(canvas).some((p) => p.id === pageId)) return noteFail(`no page with id ${pageId}`)
 
   const width = parsed.fields.width ?? NOTE_DEFAULT_SIZE.width
-  /* attached with no spot given: beside the frame, like a margin note */
-  const spot = frame ? attachedNotePlacement(frame, width) : undefined
+  const height = parsed.fields.height ?? NOTE_DEFAULT_SIZE.height
+  /* attached with no spot given: beside the frame like a margin note, clear of the page's other frames and notes */
+  let spot: { x: number; y: number } | undefined
+  if (frame) {
+    const pageOfFrame = framePageId(canvas, frame)
+    const obstacles = [
+      ...canvas.frames.filter((f) => f.id !== frame.id && framePageId(canvas, f) === pageOfFrame),
+      ...(canvas.notes ?? []).filter((n) => notePageId(canvas, n) === pageOfFrame),
+    ]
+    spot = attachedNotePlacement(frame, { width, height }, obstacles)
+  }
   const note = store.createNote(
     canvasId,
     {

@@ -65,6 +65,17 @@ type PageCopy = {
 
 const names = (pages: CanvasPageInfo[]) => pages.map((page) => page.name)
 
+/** Where a frame lands on a page: the given coordinates, else to the right of the page's right-most frame (or the
+ *  page's first spot when it is empty). */
+function placeNewFrame(pageFrameList: readonly Frame[], x?: number, y?: number): { x: number; y: number } {
+  if (x !== undefined && y !== undefined) return { x, y }
+  const rightmost = pageFrameList.reduce((mx, f) => Math.max(mx, f.x + f.width), 0)
+  return { x: x ?? (pageFrameList.length ? rightmost + 80 : 120), y: y ?? 120 }
+}
+
+/** A frame moved to another canvas: the frame itself, the canvases it left and joined, and the notes that went with it. */
+export type FrameMove = { frame: Frame; source: Canvas; target: Canvas; notes: CanvasNote[] }
+
 /**
  * In-memory canvas/frame state — the hot path for reads, reveals and
  * broadcasts. Every committed mutation is mirrored to the database via
@@ -722,16 +733,8 @@ class Store {
     if (!c) return undefined
     const pageId = input.pageId ?? canvasPages(c)[0]!.id
     if (!canvasPages(c).some((page) => page.id === pageId)) return undefined
-    const frames = pageFrames(c, pageId)
     const now = Date.now()
-    // auto-place: to the right of the right-most frame
-    let x = input.x
-    let y = input.y
-    if (x === undefined || y === undefined) {
-      const rightmost = frames.reduce((mx, f) => Math.max(mx, f.x + f.width), 0)
-      x ??= frames.length ? rightmost + 80 : 120
-      y ??= 120
-    }
+    const { x, y } = placeNewFrame(pageFrames(c, pageId), input.x, input.y)
     const frame: Frame = {
       id: nanoid(10),
       canvasId,
@@ -822,6 +825,63 @@ class Store {
     for (const note of (c.notes ?? []).filter((n) => n.frameId === frameId)) this.deleteNote(canvasId, note.id)
     persist.saveCanvas(c)
     return frame
+  }
+
+  /** Move a frame to a page of another canvas, keeping its id and everything on it. Attached sticky notes follow,
+   *  shifted by the frame's own delta; the frame's design history and review state are re-pointed in the database. */
+  moveFrame(
+    frameId: string,
+    targetCanvasId: string,
+    where: { pageId?: string; x?: number; y?: number },
+    by: string,
+    editor: EditorInfo = {},
+  ): FrameMove | undefined {
+    const sourceId = this.frameIndex.get(frameId)
+    const source = sourceId ? this.canvases.get(sourceId) : undefined
+    const target = this.canvases.get(targetCanvasId)
+    const frame = source?.frames.find((f) => f.id === frameId)
+    if (!source || !target || !frame || source === target) return undefined
+    const pageId = where.pageId ?? canvasPages(target)[0]!.id
+    if (!canvasPages(target).some((page) => page.id === pageId)) return undefined
+
+    const { x, y } = placeNewFrame(pageFrames(target, pageId), where.x, where.y)
+    const dx = x - frame.x
+    const dy = y - frame.y
+    const now = Date.now()
+
+    source.frames.splice(source.frames.indexOf(frame), 1)
+    const leaving = (source.notes ?? []).filter((n) => n.frameId === frameId)
+    if (source.notes) {
+      source.notes = source.notes.filter((n) => n.frameId !== frameId)
+      if (source.notes.length === 0) delete source.notes
+    }
+    const notes = leaving.map((note) => {
+      Object.assign(note, { canvasId: targetCanvasId, pageId, x: note.x + dx, y: note.y + dy })
+      note.updatedAt = now
+      note.updatedBy = by
+      return note
+    })
+    if (notes.length) (target.notes ??= []).push(...notes)
+
+    Object.assign(frame, { canvasId: targetCanvasId, pageId, x, y })
+    /* the monotonic stamp updateFrame uses, so a save racing the move cannot share its version */
+    frame.updatedAt = Math.max(now, frame.updatedAt + 1)
+    /* a move is not a design change: contentUpdatedAt (what the review marks follow) stays as it was */
+    frame.contentUpdatedAt ??= frame.updatedAt
+    frame.updatedBy = by
+    if (editor.userId) frame.updatedByUserId = editor.userId
+    else delete frame.updatedByUserId
+    if (editor.kind) frame.updatedByKind = editor.kind
+    else delete frame.updatedByKind
+    target.frames.push(frame)
+    this.frameIndex.set(frameId, targetCanvasId)
+
+    source.updatedAt = frame.updatedAt
+    target.updatedAt = frame.updatedAt
+    persist.saveFrameMove(frame, notes)
+    persist.saveCanvas(source)
+    persist.saveCanvas(target)
+    return { frame, source, target, notes }
   }
 
   /* ---- sticky notes ---- */
