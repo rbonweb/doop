@@ -384,7 +384,6 @@ export function CanvasPage({
       clearHistory()
       clearLayoutSnapshots()
       useStore.getState().setLaser(false)
-      useStore.getState().setShortcutsOpen(false)
     }
   }, [canvasId, guest, select])
 

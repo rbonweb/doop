@@ -73,6 +73,7 @@ export const actions = {
   findNextFrame: 'Find next frame',
   present: 'Present',
   nothingToPresent: 'Nothing to present yet. Add a frame first.',
+  nothingToMarkSeen: 'Nothing new to mark as seen',
   board: 'Board',
   stickyNotes: 'Sticky notes',
   notesShown: 'Notes shown',

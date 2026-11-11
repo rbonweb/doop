@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useStore, roleOf } from '../lib/store'
 import { useT } from '../lib/i18n'
 import { cn } from '../lib/utils'
+import { roleAllows } from '../../shared/canvasRole'
 import { Button } from './ui/button'
 import { IconButton } from './ui/icon-button'
 import { EyeIcon, XIcon } from './ui/icons'
@@ -27,7 +28,7 @@ export function AccessBanner({
   const role = useStore(roleOf)
   const loaded = useStore((s) => !!s.canvas)
   const [dismissed, setDismissed] = useState(false)
-  if (!loaded || role === 'edit' || dismissed) return null
+  if (!loaded || roleAllows(role, 'edit') || dismissed) return null
 
   if (guest)
     return (

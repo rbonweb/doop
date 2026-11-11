@@ -72,6 +72,7 @@ export const actions: Catalog['actions'] = {
   findPreviousFrame: 'Ir ao frame anterior',
   findNextFrame: 'Ir ao próximo frame',
   nothingToPresent: 'Nada para apresentar ainda. Adicione um frame primeiro.',
+  nothingToMarkSeen: 'Nada novo para marcar como visto',
   present: 'Apresentar',
   board: 'Quadro',
   stickyNotes: 'Notas adesivas',

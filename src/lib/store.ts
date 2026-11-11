@@ -131,7 +131,6 @@ interface State {
   /** laser mode: every frame outlines its element tree and the next click copies an element's path */
   laser: boolean
   /** the Keyboard shortcuts dialog is showing */
-  shortcutsOpen: boolean
   /** live alignment guide lines while a frame drag is snapped to a neighbour */
   snapGuides: SnapGuide[]
   /** ⇧R — the rulers along the stage's top and left edges; the choice sticks */
@@ -344,7 +343,6 @@ interface State {
   zoomTo(zoom: number): void
   /** laser and the non-select tools are exclusive: turning one on turns the other off */
   setLaser(on: boolean): void
-  setShortcutsOpen(open: boolean): void
   setSnapGuides(guides: SnapGuide[]): void
   toggleRulers(): void
   toggleViewOption(name: ViewOption): void
@@ -464,7 +462,6 @@ export const useStore = create<State>((set, get) => ({
   viewport: { x: 0, y: 0, zoom: 1 },
   stageSize: null,
   laser: false,
-  shortcutsOpen: false,
   snapGuides: [],
   rulers: readRulers(),
   viewOptions: readViewOptions(),
@@ -494,6 +491,9 @@ export const useStore = create<State>((set, get) => ({
          hide-UI, so the next canvas never opens with its chrome gone; a
          re-join of the same canvas keeps it */
       uiHidden: canvas ? s.uiHidden : false,
+      /* the role belongs to the canvas that granted it: leaving one clears it, so the next canvas never starts on
+         the last one's role (a stale edit would flash controls at a viewer, a stale view would hide an owner's) */
+      ...(canvas ? {} : { role: null }),
       activePageId: canvas
         ? canvas.id === s.canvas?.id && canvasPages(canvas).some((p) => p.id === s.activePageId)
           ? s.activePageId
@@ -1000,7 +1000,6 @@ export const useStore = create<State>((set, get) => ({
     if (s.stageSize) s.setViewport(zoomAroundCenter(s.viewport, zoom, s.stageSize))
   },
   setLaser: (laser) => set((s) => (laser ? { laser, tool: 'select' } : s.laser ? { laser } : s)),
-  setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setPresenting: (presenting) => set({ presenting }),
   setPresentFrame: (presentFrameId) => set({ presentFrameId }),
   /* fires on every pointermove during a drag — skip the no-op transitions
@@ -1080,8 +1079,11 @@ export function pickedSelectors(s: Pick<State, 'selectedElement' | 'selectedElem
   return s.selectedElements.at(-1) === primary ? s.selectedElements : [primary]
 }
 
-/** The caller's role on the open canvas. A canvas without one (an older
- *  server) is treated as editable; the server enforces it either way. */
+/** The caller's role on the open canvas, the one rule every edit and comment gate reads (`useCanEdit` and
+ *  `useCanComment` in `role.ts` included). The room's `init` carries the role both on the message and on the canvas
+ *  copy it hands over, and the server sends it on every join, so while a canvas is open the role is known from the
+ *  first render; `setCanvas(null)` clears it, so nothing stale survives a switch. Only an older server sends none, and
+ *  that canvas is treated as editable. The server refuses every write below the role either way. */
 export function roleOf(s: Pick<State, 'canvas'> & Partial<Pick<State, 'role'>>): CanvasRole {
   return s.role ?? s.canvas?.role ?? 'edit'
 }
