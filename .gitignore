@@ -25,3 +25,6 @@ chatgpt-plugin/dist/
 # the built component catalogue
 storybook-static/
 *storybook.log
+
+# agent and sync worktrees
+.worktrees/
