@@ -363,7 +363,7 @@ export function Rulers({ stage }: { stage: RefObject<HTMLDivElement> }) {
     <>
       {/* docked on the stage's edges, above the top bar: the page moves the
           bar and its floating chrome RULER_PX in */}
-      <div data-rulers="" className="pointer-events-none absolute inset-0 z-[28]">
+      <div data-rulers="" className="chrome-layer pointer-events-none absolute inset-0 z-[28]">
         <canvas
           ref={top}
           data-ruler="top"

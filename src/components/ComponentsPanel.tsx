@@ -141,7 +141,10 @@ export function ComponentsPanel() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pt-2 pb-3" data-slot="components-panel">
+    <div
+      className="chrome-layer flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pt-2 pb-3"
+      data-slot="components-panel"
+    >
       <SearchField
         value={query}
         onChange={(event) => setQuery(event.target.value)}

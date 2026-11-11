@@ -125,7 +125,7 @@ function Modal({
         <DialogPrimitive.Content
           ref={contentRef}
           data-slot="modal"
-          className={cn(modalVariants({ size, className }))}
+          className={cn('chrome-layer', modalVariants({ size, className }))}
           {...props}
         >
           {showClose && (

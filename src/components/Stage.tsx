@@ -21,7 +21,6 @@ import { placeComposer } from '../lib/composerPlacement'
 import { isCanvasComment, type CanvasComment } from '../../shared/comments'
 import { elementIdSelector, isElementId } from '../../shared/elementId'
 import { canvasPages } from '../../shared/pages'
-import { FlowOverlay } from './FlowOverlay'
 import { PrototypeOverlay } from './PrototypeOverlay'
 import { GhostFrames } from './GhostFrames'
 import { Cursors } from './Cursors'
@@ -1195,7 +1194,6 @@ export function Stage({
                   />
                 ))}
               <GhostFrames />
-              <FlowOverlay />
               <GuideLines stage={ref} />
               <PrototypeOverlay />
               <SnapGuides />

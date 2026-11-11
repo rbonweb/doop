@@ -51,7 +51,7 @@ function DropdownMenuContent({
         sideOffset={sideOffset}
         align={align}
         collisionPadding={12}
-        className={cn(dropdownMenuContentVariants({ width }), className)}
+        className={cn('chrome-layer', dropdownMenuContentVariants({ width }), className)}
         {...props}
       />
     </DropdownMenuPrimitive.Portal>
