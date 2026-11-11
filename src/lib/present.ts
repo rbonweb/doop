@@ -1,6 +1,7 @@
 import { canvasPages } from '../../shared/pages'
 import { flowStartFrame } from '../../shared/prototype'
 import type { Canvas } from '../../shared/types'
+import { t } from './i18n'
 import { useStore } from './store'
 
 /** The frame a presentation opens on: the selected frame (unless it is hidden), else the page's flow start (its start
@@ -25,7 +26,7 @@ export function startPresenting(frameId?: string) {
     ? s.canvas.frames.find((f) => f.id === frameId && !f.hidden)?.id
     : presentStartFrame(s.canvas, s.selectedId, s.activePageId)
   if (!start) {
-    s.pushNotice('Nothing to present yet. Add a frame first.')
+    s.pushNotice(t('actions.nothingToPresent'))
     return
   }
   s.setPresentFrame(start)

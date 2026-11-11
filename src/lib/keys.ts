@@ -20,6 +20,7 @@ export const CANVAS_MOD_CHORDS = [
   'd',
   'a',
   '.',
+  'shift+e',
   'shift+h',
   'shift+l',
   '0',
@@ -40,6 +41,21 @@ export const CANVAS_MOD_CHORDS = [
 /** Canvas shortcuts must leave native fields and rich-text editors alone. */
 export function isTypingTarget(target: EventTarget | null): target is HTMLElement {
   return target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable)
+}
+
+/* Radix marks an open dialog (and sheet, popover) role=dialog with data-state=open, and a menu role=menu likewise; a
+   closing one stays mounted for its exit animation with data-state=closed, which must not count. aria-modal covers
+   hand-rolled modals. */
+const OPEN_OVERLAY = [
+  '[role="dialog"][data-state="open"]',
+  '[role="alertdialog"][data-state="open"]',
+  '[role="menu"][data-state="open"]',
+  '[aria-modal="true"]',
+].join(', ')
+
+/** True while a modal, sheet, popover or menu is open: bare keys belong to it then. */
+export function isOverlayOpen(): boolean {
+  return !!document.querySelector(OPEN_OVERLAY)
 }
 
 /** ⌘. (Ctrl+. elsewhere): Figma's "hide UI" — only the bare chord, so

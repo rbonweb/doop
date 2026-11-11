@@ -29,6 +29,12 @@ export function CommandPalette({ onClose, onAsk }: { onClose: () => void; onAsk:
       actions: ACTIONS.filter((a) => a.menu === menu.id && a.id !== 'palette' && isEnabled(a)),
     })).filter((g) => g.actions.length),
   )
+  /* "Ask agent" leads the list: it is the one command the palette keeps outside the menus */
+  const [agent] = useState(() => {
+    const action = ACTIONS.find((a) => a.id === 'ask-agent')
+    return action && isEnabled(action) ? action : null
+  })
+  const agentChord = agent ? firstChord(agent.keys) : null
   const ask = useMemo(() => (onAsk && query.trim() ? query.trim() : null), [onAsk, query])
 
   function choose(action: CanvasAction) {
@@ -49,6 +55,15 @@ export function CommandPalette({ onClose, onAsk }: { onClose: () => void; onAsk:
         />
         <CommandList>
           <CommandEmpty>{t('actions.paletteEmpty')}</CommandEmpty>
+          {agent && (
+            <CommandGroup>
+              <CommandItem value={`${t(agent.label)} ${agent.id}`} onSelect={() => choose(agent)}>
+                <SparkIcon width={14} height={14} aria-hidden className="flex-none text-brand" />
+                <span className="min-w-0 flex-1 truncate">{t(agent.label)}</span>
+                {agentChord && <CommandShortcut>{chordHint(agentChord)}</CommandShortcut>}
+              </CommandItem>
+            </CommandGroup>
+          )}
           {groups.map(({ menu, actions }) => (
             <CommandGroup key={menu.id} heading={t(menu.label)}>
               {actions.map((action) => {

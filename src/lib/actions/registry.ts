@@ -3,13 +3,17 @@
    command, its name and its chord are written once. The canvas page lends
    the registry what only it holds (its modals and panels) as the host. */
 
-import type { PlainMessageKey } from '../i18n'
+import { t, type PlainMessageKey } from '../i18n'
+import { DEVICES, type DevicePreset } from '../../../shared/devices'
+import { isOverlayOpen } from '../keys'
+import { applyDevice, restoreDevices, tidyFrames } from '../layoutEdits'
+import { markAllSeen, reviewNext } from '../marks'
 import { useStore } from '../store'
 import { currentPageCanvas } from '../pages'
 import { readingOrder } from '../../../shared/frameOrder'
 import { redo, undo } from '../history'
 import { runViewCommand } from '../viewMenu'
-import { downloadFramesPdf } from '../frameExport'
+import { copyFramePng, downloadFramesPdf } from '../frameExport'
 import { duplicateFrames, hasFrameClip, pasteFramesOver, replaceFramesWithClip } from '../frameClipboard'
 import { hasElementClip, pasteLayer, replaceWithClip } from '../elementClipboard'
 import {
@@ -21,7 +25,7 @@ import {
 } from '../layerEdits'
 import { reorderSelection, selectAll } from '../selectionKeys'
 import type { Chord } from './chords'
-import { IS_MAC, matchesChord } from './chords'
+import { IS_MAC, chordHint, matchesChord } from './chords'
 import {
   addAutoLayout,
   align,
@@ -179,6 +183,37 @@ function duplicate(): boolean {
   return true
 }
 
+/* the Stage reports its size only while the canvas is on screen: the Board (and nothing at all) leaves it null */
+const onStage = () => store().stageSize !== null
+
+function copySelectedAsImage(scale: 2 | 4) {
+  const frame = store().canvas?.frames.find((f) => f.id === store().selectedId)
+  if (!frame) return false
+  void copyFramePng(frame, scale)
+}
+
+const STICKY_NOTES_CHORD: Chord = { code: 'KeyN', alt: true }
+
+function toggleStickyNotes() {
+  const s = store()
+  s.setNotesVisible(!s.notesVisible)
+  const key = chordHint(STICKY_NOTES_CHORD)
+  s.pushNotice(store().notesVisible ? t('actions.notesShown') : t('actions.notesHidden', { key }))
+}
+
+function toggleFlowLinks() {
+  const s = store()
+  s.setFlowLinksVisible(!s.flowLinksVisible)
+  s.pushNotice(store().flowLinksVisible ? t('actions.flowLinksShown') : t('actions.flowLinksHidden', { key: 'K' }))
+}
+
+const DEVICE_LABELS: Record<DevicePreset['id'], PlainMessageKey> = {
+  mobile: 'actions.deviceMobile',
+  tablet: 'actions.deviceTablet',
+  laptop: 'actions.deviceLaptop',
+  desktop: 'actions.deviceDesktop',
+}
+
 const mod = (key: string, extra: Partial<Chord> = {}): Chord => ({ key, mod: true, ...extra })
 const code = (c: string, extra: Partial<Chord> = {}): Chord => ({ code: c, ...extra })
 
@@ -259,6 +294,8 @@ export const ACTIONS: readonly CanvasAction[] = [
     menu: 'file',
     section: 3,
     keys: [mod('e', { shift: true })],
+    /* a dialog already open keeps its run: the page opens it with the selection preticked */
+    enabled: () => !store().exportIds,
     run: () => h()?.openExport(),
   },
   {
@@ -355,6 +392,24 @@ export const ACTIONS: readonly CanvasAction[] = [
     edit: true,
     enabled: () => picked() && hasStyleClip(),
     run: pasteProperties,
+  },
+  {
+    id: 'copy-image-2x',
+    label: 'actions.copyImage2x',
+    menu: 'edit',
+    section: 3,
+    keys: [{ key: 'i' }],
+    enabled: () => onStage() && !!store().selectedId,
+    run: () => copySelectedAsImage(2),
+  },
+  {
+    id: 'copy-image-4x',
+    label: 'actions.copyImage4x',
+    menu: 'edit',
+    section: 3,
+    keys: [{ key: 'i', shift: true }],
+    enabled: () => onStage() && !!store().selectedId,
+    run: () => copySelectedAsImage(4),
   },
   {
     id: 'pick-color',
@@ -499,7 +554,7 @@ export const ACTIONS: readonly CanvasAction[] = [
     label: 'actions.zoom100',
     menu: 'view',
     section: 2,
-    keys: [mod('0')],
+    keys: [mod('0'), code('Digit0', { shift: true })],
     run: () => runViewCommand('zoom-reset'),
   },
   {
@@ -572,7 +627,7 @@ export const ACTIONS: readonly CanvasAction[] = [
     label: 'actions.present',
     menu: 'view',
     section: 4,
-    keys: [mod('Enter', { alt: true })],
+    keys: [mod('Enter', { alt: true }), { key: 'p', shift: true }],
     run: () => h()?.present(),
   },
   {
@@ -584,6 +639,56 @@ export const ACTIONS: readonly CanvasAction[] = [
     edit: true,
     checked: () => !!h()?.boardOpen,
     run: () => h()?.toggleBoard(),
+  },
+  {
+    /* the fork's sticky notes: ⌥N, since a bare N steps to the next frame */
+    id: 'sticky-notes',
+    label: 'actions.stickyNotes',
+    menu: 'view',
+    section: 1,
+    keys: [STICKY_NOTES_CHORD],
+    enabled: onStage,
+    checked: () => store().notesVisible,
+    run: toggleStickyNotes,
+  },
+  {
+    id: 'flow-links',
+    label: 'actions.flowLinks',
+    menu: 'view',
+    section: 1,
+    keys: [{ key: 'k' }],
+    enabled: onStage,
+    checked: () => store().flowLinksVisible,
+    run: toggleFlowLinks,
+  },
+  {
+    /* laser: outline every element and click one to copy its path */
+    id: 'laser',
+    label: 'actions.laser',
+    menu: 'view',
+    section: 1,
+    keys: [{ key: 'l' }],
+    enabled: onStage,
+    checked: () => store().laser,
+    run: () => store().setLaser(!store().laser),
+  },
+  {
+    id: 'next-marked',
+    label: 'actions.nextMarked',
+    menu: 'view',
+    section: 5,
+    keys: [{ key: 'u' }],
+    enabled: onStage,
+    run: () => reviewNext(),
+  },
+  {
+    id: 'mark-all-seen',
+    label: 'actions.markAllSeen',
+    menu: 'view',
+    section: 5,
+    keys: [{ key: 'u', shift: true }],
+    enabled: onStage,
+    run: () => void markAllSeen(),
   },
 
   /* ---- Object ---- */
@@ -1053,13 +1158,48 @@ export const ACTIONS: readonly CanvasAction[] = [
     run: () => distributeEdgesOf(axis, edge),
   })),
 
+  {
+    /* the fork's ⇧T: the selection, or the whole page, into reading-order rows */
+    id: 'tidy-rows',
+    label: 'actions.tidyRows',
+    menu: 'arrange',
+    section: 6,
+    keys: [{ key: 't', shift: true }],
+    edit: true,
+    enabled: onStage,
+    run: () => void tidyFrames(),
+  },
+  ...DEVICES.map((device): CanvasAction => ({
+    id: `device-${device.id}`,
+    label: DEVICE_LABELS[device.id],
+    menu: 'arrange',
+    section: 7,
+    keys: [code(`Digit${device.key}`)],
+    edit: true,
+    enabled: onStage,
+    run: () => applyDevice(device),
+  })),
+  {
+    id: 'device-restore',
+    label: 'actions.deviceRestore',
+    menu: 'arrange',
+    section: 7,
+    keys: [code('Digit0')],
+    edit: true,
+    enabled: onStage,
+    run: () => restoreDevices(),
+  },
+
   /* ---- Help ---- */
   {
     id: 'shortcuts',
     label: 'actions.keyboardShortcuts',
     menu: 'help',
     section: 0,
-    keys: [{ code: 'Slash', ctrl: true, shift: true }],
+    keys: [
+      { code: 'Slash', ctrl: true, shift: true },
+      { key: '?', shift: true },
+    ],
     run: () => h()?.openShortcuts(),
   },
   {
@@ -1111,6 +1251,8 @@ type KeyEventLike = Pick<
  *  found nothing to act on, is left to the next binding and the browser. */
 export function dispatchActionKey(e: KeyEventLike, typing: boolean, mac = IS_MAC): boolean {
   if (!host || host.presenting) return false
+  /* bare keys stay out of an open dialog, sheet or menu; chords with ⌘ or Ctrl have always passed through */
+  if (!e.metaKey && !e.ctrlKey && isOverlayOpen()) return false
   for (const action of ACTIONS) {
     if (action.hintOnly) continue
     if (!action.keys?.some((chord) => (!typing || chord.global) && matchesChord(e, chord, mac))) continue

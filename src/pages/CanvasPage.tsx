@@ -4,6 +4,7 @@ import { canEditOpenCanvas, pickedSelectors, useStore } from '../lib/store'
 import { MOD_KEY, PRESENT_SHORTCUT_HINT, isControlTarget, isTypingTarget } from '../lib/keys'
 import { enterSelection, exitSelection, selectSibling } from '../lib/selectionKeys'
 import { dispatchActionKey, setActionHost, type ActionHost } from '../lib/actions/registry'
+import { applyEscape, escapeModeNow, type EscapeMode } from '../lib/actions/escape'
 import { presentStartFrame, startPresenting } from '../lib/present'
 import { canHideUi, hideUiHinted } from '../lib/hideUi'
 import { connect, disconnect, sendWs } from '../lib/ws'
@@ -449,12 +450,22 @@ export function CanvasPage({
         return
       }
       if (e.key === 'Escape') {
-        select(null)
-        useStore.getState().setFollowing(null)
+        /* leaves the laser or a tool first, and only then clears the selection */
+        applyEscape(escapeMode)
+        escapeMode = null
       }
     }
+    /* the Stage drops a tool on this very key, so the mode is read as the key goes down */
+    let escapeMode: EscapeMode = null
+    function noteEscape(e: KeyboardEvent) {
+      escapeMode = e.key === 'Escape' ? escapeModeNow() : null
+    }
+    window.addEventListener('keydown', noteEscape, true)
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', noteEscape, true)
+      window.removeEventListener('keydown', onKey)
+    }
   }, [canvasId, presenting]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* Native copy/paste events let us write the selection's token and read
