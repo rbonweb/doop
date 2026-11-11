@@ -1,5 +1,5 @@
 import { parse, parseFragment, type DefaultTreeAdapterTypes as Tree } from 'parse5'
-import { ELEMENT_ID_ATTR, elementIdOf, isElementId, newElementId } from '../shared/elementId.ts'
+import { ELEMENT_ID_ATTR, elementIdOf, isElementId, isReusableElementId, newElementId } from '../shared/elementId.ts'
 import type { CommentAnchor } from '../shared/types.ts'
 
 /**
@@ -131,7 +131,7 @@ function parseDocument(html: string): Tree.Document {
 export function elementIdAt(html: string, selector: string): string | undefined {
   const el = resolve(parseDocument(html), selector)
   const id = el ? attr(el, ELEMENT_ID_ATTR) : undefined
-  return isElementId(id) ? id : undefined
+  return isReusableElementId(id) ? id : undefined
 }
 
 export interface Stamped {
@@ -201,13 +201,18 @@ export function stampElementId(html: string, selector: string, opts: StampOption
   const el = resolve(doc, selector)
   if (!el) return undefined
   if (opts.like !== undefined && !matchesSnippet(el, opts.like)) return undefined
-  return stampElement(html, el, opts.id)
+  return stampElement(html, doc, el, opts.id)
 }
 
-/** Write the id into an element already found in `html`'s own parse. */
-function stampElement(html: string, el: Element, wanted?: string): Stamped | undefined {
+/** Write the id into an element already found in `html`'s own parse. An id the
+ *  element already wears is kept even when this format would not mint it (the
+ *  fork's `r10`): other markup and comments may name it. It is replaced only
+ *  when it is unusable (empty, or holding a quote) or another element before
+ *  this one carries the same id, since an id must name one element. */
+function stampElement(html: string, doc: Tree.Document, el: Element, wanted?: string): Stamped | undefined {
   const existing = attr(el, ELEMENT_ID_ATTR)
   if (isElementId(existing)) return { html, id: existing }
+  if (isReusableElementId(existing) && findByElementId(doc, existing) === el) return { html, id: existing }
   const tag = el.sourceCodeLocation?.startTag
   if (!tag) return undefined
   const id = wanted ?? newElementId()
@@ -316,7 +321,7 @@ export function stampLegacyCommentElement(html: string, selector: string, anchor
   if (!anchor) return stampElementId(html, selector)
   const doc = parseDocument(html)
   const el = resolveAnchored(doc, selector, anchor)
-  return el ? stampElement(html, el) : undefined
+  return el ? stampElement(html, doc, el) : undefined
 }
 
 /** `stampElementId` for an element named by the text it shows rather than by a
@@ -329,5 +334,5 @@ export function stampElementByQuote(html: string, quote: string): Stamped | unde
   const doc = parseDocument(html)
   const body = nthOfType(documentElement(doc) ?? doc, { tag: 'body', nth: 1 })
   const holder = body ? innermostHolding(body, probe) : undefined
-  return holder && holder !== body ? stampElement(html, holder) : undefined
+  return holder && holder !== body ? stampElement(html, doc, holder) : undefined
 }

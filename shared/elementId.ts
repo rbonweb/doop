@@ -18,6 +18,13 @@ export function isElementId(value: unknown): value is string {
   return typeof value === 'string' && /^[a-z0-9]{6}$/.test(value)
 }
 
+/** An id an element already wears that this format would not mint: the fork's own `r10`, or
+ *  a lower-case token someone wrote by hand. Such an id is kept as it is, never rewritten: a
+ *  token that is safe inside `[data-doop-id="…"]`. A freshly minted id is still `isElementId`. */
+export function isReusableElementId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z0-9_-]{1,64}$/.test(value)
+}
+
 export function newElementId(): string {
   const bytes = new Uint8Array(ID_LENGTH)
   crypto.getRandomValues(bytes)
@@ -31,8 +38,8 @@ export function elementIdSelector(id: string): string {
   return `[${ELEMENT_ID_ATTR}="${id}"]`
 }
 
-/** The id an element-id selector names, or null for any other selector. */
+/** The id an element-id selector names (a kept legacy id too), or null for any other selector. */
 export function elementIdOf(selector: string): string | null {
-  const match = new RegExp(`^\\[${ELEMENT_ID_ATTR}="([a-z0-9]{6})"\\]$`).exec(selector)
+  const match = new RegExp(`^\\[${ELEMENT_ID_ATTR}="([a-z0-9_-]{1,64})"\\]$`).exec(selector)
   return match?.[1] ?? null
 }

@@ -796,13 +796,17 @@ export async function backfillElementIds(
       try {
         if (selector === FRAME_COMMENT_SELECTOR) {
           frameWide.push(comment)
+          keepSelectorInAnchor(comment, selector)
           continue
         }
         const result = stampLegacyCommentElement(html, selector, comment.anchor)
         if (result) {
           html = result.html
           found.push({ comment, id: result.id })
-        } else lost.push(comment)
+        } else {
+          lost.push(comment)
+          keepSelectorInAnchor(comment, selector)
+        }
       } catch (err) {
         counts.failed++
         console.error(`[comments] element id backfill: comment ${comment.id} on frame ${frameId}:`, err)
@@ -823,6 +827,8 @@ export async function backfillElementIds(
       for (const { comment, id } of found) {
         if (reanchored(comment)) continue
         comment.elementId = id
+        /* the row keeps its old path beside the id (idempotent: the backfill only takes rows with no id) */
+        comment.legacySelector = legacy.get(comment.id)
         await persist.saveCommentNow(comment)
         broadcast(comment.canvasId, { type: 'comment', comment })
         counts.stamped++
@@ -851,6 +857,13 @@ export async function backfillElementIds(
     }
   }
   return counts
+}
+
+/** A comment that ends the backfill with no element has its old path spent in the
+ *  row (the backfill would take it again otherwise), so it moves into the fork anchor
+ *  when there is one; an anchorless comment has nowhere to hold it. */
+function keepSelectorInAnchor(comment: ElementComment, selector: string): void {
+  if (comment.anchor) comment.anchor = { ...comment.anchor, legacySelector: selector }
 }
 
 /* a thread moved while the backfill awaited a write: the move replaced the
@@ -894,6 +907,7 @@ export async function moveComment(
       frameId: _frameId,
       elementId: _elementId,
       elementOrigin: _elementOrigin,
+      legacySelector: _legacySelector,
       pageId: _pageId,
       x: _x,
       y: _y,

@@ -600,6 +600,9 @@ export interface CommentAnchor {
   fx: number
   /** pin position inside the element's box, 0..1 from the top */
   fy: number
+  /** the positional CSS path the comment was stored with before element ids, kept by the
+   *  boot backfill when the comment ends without an element to point at */
+  legacySelector?: string
 }
 
 /** A comment pinned to a specific element inside a frame, to a frame as a
@@ -636,6 +639,9 @@ export interface ElementComment {
   /** structured anchor used to re-find the element after edits; unset on
    *  comments from before anchors existed (they fall back to `selector`) */
   anchor?: CommentAnchor
+  /** the positional CSS path this comment was stored with before element ids. The backfill keeps it
+   *  in the `selector` column once the comment has an `elementId`; it is dropped when the thread moves */
+  legacySelector?: string
   /** what kind of actor wrote it; unset on legacy comments */
   fromKind?: ActorKind
   /** account ids of the people the text @mentions */
