@@ -411,3 +411,166 @@ fn tiles_keep_fixed_backgrounds_sized_to_the_frame() {
         doopblitz_doc_free(doc);
     }
 }
+
+/// `clip-path` clips the whole element, its outer box-shadow included. The
+/// marketing site paints full-bleed section bands with a 100vmax spread shadow
+/// clipped by `clip-path: inset(0 -100vmax)`; with the shadow drawn outside the
+/// clip it flooded the frame and covered every section before the band.
+#[test]
+fn clip_path_clips_the_outer_box_shadow() {
+    let html = CString::new(
+        "<!doctype html><html><body style='margin:0;background:#fff'>\
+         <section style='height:100px'></section>\
+         <section style='height:100px;background:#ddd;box-shadow:0 0 0 100vmax #ddd;clip-path:inset(0 -100vmax)'></section>\
+         <section style='height:100px'></section>\
+         </body></html>",
+    )
+    .unwrap();
+    let base = CString::new("https://doop.design/").unwrap();
+    unsafe {
+        let doc = doopblitz_doc_new(html.as_ptr(), base.as_ptr(), 200, 300, 1.0);
+        let (mut w, mut h, mut len) = (0u32, 0u32, 0usize);
+        let buf = doopblitz_doc_render(doc, &mut w, &mut h, &mut len);
+        let px = std::slice::from_raw_parts(buf, len);
+        let at = |x: usize, y: usize| px[(y * w as usize + x) * 4];
+        assert_eq!(at(100, 50), 0xff, "the shadow painted over the section above the band");
+        assert_eq!(at(100, 150), 0xdd, "the band itself lost its background");
+        assert_eq!(at(100, 250), 0xff, "the shadow painted over the section below the band");
+        doopblitz_buffer_free(buf, len);
+        // a tile across the band agrees with the full render
+        let (mut tw, mut th, mut tlen) = (0u32, 0u32, 0usize);
+        let tile = doopblitz_doc_render_region(doc, 1.0, 0.0, 60.0, 200.0, 80.0, &mut tw, &mut th, &mut tlen);
+        let tpx = std::slice::from_raw_parts(tile, tlen);
+        assert_eq!(tpx[(20 * tw as usize + 100) * 4], 0xff);
+        assert_eq!(tpx[(60 * tw as usize + 100) * 4], 0xdd);
+        doopblitz_buffer_free(tile, tlen);
+        doopblitz_doc_free(doc);
+    }
+}
+
+/// The outline is part of the element too: `clip-path: inset(0)` clips it to
+/// the border box, so nothing of a 20px outline shows outside the box.
+#[test]
+fn clip_path_clips_the_outline() {
+    let html = CString::new(
+        "<!doctype html><html><body style='margin:0;background:#fff'>\
+         <div style='position:absolute;left:50px;top:50px;width:100px;height:100px;background:#ddd;\
+         outline:20px solid #000;clip-path:inset(0)'></div>\
+         </body></html>",
+    )
+    .unwrap();
+    let base = CString::new("https://doop.design/").unwrap();
+    unsafe {
+        let doc = doopblitz_doc_new(html.as_ptr(), base.as_ptr(), 200, 200, 1.0);
+        let (mut w, mut h, mut len) = (0u32, 0u32, 0usize);
+        let buf = doopblitz_doc_render(doc, &mut w, &mut h, &mut len);
+        let px = std::slice::from_raw_parts(buf, len);
+        let at = |x: usize, y: usize| px[(y * w as usize + x) * 4];
+        assert_eq!(at(100, 100), 0xdd, "the box itself lost its background");
+        for (x, y) in [(40, 100), (160, 100), (100, 40), (100, 160)] {
+            assert_eq!(at(x, y), 0xff, "the outline painted outside the clip at ({x}, {y})");
+        }
+        doopblitz_buffer_free(buf, len);
+        doopblitz_doc_free(doc);
+    }
+}
+
+/// A modal centred with `translate(-50%, -50%)` is laid out with its top-left
+/// at the frame's centre and drawn half its size up and left of that. A tap at
+/// the drawn button must pick it, and the rect reported for the selection
+/// highlight must be where the button is drawn, not where it was laid out.
+#[test]
+fn hit_and_rect_follow_a_centering_transform() {
+    let html = CString::new(concat!(
+        "<style>*{margin:0}html,body{width:1440px;height:900px;position:relative}",
+        ".modal{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:960px;height:720px}",
+        ".foot{position:absolute;left:0;right:0;bottom:0;height:72px;display:flex;align-items:center;justify-content:center}",
+        ".btn{display:inline-flex;width:120px;height:34px}</style>",
+        "<div class=\"scrim\" style=\"position:absolute;inset:0\"></div>",
+        "<div class=\"modal\"><div class=\"foot\"><a class=\"btn\" id=\"go\">Continue</a></div></div>",
+    ))
+    .unwrap();
+    let base = CString::new("https://doop.design/").unwrap();
+    for scale in [1.0f32, 0.5, 2.0] {
+        unsafe {
+            let doc = doopblitz_doc_new(html.as_ptr(), base.as_ptr(), 1440, 900, scale);
+            let (mut w, mut h, mut len) = (0u32, 0u32, 0usize);
+            doopblitz_buffer_free(doopblitz_doc_render(doc, &mut w, &mut h, &mut len), len);
+            // The modal is drawn at (240, 90)-(1200, 810); its footer's button is
+            // centred in the bottom 72px: x 660-780, y 757-791.
+            let hit = doopblitz_doc_element_from_point(doc, 720.0, 774.0);
+            let button = doopblitz_doc_query_selector(doc, CString::new("#go").unwrap().as_ptr());
+            assert_ne!(button, 0);
+            assert_eq!(hit, button, "scale {scale}: the drawn button is under the tap");
+            let mut rect = [0f32; 4];
+            assert!(doopblitz_node_rect(doc, button, rect.as_mut_ptr()));
+            assert_eq!(rect, [660.0, 757.0, 120.0, 34.0], "scale {scale}");
+            // Outside the drawn modal, where it was laid out, nothing of it is hit.
+            let miss = doopblitz_doc_element_from_point(doc, 1300.0, 850.0);
+            assert_ne!(miss, button, "scale {scale}");
+            doopblitz_doc_free(doc);
+        }
+    }
+}
+
+/// A child rotated back inside a rotated parent is drawn as an upright square.
+/// Its rect must be that square, not the bounding box of the parent's bounding
+/// box: the transforms compose before the bounds are taken.
+#[test]
+fn rect_composes_nested_transforms_before_bounding() {
+    let html = CString::new(concat!(
+        "<style>*{margin:0}html,body{width:400px;height:400px;position:relative}",
+        ".p{position:absolute;left:100px;top:100px;width:100px;height:100px;transform:rotate(45deg);transform-origin:0 0}",
+        ".c{position:absolute;left:0;top:0;width:100px;height:100px;transform:rotate(-45deg);transform-origin:0 0}</style>",
+        "<div class=\"p\"><div class=\"c\" id=\"c\"></div></div>",
+    ))
+    .unwrap();
+    let base = CString::new("https://doop.design/").unwrap();
+    unsafe {
+        let doc = doopblitz_doc_new(html.as_ptr(), base.as_ptr(), 400, 400, 2.0);
+        let (mut w, mut h, mut len) = (0u32, 0u32, 0usize);
+        doopblitz_buffer_free(doopblitz_doc_render(doc, &mut w, &mut h, &mut len), len);
+        let child = doopblitz_doc_query_selector(doc, CString::new("#c").unwrap().as_ptr());
+        assert_ne!(child, 0);
+        let mut rect = [0f32; 4];
+        assert!(doopblitz_node_rect(doc, child, rect.as_mut_ptr()));
+        let expected = [100.0, 100.0, 100.0, 100.0];
+        for (got, want) in rect.iter().zip(expected) {
+            assert!((got - want).abs() < 0.01, "rect {rect:?}, expected {expected:?}");
+        }
+        assert_eq!(doopblitz_doc_element_from_point(doc, 150.0, 150.0), child);
+        doopblitz_doc_free(doc);
+    }
+}
+
+/// A tap selects the drawing it lands in, the way the web runtime's `probe`
+/// does: the whole text layer, not a bold run inside it, which as an inline
+/// box has no layout of its own and came back as a zero-size outline.
+#[test]
+fn pick_selects_the_text_layer_not_its_inline_runs() {
+    let html = CString::new(concat!(
+        "<body style=\"margin:0\">",
+        "<p data-doop-drawing=\"text\" id=\"t\" style=\"position:fixed;left:100px;top:100px;width:200px;height:120px;margin:0;font:24px/1.4 sans-serif\"><b>bold</b> run</p>",
+        "<div id=\"plain\" style=\"position:fixed;left:100px;top:300px;width:200px;height:60px;font:24px/1.4 sans-serif\"><b>bold</b></div>",
+        "</body>",
+    ))
+    .unwrap();
+    let base = CString::new("https://doop.design/").unwrap();
+    unsafe {
+        let doc = doopblitz_doc_new(html.as_ptr(), base.as_ptr(), 400, 400, 1.0);
+        let (mut w, mut h, mut len) = (0u32, 0u32, 0usize);
+        doopblitz_buffer_free(doopblitz_doc_render(doc, &mut w, &mut h, &mut len), len);
+        let layer = doopblitz_doc_query_selector(doc, CString::new("#t").unwrap().as_ptr());
+        let plain = doopblitz_doc_query_selector(doc, CString::new("#plain").unwrap().as_ptr());
+        // On the bold glyphs, and in the layer's empty lower half.
+        assert_eq!(doopblitz_doc_pick_from_point(doc, 120.0, 115.0), layer);
+        assert_eq!(doopblitz_doc_pick_from_point(doc, 250.0, 200.0), layer);
+        // Outside a drawing, bold text resolves to the nearest box.
+        assert_ne!(doopblitz_doc_element_from_point(doc, 120.0, 315.0), plain);
+        assert_eq!(doopblitz_doc_pick_from_point(doc, 120.0, 315.0), plain);
+        let mut rect = [0f32; 4];
+        assert!(doopblitz_node_rect(doc, layer, rect.as_mut_ptr()));
+        assert!(rect[2] > 199.0 && rect[3] > 119.0, "{rect:?}");
+        doopblitz_doc_free(doc);
+    }
+}

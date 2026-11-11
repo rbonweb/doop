@@ -8,6 +8,9 @@ import * as authSchema from './db/auth-schema.ts'
 import { store } from './store.ts'
 import * as billing from './billing.ts'
 import { mailerConfigured, sendMail } from './mailer.ts'
+import { dropWorkspaceFonts } from './fonts.ts'
+import { notifyUsers } from './userEvents.ts'
+import { avatarUrl } from '../shared/avatar.ts'
 import { isBillingInterval, isWorkspaceActive } from '../shared/billing.ts'
 import type { BillingInterval, WorkspaceStatus } from '../shared/billing.ts'
 import { isWorkspaceRole } from '../shared/types.ts'
@@ -172,6 +175,13 @@ export function summaryFor(ws: WorkspaceRecord, viewerId: string): WorkspaceSumm
   }
 }
 
+/** Every workspace on the instance, for the admin's default-workspace pick. */
+export function listAll(): { id: string; name: string; memberCount: number }[] {
+  return [...records.values()]
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((ws) => ({ id: ws.id, name: ws.name, memberCount: members.get(ws.id)?.size ?? 0 }))
+}
+
 export function listFor(userId: string): WorkspaceSummary[] {
   return workspaceIdsFor(userId)
     .map((id) => records.get(id))
@@ -230,12 +240,15 @@ export async function deleteWorkspace(id: string): Promise<void> {
   if (billing.billingEnabled()) await billing.cancelSubscription(ws)
   store.detachWorkspace(id)
   records.delete(id)
+  const former = [...(members.get(id)?.keys() ?? [])]
   members.delete(id)
+  notifyUsers(former, { type: 'canvases' })
   await db.transaction(async (tx) => {
     await tx.delete(t.workspaceMembers).where(eq(t.workspaceMembers.workspaceId, id))
     await tx.delete(t.workspaceInvites).where(eq(t.workspaceInvites.workspaceId, id))
     await tx.delete(t.workspaces).where(eq(t.workspaces.id, id))
   })
+  await dropWorkspaceFonts(id)
 }
 
 /** Mirror a Stripe subscription onto the row. The one place billing state
@@ -334,7 +347,22 @@ export function addMember(workspaceId: string, userId: string, role: WorkspaceRo
   map.set(userId, { role, addedAt })
   swallow(db.insert(t.workspaceMembers).values({ workspaceId, userId, role, addedBy, addedAt }).onConflictDoNothing())
   reconcileSeats(ws)
+  notifyUsers([userId], { type: 'canvases' })
   return true
+}
+
+/** A new account joins the instance's default workspace (Admin → Sign-in)
+ *  as a member. Nothing to do without one, with one that cannot grow
+ *  (billing), or for someone already in it. */
+export function joinDefaultWorkspace(userId: string, workspaceId: string | null): boolean {
+  if (!workspaceId) return false
+  const ws = records.get(workspaceId)
+  if (!ws) return false
+  if (!isActive(ws)) {
+    console.warn(`[workspaces] default workspace ${ws.name} is inactive — ${userId} not added`)
+    return false
+  }
+  return addMember(workspaceId, userId, 'member', ws.ownerId)
 }
 
 export function setRole(workspaceId: string, userId: string, role: WorkspaceRole): boolean {
@@ -362,6 +390,7 @@ export async function removeMember(workspaceId: string, userId: string): Promise
     .where(and(eq(t.workspaceMembers.workspaceId, workspaceId), eq(t.workspaceMembers.userId, userId)))
   map.delete(userId)
   reconcileSeats(ws)
+  notifyUsers([userId], { type: 'canvases' })
   return true
 }
 
@@ -424,6 +453,7 @@ async function acceptInvite(
   if (!map.has(userId)) {
     map.set(userId, { role, addedAt })
     reconcileSeats(ws)
+    notifyUsers([userId], { type: 'canvases' })
   }
 }
 
@@ -470,7 +500,12 @@ async function acceptPendingInvitesFor(ws: WorkspaceRecord): Promise<void> {
 async function userRows(ids: string[]) {
   const rows = ids.length
     ? await db
-        .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+        .select({
+          id: authSchema.user.id,
+          name: authSchema.user.name,
+          email: authSchema.user.email,
+          image: authSchema.user.image,
+        })
         .from(authSchema.user)
         .where(inArray(authSchema.user.id, ids))
     : []
@@ -485,6 +520,7 @@ async function listMembers(workspaceId: string): Promise<WorkspaceMember[]> {
       userId,
       name: users.get(userId)?.name ?? 'Unknown',
       email: users.get(userId)?.email ?? '',
+      image: avatarUrl(users.get(userId)?.image),
       role: m.role,
       addedAt: m.addedAt,
     }))
@@ -580,12 +616,24 @@ workspacesRouter.post('/:id/members', async (req, res) => {
   if (!email || !email.includes('@')) return res.status(400).json({ error: 'a valid email is required' })
   const role: WorkspaceRole = req.body?.role === 'admin' ? 'admin' : 'member'
   const [row] = await db
-    .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+    .select({
+      id: authSchema.user.id,
+      name: authSchema.user.name,
+      email: authSchema.user.email,
+      image: authSchema.user.image,
+    })
     .from(authSchema.user)
     .where(eq(authSchema.user.email, email))
   if (row) {
     if (!addMember(ws.id, row.id, role, req.user!.id)) return res.status(400).json({ error: 'already a member' })
-    const member: WorkspaceMember = { userId: row.id, name: row.name, email: row.email, role, addedAt: Date.now() }
+    const member: WorkspaceMember = {
+      userId: row.id,
+      name: row.name,
+      email: row.email,
+      image: avatarUrl(row.image),
+      role,
+      addedAt: Date.now(),
+    }
     return res.json({ member })
   }
   if (!unknownEmailInvitesAllowed())

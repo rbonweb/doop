@@ -7,14 +7,18 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		000000000000000000000383 /* SelectionDOM.js in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000382 /* SelectionDOM.js */; };
+		000000000000000000000381 /* CanvasSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000380 /* CanvasSelection.swift */; };
 		000000000000000000000371 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000370 /* Fonts */; };
 		000000000000000000000360 /* Core/CanvasSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000361 /* Core/CanvasSocket.swift */; };
 		000000000000000000000352 /* Core/PendingFrameMoves.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000353 /* Core/PendingFrameMoves.swift */; };
 		000000000000000000000354 /* Core/ProviderSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000355 /* Core/ProviderSignIn.swift */; };
 		000000000000000000000358 /* Core/AppleSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000359 /* Core/AppleSignIn.swift */; };
 		000000000000000000000356 /* WebSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000357 /* WebSignIn.swift */; };
+		000000000000000000000362 /* Core/FrameWorkers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000363 /* Core/FrameWorkers.swift */; };
 		000000000000000000000350 /* Core/FrameSnapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000351 /* Core/FrameSnapping.swift */; };
 		000000000000000000000300 /* Blitz/BlitzDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000310 /* Blitz/BlitzDocument.swift */; };
+		000000000000000000000390 /* Blitz/FrameWorkBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000391 /* Blitz/FrameWorkBadge.swift */; };
 		000000000000000000000305 /* Blitz/AgentMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000315 /* Blitz/AgentMark.swift */; };
 		000000000000000000000340 /* Blitz/AgentMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000315 /* Blitz/AgentMark.swift */; };
 		000000000000000000000301 /* Blitz/BlitzCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000311 /* Blitz/BlitzCanvasView.swift */; };
@@ -66,6 +70,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		000000000000000000000382 /* SelectionDOM.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = SelectionDOM.js; sourceTree = "<group>"; };
+		000000000000000000000380 /* CanvasSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasSelection.swift; sourceTree = "<group>"; };
 		000000000000000000000370 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
 		000000000000000000000372 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		000000000000000000000361 /* Core/CanvasSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/CanvasSocket.swift; sourceTree = "<group>"; };
@@ -73,8 +79,10 @@
 		000000000000000000000355 /* Core/ProviderSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/ProviderSignIn.swift; sourceTree = "<group>"; };
 		000000000000000000000359 /* Core/AppleSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/AppleSignIn.swift; sourceTree = "<group>"; };
 		000000000000000000000357 /* WebSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSignIn.swift; sourceTree = "<group>"; };
+		000000000000000000000363 /* Core/FrameWorkers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/FrameWorkers.swift; sourceTree = "<group>"; };
 		000000000000000000000351 /* Core/FrameSnapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/FrameSnapping.swift; sourceTree = "<group>"; };
 		000000000000000000000310 /* Blitz/BlitzDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Blitz/BlitzDocument.swift; sourceTree = "<group>"; };
+		000000000000000000000391 /* Blitz/FrameWorkBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Blitz/FrameWorkBadge.swift; sourceTree = "<group>"; };
 		000000000000000000000315 /* Blitz/AgentMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Blitz/AgentMark.swift; sourceTree = "<group>"; };
 		000000000000000000000311 /* Blitz/BlitzCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Blitz/BlitzCanvasView.swift; sourceTree = "<group>"; };
 		000000000000000000000313 /* Blitz/CanvasStress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Blitz/CanvasStress.swift; sourceTree = "<group>"; };
@@ -138,6 +146,7 @@
 			children = (
 				00000000000000000000012C /* Core/Models.swift */,
 				000000000000000000000351 /* Core/FrameSnapping.swift */,
+				000000000000000000000363 /* Core/FrameWorkers.swift */,
 				000000000000000000000361 /* Core/CanvasSocket.swift */,
 				000000000000000000000353 /* Core/PendingFrameMoves.swift */,
 				000000000000000000000355 /* Core/ProviderSignIn.swift */,
@@ -146,8 +155,11 @@
 				00000000000000000000012D /* DoopClient.swift */,
 				00000000000000000000012E /* CanvasModel.swift */,
 				000000000000000000000130 /* NativeCanvasView.swift */,
+				000000000000000000000382 /* SelectionDOM.js */,
+				000000000000000000000380 /* CanvasSelection.swift */,
 				000000000000000000000310 /* Blitz/BlitzDocument.swift */,
 				000000000000000000000315 /* Blitz/AgentMark.swift */,
+				000000000000000000000391 /* Blitz/FrameWorkBadge.swift */,
 				000000000000000000000311 /* Blitz/BlitzCanvasView.swift */,
 				000000000000000000000313 /* Blitz/CanvasStress.swift */,
 				000000000000000000000312 /* doopblitz.h */,
@@ -245,6 +257,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0000000000000000000000D2 /* Assets.xcassets in Resources */,
+				000000000000000000000383 /* SelectionDOM.js in Resources */,
 				000000000000000000000371 /* Fonts in Resources */,
 				000000000000000000000332 /* PrivacyInfo.xcprivacy in Resources */,
 			);
@@ -290,6 +303,7 @@
 				000000000000000000000265 /* Doop/GlassDock.swift in Sources */,
 				000000000000000000000190 /* Core/Models.swift in Sources */,
 				000000000000000000000350 /* Core/FrameSnapping.swift in Sources */,
+				000000000000000000000362 /* Core/FrameWorkers.swift in Sources */,
 				000000000000000000000360 /* Core/CanvasSocket.swift in Sources */,
 				000000000000000000000352 /* Core/PendingFrameMoves.swift in Sources */,
 				000000000000000000000354 /* Core/ProviderSignIn.swift in Sources */,
@@ -298,8 +312,10 @@
 				000000000000000000000191 /* DoopClient.swift in Sources */,
 				000000000000000000000192 /* CanvasModel.swift in Sources */,
 				000000000000000000000194 /* NativeCanvasView.swift in Sources */,
+				000000000000000000000381 /* CanvasSelection.swift in Sources */,
 				000000000000000000000300 /* Blitz/BlitzDocument.swift in Sources */,
 				000000000000000000000305 /* Blitz/AgentMark.swift in Sources */,
+				000000000000000000000390 /* Blitz/FrameWorkBadge.swift in Sources */,
 				000000000000000000000301 /* Blitz/BlitzCanvasView.swift in Sources */,
 				000000000000000000000302 /* Blitz/CanvasStress.swift in Sources */,
 				0000000000000000000000C8 /* DoopApp.swift in Sources */,
@@ -397,7 +413,7 @@
 					Metal,
 				);
 				SWIFT_OBJC_BRIDGING_HEADER = BlitzKit/include/doopblitz.h;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = design.doop.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -453,7 +469,7 @@
 					Metal,
 				);
 				SWIFT_OBJC_BRIDGING_HEADER = BlitzKit/include/doopblitz.h;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = design.doop.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -475,7 +491,7 @@
 				INFOPLIST_FILE = DoopActivity/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Doop Agent Status";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.2;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = design.doop.ios.activity;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -497,7 +513,7 @@
 				INFOPLIST_FILE = DoopActivity/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Doop Agent Status";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.2;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = design.doop.ios.activity;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;

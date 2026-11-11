@@ -7,6 +7,7 @@ import { store } from '../server/store.ts'
 import type { Canvas, Frame } from '../shared/types.ts'
 
 vi.mock('../server/db/persist.ts', () => ({
+  saveFrameNow: async () => {},
   saveTask: () => {},
   saveFeedback: () => {},
   saveComment: () => {},
@@ -19,11 +20,12 @@ vi.mock('../server/distill.ts', () => ({ onDecision: () => {} }))
 
 const OWNER_ID = 'owner-1'
 const CANVAS: Canvas = { id: 'c1', name: 'Pins', ownerId: OWNER_ID, createdAt: 0, updatedAt: 0, frames: [] }
+const HTML = '<button>Start free trial</button>'
 const FRAME: Frame = {
   id: 'f1',
   canvasId: CANVAS.id,
   name: 'Hero',
-  html: '<button>Start free trial</button>',
+  html: HTML,
   x: 0,
   y: 0,
   width: 640,
@@ -66,6 +68,7 @@ async function call(client: Client, name: string, args: Record<string, unknown>)
 
 beforeEach(() => {
   vi.restoreAllMocks()
+  FRAME.html = HTML
   actions.wire(
     () => {},
     () => {},
@@ -82,6 +85,12 @@ beforeEach(() => {
   vi.spyOn(store, 'getFrame').mockImplementation((id: string) =>
     id === FRAME.id ? FRAME : id === OTHER_FRAME.id ? OTHER_FRAME : undefined,
   )
+  /* the element-id stamp is an annotation write to the frame's HTML */
+  vi.spyOn(store, 'updateFrame').mockImplementation((id, patch) => {
+    if (id !== FRAME.id) return undefined
+    Object.assign(FRAME, patch)
+    return FRAME
+  })
   vi.spyOn(actions, 'heartbeatAgent').mockImplementation(() => {})
 })
 
@@ -102,7 +111,7 @@ describe('add_comment MCP tool', () => {
     }
   })
 
-  it('pins a quote-only comment with a tagless anchor, attributed to the agent', async () => {
+  it('pins a quote-only comment to the element that shows the quote, attributed to the agent', async () => {
     const { client, close } = await connect()
     try {
       const { parsed, isError } = await call(client, 'add_comment', {
@@ -113,13 +122,15 @@ describe('add_comment MCP tool', () => {
         agent_name: 'Claude',
       })
       expect(isError).toBeFalsy()
+      const { elementId } = parsed as { elementId?: string }
       expect(parsed).toMatchObject({
         frameId: FRAME.id,
         from: 'Claude',
         fromKind: 'agent',
-        selector: '',
-        anchor: { v: 1, tag: '', quote: 'Start free trial', fx: 0.5, fy: 0.5 },
+        snippet: 'Start free trial',
       })
+      expect(elementId).toBeTruthy()
+      expect(FRAME.html).toBe(`<button data-doop-id="${elementId}">Start free trial</button>`)
       expect(actions.getComments(CANVAS.id)).toHaveLength(1)
       expect(actions.getActivity(CANVAS.id)[0]).toMatchObject({ actorName: 'Claude', actorKind: 'agent' })
     } finally {
@@ -127,7 +138,26 @@ describe('add_comment MCP tool', () => {
     }
   })
 
-  it('accepts a selector alone, without inventing an anchor', async () => {
+  it('falls back to a frame comment when no element shows the quote', async () => {
+    const { client, close } = await connect()
+    try {
+      const { parsed, isError } = await call(client, 'add_comment', {
+        canvas_id: CANVAS.id,
+        frame_id: FRAME.id,
+        quote: 'Not on the page',
+        text: 'Where did it go?',
+        agent_name: 'Claude',
+      })
+      expect(isError).toBeFalsy()
+      expect(parsed).toMatchObject({ frameId: FRAME.id, fromKind: 'agent' })
+      expect((parsed as { elementId?: unknown }).elementId).toBeUndefined()
+      expect(FRAME.html).toBe(HTML)
+    } finally {
+      await close()
+    }
+  })
+
+  it('pins a selector alone to the element it names', async () => {
     const { client, close } = await connect()
     try {
       const { parsed, isError } = await call(client, 'add_comment', {
@@ -138,8 +168,10 @@ describe('add_comment MCP tool', () => {
         agent_name: 'Claude',
       })
       expect(isError).toBeFalsy()
-      expect(parsed).toMatchObject({ selector: 'button', fromKind: 'agent' })
-      expect((parsed as { anchor?: unknown }).anchor).toBeUndefined()
+      const { elementId } = parsed as { elementId?: string }
+      expect(parsed).toMatchObject({ fromKind: 'agent' })
+      expect(elementId).toBeTruthy()
+      expect(FRAME.html).toContain(`data-doop-id="${elementId}"`)
     } finally {
       await close()
     }
@@ -241,7 +273,7 @@ describe('add_comment MCP tool', () => {
     }
   })
 
-  it('lets a reply inherit the thread anchor and shows the quote through get_comments', async () => {
+  it('lets a reply inherit the thread element and lists both through get_comments', async () => {
     const { client, close } = await connect()
     try {
       const added = await call(client, 'add_comment', {
@@ -259,10 +291,12 @@ describe('add_comment MCP tool', () => {
         agent_name: 'Claude',
       })
       const { parsed } = await call(client, 'get_comments', { canvas_id: CANVAS.id })
-      const comments = parsed as Array<{ parentId?: string; anchor?: { quote?: string }; fromKind?: string }>
+      const comments = parsed as Array<{ parentId?: string; elementId?: string; fromKind?: string }>
       expect(comments).toHaveLength(2)
+      const rootElementId = (added.parsed as { elementId?: string }).elementId
+      expect(rootElementId).toBeTruthy()
       for (const c of comments) {
-        expect(c.anchor?.quote).toBe('Start free trial')
+        expect(c.elementId).toBe(rootElementId)
         expect(c.fromKind).toBe('agent')
       }
     } finally {

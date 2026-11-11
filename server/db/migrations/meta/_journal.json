@@ -260,6 +260,139 @@
       "when": 1793331819985,
       "tag": "0037_asset_versions",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1793331820985,
+      "tag": "0038_frame_approval",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1793331821985,
+      "tag": "0039_approval_automations",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1793331822985,
+      "tag": "0040_canvas_guides",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1793331823985,
+      "tag": "0041_local_agent_effort",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1793331824985,
+      "tag": "0042_reasoning_effort",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1793331825985,
+      "tag": "0043_comment_element_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1793499824743,
+      "tag": "0044_agent_feedback",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1793521728824,
+      "tag": "0045_custom_fonts",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1793692495440,
+      "tag": "0046_comment_element_origin",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1793693135674,
+      "tag": "0047_frame_stack",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1793762567006,
+      "tag": "0048_design_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1793826097552,
+      "tag": "0049_agent_runner_pick",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1793924448927,
+      "tag": "0050_multiple_model_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1793932055532,
+      "tag": "0051_feedback_runner",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1794104742941,
+      "tag": "0052_frame_rotation",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1794106479747,
+      "tag": "0053_image_descriptions",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1794299332162,
+      "tag": "0054_instance_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1794347436684,
+      "tag": "0055_custom_providers",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1794352711304,
+      "tag": "0056_components",
+      "breakpoints": true
     }
   ]
 }

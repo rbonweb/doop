@@ -15,8 +15,14 @@ import {
   revokeInvite,
   setModels,
   SettingRefused,
-} from './instanceSettings.ts'
+} from './instanceConfig.ts'
 import { env } from './env.ts'
+import { listAgentFeedback } from './agentFeedback.ts'
+import { agentFeedback } from './db/schema.ts'
+import * as workspaces from './workspaces.ts'
+import { loadOidcConfig, loginProvidersConfig } from './auth.ts'
+import { getInstanceSettings, ssoAdminSignedIn, updateInstanceSettings } from './instanceSettings.ts'
+import { isInstanceSettingsPatch } from '../shared/instanceSettings.ts'
 
 /**
  * Instance-admin surface, mounted at /api/admin (so already behind the
@@ -53,12 +59,16 @@ adminRouter.get('/canvases', async (req, res) => {
 
 /** The three numbers worth knowing at a glance. */
 adminRouter.get('/stats', async (req, res) => {
-  const [users] = await db.select({ n: count() }).from(authSchema.user)
+  const [[users], [reports]] = await Promise.all([
+    db.select({ n: count() }).from(authSchema.user),
+    db.select({ n: count() }).from(agentFeedback),
+  ])
   const canvases = [...store.canvases.values()]
   res.json({
     users: users?.n ?? 0,
     canvases: canvases.length,
     frames: canvases.reduce((n, c) => n + c.frames.length, 0),
+    agentFeedback: reports?.n ?? 0,
   })
 })
 
@@ -168,4 +178,49 @@ adminRouter.post('/models/test', async (req, res) => {
     return res.status(400).json({ error: e instanceof Error ? e.message : 'not a model name' })
   }
   res.json(await checkServerModel(model))
+})
+
+/** What agents sent through report_issue and share_feedback, a page at a time,
+ *  newest first, with the account they ran for. Filters: kind, q (search),
+ *  and before=<at>:<id> (the last report already shown) for older pages. */
+adminRouter.get('/agent-feedback', async (req, res) => {
+  const kind = req.query.kind === 'issue' || req.query.kind === 'feedback' ? req.query.kind : undefined
+  const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 200) : undefined
+  const cursor = typeof req.query.before === 'string' ? /^(\d+):(.+)$/.exec(req.query.before) : null
+  const before = cursor ? { at: Number(cursor[1]), id: cursor[2] ?? '' } : undefined
+  const page = await listAgentFeedback({ kind, q, before })
+  const userIds = [...new Set(page.reports.map((r) => r.userId).filter((id): id is string => !!id))]
+  const users = userIds.length
+    ? await db
+        .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+        .from(authSchema.user)
+        .where(inArray(authSchema.user.id, userIds))
+    : []
+  const byId = new Map(users.map((u) => [u.id, u]))
+  res.json({ ...page, reports: page.reports.map((r) => ({ ...r, user: r.userId ? byId.get(r.userId) : undefined })) })
+})
+
+/** The sign-in policy with what it depends on: the providers env has wired
+ *  up (read-only here), the workspaces a newcomer could be put in, and
+ *  whether an admin has come in through SSO (the auto-redirect guard). */
+async function instanceSettingsView() {
+  return {
+    settings: getInstanceSettings(),
+    providers: loginProvidersConfig(),
+    workspaces: workspaces.listAll(),
+    ssoAdminSignedIn: await ssoAdminSignedIn(),
+  }
+}
+
+adminRouter.get('/instance-settings', async (req, res) => {
+  res.json(await instanceSettingsView())
+})
+
+/** A partial of InstanceSettings; 400 for a malformed body, 409 with the
+ *  reason when the policy itself refuses it (shared/instanceSettings.ts). */
+adminRouter.patch('/instance-settings', async (req, res) => {
+  if (!isInstanceSettingsPatch(req.body)) return res.status(400).json({ refusal: 'invalid' })
+  const result = await updateInstanceSettings(req.body, req.user!.id, loadOidcConfig() !== null)
+  if ('refusal' in result) return res.status(409).json({ refusal: result.refusal })
+  res.json(await instanceSettingsView())
 })

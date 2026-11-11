@@ -1,0 +1,76 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import type { Page } from 'puppeteer-core'
+import { findBrowserPath } from '../server/screenshot'
+import { pagePerTest } from './browser'
+import { canvasFrame, openCanvasPage } from './canvasPageFixture'
+
+/* Z held is the Zoom tool: a click zooms in, a drag zooms onto its box, Esc
+   drops the box, and letting go of Z returns to the tool before it, in
+   whichever order Z and the mouse are released */
+describe.skipIf(!findBrowserPath())('the Zoom tool', () => {
+  const pages = pagePerTest()
+  let page: Page
+  beforeEach(async () => {
+    page = await pages.open()
+    page.setDefaultTimeout(10_000)
+    await page.setViewport({ width: 1400, height: 900 })
+    await openCanvasPage(page, [canvasFrame({ id: 'board', name: 'Board', x: 0, y: 0, width: 800, height: 600 })])
+  })
+
+  const zoom = () => page.$eval('[aria-label="Zoom level"] span', (el) => parseInt(el.textContent ?? '', 10))
+  const zoomCursor = () => page.$eval('.stage', (el) => el.className.includes('cursor-zoom-in!'))
+  async function centre() {
+    const r = await page.$eval('.stage', (el) => {
+      const b = el.getBoundingClientRect()
+      return { x: b.left + b.width / 2, y: b.top + b.height / 2 }
+    })
+    return r
+  }
+  /* every case starts from 100% */
+  async function reset() {
+    await page.keyboard.down('Meta')
+    await page.keyboard.press('Digit0')
+    await page.keyboard.up('Meta')
+    await page.waitForFunction(() => document.querySelector('[aria-label="Zoom level"] span')?.textContent === '100%')
+  }
+
+  it('zooms in on a click while Z is held, and lets go of the tool with Z', async () => {
+    await reset()
+    const at = await centre()
+    await page.keyboard.down('KeyZ')
+    expect(await zoomCursor()).toBe(true)
+    await page.mouse.click(at.x, at.y)
+    expect(await zoom()).toBe(200)
+    await page.keyboard.up('KeyZ')
+    expect(await zoomCursor()).toBe(false)
+  })
+
+  it('finishes a drag released after Z, and the next click selects instead of zooming', async () => {
+    await reset()
+    const at = await centre()
+    await page.keyboard.down('KeyZ')
+    await page.mouse.move(at.x - 100, at.y - 50)
+    await page.mouse.down()
+    await page.mouse.move(at.x + 100, at.y + 50, { steps: 5 })
+    await page.keyboard.up('KeyZ')
+    await page.mouse.up()
+    const zoomed = await zoom()
+    expect(zoomed).toBeGreaterThan(300)
+    expect(await zoomCursor()).toBe(false)
+    await page.mouse.click(at.x, at.y)
+    expect(await zoom()).toBe(zoomed)
+  })
+
+  it('drops the box on Esc without zooming', async () => {
+    await reset()
+    const at = await centre()
+    await page.keyboard.down('KeyZ')
+    await page.mouse.move(at.x - 100, at.y - 50)
+    await page.mouse.down()
+    await page.mouse.move(at.x + 100, at.y + 50, { steps: 5 })
+    await page.keyboard.press('Escape')
+    await page.mouse.up()
+    await page.keyboard.up('KeyZ')
+    expect(await zoom()).toBe(100)
+  })
+})

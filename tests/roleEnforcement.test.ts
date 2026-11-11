@@ -5,7 +5,7 @@ import type { CanvasNote, ElementComment, Frame, FrameVersionInfo } from '../sha
 
 /**
  * Roles on the entry points that frame history, sticky notes, comment anchors, review marks and pages added, against
- * the REAL server (see ./harness.ts): reading takes view, healing a pin takes comment, anything that changes the design
+ * the REAL server (see ./harness.ts): reading takes view, moving a pin takes comment, anything that changes the design
  * takes edit, and the realtime socket shows view-only people the notes without letting them send a change.
  */
 
@@ -323,24 +323,27 @@ describe('sticky notes', () => {
   })
 })
 
-describe('comment anchor heal', () => {
-  const heal = (who: Client) => who.patch(`/api/comments/${commentId}/anchor`, { selector: 'body > h1' })
+describe('comment pin move', () => {
+  const move = (who: Client, x = 5) =>
+    who.patch(`/api/comments/${commentId}/anchor`, { frameId, selector: 'h1', snippet: '', x, y: 6 })
 
   it('needs the comment role', async () => {
-    expect((await heal(viewer)).status).toBe(403)
-    expect((await heal(commenter)).status).toBe(200)
-    expect((await heal(editor)).status).toBe(200)
-    expect((await heal(owner)).status).toBe(200)
+    expect((await move(viewer)).status).toBe(403)
+    expect((await move(commenter)).status).toBe(200)
+    expect((await move(editor)).status).toBe(200)
+    expect((await move(owner)).status).toBe(200)
   })
 
   it('refuses a stranger and a signed-out caller, and a viewer cannot rewrite the pin', async () => {
-    expect((await heal(stranger)).status).toBe(403)
-    expect((await heal(anonymous)).status).toBe(401)
+    expect((await move(stranger, 99)).status).toBe(403)
+    expect((await move(anonymous, 99)).status).toBe(401)
+    expect((await move(viewer, 99)).status).toBe(403)
     const room = new Room(canvasId, owner.header())
     try {
       await room.joined()
       const comments = room.init?.comments as ElementComment[]
-      expect(comments.find((c) => c.id === commentId)?.selector).toBe('body > h1')
+      /* the pin stays where the last allowed move (x 5) put it: none of the refused callers moved it */
+      expect(comments.find((c) => c.id === commentId)?.x).toBe(5)
     } finally {
       room.close()
     }

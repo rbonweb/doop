@@ -48,6 +48,19 @@ function fakeWindow() {
   return win
 }
 
+/* a screen the player navigated to is a new iframe of its own: give it a stand-in window too, and speak from that */
+const fakedWindows = new WeakMap<HTMLIFrameElement, object>()
+function topScreenWindow() {
+  const screens = [...container.querySelectorAll('iframe')]
+  const screen = screens[screens.length - 1]!
+  const known = fakedWindows.get(screen)
+  if (known) return known
+  const win = { postMessage: vi.fn((data: Record<string, unknown>) => posted.push({ data })) }
+  Object.defineProperty(screen, 'contentWindow', { value: win, configurable: true })
+  fakedWindows.set(screen, win)
+  return win
+}
+
 async function fromFrame(win: object, data: Record<string, unknown>) {
   await act(async () => {
     window.dispatchEvent(new MessageEvent('message', { data, source: win as MessageEventSource }))
@@ -63,7 +76,7 @@ async function press(key: string) {
 async function mount(frames: Frame[], startId: string) {
   useStore.setState({ canvas: canvasOf(frames) })
   await act(async () => {
-    root.render(<PresentMode startId={startId} onClose={onClose} />)
+    root.render(<PresentMode frameId={startId} onClose={onClose} />)
   })
   const win = fakeWindow()
   await fromFrame(win, { type: 'doop:frame-ready' })
@@ -91,18 +104,22 @@ afterEach(() => {
   useStore.setState({ canvas: null })
 })
 
+/* slides: a slide start plays the deck, the player this file tests */
 const FLOW = () => [
-  frame('a', 0, 0),
-  frame('b', 500, 0, { html: '<button data-goto="c">Next</button>' }),
-  frame('c', 1000, 0),
-  frame('d', 0, 400),
+  frame('a', 0, 0, { slide: true }),
+  frame('b', 500, 0, { slide: true, html: '<button data-goto="c">Next</button>' }),
+  frame('c', 1000, 0, { slide: true }),
+  frame('d', 0, 400, { slide: true }),
 ]
 
-describe('walking a flow', () => {
+/* the same four frames as plain frames: the start frame is no slide, so the prototype player runs */
+const PLAIN = () => FLOW().map(({ slide: _slide, ...rest }) => rest)
+
+describe('walking a deck with prototype links', () => {
   it('opens on the start frame and tells the frame it is being presented', async () => {
     await mount(FLOW(), 'b')
     expect(title()).toBe('Presenting Frame b')
-    expect(modePosts()).toEqual([{ type: 'doop:mode', present: true, slides: false }])
+    expect(modePosts()).toEqual([{ type: 'doop:mode', present: true, slides: true }])
     expect(lastHtml()).toEqual({ type: 'doop:html', html: '<button data-goto="c">Next</button>' })
     expect(container.textContent).toContain('2 / 4')
   })
@@ -156,12 +173,6 @@ describe('walking a flow', () => {
   it('ignores messages from anything but its own frame', async () => {
     await mount(FLOW(), 'a')
     await fromFrame({ other: true }, { type: 'doop:goto', target: 'c' })
-    expect(title()).toBe('Presenting Frame a')
-  })
-
-  it('does not treat Space as a step outside a deck', async () => {
-    await mount(FLOW(), 'a')
-    await press(' ')
     expect(title()).toBe('Presenting Frame a')
   })
 
@@ -290,13 +301,6 @@ describe('a deck', () => {
     expect(strip.textContent).toContain('End of the deck')
   })
 
-  it('keeps s for the page when the frame is not a slide', async () => {
-    await mount(FLOW(), 'a')
-    await press('s')
-    expect(container.querySelector('[role="region"][aria-label="Presenter view"]')).toBeNull()
-    expect(container.querySelector('[aria-label="Export deck as PDF"]')).toBeNull()
-  })
-
   it('exports the deck from the toolbar', async () => {
     await mount(DECK(), 's1')
     await act(async () => {
@@ -320,6 +324,54 @@ describe('a deck', () => {
     })
     expect(container.querySelector('[role="region"][aria-label="Presenter view"]')).toBeNull()
     open.mockRestore()
+  })
+})
+
+describe('one Present entry, two players', () => {
+  const playerCurrent = () => container.querySelector('[data-proto-current]')?.textContent
+
+  it('plays a slide in the deck and any other frame in the prototype player', async () => {
+    await mount(FLOW(), 'a')
+    expect(container.querySelector('[data-prototype-player]')).toBeNull()
+    expect(container.querySelector('[aria-label="Presentation controls"]')).not.toBeNull()
+    act(() => root.unmount())
+    root = createRoot(container)
+    await mount(PLAIN(), 'a')
+    expect(container.querySelector('[data-prototype-player]')).not.toBeNull()
+    expect(container.querySelector('[aria-label="Presentation controls"]')).toBeNull()
+    expect(container.querySelector('[aria-label="Export deck as PDF"]')).toBeNull()
+  })
+
+  it('plays a data-goto link as a click that navigates', async () => {
+    await mount(PLAIN(), 'b')
+    expect(lastHtml()).toMatchObject({
+      html: '<button data-goto="c" data-doop-on="click" data-doop-action="navigate:c">Next</button>',
+    })
+  })
+
+  it('walks reading order with a key the frame did not take, and Backspace goes back', async () => {
+    const win = await mount(PLAIN(), 'a')
+    expect(playerCurrent()).toBe('Frame a')
+    await fromFrame(win, { type: 'doop:proto-unhandled-key', key: 'ArrowRight' })
+    expect(playerCurrent()).toBe('Frame b')
+    await fromFrame(topScreenWindow(), { type: 'doop:proto-unhandled-key', key: 'PageDown' })
+    expect(playerCurrent()).toBe('Frame c')
+    await fromFrame(topScreenWindow(), { type: 'doop:proto-unhandled-key', key: 'Backspace' })
+    expect(playerCurrent()).toBe('Frame b')
+  })
+
+  it('offers a key to the frame first and walks only when it says it took none', async () => {
+    const win = await mount(PLAIN(), 'a')
+    const asked = () => posted.map((p) => p.data).filter((d) => d.type === 'doop:proto-key')
+    await press('ArrowRight')
+    const first = asked().at(-1)!
+    expect(first.key).toBe('ArrowRight')
+    await fromFrame(win, { type: 'doop:proto-key-result', reqId: first.reqId, handled: true })
+    expect(playerCurrent()).toBe('Frame a')
+    await press('ArrowRight')
+    const second = asked().at(-1)!
+    await fromFrame(win, { type: 'doop:proto-key-result', reqId: second.reqId, handled: false })
+    expect(playerCurrent()).toBe('Frame b')
   })
 })
 

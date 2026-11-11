@@ -1,0 +1,1 @@
+ALTER TABLE "frames" ADD COLUMN IF NOT EXISTS "approval" jsonb;

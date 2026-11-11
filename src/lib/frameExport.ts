@@ -1,31 +1,51 @@
+import { pdfRenderBudgetMs } from '../../shared/pdfLimits'
+import { DEFAULT_EXPORT_SCALE, exportScaleSuffix, fitExportScale, formatExportScale } from '../../shared/exportScale'
 import type { Frame } from '../../shared/types'
 import { isDesktopShell } from './shell'
+import { inspectElement } from './frameBridge'
+import { clipToFrame, cropRaster, frameSvg, rasterizeFrame, type ClipRect } from './frameRaster'
 import { useStore } from './store'
+import { t } from './i18n'
 
-export type FrameExportFormat = 'png' | 'jpg'
+export type FrameExportFormat = 'png' | 'jpg' | 'svg'
+/** the formats with a pixel density, which the server can render too */
+export type RasterFormat = Exclude<FrameExportFormat, 'svg'>
 
-const FORMAT_LABEL: Record<FrameExportFormat, string> = { png: 'PNG', jpg: 'JPG' }
+/** One element inside a frame, by the selector the live document answers
+ *  to; `name` is what the Layers panel calls it, for the file name. */
+export interface ElementTarget {
+  selector: string
+  name: string
+}
+
+export const FORMAT_LABEL: Record<FrameExportFormat, string> = { png: 'PNG', jpg: 'JPG', svg: 'SVG' }
 
 /* Blob URLs are revoked late: in the desktop shell the save panel opens
    before WebKit reads the blob, and the person may take a while to pick. */
 const BLOB_URL_LIFETIME_MS = 10 * 60_000
 
-export function frameExportUrl(frame: Frame, format: FrameExportFormat, scale: 2 | 4 = 2): string {
+export function frameExportUrl(frame: Frame, format: RasterFormat, scale = DEFAULT_EXPORT_SCALE): string {
   return `/i/${frame.id}.${format}?scale=${scale}&download`
 }
 
-/** The server names the file after the frame; fall back to that if the
- *  header is missing or unreadable. */
-function fileNameOf(res: Response, frame: Frame, format: FrameExportFormat): string {
-  const header = res.headers.get('Content-Disposition') ?? ''
-  const match = /filename="([^"]+)"/.exec(header)
-  return match?.[1] ?? `${frame.name || 'frame'}.${format}`
+/** Frames of one canvas as one multi-page PDF, a page per frame in the order given. */
+export function framesPdfUrl(canvasId: string, frames: readonly Frame[]): string {
+  const ids = frames.map((frame) => encodeURIComponent(frame.id)).join(',')
+  return `/api/canvases/${encodeURIComponent(canvasId)}/export.pdf?frames=${ids}`
 }
 
-async function failureOf(res: Response, format: FrameExportFormat): Promise<string> {
+/** The server names the file; fall back to `fallback` if the header is
+ *  missing or unreadable. */
+function fileNameOf(res: Response, fallback: string): string {
+  const header = res.headers.get('Content-Disposition') ?? ''
+  const match = /filename="([^"]+)"/.exec(header)
+  return match?.[1] ?? fallback
+}
+
+async function failureOf(res: Response, label: string): Promise<string> {
   const body: unknown = await res.json().catch(() => null)
   const error = (body as { error?: unknown } | null)?.error
-  return typeof error === 'string' ? error : `Couldn’t export the ${FORMAT_LABEL[format]}`
+  return typeof error === 'string' ? error : t('panels.exportFailed', { label })
 }
 
 /* A `download` attribute is what makes this a download everywhere: the
@@ -43,9 +63,24 @@ export function saveBlob(blob: Blob, fileName: string) {
   setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_LIFETIME_MS)
 }
 
-/* An image of a busy frame renders in seconds; a request still open after
+/** Starting a download can throw (a blocked blob URL, a sandboxed page);
+ *  the export must still settle and report. */
+function trySave(blob: Blob, fileName: string): boolean {
+  try {
+    saveBlob(blob, fileName)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/* A busy frame renders in seconds; a request still open after
    this is stuck, and must not leave the spinner up forever. */
 const EXPORT_TIMEOUT_MS = 2 * 60_000
+
+/* A local render is fetches plus one paint; past this the server is the
+   better bet. */
+const RASTER_TIMEOUT_MS = 20_000
 
 /* Exports share the one canvas toast, so an outcome must not claim the
    spinner while another export is still rendering. */
@@ -56,7 +91,7 @@ let inFlight = 0
 function report(outcome: string | null) {
   const { notice, pushNotice } = useStore.getState()
   if (inFlight > 0) {
-    const more = `Exporting ${inFlight} more…`
+    const more = t('panels.exportingMore', { count: inFlight })
     pushNotice(outcome ? `${outcome} · ${more}` : more, { busy: true })
   } else if (outcome) {
     pushNotice(outcome)
@@ -65,49 +100,216 @@ function report(outcome: string | null) {
   }
 }
 
-export type FrameExportResult = { ok: true; fileName: string } | { ok: false; error: string }
+/** `note`: something the person should hear with the outcome (a scale the
+ *  frame was too big for). */
+type Fetched = { ok: true; blob: Blob; fileName: string; note?: string } | { ok: false; message: string }
 
-/** Render one frame and hand it to the browser (or the desktop save panel). Never throws: the result says what happened. */
-export async function saveFrameExport(frame: Frame, format: FrameExportFormat): Promise<FrameExportResult> {
+/* the server's JPEG quality, so both paths agree */
+const JPG_QUALITY = 0.9
+
+const rasterType = (format: RasterFormat) => (format === 'jpg' ? 'jpeg' : 'png')
+
+/** The frame drawn by this browser (what the person sees, no server
+ *  round trip), or null when it cannot be: an image its host refuses to
+ *  share, a document the serializer cannot round-trip. */
+async function rasterExport(frame: Frame, format: RasterFormat, scale: number, clip?: ClipRect): Promise<Blob | null> {
   try {
-    const res = await fetch(frameExportUrl(frame, format), { signal: AbortSignal.timeout(EXPORT_TIMEOUT_MS) })
-    if (!res.ok) return { ok: false, error: await failureOf(res, format) }
-    const fileName = fileNameOf(res, frame, format)
-    saveBlob(await res.blob(), fileName)
-    return { ok: true, fileName }
-  } catch (err) {
-    return {
-      ok: false,
-      error:
-        err instanceof DOMException && err.name === 'TimeoutError'
-          ? `The ${FORMAT_LABEL[format]} export timed out — try again`
-          : `Couldn’t export the ${FORMAT_LABEL[format]}`,
-    }
+    return await rasterizeFrame(frame, {
+      scale,
+      type: rasterType(format),
+      quality: JPG_QUALITY,
+      signal: AbortSignal.timeout(RASTER_TIMEOUT_MS),
+      clip,
+    })
+  } catch {
+    return null
   }
 }
 
-async function exportOutcome(frame: Frame, format: FrameExportFormat): Promise<string | null> {
-  const result = await saveFrameExport(frame, format)
-  if (!result.ok) return result.error
-  return isDesktopShell() ? null : `“${result.fileName}” is ready`
+/** Where an element sits in its frame right now, as the live document
+ *  measures it, or null when the frame is not on screen or the element is
+ *  gone. The whole document is rendered either way; this only says which
+ *  part to keep, so the element's inherited styles and what paints behind
+ *  it are exactly what the person sees. */
+async function measureElement(frame: Frame, selector: string): Promise<ClipRect | null> {
+  const info = await inspectElement(frame.id, selector).catch(() => null)
+  return info ? clipToFrame(info.rect, frame) : null
 }
 
-/** Save the frame's document as an .html file: the same text the raw editor shows, so a draft in progress exports as typed. Nothing to fetch, so it cannot fail the way the rendered exports can. */
+/** The server's render of the whole frame, cut down to `clip` here. */
+async function fetchClipped(frame: Frame, format: RasterFormat, scale: number, clip: ClipRect, fileName: string) {
+  const label = FORMAT_LABEL[format]
+  const whole = await fetchFile(frameExportUrl(frame, format, scale), label, fileName)
+  if (!whole.ok) return whole
+  try {
+    const blob = await cropRaster(whole.blob, clip, {
+      scale,
+      type: rasterType(format),
+      quality: JPG_QUALITY,
+    })
+    return { ok: true as const, blob, fileName }
+  } catch {
+    return { ok: false as const, message: t('panels.exportFailed', { label }) }
+  }
+}
+
+/** Render here first; the server's Chromium is the fallback. A scale the
+ *  frame is too big for comes down to the largest it allows, and says so. */
+async function fetchExport(
+  frame: Frame,
+  format: FrameExportFormat,
+  wanted: number,
+  element?: ElementTarget,
+): Promise<Fetched> {
+  const clip = element ? await measureElement(frame, element.selector) : undefined
+  if (clip === null) return { ok: false, message: t('panels.exportElementMissing') }
+  if (format === 'svg') return svgExport(frame, element, clip)
+  const scale = fitExportScale(frame, wanted)
+  const fileName = `${exportName(frame, element)}${exportScaleSuffix(scale)}.${format}`
+  const fetched = await rasterFetch(frame, format, scale, clip, fileName)
+  if (!fetched.ok || scale === wanted) return fetched
+  return { ...fetched, note: t('panels.exportScaledDown', { scale: formatExportScale(scale) }) }
+}
+
+async function rasterFetch(
+  frame: Frame,
+  format: RasterFormat,
+  scale: number,
+  clip: ClipRect | undefined,
+  fileName: string,
+): Promise<Fetched> {
+  const local = await rasterExport(frame, format, scale, clip)
+  if (local) return { ok: true, blob: local, fileName }
+  if (clip) return fetchClipped(frame, format, scale, clip, fileName)
+  return fetchFile(frameExportUrl(frame, format, scale), FORMAT_LABEL[format], fileName)
+}
+
+/** An SVG has no server fallback: the server's Chromium paints pixels, and
+ *  the file is the document this browser inlines. */
+async function svgExport(
+  frame: Frame,
+  element: ElementTarget | undefined,
+  clip: ClipRect | undefined,
+): Promise<Fetched> {
+  try {
+    const blob = await frameSvg(frame, { clip, signal: AbortSignal.timeout(RASTER_TIMEOUT_MS) })
+    return { ok: true, blob, fileName: `${exportName(frame, element)}.svg` }
+  } catch {
+    return { ok: false, message: t('panels.exportSvgFailed') }
+  }
+}
+
+/* the server's file naming (server/index.ts, /i/:id.:ext?download) */
+function safeName(name: string): string {
+  return name.replace(/[^\w\- ]+/g, '').trim()
+}
+
+function exportName(frame: Frame, element?: ElementTarget): string {
+  const frameName = safeName(frame.name) || 'frame'
+  if (!element) return frameName
+  return `${frameName} - ${safeName(element.name) || 'element'}`
+}
+
+async function fetchFile(
+  url: string,
+  label: string,
+  fallbackName: string,
+  timeoutMs = EXPORT_TIMEOUT_MS,
+): Promise<Fetched> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+    if (!res.ok) return { ok: false, message: await failureOf(res, label) }
+    return { ok: true, blob: await res.blob(), fileName: fileNameOf(res, fallbackName) }
+  } catch (err) {
+    const message =
+      err instanceof DOMException && err.name === 'TimeoutError'
+        ? t('panels.exportTimedOut', { label })
+        : t('panels.exportFailed', { label })
+    return { ok: false, message }
+  }
+}
+
+/** What one saved export came to: `note` is something the person should hear with the outcome (a scale the frame was too big for). */
+export type FrameExportResult = { ok: true; fileName: string; note?: string } | { ok: false; error: string }
+
+async function saveFetched(fetched: Fetched): Promise<FrameExportResult> {
+  if (!fetched.ok) return { ok: false, error: fetched.message }
+  if (!trySave(fetched.blob, fetched.fileName)) {
+    return { ok: false, error: t('panels.exportSaveFailed', { name: fetched.fileName }) }
+  }
+  return { ok: true, fileName: fetched.fileName, note: fetched.note }
+}
+
+/** Render one frame and hand it to the browser (or the desktop save panel). Never throws: the result says what happened. */
+export async function saveFrameExport(
+  frame: Frame,
+  format: FrameExportFormat,
+  scale = DEFAULT_EXPORT_SCALE,
+): Promise<FrameExportResult> {
+  return saveFetched(await fetchExport(frame, format, scale))
+}
+
+async function exportOutcome(fetched: Promise<Fetched>): Promise<string | null> {
+  const result = await saveFetched(await fetched)
+  if (!result.ok) return result.error
+  if (isDesktopShell()) return result.note ?? null
+  const ready = t('panels.exportReady', { name: result.fileName })
+  return result.note ? `${ready} · ${result.note}` : ready
+}
+
+/** Save the frame's document as an .html file — the same text the raw editor
+ *  shows, so a draft in progress exports as typed. Nothing to fetch, so it
+ *  cannot fail the way the rendered exports can. */
 export function downloadFrameHtml(frame: Frame, html = frame.html): void {
   saveBlob(new Blob([html], { type: 'text/html;charset=utf-8' }), `${frame.name || 'frame'}.html`)
 }
 
-/** Render and download a frame export, reporting through the canvas toast: a spinner while the server renders (rendering can take several seconds), then the outcome. Fired from surfaces that close on click, so the toast in the store is the only place the result can land. */
-export async function downloadFrameExport(frame: Frame, format: FrameExportFormat): Promise<void> {
-  await runExportJob(`Exporting ${FORMAT_LABEL[format]}…`, () => exportOutcome(frame, format))
+/** Render and download a frame export, reporting through the canvas toast:
+ *  a spinner while the server renders (it can take several seconds), then
+ *  the outcome. Fired from surfaces that close on click, so the toast in
+ *  the store is the only place the result can land. */
+export async function downloadFrameExport(
+  frame: Frame,
+  format: FrameExportFormat,
+  scale = DEFAULT_EXPORT_SCALE,
+): Promise<void> {
+  return downloadExport(frame, format, scale)
+}
+
+/** Download one element of a frame as an image: the frame rendered whole,
+ *  cut to the element's box, so a style it inherits from the document or a
+ *  background it sits on is in the picture, as Figma's export of a layer
+ *  would show it. */
+export async function downloadElementExport(
+  frame: Frame,
+  element: ElementTarget,
+  format: FrameExportFormat,
+  scale = DEFAULT_EXPORT_SCALE,
+): Promise<void> {
+  return downloadExport(frame, format, scale, element)
+}
+
+async function downloadExport(
+  frame: Frame,
+  format: FrameExportFormat,
+  scale: number,
+  element?: ElementTarget,
+): Promise<void> {
+  await runExportJob(t('panels.exportingFormat', { label: FORMAT_LABEL[format] }), () =>
+    exportOutcome(fetchExport(frame, format, scale, element)),
+  )
 }
 
 /** Run one export under the shared toast: `busy` while it works, then the outcome the job returns (null: nothing to say). */
 export async function runExportJob(busy: string, job: () => Promise<string | null>): Promise<void> {
   inFlight += 1
   useStore.getState().pushNotice(busy, { busy: true })
-  const outcome = await job()
-  inFlight -= 1
+  let outcome: string | null
+  try {
+    outcome = await job()
+  } finally {
+    inFlight -= 1
+  }
   report(outcome)
 }
 
@@ -136,6 +338,8 @@ export interface BatchSummary {
 }
 
 export interface BatchOptions {
+  /** the density every image is rendered at */
+  scale?: number
   onProgress?: (progress: BatchProgress) => void
   /** polled before each frame — true ends the run after the current one */
   shouldStop?: () => boolean
@@ -153,7 +357,14 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export async function exportFrames(
   frames: Frame[],
   format: FrameExportFormat,
-  { onProgress, shouldStop, pauseMs = BATCH_PAUSE_MS, exportOne = saveFrameExport, wait = sleep }: BatchOptions = {},
+  {
+    scale = DEFAULT_EXPORT_SCALE,
+    onProgress,
+    shouldStop,
+    pauseMs = BATCH_PAUSE_MS,
+    exportOne = saveFrameExport,
+    wait = sleep,
+  }: BatchOptions = {},
 ): Promise<BatchSummary> {
   const summary: BatchSummary = { saved: 0, failures: [], stopped: false }
   for (const [i, frame] of frames.entries()) {
@@ -163,41 +374,90 @@ export async function exportFrames(
       break
     }
     onProgress?.({ index: i + 1, total: frames.length, frame })
-    const result = await exportOne(frame, format)
+    const result = await exportOne(frame, format, scale)
     if (result.ok) summary.saved += 1
     else summary.failures.push({ frame, error: result.error })
   }
   return summary
 }
 
-/** Copy a frame to the clipboard as a PNG rendered at `scale` (the menu's Copy as PNG is 2×; `i` / `⇧I` are 2× / 4×), reporting through the canvas toast like the downloads. The clipboard write gets the pending render, not a finished blob, so Safari keeps the click or key press as the user gesture; ClipboardItem gets the pending blob because WebKit allows the write only while the click's user activation is live, and the render can take seconds. */
-export async function copyFramePng(frame: Frame, scale: 2 | 4 = 2): Promise<void> {
+/** Render frames of one canvas into a single PDF (a page per frame, in the
+ *  order given) and download it, reporting through the canvas toast like the
+ *  other exports. One request, so no batch pacing, but it waits as long as
+ *  the server may take to print that many frames. */
+export async function downloadFramesPdf(canvasId: string, frames: readonly Frame[]): Promise<void> {
+  const [first] = frames
+  if (!first) return
+  inFlight += 1
+  useStore
+    .getState()
+    .pushNotice(
+      frames.length === 1 ? t('panels.exportingPdf') : t('panels.exportingPdfFrames', { count: frames.length }),
+      { busy: true },
+    )
+  const fallback = `${(frames.length === 1 && first.name) || 'frames'}.pdf`
+  const timeoutMs = Math.max(EXPORT_TIMEOUT_MS, pdfRenderBudgetMs(frames.length))
+  const outcome = await exportOutcome(fetchFile(framesPdfUrl(canvasId, frames), 'PDF', fallback, timeoutMs))
+  inFlight -= 1
+  report(outcome)
+}
+
+/** Render the frame and put the PNG itself on the clipboard, reporting
+ *  through the canvas toast like the downloads. ClipboardItem gets the
+ *  pending blob, not an awaited one: WebKit allows the write only while the
+ *  click's user activation is live, and the render can take seconds. */
+export async function copyFramePng(frame: Frame, scale = DEFAULT_EXPORT_SCALE): Promise<void> {
+  return copyPng(frame, scale)
+}
+
+/** Put one element of a frame on the clipboard as a PNG, rendered the way
+ *  `downloadElementExport` renders it. */
+export async function copyElementPng(
+  frame: Frame,
+  element: ElementTarget,
+  scale = DEFAULT_EXPORT_SCALE,
+): Promise<void> {
+  return copyPng(frame, scale, element)
+}
+
+async function copyPng(frame: Frame, wanted: number, element?: ElementTarget): Promise<void> {
   /* no async clipboard outside a secure context (a self-hosted instance on
      plain http) or in older engines: say so before spending a render */
   if (!('clipboard' in navigator) || typeof ClipboardItem === 'undefined') {
-    useStore.getState().pushNotice('This browser can’t copy images')
+    useStore.getState().pushNotice(t('panels.copyPngUnsupported'))
     return
   }
   inFlight += 1
-  useStore.getState().pushNotice('Copying PNG…', { busy: true })
+  useStore.getState().pushNotice(t('panels.copyingPng'), { busy: true })
   /* engines differ in what the write rejects with when the blob fails, so
      the render's reason is kept here rather than read off the error */
-  let failure = 'Couldn’t copy the PNG'
+  let failure = t('panels.copyPngFailed')
   const png = (async () => {
+    /* measured inside the pending blob: the clipboard write below must
+       start while the click's activation is live, before any await */
+    const clip = element ? await measureElement(frame, element.selector) : undefined
+    if (clip === null) {
+      failure = t('panels.exportElementMissing')
+      throw new Error(failure)
+    }
+    const scale = fitExportScale(frame, wanted)
+    const local = await rasterExport(frame, 'png', scale, clip)
+    if (local) return local
     try {
       const res = await fetch(frameExportUrl(frame, 'png', scale), { signal: AbortSignal.timeout(EXPORT_TIMEOUT_MS) })
       if (res.ok) {
-        const blob = await res.blob()
+        const whole = await res.blob()
         /* an app server that answers an unknown path with its index page must not land on the clipboard as a PNG */
-        if (!blob.type.startsWith('image/')) {
-          failure = 'The server did not send an image'
+        if (!whole.type.startsWith('image/')) {
+          failure = t('panels.copyPngNotImage')
           throw new Error(failure)
         }
-        return blob.type === 'image/png' ? blob : new Blob([blob], { type: 'image/png' })
+        if (clip) return await cropRaster(whole, clip, { scale, type: 'png' })
+        return whole.type === 'image/png' ? whole : new Blob([whole], { type: 'image/png' })
       }
       failure = await failureOf(res, 'png')
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'TimeoutError') failure = 'The PNG copy timed out — try again'
+      if (err instanceof DOMException && err.name === 'TimeoutError') failure = t('panels.copyPngTimedOut')
     }
     throw new Error(failure)
   })()
@@ -206,7 +466,7 @@ export async function copyFramePng(frame: Frame, scale: 2 | 4 = 2): Promise<void
   let outcome: string
   try {
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })])
-    outcome = 'PNG copied'
+    outcome = t('panels.copyPngDone')
   } catch {
     outcome = failure
   }

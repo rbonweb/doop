@@ -7,9 +7,12 @@ import { Settings } from './pages/Settings'
 import { CanvasPage } from './pages/CanvasPage'
 import { GuestCanvas } from './pages/GuestCanvas'
 import { PresenterWindow } from './components/PresenterView'
+import { PrototypePage } from './pages/PrototypePage'
 import { AuthPage } from './pages/AuthPage'
 import { DesktopHandoff } from './pages/DesktopHandoff'
 import { DesktopSignIn } from './pages/DesktopSignIn'
+import { DesktopConnect } from './pages/DesktopConnect'
+import { DESKTOP_CONNECT_PATH } from '../shared/desktopConnect'
 import { DesktopCodexSetup } from './pages/DesktopCodexSetup'
 import { CODEX_SETUP_PATH } from './lib/codexConnection'
 import { OAuthConsent } from './pages/OAuthConsent'
@@ -20,6 +23,7 @@ import { AutomationEditor } from './pages/AutomationEditor'
 import { Integrations } from './pages/Integrations'
 import { Workspace } from './pages/Workspace'
 import { authClient } from './lib/auth'
+import { useStore } from './lib/store'
 import { setName } from './lib/identity'
 import { posthog, setSupportWidgetVisible, syncReplayForUser, suspendAnalyticsWhileImpersonating } from './lib/posthog'
 import { useMe } from './lib/me'
@@ -29,13 +33,31 @@ import { AuthScreen } from './components/ui/screen'
 import { DesktopTabs, ShellDragBar } from './components/DesktopTabs'
 import { setTabsUser } from './lib/desktop'
 import { isDesktopShell } from './lib/shell'
+import { SIGNUP_PARAM, parseSignupMethod } from '../shared/firstCanvas'
+import { useT } from './lib/i18n'
 
 export { navigate }
+
+/* A provider sign-in that created the account lands here carrying
+   ?signup=<method> (shared/firstCanvas.ts); the email form reports its own
+   signups at submit. Report it once the person is identified, then take the
+   marker off the URL so a reload or a shared link cannot count it twice. */
+function reportProviderSignup() {
+  const url = new URL(location.href)
+  const method = parseSignupMethod(url.searchParams.get(SIGNUP_PARAM))
+  if (!url.searchParams.has(SIGNUP_PARAM)) return
+  url.searchParams.delete(SIGNUP_PARAM)
+  history.replaceState(history.state, '', url)
+  if (method) posthog.capture('account_signed_up', { method })
+}
 
 export function App() {
   const [route, setRoute] = useState(location.pathname + location.search)
   const path = route.split('?')[0]!
   const { data: session, isPending } = authClient.useSession()
+  /* a signed-out guest on a share link asked for the sign-in form */
+  const [guestAuth, setGuestAuth] = useState<'signin' | 'signup' | null>(null)
+  const signInRequired = useStore((s) => s.signInRequired)
   const me = useMe(session?.user.id)
   const identifiedUserId = useRef<string | null>(null)
 
@@ -91,6 +113,7 @@ export function App() {
     posthog.identify(user.id, { email: user.email, name: user.name })
     syncReplayForUser(user.email)
     identifiedUserId.current = user.id
+    reportProviderSignup()
   }, [session?.user, me])
 
   /* the account name is the identity shown on cursors and in the feed */
@@ -127,19 +150,44 @@ export function App() {
       </>
     )
 
+  /* a provider sent the system browser back for a connection the desktop
+     app started (shared/desktopConnect.ts) — the app finishes it under its
+     own account, so this browser's session does not matter */
+  if (path === DESKTOP_CONNECT_PATH)
+    return (
+      <>
+        <ShellDragBar />
+        <DesktopConnect />
+      </>
+    )
+
+  /* signed out on a canvas link: the share gate decides (GuestCanvas asks the server, as the fork's access rules
+     define: a link that admits guests opens the canvas, a password link asks for the password, a private canvas
+     lands on the sign-in form below). The prototype player (/c/<id>/proto) goes through the same gate, so it never
+     opens for someone the canvas itself would turn away. */
+  if (!session && canvasId && !signInRequired && !guestAuth)
+    return (
+      <>
+        <ShellDragBar />
+        <GuestCanvas
+          canvasId={canvasId}
+          key={canvasId}
+          prototype={/^\/c\/[^/]+\/proto\/?$/.test(path)}
+          onSignUp={() => setGuestAuth('signup')}
+          onSignIn={() => setGuestAuth('signin')}
+        />
+      </>
+    )
+
   /* signed out: every path lands on the sign-in form. The marketing site is
      a separate service (see server/marketing.ts) that owns `/` for
      visitors; share links (/c/…) and interrupted MCP OAuth redirects keep
      their URL so the deep link / resume logic survives the sign-in. */
   if (!session) {
-    /* a share link that admits guests (or asks for its password) opens for a
-       signed-out visitor; the page asks the server which, and falls back to
-       the sign-in form for everything else */
-    const guestCanvasId = path.match(/^\/c\/([^/]+)/)?.[1]
     return (
       <>
         <ShellDragBar />
-        {guestCanvasId ? <GuestCanvas canvasId={guestCanvasId} key={guestCanvasId} /> : <AuthPage />}
+        <AuthPage initialMode={guestAuth ?? undefined} />
       </>
     )
   }
@@ -152,7 +200,11 @@ export function App() {
 
   /* /c/<id>?presenter=1 is the presenter's own window: notes and the next slide, driven by the presentation (src/components/PresenterView.tsx) */
   const presenterWindow = !!canvasId && new URLSearchParams(location.search).has('presenter')
-  const page = canvasId ? (
+  /* /c/<id>/proto: the prototype player, full page */
+  const prototypeOf = path.match(/^\/c\/([^/]+)\/proto\/?$/)?.[1]
+  const page = prototypeOf ? (
+    <PrototypePage canvasId={prototypeOf} key={prototypeOf} />
+  ) : canvasId ? (
     presenterWindow ? (
       <PresenterWindow canvasId={canvasId} key={canvasId} />
     ) : (
@@ -206,11 +258,12 @@ export function App() {
 }
 
 function ImpersonationBanner({ name }: { name: string }) {
+  const t = useT()
   const [leaving, setLeaving] = useState(false)
   return (
     <div className="fixed inset-x-0 top-0 z-[900] flex min-h-14 items-center justify-between gap-2 border-b border-accent-ink px-2.5 py-[7px] text-[11.5px] leading-tight text-accent-ink backdrop-blur-[6px] [background:repeating-linear-gradient(-45deg,rgba(208,52,31,0.16)_0_10px,rgba(208,52,31,0.08)_10px_20px)] sm:h-10 sm:min-h-0 sm:justify-center sm:gap-4 sm:text-[13px]">
       <span>
-        Viewing as <strong>{name}</strong> — read only, expires after 15 minutes.
+        {t('auth.viewingAsBefore')} <strong>{name}</strong> {t('auth.viewingAsAfter')}
       </span>
       <Button
         variant="ghost"
@@ -226,7 +279,7 @@ function ImpersonationBanner({ name }: { name: string }) {
             .catch(() => location.assign('/'))
         }}
       >
-        {leaving ? 'Leaving…' : 'Stop viewing'}
+        {leaving ? t('auth.leaving') : t('auth.stopViewing')}
       </Button>
     </div>
   )

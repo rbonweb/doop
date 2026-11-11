@@ -31,6 +31,7 @@ vi.mock('../server/db/persist.ts', () => {
   ]
   return {
     ...Object.fromEntries(writes.map((name) => [name, noop])),
+    saveFrameNow: () => Promise.resolve(),
     saveFrameVersion: (v: FrameVersion) => {
       saved.push(v)
     },
@@ -89,10 +90,10 @@ const messagesTo = (canvasId: string) =>
   sent.filter((s) => s.canvasId === canvasId && s.msg.type !== 'activity').map((s) => s.msg)
 
 describe('moveFrameToCanvas', () => {
-  it('moves the frame, keeping its id and design and changing its canvas and page', () => {
+  it('moves the frame, keeping its id and design and changing its canvas and page', async () => {
     actions.updateFrame(frame.id, { locked: true, hidden: true }, human)
     const targetPage = store.getCanvas(targetId)!.pages![0]!.id
-    const result = actions.moveFrameToCanvas(frame.id, targetId, { x: 40, y: 50 }, human)
+    const result = await actions.moveFrameToCanvas(frame.id, targetId, { x: 40, y: 50 }, human)
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -118,35 +119,35 @@ describe('moveFrameToCanvas', () => {
     expect(moves).toEqual([{ frameId: frame.id, canvasId: targetId, noteIds: [] }])
   })
 
-  it('places a frame to the right of the target page when no position is given', () => {
+  it('places a frame to the right of the target page when no position is given', async () => {
     actions.createFrame(targetId, { name: 'Existing', x: 100, y: 200, width: 500, height: 400 }, human)
-    const result = actions.moveFrameToCanvas(frame.id, targetId, {}, human)
+    const result = await actions.moveFrameToCanvas(frame.id, targetId, {}, human)
     expect(result.ok && [result.frame.x, result.frame.y]).toEqual([680, 120])
   })
 
-  it('lands on the first spot of an empty target page and honours a single coordinate', () => {
-    const empty = actions.moveFrameToCanvas(frame.id, targetId, {}, human)
+  it('lands on the first spot of an empty target page and honours a single coordinate', async () => {
+    const empty = await actions.moveFrameToCanvas(frame.id, targetId, {}, human)
     expect(empty.ok && [empty.frame.x, empty.frame.y]).toEqual([120, 120])
 
     const other = actions.createFrame(sourceId, { name: 'Other', width: 200, height: 100 }, human)!
-    const half = actions.moveFrameToCanvas(other.id, targetId, { y: 700 }, human)
+    const half = await actions.moveFrameToCanvas(other.id, targetId, { y: 700 }, human)
     expect(half.ok && [half.frame.x, half.frame.y]).toEqual([120 + 400 + 80, 700])
   })
 
-  it('moves onto the page asked for', () => {
+  it('moves onto the page asked for', async () => {
     const pages = [...store.getCanvas(targetId)!.pages!, { id: 'p2', name: 'Page 2' }]
     actions.setCanvasPages(targetId, pages, human)
-    const result = actions.moveFrameToCanvas(frame.id, targetId, { pageId: 'p2' }, human)
+    const result = await actions.moveFrameToCanvas(frame.id, targetId, { pageId: 'p2' }, human)
     expect(result.ok && result.frame.pageId).toBe('p2')
   })
 
-  it('takes attached sticky notes along, shifted by the frame delta, and leaves free notes behind', () => {
+  it('takes attached sticky notes along, shifted by the frame delta, and leaves free notes behind', async () => {
     const attached = actions.createNote(sourceId, { markdown: 'on hero', frameId: frame.id, x: 1050, y: 310 }, human)
     const free = actions.createNote(sourceId, { markdown: 'free', x: 5, y: 5 }, human)
     if (!attached.ok || !free.ok) throw new Error('notes not created')
     sent = []
 
-    const result = actions.moveFrameToCanvas(frame.id, targetId, { x: 100, y: 100 }, human)
+    const result = await actions.moveFrameToCanvas(frame.id, targetId, { x: 100, y: 100 }, human)
     expect(result.ok).toBe(true)
     if (!result.ok) return
     const dx = 100 - 600
@@ -169,7 +170,7 @@ describe('moveFrameToCanvas', () => {
     actions.updateFrame(frame.id, { html: '<p>v1</p>' }, human, { replace: true })
     expect(await persist.listFrameVersions(frame.id)).toHaveLength(1)
 
-    actions.moveFrameToCanvas(frame.id, targetId, {}, human)
+    await actions.moveFrameToCanvas(frame.id, targetId, {}, human)
     const versions = await persist.listFrameVersions(frame.id)
     expect(versions).toHaveLength(1)
     expect(versions[0]).toMatchObject({ frameId: frame.id, canvasId: targetId })
@@ -181,11 +182,11 @@ describe('moveFrameToCanvas', () => {
     expect(restored && 'frame' in restored && restored.frame.html).toBe('<p>v0</p>')
   })
 
-  it('tells both rooms and logs the move on both canvases', () => {
+  it('tells both rooms and logs the move on both canvases', async () => {
     const note = actions.createNote(sourceId, { markdown: 'n', frameId: frame.id }, human)
     if (!note.ok) throw new Error('note not created')
     sent = []
-    const result = actions.moveFrameToCanvas(frame.id, targetId, {}, human)
+    const result = await actions.moveFrameToCanvas(frame.id, targetId, {}, human)
     if (!result.ok) throw new Error(result.error)
 
     expect(messagesTo(sourceId)).toEqual([
@@ -200,8 +201,13 @@ describe('moveFrameToCanvas', () => {
     expect(actions.getActivity(targetId)[0]?.message).toBe('moved in “Hero” from Source')
   })
 
-  it('moves the comment threads pinned to the frame', () => {
-    const root = actions.addElementComment(frame.id, { selector: 'p', snippet: 'v0', text: 'nice' }, 'Ada', OWNER)!
+  it('moves the comment threads pinned to the frame', async () => {
+    const root = (await actions.addElementComment(
+      frame.id,
+      { selector: 'p', snippet: 'v0', text: 'nice' },
+      'Ada',
+      OWNER,
+    ))!
     const reply = actions.replyToComment(root.id, 'thanks', 'Bo')!
     const elsewhere = actions.addCanvasComment(
       sourceId,
@@ -209,7 +215,7 @@ describe('moveFrameToCanvas', () => {
       'Ada',
     )!
 
-    actions.moveFrameToCanvas(frame.id, targetId, {}, human)
+    await actions.moveFrameToCanvas(frame.id, targetId, {}, human)
     expect(
       actions
         .getComments(targetId)
@@ -220,36 +226,41 @@ describe('moveFrameToCanvas', () => {
     expect(actions.getComments(sourceId).map((c) => c.id)).toEqual([elsewhere.id])
   })
 
-  it('caps the target canvas comment list at 100 after the merge, keeping the newest', () => {
+  it('caps the target canvas comment list at 100 after the merge, keeping the newest', async () => {
     const page = store.getCanvas(targetId)!.pages![0]!.id
     for (let i = 0; i < 100; i++) {
       actions.addCanvasComment(targetId, { pageId: page, x: 1, y: 1, text: `t${i}` }, 'Ada')
     }
-    const root = actions.addElementComment(frame.id, { selector: 'p', snippet: 'v0', text: 'moved' }, 'Ada', OWNER)!
+    const root = (await actions.addElementComment(
+      frame.id,
+      { selector: 'p', snippet: 'v0', text: 'moved' },
+      'Ada',
+      OWNER,
+    ))!
     expect(actions.getComments(targetId)).toHaveLength(100)
 
-    actions.moveFrameToCanvas(frame.id, targetId, {}, human)
+    await actions.moveFrameToCanvas(frame.id, targetId, {}, human)
     const merged = actions.getComments(targetId)
     expect(merged).toHaveLength(100)
     expect(merged.some((c) => c.id === root.id)).toBe(true)
     expect(merged.map((c) => c.at)).toEqual([...merged.map((c) => c.at)].sort((a, b) => b - a))
   })
 
-  it('refuses a missing frame, canvas or page, the same canvas, and demo frames', () => {
-    expect(actions.moveFrameToCanvas('nope', targetId, {}, human)).toMatchObject({ ok: false, status: 404 })
-    expect(actions.moveFrameToCanvas(frame.id, 'nope', {}, human)).toMatchObject({ ok: false, status: 404 })
-    expect(actions.moveFrameToCanvas(frame.id, sourceId, {}, human)).toMatchObject({ ok: false, status: 409 })
-    expect(actions.moveFrameToCanvas(frame.id, targetId, { pageId: 'missing' }, human)).toMatchObject({
+  it('refuses a missing frame, canvas or page, the same canvas, and demo frames', async () => {
+    expect(await actions.moveFrameToCanvas('nope', targetId, {}, human)).toMatchObject({ ok: false, status: 404 })
+    expect(await actions.moveFrameToCanvas(frame.id, 'nope', {}, human)).toMatchObject({ ok: false, status: 404 })
+    expect(await actions.moveFrameToCanvas(frame.id, sourceId, {}, human)).toMatchObject({ ok: false, status: 409 })
+    expect(await actions.moveFrameToCanvas(frame.id, targetId, { pageId: 'missing' }, human)).toMatchObject({
       ok: false,
       status: 400,
     })
-    expect(actions.moveFrameToCanvas(frame.id, targetId, { x: Number.NaN }, human)).toMatchObject({
+    expect(await actions.moveFrameToCanvas(frame.id, targetId, { x: Number.NaN }, human)).toMatchObject({
       ok: false,
       status: 400,
     })
     const demo = actions.createFrame(sourceId, { name: 'Demo', demo: true }, human)!
     sent = []
-    expect(actions.moveFrameToCanvas(demo.id, targetId, {}, human)).toMatchObject({ ok: false, status: 400 })
+    expect(await actions.moveFrameToCanvas(demo.id, targetId, {}, human)).toMatchObject({ ok: false, status: 400 })
 
     /* nothing changed along the way */
     expect(store.getFrame(frame.id)?.canvasId).toBe(sourceId)

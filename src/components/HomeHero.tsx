@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { DRAFT_OPTIONS, DRAFTS_STORAGE_KEY, isDraftCount, readStoredDrafts, type DraftCount } from '../lib/homePrompt'
+import { setPromptBoxHidden, usePromptBoxHidden } from '../lib/homePreferences'
 import { DoopMark } from './Logo'
 import { ModelPicker } from './ModelPicker'
 import { BrandMark } from './ui/brand-mark'
@@ -8,6 +9,8 @@ import { Chip } from './ui/chip'
 import { MenuButton } from './ui/menu-button'
 import { Pressable } from './ui/pressable'
 import { Textarea } from './ui/textarea'
+import { Button } from './ui/button'
+import { Modal, ModalActions, ModalLede, ModalTitle } from './ui/modal'
 import {
   DropdownMenu,
   DropdownMenuCaption,
@@ -19,16 +22,17 @@ import {
 import {
   ArrowUpIcon,
   AttachmentIcon,
-  CalendarIcon,
+  BlocksIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CirclePlusIcon,
   CopyIcon,
-  HistoryIcon,
   LayoutTemplateIcon,
-  MessageSquareIcon,
   UploadIcon,
+  WebIcon,
+  XIcon,
 } from './ui/icons'
+import { useT, type PlainMessageKey } from '../lib/i18n'
 
 /**
  * The home page's front door: the hopping Disc-D, a greeting, a strip of
@@ -46,14 +50,15 @@ export interface HeroActions {
   onConnectAgents: () => void
   onAutomations: () => void
   onIntegrations: () => void
+  onCommunity: () => void
 }
 
 /** a chip either fills the composer with a brief or runs an action */
 interface Chip {
   id: string
-  label: string
+  label: PlainMessageKey
   icon: ReactNode
-  prompt?: string
+  prompt?: PlainMessageKey
   action?: keyof Omit<HeroActions, 'onPrompt'>
 }
 
@@ -62,36 +67,25 @@ const chipIcon = { width: 13, height: 13 } as const
 const CHIPS: Chip[] = [
   {
     id: 'landing',
-    label: 'Draft a landing page',
+    label: 'home.chipLanding',
     icon: <LayoutTemplateIcon {...chipIcon} />,
-    prompt: 'Draft a landing page for ',
-  },
-  {
-    id: 'recap',
-    label: 'Recap a session',
-    icon: <CalendarIcon {...chipIcon} />,
-    prompt: 'Recap what happened on my canvases this week, as one summary frame.',
-  },
-  {
-    id: 'changed',
-    label: 'What changed',
-    icon: <HistoryIcon {...chipIcon} />,
-    prompt: 'What changed across my canvases this week?',
+    prompt: 'home.chipLandingPrompt',
   },
   {
     id: 'automation',
-    label: 'Run an automation',
+    label: 'home.chipAutomation',
     icon: <span className="font-mono text-caption">/</span>,
     action: 'onAutomations',
   },
-  { id: 'agents', label: 'Connect your agents', icon: <CirclePlusIcon {...chipIcon} />, action: 'onConnectAgents' },
-  { id: 'import', label: 'Import a design', icon: <UploadIcon {...chipIcon} />, action: 'onImport' },
+  { id: 'agents', label: 'home.chipAgents', icon: <CirclePlusIcon {...chipIcon} />, action: 'onConnectAgents' },
+  { id: 'import', label: 'home.chipImport', icon: <UploadIcon {...chipIcon} />, action: 'onImport' },
   {
-    id: 'comments',
-    label: 'Review comments',
-    icon: <MessageSquareIcon {...chipIcon} />,
-    prompt: 'Go through the open comments on my canvases and address each one.',
+    id: 'integrations',
+    label: 'home.chipIntegrations',
+    icon: <BlocksIcon {...chipIcon} />,
+    action: 'onIntegrations',
   },
+  { id: 'templates', label: 'home.chipTemplates', icon: <WebIcon {...chipIcon} />, action: 'onCommunity' },
 ]
 
 /** the beam walks the strip while nobody hovers, like a slow carousel */
@@ -123,6 +117,9 @@ export function HomeHero({
   /** a timestamp — the rail's "Ask Doop" and ⌘/ ask for the keyboard */
   focusAt: number
 }) {
+  const hidden = usePromptBoxHidden()
+  const [confirmHide, setConfirmHide] = useState(false)
+  const cancelRef = useRef<HTMLButtonElement>(null)
   const [text, setText] = useState('')
   const [drafts, setDrafts] = useState<DraftCount>(() =>
     readStoredDrafts(typeof localStorage === 'undefined' ? undefined : localStorage),
@@ -130,6 +127,7 @@ export function HomeHero({
   const [beamAt, setBeamAt] = useState(3)
   const [hovered, setHovered] = useState<number | null>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const t = useT()
 
   useLayoutEffect(() => {
     if (inputRef.current) autosize(inputRef.current)
@@ -140,10 +138,10 @@ export function HomeHero({
   }, [focusAt])
 
   useEffect(() => {
-    if (hovered !== null) return
+    if (hidden || hovered !== null) return
     const timer = window.setInterval(() => setBeamAt((i) => (i + 1) % CHIPS.length), BEAM_STEP_MS)
     return () => window.clearInterval(timer)
-  }, [hovered])
+  }, [hidden, hovered])
 
   function pickDrafts(n: DraftCount) {
     setDrafts(n)
@@ -170,15 +168,52 @@ export function HomeHero({
   function runChip(chip: Chip) {
     if (chip.action) return actions[chip.action]()
     if (chip.prompt) {
-      setText(chip.prompt)
+      setText(t(chip.prompt))
       inputRef.current?.focus()
     }
   }
 
   const beamOn = hovered ?? beamAt
 
+  if (hidden) return null
+
   return (
     <section className="relative overflow-hidden" data-slot="home-hero">
+      <IconButton
+        aria-label={t('home.hidePromptBox')}
+        className="absolute right-4 top-0 z-10 text-ink-faint md:right-8"
+        disabled={busy}
+        onClick={() => setConfirmHide(true)}
+      >
+        <XIcon className="size-4" />
+      </IconButton>
+      {confirmHide && (
+        <Modal
+          size="sm"
+          onClose={() => setConfirmHide(false)}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            cancelRef.current?.focus()
+          }}
+        >
+          <ModalTitle>{t('home.hidePromptBoxTitle')}</ModalTitle>
+          <ModalLede>{t('home.hidePromptBoxLede')}</ModalLede>
+          <ModalActions>
+            <Button ref={cancelRef} onClick={() => setConfirmHide(false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => {
+                setConfirmHide(false)
+                setPromptBoxHidden(true)
+              }}
+            >
+              {t('home.hidePromptBox')}
+            </Button>
+          </ModalActions>
+        </Modal>
+      )}
       {/* the wave: 2 copies of 28 bars, blurred, fading in from the top. It is
           sized to the section, not to pixels, so it ends faded inside the hero
           on a phone as it does on desktop instead of being cut at the edge */}
@@ -195,7 +230,8 @@ export function HomeHero({
           <DoopMark animated size="fill" className="block" />
         </span>
         <h1 className="font-hero text-title font-light leading-none md:text-display">
-          Ask me what to design{firstName ? ', ' : ''}
+          {t('home.greeting')}
+          {firstName ? ', ' : ''}
           {firstName && <span className="text-ink-faint">{firstName}</span>}
         </h1>
       </div>
@@ -228,7 +264,7 @@ export function HomeHero({
                       <i />
                     </span>
                   )}
-                  {chip.label}
+                  {t(chip.label)}
                 </Chip>
               )
             })}
@@ -252,8 +288,8 @@ export function HomeHero({
             rows={1}
             value={text}
             disabled={busy}
-            placeholder="What changed across my canvases this week?"
-            aria-label="Ask Doop what to design"
+            placeholder={t('home.composerPlaceholder')}
+            aria-label={t('home.composerAria')}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
             className="min-h-[52px] text-lead placeholder:text-ink-ghost md:text-lead"
@@ -264,24 +300,24 @@ export function HomeHero({
               focus="ring"
               className="gap-[7px] rounded-row text-ink-soft transition-colors hover:text-ink"
               onClick={actions.onImport}
-              title="Attach a design to start from"
+              title={t('home.attachTitle')}
             >
-              <AttachmentIcon width={14} height={14} /> Files
+              <AttachmentIcon width={14} height={14} /> {t('home.files')}
             </Pressable>
             <span className="flex-1" />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <MenuButton
                   variant="quiet"
-                  aria-label={`Drafts per prompt: ${drafts}`}
+                  aria-label={t('home.draftsAria', { count: drafts })}
                   className="whitespace-nowrap"
                   icon={<CopyIcon width={14} height={14} />}
                 >
-                  {drafts} {drafts === 1 ? 'draft' : 'drafts'}
+                  {t('home.drafts', { count: drafts })}
                 </MenuButton>
               </DropdownMenuTrigger>
               <DropdownMenuContent side="top" align="end" width="md">
-                <DropdownMenuCaption>Drafts per prompt</DropdownMenuCaption>
+                <DropdownMenuCaption>{t('home.draftsCaption')}</DropdownMenuCaption>
                 <DropdownMenuRadioGroup
                   value={String(drafts)}
                   onValueChange={(next) => {
@@ -293,9 +329,9 @@ export function HomeHero({
                     <DropdownMenuRadioItem
                       key={n}
                       value={String(n)}
-                      description={n === 1 ? 'One take on the brief' : `${n} takes, side by side, to pick from`}
+                      description={t('home.draftsDescription', { count: n })}
                     >
-                      {n} {n === 1 ? 'draft' : 'drafts'}
+                      {t('home.drafts', { count: n })}
                     </DropdownMenuRadioItem>
                   ))}
                 </DropdownMenuRadioGroup>
@@ -306,7 +342,7 @@ export function HomeHero({
               variant="primary"
               size="lg"
               shape="round"
-              aria-label="Send"
+              aria-label={t('home.send')}
               disabled={busy || !text.trim()}
               onClick={submit}
             >
@@ -319,7 +355,7 @@ export function HomeHero({
           onClick={actions.onIntegrations}
           className="group mx-[14px] flex w-[calc(100%-28px)] items-center rounded-b-card bg-sub px-5 pb-2.5 pt-3 text-body text-ink-soft transition-colors hover:text-ink"
         >
-          Connect your existing designs for better results
+          {t('home.connectDesigns')}
           <ChevronRightIcon
             width={12}
             height={12}

@@ -1,32 +1,33 @@
-import { canvasPages, pageFrames } from '../../shared/pages'
-import { readingOrder } from '../../shared/readingOrder'
-import type { Canvas, Frame } from '../../shared/types'
+import { canvasPages } from '../../shared/pages'
+import { flowStartFrame } from '../../shared/prototype'
+import type { Canvas } from '../../shared/types'
 import { useStore } from './store'
 
-/** Where a presentation starts: the selected frame, or the first frame of the page in reading order. */
-export function presentStart(
-  canvas: Canvas,
+/** The frame a presentation opens on: the selected frame (unless it is hidden), else the page's flow start (its start
+ *  frame, or its topmost visible one), else nothing to present. The Play button, ⇧P and ⌘⌥↩ agree through this. */
+export function presentStartFrame(
+  canvas: Canvas | null,
   selectedId: string | null,
   activePageId: string | null,
-): Frame | undefined {
+): string | null {
+  if (!canvas) return null
   const selected = selectedId ? canvas.frames.find((f) => f.id === selectedId) : undefined
-  if (selected && !selected.hidden) return selected
+  if (selected && !selected.hidden) return selected.id
   const pageId = activePageId ?? canvasPages(canvas)[0]?.id
-  /* a hidden frame is not on the canvas for anyone else, so it is not a slide of the show either */
-  return pageId ? readingOrder(pageFrames(canvas, pageId).filter((f) => !f.hidden))[0] : undefined
+  return pageId ? (flowStartFrame(canvas, pageId)?.id ?? null) : null
 }
 
-/** Open present mode: on `frameId`, or where `presentStart` says. Says so when there is nothing to show. */
+/** Open present mode: on `frameId`, or where `presentStartFrame` says. Says so when there is nothing to show. */
 export function startPresenting(frameId?: string) {
   const s = useStore.getState()
   if (!s.canvas) return
   const start = frameId
-    ? s.canvas.frames.find((f) => f.id === frameId && !f.hidden)
-    : presentStart(s.canvas, s.selectedId, s.activePageId)
+    ? s.canvas.frames.find((f) => f.id === frameId && !f.hidden)?.id
+    : presentStartFrame(s.canvas, s.selectedId, s.activePageId)
   if (!start) {
     s.pushNotice('Nothing to present yet. Add a frame first.')
     return
   }
-  s.setPresentFrame(start.id)
+  s.setPresentFrame(start)
   s.setPresenting(true)
 }

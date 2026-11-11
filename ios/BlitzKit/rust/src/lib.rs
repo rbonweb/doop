@@ -21,7 +21,7 @@ use blitz_paint::{paint_scene, paint_scene_region};
 use blitz_traits::net::NetWaker;
 use blitz_traits::shell::{ColorScheme, Viewport};
 use peniko::Fill;
-use peniko::kurbo::Rect;
+use peniko::kurbo::{Affine, Rect};
 
 type WakeCallback = extern "C" fn(doc_id: usize);
 
@@ -43,11 +43,35 @@ fn base_font_context() -> FontContext {
                 collection: Collection::new(CollectionOptions { shared: false, system_fonts: true }),
             };
             ctx.collection.register_fonts(Blob::new(Arc::new(blitz_dom::BULLET_FONT) as _), None);
+            add_symbol_fallbacks(&mut ctx.collection);
             Mutex::new(ctx)
         })
         .lock()
         .unwrap()
         .clone()
+}
+
+/// System families that carry the symbols pages use as text (★ ✓ → ● ⌘ ✦), first match wins.
+/// System Font and Apple Symbols come first, as WebKit's cascade picks them; a family the
+/// device lacks is skipped.
+const SYMBOL_FAMILIES: &[&str] =
+    &["System Font", "Apple Symbols", "Hiragino Sans", "Menlo", "Zapf Dingbats", "STIX Two Math"];
+
+/// Fontique finds a fallback per script from one sample letter, and symbols belong to no
+/// script of their own: a ★ in a Latin run only gets the Latin fallback (Helvetica), and a
+/// run of symbols and digits gets none. On macOS Helvetica happens to carry ★; on iOS it
+/// does not, so the glyph came from LastResort. Append the symbol families after the
+/// system's own fallback for Latin and for the common, inherited and unknown scripts.
+fn add_symbol_fallbacks(collection: &mut parley::fontique::Collection) {
+    use parley::fontique::{FallbackKey, Script};
+    let symbols: Vec<_> = SYMBOL_FAMILIES.iter().filter_map(|name| collection.family_id(name)).collect();
+    for script in [*b"Latn", *b"Zyyy", *b"Zinh", *b"Zzzz"] {
+        let key = FallbackKey::new(Script::from_bytes(script), None);
+        // Asking first records the system's own choice, which appending would otherwise replace.
+        let system: Vec<_> = collection.fallback_families(key).collect();
+        let extra = symbols.iter().copied().filter(|id| !system.contains(id));
+        collection.append_fallbacks(key, extra);
+    }
 }
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -82,7 +106,7 @@ impl Doc {
     fn new(html: &str, base_url: &str, width: u32, height: u32, scale: f32) -> Self {
         let _guard = runtime().enter();
         let net = Arc::new(Provider::new(Some(Arc::new(Waker) as Arc<dyn NetWaker>)));
-        let document = HtmlDocument::from_html(
+        let mut document = HtmlDocument::from_html(
             html,
             DocumentConfig {
                 base_url: Some(base_url.to_string()),
@@ -92,6 +116,9 @@ impl Doc {
                 ..Default::default()
             },
         );
+        // Icon sprites: inline SVG is drawn from standalone markup, so `<use>` references are
+        // expanded into clones that inherit from the `<use>` site, as a browser's shadow tree does.
+        document.as_mut().expand_svg_use_elements();
         Self { document, net, base_url: base_url.to_string(), width, height, scale }
     }
 
@@ -208,11 +235,12 @@ pub extern "C" fn doopblitz_doc_is_animating(doc: *const Doc) -> bool {
     doc.base().is_animating()
 }
 
-/// True while fonts or images are still being fetched for this document.
+/// True while fonts or images are still being fetched for this document, or have
+/// arrived but not been applied yet (a stylesheet whose fonts are fetched on the next paint).
 #[unsafe(no_mangle)]
 pub extern "C" fn doopblitz_doc_loading(doc: *const Doc) -> bool {
     let doc = unsafe { &*doc };
-    !doc.net.is_empty()
+    !doc.net.is_empty() || doc.base().has_pending_events()
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +468,49 @@ pub extern "C" fn doopblitz_doc_element_from_point(doc: *mut Doc, x: f32, y: f32
     raw(doc.base().element_from_point(x, y))
 }
 
+/// The element a tap at a CSS point selects, or 0, as the web runtime's
+/// `probe` picks it: the drawing (`[data-doop-drawing]`) the hit is part of,
+/// so a text layer is selected whole rather than the run of bold inside it.
+/// Outside a drawing, a hit without a box of its own (inline formatting, whose
+/// glyphs live in the parent's inline layout) resolves to the nearest ancestor
+/// that has one, or the selection would be an outline of zero size.
+#[unsafe(no_mangle)]
+pub extern "C" fn doopblitz_doc_pick_from_point(doc: *mut Doc, x: f32, y: f32) -> u64 {
+    let doc = unsafe { &mut *doc };
+    let _guard = runtime().enter();
+    doc.base_mut().resolve(0.0);
+    let base = doc.base();
+    let Some(hit) = base.element_from_point(x, y) else { return 0 };
+    if let Some(drawing) = self_or_ancestor(base, hit, |id| is_drawing(base, id)) {
+        return raw(Some(drawing));
+    }
+    raw(self_or_ancestor(base, hit, |id| has_box(base, id)).or(Some(hit)))
+}
+
+fn self_or_ancestor(base: &BaseDocument, id: NodeId, matches: impl Fn(NodeId) -> bool) -> Option<NodeId> {
+    let mut current = Some(id);
+    while let Some(node) = current {
+        if is_real_element(base, node) && matches(node) {
+            return Some(node);
+        }
+        current = element_parent(base, node);
+    }
+    None
+}
+
+fn is_drawing(base: &BaseDocument, id: NodeId) -> bool {
+    base.get_node(id)
+        .and_then(|n| n.element_data())
+        .is_some_and(|e| e.attrs().iter().any(|a| &*a.name.local == "data-doop-drawing"))
+}
+
+fn has_box(base: &BaseDocument, id: NodeId) -> bool {
+    base.get_node(id).is_some_and(|n| {
+        let size = n.final_layout().size;
+        size.width > 0.0 && size.height > 0.0
+    })
+}
+
 /// First element matching a CSS selector, or 0.
 #[unsafe(no_mangle)]
 pub extern "C" fn doopblitz_doc_query_selector(doc: *const Doc, selector: *const c_char) -> u64 {
@@ -519,11 +590,31 @@ fn element_parent(base: &BaseDocument, id: NodeId) -> Option<NodeId> {
     None
 }
 
+/// Document-relative bounding box of a node's border box as it is drawn: the
+/// node's transform and layout offset, and those of each containing block up
+/// to the root, are composed into one affine (the mirror of the hit test, which
+/// undoes them one by one on the way down) and the box is bounded once, so a
+/// child rotated back inside a rotated parent reports its drawn square rather
+/// than a bounding box of a bounding box. Blitz keeps transforms in device
+/// pixels, so the composition happens at the viewport scale.
 fn node_rect(base: &BaseDocument, id: NodeId) -> Option<[f32; 4]> {
-    let node = base.get_node(id)?;
-    let origin = node.absolute_position(0.0, 0.0);
-    let size = node.final_layout().size;
-    Some([origin.x, origin.y, size.width, size.height])
+    let scale = base.viewport().scale() as f64;
+    let size = base.get_node(id)?.final_layout().size;
+    let mut to_document = Affine::IDENTITY;
+    let mut current = Some(id);
+    while let Some(node_id) = current {
+        let node = base.get_node(node_id)?;
+        let location = node.final_layout().location;
+        let scroll = node.scroll_offset();
+        let mut local = Affine::translate(((location.x as f64 - scroll.x) * scale, (location.y as f64 - scroll.y) * scale));
+        if let Some(transform) = node.transform().as_deref() {
+            local *= *transform;
+        }
+        to_document = local * to_document;
+        current = node.containing_block();
+    }
+    let rect = to_document.transform_rect_bbox(Rect::new(0.0, 0.0, size.width as f64 * scale, size.height as f64 * scale));
+    Some([(rect.x0 / scale) as f32, (rect.y0 / scale) as f32, (rect.width() / scale) as f32, (rect.height() / scale) as f32])
 }
 
 fn tag_of(base: &BaseDocument, id: NodeId) -> Option<String> {

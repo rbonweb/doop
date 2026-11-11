@@ -49,7 +49,6 @@ const ROOT: ElementComment = {
   id: 'root',
   canvasId: CANVAS.id,
   frameId: FRAME.id,
-  selector: 'h1',
   snippet: '<h1>Hi</h1>',
   from: 'alice',
   text: 'thoughts?',

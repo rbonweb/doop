@@ -17,6 +17,7 @@ import { CheckIcon } from './ui/icons'
 import { Disclosure } from './ui/collapsible'
 import { isResidentLimit } from './TeamAllowance'
 import { MentionTextarea, mentionIds, type MentionTextareaHandle } from './MentionTextarea'
+import { useT } from '../lib/i18n'
 
 const emptyNote = 'px-4 py-6 text-center text-[12px] leading-[1.45] text-ink-faint'
 
@@ -29,18 +30,17 @@ export function CommentsPanel() {
   const canvas = useStore((s) => s.canvas)
   const activePageId = useStore((s) => s.activePageId)
   const [filter, setFilter] = useState<ThreadState>('open')
+  const t = useT()
 
   const threads = useMemo(() => pageThreads(comments, canvas, activePageId), [comments, canvas, activePageId])
   const counts = { open: 0, resolved: 0 }
-  for (const t of threads) counts[threadState(t)] += 1
-  const shown = threads.filter((t) => threadState(t) === filter)
+  for (const thread of threads) counts[threadState(thread)] += 1
+  const shown = threads.filter((thread) => threadState(thread) === filter)
 
   if (threads.length === 0) {
     return (
       <PanelBody className="py-2">
-        <div className={emptyNote}>
-          No comments on this page yet. Use the comment tool or right-click an element to leave one.
-        </div>
+        <div className={emptyNote}>{t('stage.noComments')}</div>
       </PanelBody>
     )
   }
@@ -48,18 +48,18 @@ export function CommentsPanel() {
   return (
     <PanelBody className="pb-2">
       {/* the same quiet segmented switch as the panel's own tabs */}
-      <div role="group" aria-label="Comment filter" className="flex gap-0.5 px-3 pt-2 pb-1">
+      <div role="group" aria-label={t('stage.commentFilter')} className="flex gap-0.5 px-3 pt-2 pb-1">
         <FilterTab active={filter === 'open'} count={counts.open} onClick={() => setFilter('open')}>
-          Open
+          {t('stage.filterOpen')}
         </FilterTab>
         <FilterTab active={filter === 'resolved'} count={counts.resolved} onClick={() => setFilter('resolved')}>
-          Resolved
+          {t('stage.filterResolved')}
         </FilterTab>
       </div>
       {shown.length === 0 ? (
-        <div className={emptyNote}>No {filter} threads on this page.</div>
+        <div className={emptyNote}>{t(filter === 'open' ? 'stage.noOpenThreads' : 'stage.noResolvedThreads')}</div>
       ) : (
-        shown.map((t) => <ThreadRow key={t.root.id} thread={t} />)
+        shown.map((thread) => <ThreadRow key={thread.root.id} thread={thread} />)
       )}
     </PanelBody>
   )
@@ -105,6 +105,7 @@ function reportLimit(err: unknown) {
 function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
   const { root, frame } = thread
   const resolved = threadState(thread) === 'resolved'
+  const t = useT()
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -161,7 +162,7 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
       <div
         role="button"
         tabIndex={0}
-        title={frame ? `Go to “${frame.name}”` : 'Go to the pin on the canvas'}
+        title={frame ? t('stage.goToFrame', { name: frame.name }) : t('stage.goToPin')}
         onClick={goToThread}
         onKeyDown={(e) => {
           if (e.target !== e.currentTarget) return
@@ -175,7 +176,7 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
         <span className="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
           <span
             aria-hidden
-            className="grid size-4 flex-none place-items-center rounded-full text-[8px] font-medium text-white"
+            className="grid size-4 flex-none place-items-center rounded-full text-[8px] leading-none font-medium text-white"
             style={{ background: colorFor(root.from) }}
           >
             {root.from.slice(0, 1).toUpperCase()}
@@ -202,7 +203,8 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
             )}
             {resolved && root.resolvedBy && (
               <span className="min-w-0 truncate">
-                {frame ? '· ' : ''}resolved by {root.resolvedBy}
+                {frame ? '· ' : ''}
+                {t('stage.resolvedBy', { name: root.resolvedBy })}
               </span>
             )}
           </span>
@@ -210,10 +212,10 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
       </div>
       {resolved && thread.replies.length > 0 && (
         <Disclosure
-          label={`${thread.replies.length} ${thread.replies.length === 1 ? 'reply' : 'replies'}`}
+          label={t('stage.replies', { count: thread.replies.length })}
           className="py-1 pr-1.5 pl-[28px] text-label text-ink-soft"
         >
-          <ol className="space-y-3" aria-label="Resolved replies">
+          <ol className="space-y-3" aria-label={t('stage.resolvedReplies')}>
             {thread.replies.map((reply) => (
               <li key={reply.id}>
                 <div className="flex items-center justify-between gap-2">
@@ -235,7 +237,8 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
             agents={mayEdit}
             myId={myId}
             className="min-h-7 min-w-0 flex-1 rounded-[7px] bg-surface px-2.5 py-1 shadow-ring focus:shadow-elevation-1-focus md:text-[12px]"
-            placeholder={mayEdit ? 'Reply… @ to mention, @doop to ask the agent' : 'Reply…'}
+            placeholder={mayEdit ? t('stage.replyPanelMention') : t('stage.replyEllipsis')}
+            ariaLabel={t('stage.replyTo', { name: root.from })}
             value={draft}
             onChange={setDraft}
             onKeyDown={(e) => {
@@ -249,20 +252,16 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
             <Button
               variant="bare"
               className="h-7 flex-none gap-1 rounded-[7px] px-2 text-[12px] font-normal"
-              title="Mark this thread as resolved"
+              title={t('stage.markResolved')}
               onClick={resolve}
             >
               <CheckIcon className="size-3.5" />
-              Resolve
+              {t('stage.resolve')}
             </Button>
           )}
         </div>
       )}
-      {failed && (
-        <div className="pl-[28px] text-[11px] leading-[1.4] text-accent-ink">
-          That reply did not go through — it may be resolved already. Try again.
-        </div>
-      )}
+      {failed && <div className="pl-[28px] text-[11px] leading-[1.4] text-accent-ink">{t('stage.replyFailed')}</div>}
     </div>
   )
 }

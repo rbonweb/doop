@@ -24,11 +24,8 @@ async function openChatGPT(origin: string, canvasId?: string) {
   root = createRoot(container)
   await act(async () => root.render(<ConnectModal canvasId={canvasId} onClose={vi.fn()} />))
   await act(async () => {
-    document.body.querySelector<HTMLButtonElement>('button[aria-pressed]:nth-child(3)')!.click()
-  })
-  await act(async () => {
-    Array.from(document.body.querySelectorAll('button'))
-      .find((button) => button.textContent?.trim() === 'Connect')!
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>('[data-slot="choice-row"]'))
+      .find((row) => row.textContent?.includes('ChatGPT'))!
       .click()
   })
 }
@@ -58,7 +55,7 @@ it('opens the official ChatGPT setup and copies the production MCP URL without d
   )!
   await act(async () => serverBlock.querySelector('button')!.click())
   expect(writeText).toHaveBeenCalledWith('https://doop.design/mcp')
-  expect(serverBlock.textContent).toContain('✓')
+  expect(serverBlock.querySelector('button')?.getAttribute('aria-label')).toBe('Copied')
 })
 
 it.each([

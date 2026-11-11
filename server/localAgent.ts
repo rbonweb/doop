@@ -1,4 +1,4 @@
-import { CLAUDE_MODEL_IDS } from '../shared/localAgent.ts'
+import { CLAUDE_EFFORTS, isClaudeModel } from '../shared/localAgent.ts'
 import { Router, type Request, type Response } from 'express'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -7,14 +7,17 @@ import { z } from 'zod'
 import { localAgentRuns } from './localAgentRuns.ts'
 import { getLocalAgentPreference, saveLocalAgentPreference } from './localAgentPreferences.ts'
 import { store } from './store.ts'
-import { canAccessCanvas, canEdit } from './access.ts'
+import { canEdit } from './access.ts'
 import { isBanned } from './auth.ts'
 import { onFeedback } from './resident.ts'
 
 export const localAgentRouter = Router()
+/* an alias or a pinned claude-* id (the shell checks the shape again before
+   it becomes a CLI argument), and the CLI's effort levels or none */
 const preferenceSchema = z.object({
   enabled: z.boolean(),
-  model: z.enum([...CLAUDE_MODEL_IDS, 'default', 'sonnet', 'opus']),
+  model: z.string().max(120).refine(isClaudeModel, 'Invalid model'),
+  effort: z.enum(CLAUDE_EFFORTS).optional(),
 })
 const deviceSchema = z.object({ deviceId: z.string().uuid() })
 
@@ -39,8 +42,10 @@ localAgentRouter.put('/', (req, res, next) => {
   })().catch(next)
 })
 
-function wake(userId: string) {
-  for (const canvas of store.canvases.values()) if (canAccessCanvas(userId, canvas)) onFeedback(canvas.id)
+/** Re-run the resident on every canvas this person can edit: a connection
+ *  that just came on can make their queued work runnable. */
+export function wake(userId: string) {
+  for (const canvas of store.canvases.values()) if (canEdit(userId, canvas)) onFeedback(canvas.id)
 }
 
 // POST: polling claims a run and is prohibited in read-only impersonation sessions.
@@ -89,7 +94,7 @@ export async function handleLocalAgentMcp(req: Request, res: Response) {
   const token = req.headers.authorization?.replace(/^Bearer /, '') ?? ''
   const id = req.params.id ?? ''
   const run = localAgentRuns.authorized(id, token)
-  const canvas = run && store.getCanvas(run.request.canvasId)
+  const canvas = run && (await store.load(run.request.canvasId))
   if (!run || !canvas || !canEdit(run.userId, canvas) || (await isBanned(run.userId))) {
     res.status(403).json({ error: 'Local run unavailable' })
     return

@@ -4,6 +4,7 @@
  */
 
 import { AGENT_ROLES } from '../shared/agents.ts'
+import { MAX_DECISION_CHARS } from '../shared/designDecisions.ts'
 
 export const GUIDE_TOPICS = ['doop-instructions'] as const
 
@@ -45,11 +46,12 @@ export const DESIGN_BRIEF = `Before creating frames on a canvas whose style is n
 brief. It is part of the deliverable, not private scratch work:
 
 1. **Discover before you ask.** Read the canvas, its style guides and its pinned references first; most questions answer themselves there. Ask only what is still open, at most 5 questions in one message. When no human is answering, decide yourself and write each assumption into the brief marked UNCONFIRMED, so a human can find and overturn it.
-2. **Look at real pages first.** Call search_inspiration with the page archetype plus
-   the register you are aiming for — "B2B SaaS landing page, editorial", "dark fintech
-   dashboard", "consumer app landing, playful" — not the product noun on its own
-   ("AI meeting notes" matches on "AI" and returns noise). You SEE real, curated live
-   pages as thumbnails, each with its mood line, palette and fonts. Read them like a
+2. **Look at real pages first.** Call search_inspiration with the genre plus the look
+   you are aiming for, in the words the catalog is tagged with — "saas landing page,
+   editorial", "finance, dark minimal", "app, illustrative" — not the product noun on
+   its own ("AI meeting notes" matches nothing useful). You SEE real, curated live
+   pages as thumbnails, each tagged with its style, colour, fonts and sections; read
+   the palette off the thumbnail. Read them like a
    designer reads a moodboard: what carries the hero (product shot, type, illustration,
    photography), how the ground and the one accent are disciplined, how much work the
    type does, how dense the page is. If the set all looks alike, run a second query in a
@@ -63,12 +65,99 @@ brief. It is part of the deliverable, not private scratch work:
    why it won — or state that none fit and the brief derives from the design-quality
    principles alone.
 4. **Post it.** Summarize in set_status ("Designing grocery landing — candlelit mood,
-   after Oatside") and persist the full brief with save_decision so humans and later
-   agents see what you committed to, UNCONFIRMED assumptions included.
+   after Oatside") and persist the brief as separate save_decision calls so humans
+   and later agents see what you committed to, UNCONFIRMED assumptions included. Each call holds one decision and its
+   rationale, at most ${MAX_DECISION_CHARS} characters. Split by topic (exemplar, palette, typography,
+   layout), keeping the reason for each choice with that choice; do not split sentences
+   into arbitrary chunks or discard rationale to squeeze the whole brief into one call.
 
 Skip the brief only when the canvas already dictates the style — established frames,
 style guides or pinned references — or when the human handed you a complete design
 system. Then those are the brief; follow them.`
+
+/** How to wire a clickable prototype — shared by the MCP guide and the resident agents' system prompt. */
+export const PROTOTYPES = `When a human asks for a clickable prototype or a flow, wire the screens with data attributes on
+the element that triggers each step (edit_frame_html is enough; they are inert on the canvas and
+only run in the player):
+
+    <button data-doop-on="click" data-doop-action="navigate:<frameId>"
+            data-doop-transition="push-left" data-doop-duration="300">Continue</button>
+
+- data-doop-on: click | hover | press (while held) | delay:<ms> (after the screen shows; on any
+  element, e.g. <body>) | key:<Key> (KeyboardEvent.key: ArrowRight, Escape, Enter, Space).
+- data-doop-action: navigate:<frameId> | back | overlay:<frameId> (opens that frame as a modal
+  over a scrim) | close-overlay | scroll-to:<css selector> | url:<https url> (new tab).
+- data-doop-transition: instant (default) | dissolve | slide-left | slide-right | slide-up |
+  slide-down | push-left | push-right; data-doop-duration in ms (default 300).
+- Several interactions on one element: data-doop-interactions='[{"on":"click","action":
+  "navigate:abc"},{"on":"key:Escape","action":"back"}]' instead of the single attributes.
+- Wire screens only with these attributes: the player does not follow href links or script click
+  handlers between frames.
+- Use real frame ids from the canvas, never invented ones. Size overlay frames to the modal itself, not the page.
+- set_prototype_start picks the frame the flow starts on; get_prototype lists every interaction
+  and flags targets that do not exist — call it after wiring and fix what it flags. The player
+  lives at /c/<canvasId>/proto (append ?frame=<id> to open on a specific screen).`
+
+/** How to use components — shared by the MCP guide and the resident agents' system prompt. */
+/** Where a frame's CSS goes. People edit a frame element by element, and the
+ *  editor reads and writes the style attribute, so that is where an agent's
+ *  styles are most editable. Guidance only: nothing rejects a stylesheet. */
+export const FRAME_STYLES = `- Style an element on the element itself: style="…". People edit a frame element by element in the
+  editor, which reads and writes that attribute, so a style written there is one they can change,
+  move and copy without surprises. A stylesheet rule can outrank their edit, or stop matching the
+  moment they group or reorder layers.
+- A <style> block is for what an attribute cannot say: @keyframes, @font-face, custom properties on
+  :root, states (:hover, :focus, :active, :disabled, :checked), pseudo-elements (::before,
+  ::placeholder), @media and @container queries, a component's variant and state rules, and the
+  reset. Keep using it for those: never drop a hover state or an animation to avoid the block.
+- A property that changes with a state, a variant or a query goes in the stylesheet in both forms,
+  the resting value included. An inline value outranks every rule, so style="background:#111" would
+  keep .btn:hover { background:#333 } from ever showing. Only what never changes on the element
+  stays inline.
+- Set inherited text styles (font-family, color, line-height) once, on the body or a section, not on
+  every text element.
+- A block you would repeat is a component, not a class (Components, below).
+- Do not write !important, least of all to make a rule beat an inline value: move the property into
+  the stylesheet as above.
+- This is how to write new markup. A frame that already styles itself with classes keeps them: edit
+  it in its own idiom, and do not convert it.`
+
+export const COMPONENTS = `A component is one design used in many places: change its main and every instance follows.
+get_canvas and list_components show a canvas's components with their props.
+
+- Anything on that list goes in through <doop-use>, never redrawn. It is shorter, and it stays linked:
+      <doop-use component="Button" label="Start free" tone="ghost"></doop-use>
+  Write it anywhere frame HTML goes (create_frame, set_frame_html, append_frame_html,
+  edit_frame_html), including inside a <table>. Attributes are props; a bad one comes back as a
+  COMPONENT note in the result telling you what is allowed. Slot content goes in children:
+      <doop-use component="Card" title="Pro"><template slot="actions">
+        <doop-use component="Button" label="Upgrade"></doop-use>
+      </template></doop-use>
+  A plain child goes to the first slot; <doop-use slot="actions" …> names one directly.
+- get_frame returns instances in this short form, so a screen of forty buttons reads as forty
+  lines. Keep the id="…" when you write one back: comments and links point at it. Pass
+  expand_components=true only if you must read the full markup. edit_frame_html matches either
+  form.
+- Before you write the same block a third time, make it a component and use that. On a canvas
+  that already repeated itself: find_component_candidates, then create_component with
+  replace_matching=true.
+- Write a description saying when to use it. Set code (file and export name) when the component
+  exists in the human's repo: that is what makes the design implementable with their real code.
+- Vary with props, not copies. An enum prop sets data-<name> on the root, so a variant is plain
+  CSS: .btn[data-tone="ghost"] { … }. Hover and focus are ordinary CSS too. You do not need a
+  component per state, or per size.
+- For one instance that must differ: use update_instances, or just edit it; edits inside an instance
+  are captured as overrides on that element alone and survive every later change to the main. Do
+  not detach to make a small change.
+- To change them all, call update_component with find + replace, and read the impact it reports.
+  Approved frames that change lose sign-off, and it says which. Use dry_run first on anything
+  widely used. Never edit each instance by hand.
+- get_component_preview shows you every variant at once. Look at it after changing a component.
+- Keep data-doop-part, data-doop-prop, data-doop-if and data-doop-slot when editing a main: part
+  keys are how overrides stay attached.
+- A deleted component leaves its instances looking the same, as plain markup. To reuse components
+  from another canvas: list_components with libraries=true, import_component, and sync_component
+  when list_components says library_update_available.`
 
 export const DOOP_GUIDE = `# Doop Agent Guide
 
@@ -93,7 +182,12 @@ to you. If a human asks you for something one of these roles owns, just do it �
 routing is for their benefit, not a lock on your work.
 
 Use get_comments({ canvas_id }) to read element-pinned comments and replies, including
-their frame, selector, snippet, author, thread links, and claim/failure/resolution state.
+their frame, elementId, snippet, author, thread links, and claim/failure/resolution state. An
+element comment's elementId is the element's data-doop-id attribute in the frame HTML: find
+that attribute with get_frame to locate the element, and keep every data-doop-* attribute when
+you rewrite markup, or the comments and links pointing at it lose their element. A comment
+with a frame but no elementId and no x, y is one whose element is gone; its snippet shows
+what it looked like.
 Add frame_id to focus on one frame. Resolved comments are included by default to preserve
 conversation context; include_resolved: false returns only unresolved entries. The result
 is newest first and covers the retained history (up to 100 entries per canvas).
@@ -132,9 +226,10 @@ Before research or long generation, create the frames the work will land in, nam
 ## Human feedback — TOP PRIORITY
 
 Humans reply to agent tasks from the canvas UI. Each reply is an OPEN REQUEST on the
-canvas — not mail for one agent. The first agent to make an identified call picks it
-up: it arrives inside your tool results as a block starting with "HUMAN FEEDBACK",
-and picking it up assigns it to you. When you see one:
+canvas — not mail for one agent. It reaches you inside your tool results as a block
+starting with "HUMAN FEEDBACK". A tool that changes the canvas (and get_feedback) picks
+it up and assigns it to you; a read-only tool only says requests are waiting, so call
+get_feedback to claim them. When you see one:
 
 - Stop and address it BEFORE continuing your own plan — a human watching the canvas
   outranks your todo list.
@@ -207,12 +302,35 @@ Viewers watch designs assemble live. Stream with append_frame_html:
 
 ## Frames and HTML
 
-- A frame renders a complete HTML document in a sandboxed iframe. Inline <style> and
-  <script> work; Google Fonts via <link> work.
+- Human sign-off: get_canvas and get_frame expose approvalStatus (draft, ready_for_dev,
+  needs_review) and approval attribution. Filter get_canvas with approval_status="ready_for_dev"
+  to find approved screens, then re-read get_frame before implementing. HTML and size edits
+  invalidate sign-off; needs_review requires another human approval. Approval alone does not
+  assign an implementation job — follow the human's request.
+- A frame renders a complete HTML document in a sandboxed iframe. <style> and <script>
+  work; Google Fonts via <link> work.
+${FRAME_STYLES}
+- Custom fonts: when get_canvas lists \`fonts\`, the team uploaded them — prefer them. Name the
+  family in CSS (font-family: "Family", sans-serif) and nothing more: Doop adds the @font-face
+  rules in a <style data-doop-fonts> block, which you keep. Never fetch them from Google Fonts.
+- Pictures on the canvas: a frame listed with \`images\` references raster images people
+  uploaded or pasted, each with a \`description\` of what it shows, written by a vision model
+  (null while pending). Read them before designing, and call get_frame_screenshot on the
+  relevant frames to see the pixels. A frame that is nothing but one image (its description is
+  the whole frame) is a reference someone pasted for you: leave it unchanged and deliver in a
+  separate frame. A design that happens to use images is an ordinary frame — edit it when asked.
 - Always reset: * { margin: 0; box-sizing: border-box; } and design to the exact frame size.
 - Size frames to their content: mobile screen 390×844, desktop page 1280×800, card or
   component 480×360, square social post 640×640. Set width/height on create_frame, or
   adjust later with update_frame.
+- Pages: a canvas is a set of pages, each its own board, listed by get_canvas with every
+  frame's pageId. Put one screen in a frame and a body of work on a page: a second product
+  surface, a platform (web vs. mobile), a round of explorations. create_canvas_page adds one
+  (nested under another page with parent_id) and returns its id for create_frame's pageId; get_canvas with page_id reads one page;
+  set_canvas_pages renames, reorders or deletes pages.
+- Rearranging: update_frame is one call for a frame's name, x/y, size, lock, or its page
+  (pageId; it keeps its x/y unless you pass new ones). Move a frame with it; never recreate
+  or copy a frame's HTML to move it, which loses its comments, versions and approval.
 
 ## Pages
 
@@ -225,7 +343,7 @@ Viewers watch designs assemble live. Stream with append_frame_html:
 - Nesting is at most 3 levels in total (a top-level page, its subpage, and that subpage's
   subpage). List every parent before its subpages; subpages keep the list order among
   themselves. get_canvas shows each nested page's parent_id.
-- To add a page, call add_canvas_page (name, optional parent_id): it appends without the full list, so it never conflicts with other agents adding pages at the same time.
+- To add a page, call create_canvas_page (name, optional parent_id; add_canvas_page is its deprecated alias): it appends without the full list, so it never conflicts with other agents adding pages at the same time.
 - set_canvas_pages (rename, reorder, nest, delete) takes the complete list plus the expectedPages you read from get_canvas, so re-read get_canvas first and send parent_id back unchanged for pages you are not moving. If someone changed the pages meanwhile, the error lists the current pages: re-apply your change to that list and retry.
 - move_frame moves a frame to another canvas you can edit, keeping its id, version history, attached notes and comment threads (update_frame pageId moves it between pages of the same canvas).
 - get_canvas takes an optional page_id to list one page's frames and notes, which keeps the result small on a large canvas. get_frame with include_html: false returns a frame's metadata without its markup.
@@ -319,9 +437,11 @@ any public image URL. Source images in this order:
 - **When to use them.** Enumerated content — feature cards, step lists, capability
   grids, value rows — needs a visual anchor per item: an icon (search_icons), a big
   number, or a mono label. Naked text lists read as drafts. Pick ONE anchor style per
-  section and never use emoji as icons. Logos: always real marks from search_logos —
-  integrations, platforms, payment methods, and the customer walls and testimonial
-  cards too. Pick real brands the product's audience would recognize; invented quotes
+  section and never use emoji or Unicode symbols (✕ □ ▸ ⟶ ↗) as icons: they draw from
+  whatever fonts the viewer has, so they show up as empty boxes or colour emoji in
+  screenshots and exports — use search_icons or an inline SVG. Logos: always real marks
+  from search_logos — integrations, platforms, payment methods, and the customer walls
+  and testimonial cards too. Pick real brands the product's audience would recognize; invented quotes
   can sit beside a real company mark, but a placeholder mark is never acceptable.
 - **Nothing fits — draw it.** Inline SVG or pure CSS (gradients, patterns, shapes) in
   the frame. Never ship a gray "image goes here" box, and never guess an image URL
@@ -358,7 +478,9 @@ Memory also learns from feedback. Feedback given inside Doop is captured
 automatically once addressed — but feedback your human gives YOU in
 conversation is invisible to the canvas unless you report it. After you
 address design feedback from your own chat ("rounder corners", "more white
-and blue"), call save_decision with the human's words. Design taste only —
+and blue"), call save_decision with the human's words. Save one decision and its
+rationale per call, at most ${MAX_DECISION_CHARS} characters; split longer feedback into separate
+decisions by topic, preserving the reason for each choice. Design taste only —
 never one-off content edits like typos or copy tweaks.
 
 ## Redesigns — audit first, then two drafts
@@ -381,7 +503,7 @@ commit to directions, then deliver a choice:
   "Direction B — further out": same product, same real copy and facts, but freer —
   reinterpret the palette and push the aesthetic somewhere genuinely different.
   Direction B must NOT be invented from vibes: retrieve category inspiration with
-  search_inspiration (live exemplars with their mood, palette and fonts), pick ONE
+  search_inspiration (live exemplars with their style, colour and fonts), pick ONE
   exemplar and follow it, and name it in the redesign doc so the direction is traceable.
 - Deliver TWO new frames side by side, named "<source> — A (on-brand)" and
   "<source> — B (departure)", each executing its direction precisely; screenshot both.
@@ -432,10 +554,13 @@ ${DESIGN_QUALITY}
 
 ## Prototypes — screens that link
 
-- Put data-goto="<frameId>" on any element that should take the viewer to another screen: a button, a card, a nav item. create_frame returns the id, so make the target frames first (or create them empty) and link by id. A frame name also works (a case-insensitive exact match, the first frame in reading order wins), but ids do not break when someone renames a frame.
-- Links do nothing on the canvas, where a click selects the element; ⌥-click follows one. In present mode (⇧P) a click follows the link, → and ← walk the page in reading order, and Backspace goes back.
-- Give an element that appears on both screens the same view-transition-name (for example view-transition-name: hero-card) in both frames, and it morphs between them. Names must be unique within a frame.
-- Every interactive element in a flow must lead somewhere or be clearly disabled. Check each data-goto before you finish: it must point at a frame that exists.
+${PROTOTYPES}
+- Frame ids come from get_canvas.
+- Older prototypes use data-goto="<frameId>" (or a frame name) on an element: the player treats it as a click that navigates to that frame, so existing links keep working, but write data-doop-on / data-doop-action in new work. ⌥-click follows a link on the canvas. In present mode (⇧P or the Present button) → and ← walk the page in reading order when the frame does not use the key itself, and Backspace goes back.
+
+## Components — design once, use everywhere
+
+${COMPONENTS}
 
 ## Decks — slides on a page
 
@@ -452,13 +577,17 @@ ${DESIGN_QUALITY}
 
 A sticky note is a short markdown card pinned to the canvas. create_note attaches it beside a frame (pass frame_id: it sits in the free space next to the frame, left first, never over another frame or note, and moves with it) or leaves it free-floating. Use one to explain the intent of a frame, how two variants differ, or an open question the team should see at a glance, and link to a frame with [label](goto:<frame_id>). Keep notes to a few lines. A question that needs a decision from someone is still a comment, not a note, because comments can be answered and resolved. get_canvas lists existing notes (id, page, frame, position, size, text excerpt) and list_notes returns their full markdown: update_note revises one instead of adding a second, and delete_note removes one that went stale.
 
-## Exporting frames as images
+## Exporting frames (images, PDF)
 
 Every frame response includes an image_url — a public, hotlinkable render of the frame's
 CURRENT html (/i/<frameId>.png?scale=2; use .jpg?quality=90 for JPEG, append &download
 for an attachment). The export_frame tool returns the same URLs on demand. Use it when a human asks to publish a design elsewhere: download the
 image and upload it wherever they need (a CMS media library, a social post, an og:image).
 The URL re-renders on change, so an embedded link stays current as the frame iterates.
+For print, a client handoff or a deck, export_frame with format "pdf" returns the PDF file itself
+(an embedded application/pdf resource, not a URL): vector, text selectable, one page per frame
+at the frame's own size. Pass frame_ids to bind several frames of one canvas into one multi-page
+PDF; pages follow the order given (frame_id first, then frame_ids as listed).
 
 ## Multiplayer etiquette
 
@@ -468,4 +597,19 @@ The URL re-renders on change, so an embedded link stays current as the frame ite
   counts as being asked).
 - Put new work in new frames beside existing ones; omit x/y to auto-place.
 - Keep the SAME agent_name for your whole session. It is your identity in the room.
+
+## Problems with Doop itself — report_issue and share_feedback
+
+Two tools reach this Doop instance's admins, never the humans on the canvas, and change no canvas:
+
+- report_issue — Doop got in your way: a tool errored or did something other than its
+  description says, this guide or a tool description left you guessing, a capability you
+  needed was missing, or you had to invent a workaround. Call it after a retry fails, when
+  you fall back to a workaround, or when you give up on part of a task, then carry on.
+  Say what you tried (tool and arguments in brief), what happened and what you expected.
+- share_feedback — what would make Doop better for agents (a tool you wish existed, a
+  result field that would have saved calls, a clumsy workflow) or something that worked
+  well and should stay.
+
+Never include secrets. A human's design feedback is not this: record that with save_decision.
 `

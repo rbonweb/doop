@@ -10,6 +10,9 @@ import * as workspaces from './workspaces.ts'
 import { canvasRole, canManageCanvas, canView, guestRole, type AccessContext, type AccessUser } from './access.ts'
 import { mailerConfigured, sendMail } from './mailer.ts'
 import { canvasLink } from './links.ts'
+import { emailShare } from './canvasShares.ts'
+import * as userEvents from './userEvents.ts'
+import { avatarUrl } from '../shared/avatar.ts'
 import {
   decoyHash,
   hashLinkPassword,
@@ -127,6 +130,7 @@ interface Person {
   id: string
   name: string
   email: string
+  image?: string | null
   emailVerified: boolean
   banned: boolean
 }
@@ -138,6 +142,7 @@ async function peopleByIds(ids: readonly string[]): Promise<Map<string, Person>>
       id: authSchema.user.id,
       name: authSchema.user.name,
       email: authSchema.user.email,
+      image: authSchema.user.image,
       emailVerified: authSchema.user.emailVerified,
       banned: authSchema.user.banned,
     })
@@ -388,14 +393,9 @@ sharingRouter.post('/:id/access-requests/:userId/approve', async (req, res) => {
     else store.addMember(canvas.id, asked.userId, req.user!.id, role)
   }
   refreshAccess(canvas.id)
-  const [person] = [...(await peopleByIds([asked.userId])).values()]
-  if (person && !person.banned) {
-    sendMail({
-      to: person.email,
-      subject: `You now have access to “${canvas.name}”`,
-      text: `Hi ${person.name || 'there'},\n\n${req.user!.name} gave you ${role === 'edit' ? 'edit' : role === 'comment' ? 'comment' : 'view'} access to “${canvas.name}”.\n\nOpen it: ${canvasLink(canvas.id)}\n`,
-    }).catch((err) => console.error(`[access] approval email to ${person.id} failed`, err))
-  }
+  /* the same role-aware email an invite sends, and Home lists the canvas at once */
+  void emailShare(req.user!, asked.userId, canvas, role)
+  userEvents.notifyUsers([asked.userId], { type: 'canvases' })
   res.json({ ok: true, userId: asked.userId, role })
 })
 
@@ -427,6 +427,7 @@ sharingRouter.get('/:id/members', async (req, res) => {
       name: people.get(id)?.name ?? 'Unknown',
       /* addresses are the owner's to see; everyone else gets names */
       email: isOwner || id === req.user!.id ? (people.get(id)?.email ?? '') : '',
+      image: avatarUrl(people.get(id)?.image),
       owner: id === canvas.ownerId,
       role: id === canvas.ownerId ? 'owner' : (store.memberRole(canvas.id, id) ?? 'edit'),
     })),
@@ -441,19 +442,29 @@ sharingRouter.post('/:id/members', async (req, res) => {
   const role: unknown = req.body?.role ?? 'edit'
   if (!isMemberRole(role)) return res.status(400).json({ error: 'role must be view, comment or edit' })
   const [row] = await db
-    .select({ id: authSchema.user.id, name: authSchema.user.name, email: authSchema.user.email })
+    .select({
+      id: authSchema.user.id,
+      name: authSchema.user.name,
+      email: authSchema.user.email,
+      image: authSchema.user.image,
+    })
     .from(authSchema.user)
     .where(eq(authSchema.user.email, email))
   if (!row) return res.status(404).json({ error: 'no doop account with that email — ask them to sign up first' })
   if (row.id === canvas.ownerId) return res.status(400).json({ error: 'the owner already has access' })
+  const isNew = !store.memberRole(canvas.id, row.id)
   store.addMember(canvas.id, row.id, req.user!.id, role)
   /* inviting someone who had asked to come in answers their request */
   await persist.deleteAccessRequest(canvas.id, row.id)
   refreshAccess(canvas.id)
+  /* a new collaborator is emailed once, in the words of their role, and sees the canvas on Home at once */
+  if (isNew) void emailShare(req.user!, row.id, canvas, role)
+  userEvents.notifyUsers([row.id], { type: 'canvases' })
   res.json({
     userId: row.id,
     name: row.name,
     email: row.email,
+    image: avatarUrl(row.image),
     owner: false,
     role: store.memberRole(canvas.id, row.id),
   })
@@ -476,6 +487,7 @@ sharingRouter.delete('/:id/members/:userId', (req, res) => {
     return res.status(403).json({ error: 'only the owner can remove collaborators' })
   if (!store.removeMember(canvas.id, req.params.userId)) return res.status(404).json({ error: 'not a collaborator' })
   refreshAccess(canvas.id)
+  userEvents.notifyUsers([req.params.userId], { type: 'canvases' })
   res.json({ ok: true })
 })
 
@@ -574,7 +586,7 @@ function withNotice(comment: ElementComment, text: string): ElementComment & { n
   return notice ? { ...comment, notice } : comment
 }
 
-publicRouter.post('/frames/:id/comments', (req, res) => {
+publicRouter.post('/frames/:id/comments', async (req, res) => {
   const frame = store.getFrame(req.params.id)
   if (!frame) return res.status(404).json({ error: 'frame not found' })
   if (!guestGate(req, res, frame.canvasId)) return
@@ -585,10 +597,18 @@ publicRouter.post('/frames/:id/comments', (req, res) => {
     .slice(0, MAX_GUEST_COMMENT)
   if (!text) return res.status(400).json({ error: 'empty comment' })
   if (!guestThrottle(req, res, frame.canvasId)) return
-  const { selector, snippet } = req.body ?? {}
-  const comment = actions.addElementComment(
+  /* frame HTML loads per canvas, and an element comment stamps an id into it */
+  try {
+    await store.load(frame.canvasId)
+    res.once('close', store.hold(frame.canvasId))
+  } catch (error) {
+    console.error('[comments] guest comment could not load the canvas', error)
+    return res.status(500).json({ error: 'could not open the canvas' })
+  }
+  const { selector, elementId, snippet, x, y, elementOrigin } = req.body ?? {}
+  const comment = await actions.addElementComment(
     frame.id,
-    { selector: String(selector ?? ''), snippet: String(snippet ?? ''), text },
+    { selector, elementId, snippet, text, x, y, elementOrigin },
     name,
     undefined,
     'user',

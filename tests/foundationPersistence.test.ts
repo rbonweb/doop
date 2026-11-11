@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, expect, it } from 'vitest'
+import { withHtml } from '../server/frameHtml.ts'
 import type { Canvas, ElementComment, Frame, FrameVersion } from '../shared/types.ts'
 
 const migrationsDir = new URL('../server/db/migrations/', import.meta.url)
@@ -151,7 +152,6 @@ it('round-trips a comment anchor, author kind and mentions through write and hyd
     id: 'cm1',
     canvasId: 'c-hydrate',
     frameId: 'f-hydrate',
-    selector: 'main > h1',
     snippet: '<h1>Hi</h1>',
     from: 'Ada',
     fromUserId: 'u-ada',
@@ -166,7 +166,6 @@ it('round-trips a comment anchor, author kind and mentions through write and hyd
     id: 'cm2',
     canvasId: 'c-hydrate',
     frameId: 'f-hydrate',
-    selector: 'p',
     snippet: '',
     from: 'Bo',
     text: 'old style',
@@ -248,11 +247,13 @@ it('hydrates frame attribution, slides, notes, roles, grants and keeps the link 
     return c?.frames.length === 1 && c.memberIds?.length === 2 ? data : undefined
   })
   const restored = hydrated.canvases.find((c) => c.id === 'c-share')!
-  expect(restored.frames[0]).toEqual(frame)
+  /* hydrate leaves frame html unloaded: it is read per canvas, as store.load does */
+  const [storedHtml] = await persist.loadFrameHtml('c-share')
+  expect(withHtml(restored.frames[0]!, storedHtml!.html)).toEqual(frame)
   expect(restored.linkAccess).toBe('comment')
   expect(restored.linkAudience).toBe('password')
   expect(restored.hasLinkPassword).toBe(true)
-  expect(JSON.stringify(restored)).not.toContain('hash-1')
+  expect(JSON.stringify({ ...restored, frames: [] })).not.toContain('hash-1')
   expect(hydrated.linkPasswordHashes.get('c-share')).toBe('hash-1')
   expect(restored.memberRoles).toEqual({ 'u-view': 'view' })
   expect(hydrated.domainGrants.get('c-share')).toEqual([
@@ -318,6 +319,7 @@ it('keeps the design stamp through a save and hydrate, and two boots in a row ch
     const data = await persist.hydrate()
     store.canvases.clear()
     store.init(data.canvases, data)
+    await store.load('c-boot')
     return structuredClone(data.canvases.find((c) => c.id === 'c-boot')!.frames)
   }
   const first = await boot()

@@ -1,4 +1,8 @@
 import type { BillingInterval, WorkspaceStatus } from './billing.ts'
+import type { CanvasRole, LinkAccess } from './canvasRole.ts'
+import type { ComponentDef } from './components.ts'
+import type { DesignToken } from './designTokens.ts'
+import type { RunnerPick } from './agentRunner.ts'
 
 export interface Frame {
   id: string
@@ -34,6 +38,24 @@ export interface Frame {
    *  deleted from the stage until it is unlocked (Layers panel, Inspector,
    *  ⌘⇧L, or an agent via update_frame) */
   locked?: boolean
+  /** Stacking order on its page (back to front; see shared/frameStack.ts).
+   *  Unset on frames made before stacking existed: they stack by createdAt. */
+  z?: number
+  /** Degrees clockwise about the frame's centre (shared/frameRotation.ts);
+   *  `x`/`y`/`width`/`height` stay the unrotated box. Unset is 0. */
+  rotation?: number
+  /** Human sign-off for implementation. Missing/null means draft. Design
+   * edits retain the attribution but change the status to needs_review. */
+  approval?: FrameApproval | null
+}
+
+export interface FrameApproval {
+  status: 'ready_for_dev' | 'needs_review'
+  approvedBy: string
+  approvedByUserId: string
+  approvedAt: number
+  /** The frame revision the person reviewed before approving. */
+  approvedFrameUpdatedAt: number
 }
 
 /** One entry of a frame's design history: the HTML (and size) the frame had
@@ -75,8 +97,9 @@ export interface CanvasMeta {
   previewFrameId?: string
   /** agents that have worked on this canvas (most recent first) */
   agents?: { name: string; owner?: string; lastAt?: number }[]
-  /** the owner first, then everyone invited — the home tile's avatar stack */
-  people?: { id: string; name: string }[]
+  /** the owner first, then everyone invited — the home tile's avatar stack;
+   *  `image` is a profile photo's URL when the person uploaded one */
+  people?: { id: string; name: string; image?: string }[]
 }
 
 /** The dashboard/gallery preview render (`/i/<id>.jpg?preview`) clips a
@@ -123,17 +146,31 @@ export interface CanvasPageInfo {
   name: string
   /** nested pages: the page this one sits under; unset = top level */
   parentId?: string
+  /** the frame this page's prototype flow starts on (shared/prototype.ts).
+   *  Set only through the flow-start route or MCP tool; page-list saves keep
+   *  whatever the server already has. */
+  startFrameId?: string
+  /** the page's own canvas colour (`#rrggbb`, shared/pageBackground.ts),
+   *  shown in place of the viewer's theme paper. Set only through the
+   *  background route or MCP tool; page-list saves keep it, as they keep
+   *  the flow start. */
+  background?: string
 }
 
-/** What a person may do on a canvas, from least to most. 'owner' is never
- *  granted through sharing — it is the canvas's creator. */
-export type CanvasRole = 'view' | 'comment' | 'edit' | 'owner'
+/** A ruler guide: an infinite line on one page of a canvas, in world px.
+ *  'v' is a vertical line at x = `at`, 'h' a horizontal one at y = `at`
+ *  (the same convention as the alignment snap guides). */
+export interface CanvasGuide {
+  id: string
+  pageId: string
+  axis: 'v' | 'h'
+  at: number
+}
+
+export type { CanvasRole, LinkAccess }
 
 /** The roles sharing can hand out (invites, domain grants). */
 export type MemberRole = 'view' | 'comment' | 'edit'
-
-/** What the share link grants people who are not the owner or invited. */
-export type LinkAccess = 'none' | 'view' | 'comment' | 'edit'
 
 /** Who the share link admits: any signed-in account (the default), anyone
  *  including signed-out visitors, or anyone who knows the link password. */
@@ -145,7 +182,7 @@ export interface Canvas {
   ownerId?: string
   /** what the share link grants people who are not the owner or invited:
    *  'edit' (anyone with the link collaborates), 'comment', 'view', or
-   *  'none' (private — the default; unset means 'none'). */
+   *  'none' (private — the default; unset means 'none'). See shared/canvasRole.ts. */
   linkAccess?: LinkAccess
   /** who the share link admits; unset = 'signed-in' */
   linkAudience?: LinkAudience
@@ -158,6 +195,11 @@ export interface Canvas {
   /** role per invited user id; a member without an entry can edit (the only
    *  role invites had before roles existed) */
   memberRoles?: Record<string, MemberRole>
+  /** the caller's own role, set on the copy a canvas GET or a room `init`
+   *  hands one person; never stored */
+  role?: CanvasRole
+  /** reusable designs on this canvas; unset = none. See shared/components.ts. */
+  components?: ComponentDef[]
   /** the shared workspace this canvas belongs to — every workspace member
    *  can open it, on top of the owner and invited members. Unset = the
    *  owner's personal space. */
@@ -176,8 +218,14 @@ export interface Canvas {
   updatedAt: number
   frames: Frame[]
   pages?: CanvasPageInfo[]
+  /** ruler guides of every page, each tagged with its page */
+  guides?: CanvasGuide[]
   /** named design docs (brand rules, style recipes) every actor on the canvas follows */
   guidelines?: GuidelineDoc[]
+  /** design tokens (shared/designTokens.ts): the CSS custom properties frames use as var(--name) */
+  tokens?: DesignToken[]
+  /** the token themes (light, dark, …) in display order; a token may carry a value per theme */
+  tokenThemes?: string[]
   /** frames pinned to Memory as style exemplars — HTML snapshotted at pin time */
   references?: MemoryReference[]
   /** sticky notes pinned to the canvas, a page or a frame */
@@ -283,6 +331,8 @@ export interface WorkspaceMember {
   userId: string
   name: string
   email: string
+  /** the profile photo's URL when the person uploaded one */
+  image?: string
   role: WorkspaceRole
   addedAt: number
 }
@@ -401,7 +451,11 @@ export interface Actor {
 
 export interface Presence {
   clientId: string
+  /** Authenticated identity for people, shared across their connections. */
+  userId?: string
   name: string
+  /** a person's profile photo (shared/avatar.ts), else initials */
+  image?: string
   color: string
   kind: ActorKind
   cursor?: { x: number; y: number }
@@ -461,6 +515,9 @@ export interface AgentTask {
    *  handing the title to the chat agent. Absent on prompt cards. */
   kind?: RepoCardKind
   payload?: RepoCardPayload
+  /** board cards: the connection and model the composer picked for this
+   *  card; absent runs on the requester's Settings default */
+  runner?: RunnerPick
 }
 
 export interface CardScope {
@@ -505,6 +562,9 @@ export interface TaskFeedback {
   from: string
   /** account id of the human who left it — decides which model credential runs it */
   fromUserId?: string
+  /** the connection the task it answers ran on, kept from when it was left,
+   *  so the reply runs there even after the task leaves the history */
+  runner?: RunnerPick
   text: string
   at: number
   /** set once the feedback has been included in some agent's tool result */
@@ -542,28 +602,32 @@ export interface CommentAnchor {
   fy: number
 }
 
-/** A comment pinned to a specific element inside a frame, or to a point on
- *  the canvas itself. Comments that mention @Doop are routed to the resident
- *  agent; others are notes for the humans in the room.
+/** A comment pinned to a specific element inside a frame, to a frame as a
+ *  whole, or to a point on the canvas itself. Comments that mention @Doop are
+ *  routed to the resident agent; others are notes for the humans in the room.
  *
- *  Two anchors: an element comment carries `frameId` + `selector` + `snippet`;
- *  a canvas comment carries `pageId` + `x` + `y` (world coordinates) and no
- *  `frameId`, with `selector` and `snippet` empty. `isCanvasComment` in
- *  shared/comments.ts tells them apart. */
+ *  Three anchors (`shared/comments.ts` tells them apart): an element comment
+ *  carries `frameId` + `elementId` (the element's `data-doop-id` in the frame
+ *  HTML) + `snippet`; a frame comment carries `frameId` + `x` + `y` (design
+ *  px) and no `elementId`; a canvas comment carries `pageId` + `x` + `y`
+ *  (world coordinates) and no `frameId`. An element comment whose element
+ *  could not be found again has `frameId` and `snippet` only. */
 export interface ElementComment {
   id: string
   canvasId: string
   /** the frame the element lives in; absent on a canvas comment */
   frameId?: string
-  /** CSS selector of the anchored element, resolved at comment time ('' on a canvas comment) */
-  selector: string
-  /** outerHTML excerpt of the element, for agent context and dead-anchor display ('' on a canvas comment) */
+  /** the anchored element's `data-doop-id`; absent on frame and canvas comments */
+  elementId?: string
+  /** outerHTML excerpt of the element, for agent context and dead-anchor display ('' off an element) */
   snippet: string
   /** canvas comment: the page it sits on … */
   pageId?: string
-  /** … and its world point on that page */
+  /** Clicked point: frame design coordinates, or world coordinates on a canvas page. */
   x?: number
   y?: number
+  /** Element top-left at placement time; a moved element uses its current top-left. */
+  elementOrigin?: { x: number; y: number }
   from: string
   /** account id of the human who left it — decides which model credential runs it */
   fromUserId?: string
@@ -619,7 +683,7 @@ export type ClientMessage =
   | { type: 'cursor'; x: number; y: number }
   | { type: 'viewport'; viewport: PeerViewport }
   | { type: 'editing'; frameId: string | null }
-  | { type: 'frame:drag'; frameId: string; x: number; y: number; width: number; height: number }
+  | { type: 'frame:drag'; frameId: string; x: number; y: number; width: number; height: number; rotation?: number }
 
 export type ServerMessage =
   | {
@@ -640,7 +704,7 @@ export type ServerMessage =
       /** a signed-out visitor: capped at comment, sees frames, comments and presence only */
       guest?: boolean
     }
-  /** this connection's role changed (the owner edited sharing) */
+  /** this connection's role changed (the owner edited sharing, or the share link changed) */
   | { type: 'role'; role: CanvasRole }
   /** a message of this connection was refused; it was not broadcast */
   | { type: 'error'; message: string }
@@ -657,7 +721,16 @@ export type ServerMessage =
   | { type: 'task'; task: AgentTask }
   | { type: 'feedback'; feedback: TaskFeedback }
   | { type: 'comment'; comment: ElementComment }
-  | { type: 'frame:drag'; clientId: string; frameId: string; x: number; y: number; width: number; height: number }
+  | {
+      type: 'frame:drag'
+      clientId: string
+      frameId: string
+      x: number
+      y: number
+      width: number
+      height: number
+      rotation?: number
+    }
   | { type: 'frame:created'; frame: Frame; actor: Actor }
   | { type: 'frame:updated'; frame: Frame; actor: Actor }
   | { type: 'frame:deleted'; frameId: string; actor: Actor }
@@ -668,14 +741,22 @@ export type ServerMessage =
   | { type: 'note:upsert'; note: CanvasNote; actor: Actor }
   /** a sticky note was removed */
   | { type: 'note:delete'; id: string; actor: Actor }
+  /** a ruler guide was added or moved (guide set) or removed (null) */
+  | { type: 'guide'; id: string; guide: CanvasGuide | null; actor: Actor }
+  /** a component changed, or was deleted (`component` null) */
+  | { type: 'component'; id: string; component: ComponentDef | null; actor: Actor }
   /** a style-guide doc was written, moved (doc set) or deleted (doc null) */
   | { type: 'guidelines'; name: string; doc: GuidelineDoc | null; actor: Actor }
+  /** the canvas's design tokens changed: the whole list after the change */
+  | { type: 'tokens'; tokens: DesignToken[]; themes: string[]; actor: Actor }
   /** a frame was pinned to (reference set) or unpinned from (null) Memory */
   | { type: 'reference'; id: string; reference: MemoryReference | null; actor: Actor }
   /** a design decision was captured into Memory */
   | { type: 'decision'; decision: DesignDecision }
   /** the distiller proposed a rule, or a proposal was accepted/dismissed */
   | { type: 'proposal'; proposal: MemoryProposal }
+  /** an uploaded image got its description for agents (shared/imageDescriptions.ts) */
+  | { type: 'asset:described'; assetId: string; description: string }
   | { type: 'canvas:deleted' }
   /** an uploaded stylesheet was replaced in place: the frames that link it (frameIds, in this canvas) should reload it */
   | { type: 'asset:updated'; assetId: string; version: number; frameIds: string[] }

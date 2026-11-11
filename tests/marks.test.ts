@@ -45,7 +45,6 @@ function comment(over: Partial<ElementComment> & Pick<ElementComment, 'id'>): El
   return {
     canvasId: 'c1',
     frameId: 'f1',
-    selector: 'body',
     snippet: '',
     from: 'Someone',
     text: 'hi',

@@ -9,7 +9,7 @@ import { nanoid } from 'nanoid'
 import sharp from 'sharp'
 import { db } from './db/index.ts'
 import * as t from './db/schema.ts'
-import { agentModel } from './instanceSettings.ts'
+import { agentModel } from './instanceConfig.ts'
 import * as storage from './storage.ts'
 
 /**

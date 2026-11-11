@@ -4,6 +4,23 @@
  * page (the element properties panel) reaches the live document through
  * these calls instead of holding an iframe ref of its own.
  */
+import type { DropTarget, FlowPlacement } from './layers'
+import type { Interaction } from '../../shared/prototype'
+import type { TextFormatCommand } from './richText'
+
+export interface LayoutDrop {
+  target: DropTarget
+  styles: FlowPlacement
+  container: ElementInfo['rect']
+  line: ElementInfo['rect']
+  /** the drop leaves the element's parent: only then is the container marked */
+  reparent?: boolean
+}
+
+export async function elementMoveTarget(frameId: string, selector: string, x: number, y: number) {
+  const reply = await requestFrame(frameId, 'doop:move-target', { selector, x, y })
+  return reply?.result as { free: boolean; drop: LayoutDrop | null } | undefined
+}
 
 /** The runtime's summary of one element: computed styles resolved to what
  *  the Design panel shows, plus the inline styles the element already carries.
@@ -40,6 +57,9 @@ export interface ElementInfo {
   }
   /** rendered box over layout box: the element's own and inherited scale */
   scale: { x: number; y: number }
+  /** the rendered box before the element's own turn, which `rect` (its
+   *  bounds) grows past; the selection furniture is drawn on this box */
+  box?: { width: number; height: number }
   position: string
   display: string
   flexDirection: string
@@ -65,6 +85,7 @@ export interface ElementInfo {
   visibility: string
   clipsContent: boolean
   backgroundColor: string
+  image: { kind: 'img' | 'background'; src: string; size: string; repeat: string } | null
   /** top, right, bottom, left */
   borderWidths: [number | null, number | null, number | null, number | null]
   /** style and colour of the first side that draws */
@@ -75,6 +96,9 @@ export interface ElementInfo {
   fontSize: number | null
   fontWeight: string
   fontFamily: string
+  /** Text properties whose runs disagree (the selected run's while editing,
+   *  else the whole layer's); the Design panel shows "Mixed" for them. */
+  textMixed?: Partial<Record<'fontFamily' | 'fontSize' | 'fontWeight' | 'color', boolean>>
   /** Font faces declared by this frame, including linked web fonts. */
   fontFamilies: string[]
   textAlign: string
@@ -86,9 +110,20 @@ export type StylePatch = Record<string, string | null>
 
 export type GeometryEdit =
   | { kind: 'position'; axis: 'x' | 'y'; value: number }
+  /** Move both axes together to a rendered position in frame pixels. */
+  | { kind: 'move'; x: number; y: number }
   | { kind: 'align'; axis: 'x' | 'y'; edge: 'start' | 'center' | 'end' }
   | { kind: 'rotate'; value: number }
   | { kind: 'flip'; axis: 'x' | 'y' }
+  | { kind: 'nudge'; dx: number; dy: number }
+
+export function nudgeElements(frameId: string, selectors: string[], dx: number, dy: number) {
+  return requestFrame(frameId, 'doop:nudge', { selectors, dx, dy })
+}
+
+export function settleFrames() {
+  return Promise.all([...windows.keys()].map((frameId) => requestFrame(frameId, 'doop:settle', {})))
+}
 
 export async function editElementGeometry(
   frameId: string,
@@ -109,7 +144,10 @@ interface PendingAsk {
 const REPLY_TIMEOUT_MS = 2000
 
 const windows = new Map<string, Window>()
+/* ⌘Y outline mode, which a frame mounted later picks up when it registers */
+let outlines = false
 const changeListeners = new Map<string, Set<() => void>>()
+const selectionListeners = new Map<string, Set<() => void>>()
 const pending = new Map<number, PendingAsk>()
 let nextReq = 0
 let listening = false
@@ -119,9 +157,10 @@ function listen() {
   listening = true
   window.addEventListener('message', (ev: MessageEvent) => {
     const data = ev.data as { type?: string; reqId?: number } | null
-    if (data?.type === 'doop:frame-updated') {
+    if (data?.type === 'doop:frame-updated' || data?.type === 'doop:text-selection') {
+      const listeners = data.type === 'doop:frame-updated' ? changeListeners : selectionListeners
       for (const [frameId, win] of windows) {
-        if (ev.source === win) changeListeners.get(frameId)?.forEach((cb) => cb())
+        if (ev.source === win) listeners.get(frameId)?.forEach((cb) => cb())
       }
       return
     }
@@ -137,23 +176,72 @@ function listen() {
 
 export function registerFrameWindow(frameId: string, win: Window) {
   windows.set(frameId, win)
+  if (outlines) win.postMessage({ type: 'doop:outlines', on: true }, '*')
   changeListeners.get(frameId)?.forEach((cb) => cb())
 }
 
 export function unregisterFrameWindow(frameId: string, win: Window) {
-  if (windows.get(frameId) === win) windows.delete(frameId)
+  if (windows.get(frameId) !== win) return
+  windows.delete(frameId)
+  shownDocuments.delete(frameId)
+}
+
+/* The HTML each frame's runtime has acknowledged showing; absent while a
+   newer document is still on its way there. */
+const shownDocuments = new Map<string, string>()
+const documentListeners = new Map<string, Set<() => void>>()
+
+/** Record what the frame's runtime shows: the acknowledged HTML, or null
+ *  once a newer document has been posted and not yet acknowledged. */
+export function noteFrameDocument(frameId: string, html: string | null) {
+  if (html === null) shownDocuments.delete(frameId)
+  else shownDocuments.set(frameId, html)
+  documentListeners.get(frameId)?.forEach((cb) => cb())
+}
+
+/** Resolve true once the frame's runtime shows `html`, false if it does not
+ *  within the reply timeout. The store can run ahead of the frame's
+ *  throttled render, and a hit test on the older document would name its
+ *  elements, not the ones `html` has in those places. */
+export function frameShows(frameId: string, html: string): Promise<boolean> {
+  if (shownDocuments.get(frameId) === html) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    const set = documentListeners.get(frameId) ?? new Set()
+    documentListeners.set(frameId, set)
+    const done = (shown: boolean) => {
+      window.clearTimeout(timer)
+      set.delete(check)
+      if (set.size === 0 && documentListeners.get(frameId) === set) documentListeners.delete(frameId)
+      resolve(shown)
+    }
+    const check = () => {
+      if (shownDocuments.get(frameId) === html) done(true)
+    }
+    const timer = window.setTimeout(() => done(false), REPLY_TIMEOUT_MS)
+    set.add(check)
+  })
 }
 
 /** Re-read after the runtime registers, renders HTML, or loads font faces.
  *  Store updates can precede the frame's throttled render. */
 export function onFrameChange(frameId: string, cb: () => void): () => void {
+  return subscribe(changeListeners, frameId, cb)
+}
+
+/** Re-read when the text selected inside an edited element changes: the
+ *  Design panel's text fields show and edit the selected run. */
+export function onTextSelection(frameId: string, cb: () => void): () => void {
+  return subscribe(selectionListeners, frameId, cb)
+}
+
+function subscribe(listeners: Map<string, Set<() => void>>, frameId: string, cb: () => void): () => void {
   listen()
-  const set = changeListeners.get(frameId) ?? new Set()
+  const set = listeners.get(frameId) ?? new Set()
   set.add(cb)
-  changeListeners.set(frameId, set)
+  listeners.set(frameId, set)
   return () => {
     set.delete(cb)
-    if (set.size === 0) changeListeners.delete(frameId)
+    if (set.size === 0) listeners.delete(frameId)
   }
 }
 
@@ -163,6 +251,7 @@ export function requestFrame(
   frameId: string,
   type: `doop:${string}`,
   payload: Record<string, unknown>,
+  timeoutMs = REPLY_TIMEOUT_MS,
 ): Promise<Record<string, unknown> | null> {
   const win = windows.get(frameId)
   if (!win) return Promise.resolve(null)
@@ -175,8 +264,29 @@ export function requestFrame(
     /* a frame that unloads mid-request would leave the promise hanging */
     window.setTimeout(() => {
       if (pending.delete(reqId)) resolve(null)
-    }, REPLY_TIMEOUT_MS)
+    }, timeoutMs)
   })
+}
+
+/* a snapshot reads every canvas and blob image; a big one takes longer than
+   a hit test */
+const SNAPSHOT_TIMEOUT_MS = 15_000
+
+export interface FrameSnapshot {
+  /** the live document with what an image export needs captured in (canvas
+   *  pixels, picked image sources, CSSOM rules); null when the runtime
+   *  could not read it all (a tainted canvas) */
+  html: string | null
+}
+
+/** The frame's document as the runtime shows it, or null when the frame
+ *  is not mounted. A mounted frame that does not answer in time counts as
+ *  one that could not be read, never as unmounted: its saved HTML would
+ *  render without what the runtime shows. */
+export async function snapshotFrame(frameId: string): Promise<FrameSnapshot | null> {
+  if (!windows.has(frameId)) return null
+  const reply = await requestFrame(frameId, 'doop:snapshot', {}, SNAPSHOT_TIMEOUT_MS)
+  return { html: typeof reply?.html === 'string' ? reply.html : null }
 }
 
 /* the runtime's replies carry the element summary under `info` */
@@ -192,15 +302,85 @@ export async function inspectElement(frameId: string, selector: string): Promise
 /** Write inline styles onto the element. The runtime saves the edited
  *  document through the frame's normal edit path and answers with the
  *  element's fresh properties. */
-export async function styleElement(frameId: string, selector: string, styles: StylePatch): Promise<ElementInfo | null> {
-  return infoOf(await requestFrame(frameId, 'doop:style', { selector, styles }))
+/** `uniformText` makes the patch's type the whole layer's: the inline runs
+ *  under it drop their own values, and <b> / <i> / <u> runs their formatting. */
+export async function styleElement(
+  frameId: string,
+  selector: string,
+  styles: StylePatch,
+  { uniformText = false }: { uniformText?: boolean } = {},
+): Promise<ElementInfo | null> {
+  return infoOf(await requestFrame(frameId, 'doop:style', { selector, styles, uniformText }))
 }
 
-/** Preview a whole scrub locally, then save once or restore its original CSS. */
+/** Replace image content through the same live edit/undo path as styles. */
+export async function replaceElementImage(
+  frameId: string,
+  selector: string,
+  image: NonNullable<ElementInfo['image']>,
+  url: string,
+): Promise<ElementInfo | null> {
+  return infoOf(await requestFrame(frameId, 'doop:replace-image', { selector, image, url }))
+}
+
+/** One element with interactions, as the frame runtime reports it. */
+export interface ScannedHotspot {
+  selector: string
+  rect: ElementInfo['rect']
+  interactions: Interaction[]
+}
+
+/** Every element of the live document that carries prototype interactions,
+ *  including ones a script created; empty when the frame is not mounted. */
+export async function scanHotspots(frameId: string): Promise<ScannedHotspot[]> {
+  const reply = await requestFrame(frameId, 'doop:proto-scan', {})
+  return Array.isArray(reply?.items) ? (reply.items as ScannedHotspot[]) : []
+}
+
+/** Preview a whole scrub locally, then save once or restore its original CSS.
+ *  `followers` (a `begin` only) are the rest of a multi-pick: a `move` of the
+ *  element carries them by the same delta, and a cancel puts them back too. */
 export async function styleGesture(
   frameId: string,
   selector: string,
   phase: 'begin' | 'commit' | 'cancel',
+  followers: string[] = [],
 ): Promise<ElementInfo | null> {
-  return infoOf(await requestFrame(frameId, 'doop:style-gesture', { selector, phase }))
+  return infoOf(await requestFrame(frameId, 'doop:style-gesture', { selector, phase, followers }))
+}
+
+/** Toggle a text format over whole layers, as ⌘B does with a text layer
+ *  selected. Resolves with the layers' selectors afterwards (a paragraph
+ *  turned list changes tag), or null when the frame did not format. */
+export async function formatElementText(
+  frameId: string,
+  selectors: string[],
+  command: TextFormatCommand,
+): Promise<string[] | null> {
+  const reply = await requestFrame(frameId, 'doop:text-format', { selectors, command })
+  return Array.isArray(reply?.selectors) ? (reply.selectors as string[]) : null
+}
+
+/** The element's computed values for `properties`, or null when the selector
+ *  no longer resolves or the frame is not mounted. `fromTextRun` reads them
+ *  off the element's first text run instead, where a bold or italic run's
+ *  formatting shows. */
+export async function computedStyles(
+  frameId: string,
+  selector: string,
+  properties: readonly string[],
+  { fromTextRun = false }: { fromTextRun?: boolean } = {},
+): Promise<Record<string, string> | null> {
+  const reply = await requestFrame(frameId, 'doop:computed', { selector, properties: [...properties], fromTextRun })
+  return reply && reply.values && typeof reply.values === 'object' ? (reply.values as Record<string, string>) : null
+}
+
+/** ⌘Y: draw every mounted frame (and any frame mounted later, through
+ *  `outlinesOn`) as outlines. Nothing is saved. */
+export function setOutlines(on: boolean) {
+  outlines = on
+  for (const win of windows.values()) win.postMessage({ type: 'doop:outlines', on }, '*')
+}
+export function outlinesOn() {
+  return outlines
 }

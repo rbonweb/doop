@@ -2,7 +2,11 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPoi
 import { useStore } from '../lib/store'
 import { isDrawingTool, resolvePointerAction, type DrawingTool } from '../lib/tools'
 import { gesture } from '../lib/gesture'
+import { visibleGuides } from '../lib/guides'
+import { snapPointToGuides } from '../lib/snap'
 import { isTypingTarget } from '../lib/keys'
+import { useT } from '../lib/i18n'
+import { usePaper } from '../lib/paper'
 import {
   defaultDrawing,
   drawingBounds,
@@ -12,7 +16,7 @@ import {
   pathDrawing,
   saveDrawing,
   DRAWING_FILL,
-  DRAWING_INK,
+  drawingInk,
   type Drawing,
   type DrawingTarget,
   type Point,
@@ -73,8 +77,13 @@ export function useCanvasDrawing(stage: RefObject<HTMLDivElement>) {
       } else if (e.key === 'Escape') {
         e.preventDefault()
         e.stopImmediatePropagation()
-        cancel()
-        useStore.getState().setTool('select')
+        // Esc leaves text editing the way a blur does: what was typed stays
+        // (an empty draft still vanishes); a shape or path mid-gesture is dropped.
+        if (current.typing) finish()
+        else {
+          cancel()
+          useStore.getState().setTool('select')
+        }
       } else if (
         e.key === 'Enter' &&
         (current.drawing.tool === 'path' || (current.typing && (e.metaKey || e.ctrlKey)))
@@ -114,13 +123,19 @@ export function useCanvasDrawing(stage: RefObject<HTMLDivElement>) {
     const vp = useStore.getState().viewport
     return { x: (clientX - rect.left - vp.x) / vp.zoom, y: (clientY - rect.top - vp.y) / vp.zoom }
   }
+  /** The world point under the pointer, pulled onto the ruler guides unless
+   *  Alt is held — the same bypass as the pen's anchor snapping. */
+  function snappedWorld(ev: { clientX: number; clientY: number; altKey: boolean }): Point {
+    const at = toWorld(ev.clientX, ev.clientY)
+    return ev.altKey ? at : snapPointToGuides(at, visibleGuides(), useStore.getState().viewport.zoom)
+  }
 
   function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
     if ((e.target as Element).closest('[data-comment-ui]')) {
       cancel()
       return
     }
-    if ((e.target as Element).closest('[data-drawing-input]')) return
+    if ((e.target as Element).closest('[data-drawing-input], [data-ruler]')) return
     if (!e.isPrimary || gesture.pinching) {
       if (!draftRef.current?.typing) cancel()
       return
@@ -144,14 +159,15 @@ export function useCanvasDrawing(stage: RefObject<HTMLDivElement>) {
       finish()
       return
     }
-    const start = toWorld(e.clientX, e.clientY)
+    const start = snappedWorld(e)
     const target = draftRef.current?.target ?? drawingTarget(start, tool)
     if (!target) return
     s.setFollowing(null)
     if (tool === 'path') {
       const points = draftRef.current?.drawing.points ?? []
       const zoom = s.viewport.zoom
-      const snapped = e.altKey ? null : nearestPathAnchor(points, start, zoom)
+      /* the path's own anchors pull harder than the guides do */
+      const snapped = e.altKey ? null : nearestPathAnchor(points, toWorld(e.clientX, e.clientY), zoom)
       const placed = snapped === null ? start : { x: points[snapped]!.x, y: points[snapped]!.y }
       const closing = points.length >= 2 && snapped === 0
       const last = points.at(-1)
@@ -223,13 +239,13 @@ export function useCanvasDrawing(stage: RefObject<HTMLDivElement>) {
       if (gesture.pinching) return cancel()
       setDraft({
         target: target!,
-        drawing: drawingBounds(drawTool, start, toWorld(ev.clientX, ev.clientY), ev.shiftKey),
+        drawing: drawingBounds(drawTool, start, snappedWorld(ev), ev.shiftKey),
       })
     }
     function up(ev: PointerEvent) {
       if (ev.pointerId !== pointerId) return
       if (gesture.pinching) return cancel()
-      const end = toWorld(ev.clientX, ev.clientY)
+      const end = snappedWorld(ev)
       const clicked = Math.hypot(end.x - start.x, end.y - start.y) * useStore.getState().viewport.zoom < 3
       const drawing = clicked ? defaultDrawing(drawTool, start) : drawingBounds(drawTool, start, end, ev.shiftKey)
       cleanup.current?.()
@@ -262,8 +278,18 @@ export function useCanvasDrawing(stage: RefObject<HTMLDivElement>) {
       onFinish={() => finish()}
     />
   )
+  const penZoom = useStore((s) => s.viewport.zoom)
+  /* what the pen's badge says a press would do: close the path, land on an
+     anchor it already placed, or just add the next point */
+  const penCursor = (() => {
+    const points = draft?.drawing.tool === 'path' ? (draft.drawing.points ?? []) : []
+    const snapped = hover && !hover.unsnapped && points.length ? nearestPathAnchor(points, hover, penZoom) : null
+    if (snapped === null) return 'pen' as const
+    return snapped === 0 && points.length >= 2 ? ('pen-close' as const) : ('pen-anchor' as const)
+  })()
   return {
     preview,
+    penCursor,
     pathActive: draft?.drawing.tool === 'path',
     canFinishPath: (draft?.drawing.points?.length ?? 0) >= 2,
     finish: () => finish(),
@@ -297,19 +323,25 @@ function DrawingPreview({
   onFinish: () => void
 }) {
   const zoom = useStore((s) => s.viewport.zoom)
+  const t = useT()
+  const paper = usePaper()
   const d = draft.drawing
+  const ink = drawingInk(draft.target, paper.tone)
   if (draft.typing)
     return (
       <textarea
         data-drawing-input
-        aria-label="Text to add to canvas"
+        aria-label={t('stage.textInputLabel')}
         autoFocus
-        placeholder="Type something…"
+        placeholder={t('stage.textPlaceholder')}
         value={d.text ?? ''}
         onChange={(e) => onText(e.target.value, Math.max(d.height, e.target.scrollHeight))}
         onBlur={onFinish}
-        className="absolute z-30 resize-none border-0 bg-white/90 p-0 text-[#202124] outline-2 outline-brand"
+        /* the box is see-through, like the text it becomes: the ring and the
+           placeholder are all that mark it on the canvas */
+        className="absolute z-30 resize-none border-0 bg-transparent p-0 outline-2 outline-brand placeholder:text-ink-faint"
         style={{
+          color: ink,
           left: d.x,
           top: d.y,
           width: d.width,
@@ -333,7 +365,7 @@ function DrawingPreview({
         width={preview.width}
         height={preview.height}
       >
-        <path d={pathData(preview)} fill="none" stroke={DRAWING_INK} strokeWidth={2} strokeLinejoin="round" />
+        <path d={pathData(preview)} fill="none" stroke={ink} strokeWidth={2} strokeLinejoin="round" />
         {points
           .filter((p) => p.handle)
           .map((p, i) => (

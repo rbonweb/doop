@@ -1,0 +1,1 @@
+ALTER TABLE "frames" ADD COLUMN IF NOT EXISTS "rotation" double precision;

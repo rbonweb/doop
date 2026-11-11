@@ -7,6 +7,12 @@ import * as t from './schema.ts'
 import { extractAssetIds } from '../assets.ts'
 import { roleByAgentName } from '../../shared/agents.ts'
 import { isCommunityCategory } from '../../shared/types.ts'
+import { storedLinkAccess } from '../../shared/canvasRole.ts'
+import type { ComponentDef } from '../../shared/components.ts'
+import type { DesignToken, TokenType } from '../../shared/designTokens.ts'
+import { parseRunnerPick } from '../../shared/agentRunner.ts'
+import { byStack } from '../../shared/frameStack.ts'
+import { unloadHtml } from '../frameHtml.ts'
 import type {
   AccessRequest,
   ActivityItem,
@@ -22,7 +28,6 @@ import type {
   FrameVersion,
   FrameVersionInfo,
   GuidelineDoc,
-  LinkAccess,
   MemberRole,
   MemoryProposal,
   MemoryReference,
@@ -59,8 +64,10 @@ function canvasColumns(c: Canvas) {
   return {
     name: c.name,
     pages: c.pages ?? null,
+    guides: c.guides?.length ? c.guides : null,
+    tokenThemes: c.tokenThemes?.length ? c.tokenThemes : null,
     ownerId: c.ownerId ?? null,
-    linkAccess: c.linkAccess ?? null,
+    linkAccess: storedLinkAccess(c.linkAccess) ?? null,
     linkAudience: c.linkAudience ?? null,
     publishedAt: c.publishedAt ?? null,
     description: c.description ?? null,
@@ -105,6 +112,13 @@ export async function saveCanvasCopy(c: Canvas): Promise<void> {
           y: doc.y ?? null,
         })),
       )
+    }
+
+    if (c.components?.length) {
+      await tx.insert(t.components).values(c.components.map((def) => componentRow(c.id, def)))
+    }
+    if (c.tokens?.length) {
+      await tx.insert(t.designTokens).values(c.tokens.map((token) => tokenRow(c.id, token)))
     }
 
     if (c.references?.length) {
@@ -163,6 +177,44 @@ export function deleteMember(canvasId: string, userId: string) {
 }
 
 /* Single-shot writes (one save per explicit edit) — no debounce needed. */
+function componentRow(canvasId: string, def: ComponentDef) {
+  return {
+    canvasId,
+    id: def.id,
+    name: def.name,
+    description: def.description,
+    template: def.template,
+    css: def.css,
+    rawCss: def.rawCss,
+    head: def.head,
+    props: def.props,
+    slots: def.slots,
+    rev: def.rev,
+    mainFrameId: def.mainFrameId,
+    code: def.code ?? null,
+    source: def.source ?? null,
+    history: def.history,
+    createdAt: def.createdAt,
+    updatedAt: def.updatedAt,
+    updatedBy: def.updatedBy,
+  }
+}
+
+export function saveComponent(canvasId: string, def: ComponentDef) {
+  const row = componentRow(canvasId, def)
+  const { canvasId: _canvasId, id: _id, createdAt: _createdAt, ...set } = row
+  swallow(
+    db
+      .insert(t.components)
+      .values(row)
+      .onConflictDoUpdate({ target: [t.components.canvasId, t.components.id], set }),
+  )
+}
+
+export function deleteComponent(canvasId: string, id: string) {
+  swallow(db.delete(t.components).where(and(eq(t.components.canvasId, canvasId), eq(t.components.id, id))))
+}
+
 export function saveGuideline(canvasId: string, doc: GuidelineDoc) {
   const row = {
     canvasId,
@@ -194,6 +246,66 @@ export function saveGuideline(canvasId: string, doc: GuidelineDoc) {
 
 export function deleteGuideline(canvasId: string, name: string) {
   swallow(db.delete(t.guidelines).where(and(eq(t.guidelines.canvasId, canvasId), eq(t.guidelines.name, name))))
+}
+
+function tokenRow(canvasId: string, token: DesignToken) {
+  return {
+    canvasId,
+    name: token.name,
+    type: token.type,
+    value: token.value,
+    themes: token.themes && Object.keys(token.themes).length ? token.themes : null,
+    description: token.description ?? null,
+    order: token.order,
+    updatedAt: token.updatedAt,
+    updatedBy: token.updatedBy,
+  }
+}
+
+/* Writes to one token run in order: a rename followed by an edit of the
+   same row must not let the earlier write land last on a pooled connection. */
+const tokenWrites = new Map<string, Promise<unknown>>()
+
+function queueTokenWrite(canvasId: string, name: string, write: () => Promise<unknown>) {
+  const key = `${canvasId}\0${name}`
+  const prior = tokenWrites.get(key) ?? Promise.resolve()
+  const next = prior.then(write, write)
+  tokenWrites.set(key, next)
+  swallow(next.finally(() => tokenWrites.get(key) === next && tokenWrites.delete(key)))
+}
+
+/** Every queued token write of a canvas, settled: what a canvas delete waits
+ *  for, so a save still in the queue cannot put a row back afterwards. */
+function pendingTokenWrites(canvasId: string): Promise<unknown> {
+  const prefix = `${canvasId}\0`
+  return Promise.allSettled([...tokenWrites].filter(([key]) => key.startsWith(prefix)).map(([, write]) => write))
+}
+
+export function saveToken(canvasId: string, token: DesignToken) {
+  const row = tokenRow(canvasId, token)
+  queueTokenWrite(canvasId, token.name, () =>
+    db
+      .insert(t.designTokens)
+      .values(row)
+      .onConflictDoUpdate({
+        target: [t.designTokens.canvasId, t.designTokens.name],
+        set: {
+          type: row.type,
+          value: row.value,
+          themes: row.themes,
+          description: row.description,
+          order: row.order,
+          updatedAt: row.updatedAt,
+          updatedBy: row.updatedBy,
+        },
+      }),
+  )
+}
+
+export function deleteToken(canvasId: string, name: string) {
+  queueTokenWrite(canvasId, name, () =>
+    db.delete(t.designTokens).where(and(eq(t.designTokens.canvasId, canvasId), eq(t.designTokens.name, name))),
+  )
 }
 
 /* Append-only doc history: a snapshot per save, '' marks a deletion. */
@@ -321,7 +433,33 @@ export async function savePageCopy(c: Canvas, frames: Frame[], notes: CanvasNote
   })
 }
 
+/* Frames whose latest state is not yet in the database, by write
+   generation: marked on every save, cleared only once a write that started
+   at the latest generation succeeds. A frame stays dirty through its
+   debounce, its write in flight and a failed write, and a dirty frame keeps
+   its canvas loaded (store.evictIdle) — dropping it would lose the only
+   copy, or reload the stored row over a newer one still being written. */
+const dirtyFrames = new Map<string, number>()
+
+/** writes of a frame on their way to the database, counted */
+const writesInFlight = new Map<string, number>()
+
+function markDirty(frameId: string) {
+  dirtyFrames.set(frameId, (dirtyFrames.get(frameId) ?? 0) + 1)
+}
+
+/** Write the frame now and resolve once it is on disk, for a caller that
+ *  must write something naming the frame's content afterwards. */
+export async function saveFrameNow(f: Frame): Promise<void> {
+  markDirty(f.id)
+  const existing = frameTimers.get(f.id)
+  if (existing) clearTimeout(existing)
+  frameTimers.delete(f.id)
+  await writeFrame(f)
+}
+
 export function saveFrame(f: Frame, immediate = false) {
+  markDirty(f.id)
   const existing = frameTimers.get(f.id)
   if (existing) clearTimeout(existing)
   if (immediate) {
@@ -361,14 +499,90 @@ function frameRow(f: Frame) {
     speakerNotes: f.speakerNotes ?? null,
     hidden: f.hidden ?? null,
     locked: f.locked ?? null,
+    z: f.z ?? null,
+    rotation: f.rotation ?? null,
+    approval: f.approval ?? null,
   }
 }
 
 async function writeFrame(f: Frame) {
+  writesInFlight.set(f.id, (writesInFlight.get(f.id) ?? 0) + 1)
+  try {
+    await writeFrameRow(f)
+  } finally {
+    const left = (writesInFlight.get(f.id) ?? 1) - 1
+    if (left > 0) writesInFlight.set(f.id, left)
+    else writesInFlight.delete(f.id)
+  }
+}
+
+async function writeFrameRow(f: Frame) {
+  const generation = dirtyFrames.get(f.id)
   const row = frameRow(f)
   const { id, createdAt, ...set } = row
   await db.insert(t.frames).values(row).onConflictDoUpdate({ target: t.frames.id, set })
-  await syncAssetRefs(f.id, f.html)
+  /* a save made while this one was in flight keeps the frame dirty */
+  if (dirtyFrames.get(f.id) === generation) dirtyFrames.delete(f.id)
+  await syncAssetRefs(f.id, row.html)
+}
+
+/** A frame whose latest state is not yet stored: waiting on its debounce,
+ *  its write in flight, or its write failed. Its canvas must stay loaded. */
+export function frameWritePending(frameId: string): boolean {
+  return dirtyFrames.has(frameId)
+}
+
+/** Write again a dirty frame with nothing scheduled or in flight: one whose
+ *  write failed. The idle sweep calls this for the frames that keep their
+ *  canvas from being dropped. */
+export function retryFrameWrite(f: Frame) {
+  if (dirtyFrames.has(f.id) && !frameTimers.has(f.id) && !writesInFlight.has(f.id)) saveFrame(f)
+}
+
+/** Move a frame to another page without touching its html, for a frame
+ *  whose canvas is not loaded (store.init's repair of an orphaned frame). */
+export function saveFramePage(frameId: string, pageId: string) {
+  swallow(writeFramePage(frameId, pageId))
+}
+
+async function writeFramePage(frameId: string, pageId: string) {
+  await db.update(t.frames).set({ pageId }).where(eq(t.frames.id, frameId))
+}
+
+/** The html of every frame on a canvas, for store.load. */
+export function loadFrameHtml(canvasId: string): Promise<{ id: string; html: string }[]> {
+  return db.select({ id: t.frames.id, html: t.frames.html }).from(t.frames).where(eq(t.frames.canvasId, canvasId))
+}
+
+/** One frame's html, for a render of a frame whose canvas is not loaded. */
+export async function loadOneFrameHtml(frameId: string): Promise<string | undefined> {
+  const [row] = await db.select({ html: t.frames.html }).from(t.frames).where(eq(t.frames.id, frameId))
+  return row?.html
+}
+
+const frameMetaColumns = {
+  id: t.frames.id,
+  canvasId: t.frames.canvasId,
+  pageId: t.frames.pageId,
+  name: t.frames.name,
+  x: t.frames.x,
+  y: t.frames.y,
+  width: t.frames.width,
+  height: t.frames.height,
+  createdAt: t.frames.createdAt,
+  updatedAt: t.frames.updatedAt,
+  contentUpdatedAt: t.frames.contentUpdatedAt,
+  updatedBy: t.frames.updatedBy,
+  updatedByUserId: t.frames.updatedByUserId,
+  updatedByKind: t.frames.updatedByKind,
+  demo: t.frames.demo,
+  slide: t.frames.slide,
+  speakerNotes: t.frames.speakerNotes,
+  hidden: t.frames.hidden,
+  locked: t.frames.locked,
+  z: t.frames.z,
+  rotation: t.frames.rotation,
+  approval: t.frames.approval,
 }
 
 /* Frame design history: one row per burst boundary (see actions.ts), newest
@@ -547,7 +761,11 @@ export function deleteCanvas(canvasId: string) {
   swallow(db.delete(t.comments).where(eq(t.comments.canvasId, canvasId)))
   swallow(db.delete(t.activity).where(eq(t.activity.canvasId, canvasId)))
   swallow(db.delete(t.guidelines).where(eq(t.guidelines.canvasId, canvasId)))
+  swallow(db.delete(t.components).where(eq(t.components.canvasId, canvasId)))
   swallow(db.delete(t.guidelineVersions).where(eq(t.guidelineVersions.canvasId, canvasId)))
+  swallow(
+    pendingTokenWrites(canvasId).then(() => db.delete(t.designTokens).where(eq(t.designTokens.canvasId, canvasId))),
+  )
   swallow(
     pendingVersionWrites((_, c) => c === canvasId).then(() =>
       db.delete(t.frameVersions).where(eq(t.frameVersions.canvasId, canvasId)),
@@ -566,6 +784,7 @@ export function deleteCanvas(canvasId: string) {
 }
 
 export function deleteFrame(frameId: string) {
+  dirtyFrames.delete(frameId)
   const timer = frameTimers.get(frameId)
   if (timer) {
     clearTimeout(timer)
@@ -603,6 +822,18 @@ function scopeField(scope: string | null): Pick<AgentTask, 'scope'> {
   try {
     const parsed = JSON.parse(scope) as CardScope
     return typeof parsed?.frameId === 'string' ? { scope: parsed } : {}
+  } catch {
+    return {}
+  }
+}
+
+/** The connection a card was sent to, or nothing when the row carries none
+ *  or it no longer parses (the card then runs on the Settings default). */
+function runnerField(runner: string | null): Pick<AgentTask, 'runner'> {
+  if (!runner) return {}
+  try {
+    const parsed = parseRunnerPick(JSON.parse(runner))
+    return parsed ? { runner: parsed } : {}
   } catch {
     return {}
   }
@@ -647,6 +878,7 @@ export function saveTask(canvasId: string, task: AgentTask) {
     payload: task.payload ? JSON.stringify(task.payload) : null,
     scope: task.scope ? JSON.stringify(task.scope) : null,
     frameIds: task.frameIds?.join(',') ?? null,
+    runner: task.runner ? JSON.stringify(task.runner) : null,
   }
   const write = () =>
     db
@@ -688,6 +920,7 @@ export function saveFeedback(fb: TaskFeedback) {
     completedAt: fb.completedAt ?? null,
     failedAt: fb.failedAt ?? null,
     failureReason: fb.failureReason ?? null,
+    runner: fb.runner ? JSON.stringify(fb.runner) : null,
   }
   swallow(
     db
@@ -707,11 +940,23 @@ export function saveFeedback(fb: TaskFeedback) {
 }
 
 export function saveComment(c: ElementComment) {
+  swallow(writeComment(c))
+}
+
+/** The comment's write, for a caller that must know it landed. */
+export function saveCommentNow(c: ElementComment): Promise<void> {
+  return writeComment(c)
+}
+
+async function writeComment(c: ElementComment): Promise<void> {
   const row = {
     id: c.id,
     canvasId: c.canvasId,
     frameId: c.frameId ?? null,
-    selector: c.selector,
+    elementId: c.elementId ?? null,
+    elementOrigin: c.elementOrigin ?? null,
+    /* the pre-element-id anchor is spent once the comment is saved again */
+    selector: null,
     snippet: c.snippet,
     pageId: c.pageId ?? null,
     x: c.x ?? null,
@@ -733,23 +978,33 @@ export function saveComment(c: ElementComment) {
     fromKind: c.fromKind ?? null,
     mentions: c.mentions?.length ? c.mentions.join(',') : null,
   }
-  swallow(
-    db
-      .insert(t.comments)
-      .values(row)
-      .onConflictDoUpdate({
-        target: t.comments.id,
-        set: {
-          selector: row.selector,
-          claimedBy: row.claimedBy,
-          claimedAt: row.claimedAt,
-          failedAt: row.failedAt,
-          failureReason: row.failureReason,
-          resolvedBy: row.resolvedBy,
-          resolvedAt: row.resolvedAt,
-        },
-      }),
-  )
+  await db
+    .insert(t.comments)
+    .values(row)
+    .onConflictDoUpdate({
+      target: t.comments.id,
+      set: {
+        /* a moved thread keeps its id and takes a new anchor */
+        frameId: row.frameId,
+        elementId: row.elementId,
+        elementOrigin: row.elementOrigin,
+        selector: row.selector,
+        snippet: row.snippet,
+        pageId: row.pageId,
+        x: row.x,
+        y: row.y,
+        /* a request handed back to the person is no longer the agent's */
+        forAgent: row.forAgent,
+        claimedBy: row.claimedBy,
+        claimedAt: row.claimedAt,
+        failedAt: row.failedAt,
+        failureReason: row.failureReason,
+        resolvedBy: row.resolvedBy,
+        resolvedAt: row.resolvedAt,
+        /* the fork's anchor hints (testid, id, role, quote) follow a moved thread too */
+        anchor: row.anchor,
+      },
+    })
 }
 
 export function saveActivity(canvasId: string, item: ActivityItem) {
@@ -947,7 +1202,8 @@ export function deleteNote(id: string): Promise<void> {
 /** Flush pending debounced frame writes and queued version writes (called
  *  on shutdown): a design must not survive a restart without its history. */
 export async function flush(getFrame: (id: string) => Frame | undefined): Promise<void> {
-  const ids = [...frameTimers.keys()]
+  /* every dirty frame, a failed write included, not only the debounced ones */
+  const ids = [...dirtyFrames.keys()]
   for (const [, timer] of frameTimers) clearTimeout(timer)
   frameTimers.clear()
   await Promise.allSettled(
@@ -968,6 +1224,9 @@ export interface Hydrated {
   tasks: Map<string, AgentTask[]> // canvasId -> newest first
   feedback: Map<string, TaskFeedback[]>
   comments: Map<string, ElementComment[]>
+  /** comment id -> the positional CSS path an element comment was anchored
+   *  by before element ids; `backfillElementIds` turns each into a stamp */
+  legacyCommentSelectors: Map<string, string>
   activity: Map<string, ActivityItem[]>
   decisions: Map<string, DesignDecision[]>
   proposals: Map<string, MemoryProposal[]>
@@ -979,13 +1238,12 @@ export interface Hydrated {
 
 const LOG_CAP = 100
 
-/** 'none' and anything unrecognised read as unset: private is the default. */
-function linkAccessFromColumn(value: string | null): LinkAccess | undefined {
-  return value === 'edit' || value === 'comment' || value === 'view' ? value : undefined
-}
+/** A frames row as boot reads it: every column but html, which loads per canvas (store.load). */
+type FrameMetaRow = Omit<typeof t.frames.$inferSelect, 'html'>
 
-function frameFromRow(f: typeof t.frames.$inferSelect): Frame {
-  return {
+/** The frame a boot row describes, its html left unloaded until something loads the canvas. */
+function frameFromRow(f: FrameMetaRow): Frame {
+  const frame = {
     id: f.id,
     canvasId: f.canvasId,
     ...(f.pageId != null ? { pageId: f.pageId } : {}),
@@ -994,7 +1252,6 @@ function frameFromRow(f: typeof t.frames.$inferSelect): Frame {
     y: f.y,
     width: f.width,
     height: f.height,
-    html: f.html,
     createdAt: f.createdAt,
     updatedAt: f.updatedAt,
     ...(f.contentUpdatedAt != null ? { contentUpdatedAt: f.contentUpdatedAt } : {}),
@@ -1006,7 +1263,12 @@ function frameFromRow(f: typeof t.frames.$inferSelect): Frame {
     ...(f.speakerNotes != null ? { speakerNotes: f.speakerNotes } : {}),
     ...(f.hidden != null ? { hidden: f.hidden } : {}),
     ...(f.locked != null ? { locked: f.locked } : {}),
-  }
+    ...(f.z != null ? { z: f.z } : {}),
+    ...(f.rotation != null ? { rotation: f.rotation } : {}),
+    ...(f.approval != null ? { approval: f.approval } : {}),
+  } as Frame
+  unloadHtml(frame)
+  return frame
 }
 
 function noteFromRow(n: typeof t.canvasNotes.$inferSelect): CanvasNote {
@@ -1038,6 +1300,8 @@ export async function hydrate(): Promise<Hydrated> {
     commentRows,
     activityRows,
     guidelineRows,
+    componentRows,
+    tokenRows,
     referenceRows,
     decisionRows,
     proposalRows,
@@ -1046,12 +1310,16 @@ export async function hydrate(): Promise<Hydrated> {
     noteRows,
   ] = await Promise.all([
     db.select().from(t.canvases),
-    db.select().from(t.frames),
+    /* every column but html: frame HTML is most of the database and loads
+       per canvas when something needs it (store.load) */
+    db.select(frameMetaColumns).from(t.frames),
     db.select().from(t.tasks).orderBy(desc(t.tasks.startedAt)),
     db.select().from(t.feedback).orderBy(desc(t.feedback.at)),
     db.select().from(t.comments).orderBy(desc(t.comments.at)),
     db.select().from(t.activity).orderBy(desc(t.activity.at)),
     db.select().from(t.guidelines).orderBy(t.guidelines.name),
+    db.select().from(t.components).orderBy(t.components.name),
+    db.select().from(t.designTokens).orderBy(t.designTokens.order, t.designTokens.name),
     db.select().from(t.memoryReferences).orderBy(desc(t.memoryReferences.pinnedAt)),
     db.select().from(t.decisions).orderBy(desc(t.decisions.at)),
     db.select().from(t.memoryProposals).orderBy(desc(t.memoryProposals.at)),
@@ -1064,8 +1332,11 @@ export async function hydrate(): Promise<Hydrated> {
     id: c.id,
     name: c.name,
     pages: c.pages ?? undefined,
+    ...(c.guides?.length ? { guides: c.guides } : {}),
+    ...(c.tokenThemes?.length ? { tokenThemes: c.tokenThemes } : {}),
     ownerId: c.ownerId ?? undefined,
-    linkAccess: linkAccessFromColumn(c.linkAccess),
+    /* 'view' / 'comment' / 'edit'; null and anything unknown read as private */
+    linkAccess: storedLinkAccess(c.linkAccess),
     ...(c.linkAudience === 'anyone' || c.linkAudience === 'password' ? { linkAudience: c.linkAudience } : {}),
     ...(c.linkPasswordHash ? { hasLinkPassword: true } : {}),
     ...(c.publishedAt != null ? { publishedAt: c.publishedAt } : {}),
@@ -1099,7 +1370,7 @@ export async function hydrate(): Promise<Hydrated> {
     list.push(domainGrantFromRow(g))
     domainGrants.set(g.canvasId, list)
   }
-  for (const c of canvases) c.frames.sort((a, b) => a.createdAt - b.createdAt)
+  for (const c of canvases) c.frames.sort(byStack)
   for (const r of referenceRows) {
     const c = byId.get(r.canvasId)
     if (!c) continue
@@ -1114,6 +1385,12 @@ export async function hydrate(): Promise<Hydrated> {
       pinnedAt: r.pinnedAt,
     })
   }
+  for (const row of componentRows) {
+    const c = byId.get(row.canvasId)
+    if (!c) continue
+    const { canvasId: _canvasId, code, source, ...def } = row
+    ;(c.components ??= []).push({ ...def, ...(code ? { code } : {}), ...(source ? { source } : {}) })
+  }
   for (const g of guidelineRows) {
     const c = byId.get(g.canvasId)
     if (!c) continue
@@ -1125,6 +1402,20 @@ export async function hydrate(): Promise<Hydrated> {
       updatedBy: g.updatedBy,
       ...(g.x != null ? { x: g.x } : {}),
       ...(g.y != null ? { y: g.y } : {}),
+    })
+  }
+  for (const row of tokenRows) {
+    const c = byId.get(row.canvasId)
+    if (!c) continue
+    ;(c.tokens ??= []).push({
+      name: row.name,
+      type: row.type as TokenType,
+      value: row.value,
+      ...(row.themes && Object.keys(row.themes).length ? { themes: row.themes } : {}),
+      ...(row.description != null ? { description: row.description } : {}),
+      order: row.order,
+      updatedAt: row.updatedAt,
+      updatedBy: row.updatedBy,
     })
   }
 
@@ -1169,6 +1460,7 @@ export async function hydrate(): Promise<Hydrated> {
       ...repoCardFields(row.kind, row.payload),
       ...scopeField(row.scope),
       ...(row.frameIds ? { frameIds: row.frameIds.split(',').filter(Boolean) } : {}),
+      ...runnerField(row.runner),
     })
     tasks.set(row.canvasId, list)
   }
@@ -1195,6 +1487,7 @@ export async function hydrate(): Promise<Hydrated> {
       ...(row.targetAgent != null ? { targetAgent: row.targetAgent } : {}),
       from: row.fromName,
       ...(row.fromUserId != null ? { fromUserId: row.fromUserId } : {}),
+      ...runnerField(row.runner),
       text: row.text,
       at: row.at,
       ...(row.deliveredAt != null ? { deliveredAt: row.deliveredAt } : {}),
@@ -1207,9 +1500,18 @@ export async function hydrate(): Promise<Hydrated> {
   }
 
   const comments = new Map<string, ElementComment[]>()
+  const legacyCommentSelectors = new Map<string, string>()
   for (const row of commentRows) {
     const list = comments.get(row.canvasId) ?? []
     if (list.length >= LOG_CAP) continue
+    if (
+      row.elementId == null &&
+      row.frameId != null &&
+      row.selector &&
+      (row.selector !== 'body' || row.anchor != null)
+    ) {
+      legacyCommentSelectors.set(row.id, row.selector)
+    }
     const interrupted = row.claimedBy != null && row.resolvedAt == null && row.failedAt == null
     const failedAt = row.failedAt ?? (interrupted ? now : undefined)
     const failureReason = row.failureReason ?? (interrupted ? interruptedReason : undefined)
@@ -1218,7 +1520,8 @@ export async function hydrate(): Promise<Hydrated> {
       id: row.id,
       canvasId: row.canvasId,
       ...(row.frameId != null ? { frameId: row.frameId } : {}),
-      selector: row.selector,
+      ...(row.elementId != null ? { elementId: row.elementId } : {}),
+      ...(row.elementOrigin != null ? { elementOrigin: row.elementOrigin } : {}),
       snippet: row.snippet,
       ...(row.pageId != null ? { pageId: row.pageId } : {}),
       ...(row.x != null ? { x: row.x } : {}),
@@ -1296,7 +1599,18 @@ export async function hydrate(): Promise<Hydrated> {
     proposals.set(row.canvasId, list)
   }
 
-  return { canvases, tasks, feedback, comments, activity, decisions, proposals, domainGrants, linkPasswordHashes }
+  return {
+    canvases,
+    tasks,
+    feedback,
+    comments,
+    legacyCommentSelectors,
+    activity,
+    decisions,
+    proposals,
+    domainGrants,
+    linkPasswordHashes,
+  }
 }
 
 /** One-time import of the pre-DB data/store.json so existing canvases survive. */

@@ -29,28 +29,93 @@ Local self-hosting is still `docker compose up` (`docker-compose.yml` + `Dockerf
 
 The CI build uses `bun run --bun build` to match the `oven/bun` Docker build stage, where `node` commands run with Bun. Extension tests also build with both runtimes and run the Bun-built archive under Node, including its nested runtime dependencies.
 
-## Desktop app (Tauri: macOS DMG + Windows NSIS installer)
+## Desktop app (Tauri: macOS DMG + Windows NSIS installer + Linux AppImage/.deb/.rpm)
 
 Driven by `.github/workflows/desktop-release.yml`; every desktop job shares the toolchain setup
 in `.github/actions/setup-desktop`:
 
 - Push a tag matching `desktop-v*` -> `dmg-macos` builds a universal (Apple Silicon + Intel) DMG
-  with `bunx tauri build --target universal-apple-darwin --bundles dmg`, `nsis-windows` builds
-  `doop_<version>_x64-setup.exe` with `bunx tauri build --bundles nsis`, and a final `release`
-  job (`needs` both) attaches the two to one GitHub Release - so a tag is never published with
-  only one installer.
+  with `bunx tauri build --target universal-apple-darwin --bundles app,dmg`, `nsis-windows` builds
+  `doop_<version>_x64-setup.exe` with `bunx tauri build --bundles nsis`, `linux` builds the
+  x64 AppImage, .deb and .rpm on `ubuntu-22.04` (the oldest runner, for a low glibc floor) with
+  `bunx tauri build --bundles deb,rpm,appimage`, and a final `release` job (`needs` all three)
+  attaches them to one GitHub Release - so a tag is never published with an installer missing.
+- The AppImage is repacked after the build by `desktop/scripts/appimage-drop-wayland.sh` (pinned
+  `appimagetool` and type2 runtime, both checksummed), which drops the bundled `libwayland-*`: copies from the 22.04 runner are older
+  than current distros' Mesa and make WebKitGTK abort with `EGL_BAD_PARAMETER`. Tauri passes
+  linuxdeploy no extra flags, so `--exclude-library` cannot do it. The script re-signs the
+  updater `.sig` when the key is set.
+- Self-update (`tauri-plugin-updater`, `desktop/src-tauri/src/updates.rs`): with the
+  `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets set, every build also
+  emits signed updater packages, and the `release` job writes `latest.json`, attaches it and copies
+  it onto the fixed `desktop-updates` prerelease, which `doop.design/desktop/latest.json`
+  redirects to (served by the hosted deployment). A tag fails without the key. Installed official
+  shells check at launch and daily, download in the background and offer a restart: in the
+  page's "Update available" card (`src/components/UpdateCard.tsx`, `src/lib/desktopUpdate.ts`;
+  bottom right above the zoom pill, shaped like the canvas's getting-started card),
+  which claims the offer through `update_card_ready` once it listens for `update-ready` and answers
+  with `update_restart`, or in a native dialog while no page has claimed it (each page load resets
+  the claim, so an older web build still gets the dialog). Its ✕ (Not now) keeps the download for the
+  next check and, on macOS, installs it on quit. The key
+  pair lives in the signing backup; its public half is `plugins.updater.pubkey`.
 - `workflow_dispatch` or a PR touching the workflow file itself -> same builds, uploaded as
   workflow artifacts instead (keeps the pipeline validated without cutting a release).
 - macOS signing/notarization: automatic once the `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
   `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` repo secrets exist (see
   `desktop/README.md`). Without them the DMG is unsigned - it still works, but downloaders must
   approve it via System Settings -> Privacy & Security.
-- The Windows installer is unsigned (no Authenticode certificate configured): SmartScreen warns on
-  first run and users click "More info" -> "Run anyway".
+- Windows signing: Azure Artifact Signing (account `Doop`, East US, profile `doop-public`). The
+  `nsis-windows` job runs in the `desktop-release` environment, logs in through OIDC (app
+  registration `doop-desktop-signing`, federated on that environment; `AZURE_CLIENT_ID` /
+  `AZURE_TENANT_ID` repo variables, no secret) and passes a CI-only `signCommand` to Tauri
+  (`desktop/scripts/sign-windows.ps1`: signtool + the pinned `Microsoft.ArtifactSigning.Client`
+  dlib), so the app exe, installer and uninstaller are signed; `signtool verify` gates the job. PR
+  builds and repos without the variables stay unsigned. Setup: `desktop/README.md`.
+- Connecting an OAuth integration (Meta, Linear, Slack) from the app opens the
+  provider in the system browser and returns over a `doop://integration/<id>` link; the app
+  finishes it under its own session (`shared/desktopConnect.ts`). This is web-only: shells from
+  0.2.1 already deliver any `doop://` link, and older shells open Integrations in the browser.
+- The macOS menu bar is the page's (`desktop/src-tauri/src/app_menu.rs`, `src/lib/appMenu.ts`, gated
+  on `window.__DOOP_APP_MENU__`, macOS only): the page sends File, Edit, View, Object, Text, Arrange
+  and Help from the action registry (`app_menu_set`, labels in its language, each chord as the key
+  equivalent) and then only changed enabled/checked state (`app_menu_state`); the shell keeps the
+  app menu, Close Tab, the system Undo/Cut/Copy/Paste/Select All that text fields need, Full Screen
+  and Window. A pick returns as `app-menu` `{ id, key }`; the webview sees a key before the menu, and
+  a key the menu does get keeps the canvas keyboard's rules (nothing while typing or presenting).
+  Until a page sets it the bar is the old fixed one, whose View menu (`view_menu.rs`,
+  `src/lib/viewMenu.ts`, `__DOOP_VIEW_MENU__`) an older page still drives. Needs a desktop release.
+- Server choice (`desktop/src-tauri/src/server.rs`, `src/components/ServerSettings.tsx`): the
+  sign-in screen's cog (shells advertising `__DOOP_SERVER_CHOOSE__`) points an official build at a
+  self-hosted server. `server_choose` normalizes the address to an origin (https, or http on loopback only),
+  checks `/api/locale-config` answers and takes the origin any redirect lands on, confirms natively, writes `server.json` in the app data dir and
+  restarts; at launch the chosen origin gets `capabilities/default.json` as a runtime capability
+  and the navigation allowlist. A chosen server that does not answer at launch gets a native Try Again / Use doop.design dialog
+  (`check_on_launch`, every platform); macOS also has "Use doop.design…" in the app menu. Official builds
+  keep updating from the doop.design feed whatever server is chosen. Tests: the Rust unit tests in
+  `server.rs`, `serverSettings.test.tsx`.
 - The shell tells the page its platform via `window.__DOOP_DESKTOP_PLATFORM__` (read in
   `src/lib/shell.ts`); only macOS gets the overlay title bar / traffic-light inset.
 - Desktop app version is tracked separately from the root `package.json` and bumped by
   release-please (see above); after the release PR merges, tag as `desktop-vX.Y.Z`.
+- The macOS app is the Chromium (CEF) build in `desktop/src-tauri-chromium`; Windows and Linux
+  stay on the WebKit build. It ships as `doop` / `design.doop.desktop` with the executable
+  `doop-desktop`, exactly as the WebKit app did, so the updater swaps the bundle in place and
+  relaunches it by its old path. The Tauri 3 CLI bundles CEF for one architecture at a time
+  (its universal target ships one architecture's framework), so `dmg-macos` runs
+  `desktop/scripts/macos-universal.sh` as Electron apps do: an unsigned app per architecture
+  (`bun run build:chromium --target … --no-sign`, ninja from brew, CEF cached under
+  `~/Library/Caches/tauri-cef`), merged by `@electron/universal` (`scripts/universal-app.mjs`),
+  signed inside out (framework libraries, framework, five helpers, app) with the CEF entitlements
+  (allow-jit, allow-unsigned-executable-memory, disable-library-validation) under the hardened
+  runtime, notarized, packed with `create-dmg`, and tarred and signed with `tauri signer` for the
+  updater. The outputs keep the WebKit build's names (`doop_<version>_universal.dmg`,
+  `doop.app.tar.gz`), so the release job and the download link are unchanged; the app is about
+  600 MB, Chromium for both architectures. The first Chromium launch brings the
+  WebKit app's cookies and localStorage over (`src/webkit_migration.rs`), so the switch keeps
+  people signed in. Each Chromium security release needs a CEF bump (`tauri-runtime-cef`) and a
+  desktop release. Rolling back means publishing a WebKit macOS build with a higher version to
+  the feed; it starts from its old WebKit store, as it was before the switch.
+  release-please bumps the Chromium `tauri.conf.json` and `Cargo.toml` with the WebKit shell's.
 
 ## Claude Desktop extension
 
@@ -82,7 +147,7 @@ link; the app opens a review screen and writes only after the user clicks Add to
 The native capability marker gates older shells. Release the updated desktop binary
 and frontend together; no downloadable integration bundle is built. Codex still owns
 the separate OAuth approval. Config preservation, conflict handling and handoff checks
-are covered by Rust/frontend tests; desktop CI now runs the Rust tests on both platforms.
+are covered by Rust/frontend tests; desktop CI now runs the Rust tests on macOS, Windows and Linux.
 See [`desktop/README.md`](../desktop/README.md#add-to-codex) for release smoke checks.
 
 ## Cursor marketplace plugin

@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { createServer, type ViteDevServer } from 'vite'
-import type { Browser, Page } from 'puppeteer-core'
-import { findBrowserPath, getBrowser } from '../server/screenshot.ts'
+import { beforeEach, describe, expect, it } from 'vitest'
+import type { Page } from 'puppeteer-core'
+import { findBrowserPath } from '../server/screenshot.ts'
+import { fixtureUrl, pagePerTest } from './browser.ts'
 
 type Inspect = { classes: string[]; backgroundColor: string; padding: number[] } | null
 type Message = { type: string; reqId?: string; info?: Inspect }
@@ -14,20 +14,13 @@ type Fixture = { messages: Message[]; testReady: boolean }
 // document, so the body's own attributes have to travel too or the whole
 // stylesheet matches nothing and the frame renders as browser defaults.
 describe.skipIf(!findBrowserPath())('frame runtime body attributes', () => {
-  let server: ViteDevServer
-  let browser: Browser
+  const pages = pagePerTest()
   let page: Page
   let seq = 0
-  beforeAll(async () => {
-    server = await createServer({
-      server: { port: 0 },
-      optimizeDeps: { include: ['posthog-js/dist/posthog-recorder', 'posthog-js/dist/rrweb'] },
-      logLevel: 'error',
-    })
-    await server.listen()
-    browser = await getBrowser()
-    page = await browser.newPage()
-    await page.goto(`${server.resolvedUrls!.local[0]}tests/fixtures/frameReplay.html`)
+  beforeEach(async () => {
+    seq = 0
+    page = await pages.open()
+    await page.goto(fixtureUrl('frameReplay.html'))
     await page.waitForFunction(
       () =>
         (window as unknown as Fixture).testReady &&
@@ -37,11 +30,6 @@ describe.skipIf(!findBrowserPath())('frame runtime body attributes', () => {
       },
     )
   }, 60_000)
-  afterAll(async () => {
-    await page?.close()
-    await browser?.close()
-    await server?.close()
-  })
 
   async function ask<T extends Message>(message: Record<string, unknown>, reply: string): Promise<T> {
     const reqId = `req-${++seq}`

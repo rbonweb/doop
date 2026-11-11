@@ -1,7 +1,14 @@
 import { useStore } from './store'
+import type { InstanceSettings, InstanceSettingsPatch } from '../../shared/instanceSettings'
+import { beginFrameSave } from './frameSaves'
+import type { StackWrite } from '../../shared/frameStack'
 import type { LocalAgentPreference, LocalAgentJob, LocalAgentResult } from '../../shared/localAgent'
+import type { ImageDescriptionMode, ImageDescriptionPreference } from '../../shared/imageDescriptions'
+import type { AgentRunners, RunnerPick, RunnerProvider } from '../../shared/agentRunner'
+import type { CustomProviderConfig, CustomProviderKind } from '../../shared/customProvider'
 import type { NotificationPrefs, NotificationSettings } from '../../shared/notifications'
 import type { WebhookDeliveryResult, WebhookEventType, WebhookInfo } from '../../shared/webhooks'
+import type { AgentFeedbackKind, AgentFeedbackReport } from '../../shared/agentFeedback'
 import type {
   AccessRequestInfo,
   ActivityItem,
@@ -9,7 +16,6 @@ import type {
   CanvasMeta,
   CanvasNote,
   CardScope,
-  CommentAnchor,
   CommunityCategory,
   CommunityItem,
   DomainGrant,
@@ -17,19 +23,71 @@ import type {
   Frame,
   FrameVersion,
   FrameVersionInfo,
-  LinkAccess,
   LinkAudience,
   MemberRole,
-  CanvasRole,
   WorkspaceDetail,
   WorkspaceInvite,
   WorkspaceMember,
   WorkspaceRole,
   WorkspaceSummary,
 } from '../../shared/types'
-import type { Automation, AutomationRun, Schedule, Step } from '../../shared/automations'
+import type { Automation, AutomationRun, AutomationTrigger, Schedule, Step } from '../../shared/automations'
 import type { UpdateInfo } from '../../shared/selfUpdate'
 import type { BillingInterval, Plan } from '../../shared/billing'
+import type { CanvasRole, LinkAccess } from '../../shared/canvasRole'
+import type { CommentAnchorInput } from '../../shared/comments'
+import type { ComponentCode, ComponentDef, ComponentProp, PartOverride } from '../../shared/components'
+
+/** What the server says about a component beyond the definition itself. */
+export interface ComponentInfo {
+  id: string
+  name: string
+  signature: string
+  description?: string
+  usage: string
+  instances: number
+  main_missing?: boolean
+  code?: ComponentCode
+  library_update_available?: { from_rev: number; to_rev: number; canvas_id: string }
+  rev: number
+  usage_by_frame: { id: string; name: string; instances: number; approved: boolean }[]
+}
+
+export interface ComponentCandidate {
+  suggested_name: string
+  occurrences: number
+  frames: number
+  elements_each: number
+  sample_text: string
+  example: { frame_id: string; frame_name: string; element: string }
+}
+
+export interface ComponentLibrary {
+  id: string
+  name: string
+  components: { id: string; name: string; signature: string; description?: string; instances: number }[]
+}
+
+export interface ComponentImpact {
+  component: ComponentDef
+  dry_run: boolean
+  impact: {
+    instances: number
+    frames: { id: string; name: string; instances: number; approved: boolean }[]
+    approvals_affected: number
+    overrides_orphaned: { frame_id: string; instance_id: string; parts: string[] }[]
+  }
+}
+
+export interface InstanceChangeInput {
+  instanceId: string
+  props?: Record<string, string>
+  overrides?: Record<string, PartOverride>
+  reset?: boolean | string[]
+  detach?: boolean
+}
+import type { CustomFont } from '../../shared/fonts'
+import type { DesignToken, DesignTokenInput, ThemeRename, TokenEdit, TokenResult } from '../../shared/designTokens'
 
 export type HomeActivity = ActivityItem & { canvasId: string; canvasName: string }
 
@@ -38,6 +96,8 @@ export interface CanvasMember {
   name: string
   /** only the owner is shown addresses; everyone else gets an empty string */
   email: string
+  /** the profile photo's URL when the person uploaded one */
+  image?: string
   owner: boolean
   role: CanvasRole
 }
@@ -165,11 +225,24 @@ export interface Allowance {
   byoModel: boolean
   byoKind?: ModelAccountKind | 'claude-local' | 'gemini-cloud'
   byoEmail?: string
+  /** a custom provider's name, when that is the default */
+  byoName?: string
   /** free tasks are spent and their own account is carrying the agent */
   onOwnAccount: boolean
 }
 
-export type ModelAccountKind = 'chatgpt' | 'openai-key' | 'anthropic-key' | 'openrouter-key' | 'gemini-key'
+/** A built-in provider, or a custom one a person added (`custom:<id>`). */
+export type ModelAccountKind = BuiltinModelAccountKind | CustomProviderKind
+
+export type BuiltinModelAccountKind =
+  | 'chatgpt'
+  | 'openai-key'
+  | 'anthropic-key'
+  | 'openrouter-key'
+  | 'gemini-key'
+  | 'deepseek-key'
+  | 'kimi-key'
+  | 'kimi-code'
 
 /** An in-flight device sign-in: the user types `userCode` at `verificationUrl`
  *  and the server polls OpenAI until they approve. */
@@ -186,20 +259,58 @@ export interface AgentModelOption {
   blurb: string
   /** false = the model cannot see screenshots; runs skip visual review */
   vision?: boolean
+  /** true on a curated entry the provider's live catalog confirmed */
+  recommended?: boolean
 }
 
+/** The connected provider's live model list, or the curated menu when the
+ *  provider could not be asked (`live: false`, with the reason in `error`). */
+export interface AgentModelCatalog {
+  models: AgentModelOption[]
+  live: boolean
+  error?: string
+}
+
+/** One connected model account, as Settings shows it: never a token. */
 export interface ModelAccountStatus {
-  connected: boolean
-  kind?: ModelAccountKind
+  kind: ModelAccountKind
+  /** off keeps the credential but takes the account out of use */
+  enabled: boolean
   email?: string
   plan?: string
   /** the model tier this account runs on right now */
   model?: string
-  connectedAt?: number
+  /** the reasoning effort in effect; only the OpenAI kinds have one */
+  effort?: string
+  connectedAt: number
+  /** a custom provider's description: never its key or header values */
+  custom?: CustomProviderStatus
+}
+
+export interface CustomProviderStatus extends CustomProviderConfig {
+  headerNames: string[]
+  hasKey: boolean
+}
+
+/** What the custom provider form sends. A key or headers left out keep the
+ *  stored ones on an edit; an empty key clears it. */
+export interface CustomProviderInput extends CustomProviderConfig {
+  apiKey?: string
+  headers?: Record<string, string>
+}
+
+/** The Settings pane's view: every connected account, on or off, and which
+ *  connection runs work nobody picked one for. */
+export interface ModelAccounts {
+  accounts: ModelAccountStatus[]
+  default?: RunnerProvider
   /** false when the server has switched the ChatGPT flow off */
-  chatgptEnabled?: boolean
-  /** the curated menu each provider's picker offers */
-  menus?: Record<ModelAccountKind, AgentModelOption[]>
+  chatgptEnabled: boolean
+  /** the menu each provider's picker offers: curated for the built-in
+   *  kinds, as listed for each connected custom provider */
+  menus: Partial<Record<ModelAccountKind, AgentModelOption[]>>
+  /** false when the server has switched custom providers off */
+  customProviders?: boolean
 }
 
 /** One image-model registry entry's availability for this user. */
@@ -220,6 +331,7 @@ export interface AutomationInput {
   enabled?: boolean
   schedule?: Schedule
   steps?: Step[]
+  trigger?: AutomationTrigger
 }
 
 /** The Integrations page: per-provider connection state. A provider the
@@ -313,11 +425,33 @@ export const api = {
   updateWebhook: (id: string, patch: { url?: string; events?: WebhookEventType[]; enabled?: boolean }) =>
     req<WebhookInfo>(`/api/webhooks/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteWebhook: (id: string) => req<{ ok: boolean }>(`/api/webhooks/${id}`, { method: 'DELETE' }),
+  /* font libraries: a workspace's with an id, the signed-in person's without */
+  listFonts: (workspaceId?: string) =>
+    req<CustomFont[]>(`/api/fonts${workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : ''}`),
+  uploadFont: (file: File, workspaceId?: string) =>
+    req<CustomFont>(`/api/fonts${workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : ''}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
+      body: file,
+    }),
+  deleteFont: (id: string) => req<{ ok: boolean }>(`/api/fonts/${id}`, { method: 'DELETE' }),
+  /* the profile photo: raw bytes in, the face's URL out */
+  uploadAvatar: (file: File) =>
+    req<{ image: string }>('/api/me/avatar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    }),
+  removeAvatar: () => req<{ ok: boolean }>('/api/me/avatar', { method: 'DELETE' }),
+  canvasFonts: (canvasId: string) => req<CustomFont[]>(`/api/canvases/${canvasId}/fonts`),
   rotateWebhookSecret: (id: string) => req<{ secret: string }>(`/api/webhooks/${id}/rotate`, { method: 'POST' }),
   testWebhook: (id: string) => req<WebhookDeliveryResult>(`/api/webhooks/${id}/test`, { method: 'POST' }),
   notificationSettings: () => req<NotificationSettings>('/api/notifications'),
   setNotificationPrefs: (prefs: NotificationPrefs) =>
     req<NotificationSettings>('/api/notifications', { method: 'PUT', body: JSON.stringify(prefs) }),
+  imageDescriptions: () => req<ImageDescriptionPreference>('/api/image-descriptions'),
+  setImageDescriptions: (mode: ImageDescriptionMode) =>
+    req<ImageDescriptionPreference>('/api/image-descriptions', { method: 'PUT', body: JSON.stringify({ mode }) }),
   localAgent: () => req<LocalAgentPreference>('/api/local-agent'),
   setLocalAgent: (preference: LocalAgentPreference) =>
     req<LocalAgentPreference>('/api/local-agent', { method: 'PUT', body: JSON.stringify(preference) }),
@@ -402,8 +536,19 @@ export const api = {
     }),
   guestCanvasComment: (canvasId: string, input: { pageId: string; x: number; y: number; text: string; name: string }) =>
     req<PostedComment>(`/api/public/canvases/${canvasId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
-  guestComment: (frameId: string, input: { selector: string; snippet: string; text: string; name: string }) =>
-    req<PostedComment>(`/api/public/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
+  guestComment: (
+    frameId: string,
+    input: {
+      selector?: string
+      elementId?: string
+      snippet: string
+      text: string
+      x: number
+      y: number
+      elementOrigin?: { x: number; y: number }
+      name: string
+    },
+  ) => req<PostedComment>(`/api/public/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
   guestReply: (commentId: string, text: string, name: string) =>
     req<PostedComment>(`/api/public/comments/${commentId}/replies`, {
       method: 'POST',
@@ -451,6 +596,29 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ markdown, ...(title !== undefined ? { title } : {}) }),
     }),
+  /* design tokens */
+  createTokens: (canvasId: string, tokens: DesignTokenInput[]) =>
+    req<{ results: TokenResult[]; tokens: DesignToken[] }>(`/api/canvases/${canvasId}/tokens`, {
+      method: 'POST',
+      body: JSON.stringify({ tokens }),
+    }),
+  setToken: (canvasId: string, name: string, edit: Omit<TokenEdit, 'name'>) =>
+    req<{ result: TokenResult; tokens: DesignToken[] }>(
+      `/api/canvases/${canvasId}/tokens/${encodeURIComponent(name)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(edit),
+      },
+    ),
+  setTokenThemes: (canvasId: string, themes: string[], renames: ThemeRename[] = []) =>
+    req<{ themes: string[]; tokens: DesignToken[] }>(`/api/canvases/${canvasId}/token-themes`, {
+      method: 'PUT',
+      body: JSON.stringify({ themes, ...(renames.length ? { renames } : {}) }),
+    }),
+  deleteToken: (canvasId: string, name: string) =>
+    req<{ ok: boolean; tokens: DesignToken[] }>(`/api/canvases/${canvasId}/tokens/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
   /* design memory */
   pinReference: (canvasId: string, frameId: string) =>
     req(`/api/canvases/${canvasId}/references`, { method: 'POST', body: JSON.stringify({ frameId }) }),
@@ -487,6 +655,23 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ pages, expectedPages }),
     }),
+  setFlowStart: (canvasId: string, pageId: string, frameId: string | null) =>
+    req<import('../../shared/types').CanvasPageInfo[]>(
+      `/api/canvases/${canvasId}/pages/${encodeURIComponent(pageId)}/flow-start`,
+      { method: 'PUT', body: JSON.stringify({ frameId }) },
+    ),
+  setPageBackground: (canvasId: string, pageId: string, color: string | null) =>
+    req<import('../../shared/types').CanvasPageInfo[]>(
+      `/api/canvases/${canvasId}/pages/${encodeURIComponent(pageId)}/background`,
+      { method: 'PUT', body: JSON.stringify({ color }) },
+    ),
+  putGuide: (canvasId: string, guide: import('../../shared/types').CanvasGuide) =>
+    req<import('../../shared/types').CanvasGuide>(`/api/canvases/${canvasId}/guides/${guide.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ pageId: guide.pageId, axis: guide.axis, at: guide.at }),
+    }),
+  deleteGuide: (canvasId: string, guideId: string) =>
+    req<{ ok: true }>(`/api/canvases/${canvasId}/guides/${guideId}`, { method: 'DELETE' }),
   duplicatePage: (canvasId: string, pageId: string) =>
     req<{
       page: import('../../shared/types').CanvasPageInfo
@@ -506,13 +691,89 @@ export const api = {
         actor: actor(),
       }),
     }),
-  updateFrame: (frameId: string, patch: Partial<Frame>, expectedUpdatedAt?: number) =>
-    req<Frame>('/api/frames/' + frameId, {
+  updateFrame: async (frameId: string, patch: Partial<Frame>, expectedUpdatedAt?: number) => {
+    const finish = ['html', 'width', 'height'].some((key) => key in patch) ? beginFrameSave(frameId) : () => {}
+    try {
+      return await req<Frame>('/api/frames/' + frameId, {
+        method: 'PATCH',
+        body: JSON.stringify({ ...patch, expectedUpdatedAt, actor: actor() }),
+      })
+    } finally {
+      finish()
+    }
+  },
+  components: (canvasId: string) => req<ComponentInfo[]>(`/api/canvases/${canvasId}/components`),
+  componentPreview: (canvasId: string, componentId: string) =>
+    req<{ html: string; width: number; height: number; variants: number }>(
+      `/api/canvases/${canvasId}/components/${componentId}/preview`,
+    ),
+  componentCandidates: (canvasId: string) =>
+    req<ComponentCandidate[]>(`/api/canvases/${canvasId}/component-candidates`),
+  componentLibraries: (canvasId: string) => req<ComponentLibrary[]>(`/api/canvases/${canvasId}/component-libraries`),
+  createComponent: (
+    canvasId: string,
+    body: { name: string; frameId: string; element: string; replaceMatching?: boolean; description?: string },
+  ) =>
+    req<{ component: ComponentDef; converted: { frameId: string; instances: number }[]; frames: Frame[] }>(
+      `/api/canvases/${canvasId}/components`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  updateComponent: (
+    canvasId: string,
+    componentId: string,
+    body: {
+      name?: string
+      description?: string
+      props?: ComponentProp[]
+      code?: ComponentCode | null
+      dryRun?: boolean
+    },
+  ) =>
+    req<ComponentImpact>(`/api/canvases/${canvasId}/components/${componentId}`, {
       method: 'PATCH',
-      body: JSON.stringify({ ...patch, expectedUpdatedAt, actor: actor() }),
+      body: JSON.stringify(body),
     }),
+  deleteComponent: (canvasId: string, componentId: string) =>
+    req<{ deleted: string; instances_detached: number }>(`/api/canvases/${canvasId}/components/${componentId}`, {
+      method: 'DELETE',
+    }),
+  restoreComponent: (canvasId: string, componentId: string, rev: number) =>
+    req<ComponentImpact>(`/api/canvases/${canvasId}/components/${componentId}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ rev }),
+    }),
+  importComponent: (canvasId: string, sourceCanvasId: string, component: string) =>
+    req<ComponentDef>(`/api/canvases/${canvasId}/components/import`, {
+      method: 'POST',
+      body: JSON.stringify({ sourceCanvasId, component }),
+    }),
+  syncComponent: (canvasId: string, componentId: string) =>
+    req<{ component: ComponentDef; updated: boolean }>(`/api/canvases/${canvasId}/components/${componentId}/sync`, {
+      method: 'POST',
+    }),
+  insertInstance: (
+    frameId: string,
+    body: { component: string; props?: Record<string, string>; target?: string; position?: string },
+  ) =>
+    req<{ frame: Frame; instanceId: string }>(`/api/frames/${frameId}/instances`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  changeInstances: (frameId: string, changes: InstanceChangeInput[]) =>
+    req<{ frame: Frame; missing: string[] }>(`/api/frames/${frameId}/instances`, {
+      method: 'PATCH',
+      body: JSON.stringify({ changes }),
+    }),
+  /* several frames' stacking order at once, all or nothing */
+  restackFrames: (canvasId: string, frames: StackWrite[]) =>
+    req<Frame[]>(`/api/canvases/${canvasId}/stack`, { method: 'PUT', body: JSON.stringify({ frames }) }),
   deleteFrame: (frameId: string, expectedUpdatedAt?: number) =>
     req('/api/frames/' + frameId, { method: 'DELETE', body: JSON.stringify({ expectedUpdatedAt, actor: actor() }) }),
+  setFrameApproval: (frameId: string, status: 'ready_for_dev' | 'draft', expectedUpdatedAt: number) =>
+    req<Frame>(`/api/frames/${frameId}/approval`, {
+      method: 'PUT',
+      body: JSON.stringify({ status, expectedUpdatedAt }),
+    }),
   /* design history: the states earlier edits replaced, newest first (no HTML) */
   frameVersions: (frameId: string) => req<FrameVersionInfo[]>(`/api/frames/${frameId}/versions`),
   frameVersion: (frameId: string, versionId: string) =>
@@ -546,41 +807,111 @@ export const api = {
       body: JSON.stringify({ urls }),
     }),
   agentAllowance: () => req<Allowance>('/api/agent-allowance'),
-  modelAccount: () => req<ModelAccountStatus>('/api/model-account'),
+  /** the connections the composer may send a task to */
+  agentRunners: () => req<AgentRunners>('/api/agent-runners'),
+  /** which connection comments, @mentions and automations run on */
+  setDefaultRunner: (provider: RunnerProvider) =>
+    req<ModelAccounts>('/api/agent-runners/default', { method: 'PUT', body: JSON.stringify({ provider }) }),
+  modelAccounts: () => req<ModelAccounts>('/api/model-account'),
+  agentModels: (kind: ModelAccountKind) =>
+    req<AgentModelCatalog>(`/api/model-account/models?kind=${encodeURIComponent(kind)}`),
   chatgptAuthorize: () =>
     req<{ url: string; state: string; catching: boolean }>('/api/model-account/chatgpt/authorize', { method: 'POST' }),
   startDeviceAuth: () => req<DeviceFlow>('/api/model-account/chatgpt/device', { method: 'POST' }),
   deviceAuthStatus: () => req<DeviceFlow | { status: 'none' }>('/api/model-account/chatgpt/device'),
   cancelDeviceAuth: () => req('/api/model-account/chatgpt/device', { method: 'DELETE' }),
   connectChatgpt: (redirect: string) =>
-    req<ModelAccountStatus>('/api/model-account/chatgpt', { method: 'POST', body: JSON.stringify({ redirect }) }),
+    req<ModelAccounts>('/api/model-account/chatgpt', { method: 'POST', body: JSON.stringify({ redirect }) }),
   connectOpenAiKey: (apiKey: string) =>
-    req<ModelAccountStatus>('/api/model-account/openai-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
+    req<ModelAccounts>('/api/model-account/openai-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
   connectAnthropicKey: (apiKey: string) =>
-    req<ModelAccountStatus>('/api/model-account/anthropic-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
+    req<ModelAccounts>('/api/model-account/anthropic-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
   connectOpenRouterKey: (apiKey: string) =>
-    req<ModelAccountStatus>('/api/model-account/openrouter-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
+    req<ModelAccounts>('/api/model-account/openrouter-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
   connectGeminiKey: (apiKey: string) =>
-    req<ModelAccountStatus>('/api/model-account/gemini-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
-  disconnectModelAccount: () => req<ModelAccountStatus>('/api/model-account', { method: 'DELETE' }),
-  setAgentModel: (model: string) =>
-    req<ModelAccountStatus>('/api/model-account', { method: 'PATCH', body: JSON.stringify({ model }) }),
+    req<ModelAccounts>('/api/model-account/gemini-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
+  connectDeepSeekKey: (apiKey: string) =>
+    req<ModelAccounts>('/api/model-account/deepseek-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
+  connectKimiKey: (apiKey: string) =>
+    req<ModelAccounts>('/api/model-account/kimi-key', { method: 'POST', body: JSON.stringify({ apiKey }) }),
+  connectKimiCodeKey: (apiKey: string) =>
+    req<ModelAccounts>('/api/model-account/kimi-code', { method: 'POST', body: JSON.stringify({ apiKey }) }),
+  disconnectModelAccount: (kind: ModelAccountKind) =>
+    req<ModelAccounts>(`/api/model-account/${encodeURIComponent(kind)}`, { method: 'DELETE' }),
+  setAgentModel: (kind: ModelAccountKind, model: string) =>
+    req<ModelAccounts>(`/api/model-account/${encodeURIComponent(kind)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ model }),
+    }),
+  setAgentEffort: (kind: ModelAccountKind, effort: string) =>
+    req<ModelAccounts>(`/api/model-account/${encodeURIComponent(kind)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ effort }),
+    }),
+  setModelAccountEnabled: (kind: ModelAccountKind, enabled: boolean) =>
+    req<ModelAccounts>(`/api/model-account/${encodeURIComponent(kind)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    }),
+  addCustomProvider: (input: CustomProviderInput) =>
+    req<ModelAccounts>('/api/custom-providers', { method: 'POST', body: JSON.stringify(input) }),
+  updateCustomProvider: (kind: CustomProviderKind, input: CustomProviderInput) =>
+    req<ModelAccounts>(`/api/custom-providers/${encodeURIComponent(kind)}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+  /** the endpoint's own model ids; `kind` lets an edit use the stored key */
+  discoverCustomModels: (input: {
+    apiType: CustomProviderConfig['apiType']
+    baseUrl: string
+    apiKey?: string
+    headers?: Record<string, string>
+    kind?: CustomProviderKind
+  }) => req<{ models: string[] }>('/api/custom-providers/models', { method: 'POST', body: JSON.stringify(input) }),
+  /** one turn that must call a tool, on `model` */
+  testCustomProvider: (input: CustomProviderInput & { model: string; kind?: CustomProviderKind }) =>
+    req<{ ok: true; model: string }>('/api/custom-providers/test', { method: 'POST', body: JSON.stringify(input) }),
   imageModels: () => req<{ models: ImageModelStatus[] }>('/api/image-model'),
   setImageModel: (model: string) =>
     req<{ models: ImageModelStatus[] }>('/api/image-model', { method: 'PUT', body: JSON.stringify({ model }) }),
-  addCard: (canvasId: string, title: string, agents: string[], attachments?: string[], scope?: CardScope) =>
+  addCard: (
+    canvasId: string,
+    title: string,
+    agents: string[],
+    attachments?: string[],
+    scope?: CardScope,
+    runner?: RunnerPick,
+  ) =>
     req(`/api/canvases/${canvasId}/cards`, {
       method: 'POST',
-      body: JSON.stringify({ title, agents, attachments, scope }),
+      body: JSON.stringify({ title, agents, attachments, scope, runner }),
     }),
   completeCard: (canvasId: string, cardId: string) =>
     req(`/api/canvases/${canvasId}/cards/${cardId}/done`, { method: 'POST' }),
   retryCard: (canvasId: string, cardId: string) =>
     req(`/api/canvases/${canvasId}/cards/${cardId}/retry`, { method: 'POST' }),
+  stopCard: (canvasId: string, cardId: string) =>
+    req(`/api/canvases/${canvasId}/cards/${cardId}/stop`, { method: 'POST' }),
+  /** a comment on an element (its positional selector, which the server turns into a stamped data-doop-id, or the id it already carries) or, with neither, on the frame at the point; x/y is where it was left, in frame design px */
   addComment: (
     frameId: string,
-    input: { selector: string; snippet: string; text: string; anchor?: CommentAnchor; mentions?: string[] },
+    input: {
+      selector?: string
+      elementId?: string
+      snippet: string
+      text: string
+      x: number
+      y: number
+      elementOrigin?: { x: number; y: number }
+      mentions?: string[]
+    },
   ) => req<PostedComment>(`/api/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
+  /** the stable id of the element a positional selector names, stamped into the frame if needed */
+  ensureElementId: (frameId: string, selector: string, snippet?: string) =>
+    req<{ elementId: string }>(`/api/frames/${frameId}/element-id`, {
+      method: 'POST',
+      body: JSON.stringify({ selector, ...(snippet ? { snippet } : {}) }),
+    }),
   /** a comment pinned to a point on the canvas (world coordinates on a page) rather than to an element */
   addCanvasComment: (
     canvasId: string,
@@ -592,9 +923,6 @@ export const api = {
       body: JSON.stringify({ text, mentions }),
     }),
   resolveComment: (commentId: string) => req(`/api/comments/${commentId}/resolve`, { method: 'POST' }),
-  /** report the element's new CSS path after a pin was re-found by its anchor */
-  healCommentAnchor: (commentId: string, selector: string) =>
-    req(`/api/comments/${commentId}/anchor`, { method: 'PATCH', body: JSON.stringify({ selector }) }),
   /** what this person has seen on a canvas, and when they first opened it (the first call starts that baseline) */
   getSeen: (canvasId: string) =>
     req<{ seen: Record<string, number>; baselineAt: number }>(`/api/canvases/${canvasId}/seen`),
@@ -611,6 +939,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ frames, replace: true }),
     }),
+  /** re-pin a thread (its root or any reply names it) where its pin was dropped */
+  moveComment: (commentId: string, anchor: CommentAnchorInput) =>
+    req<ElementComment>(`/api/comments/${commentId}/anchor`, { method: 'PATCH', body: JSON.stringify(anchor) }),
   retryComment: (commentId: string) => req(`/api/comments/${commentId}/retry`, { method: 'POST' }),
   retryTaskFeedback: (feedbackId: string) => req(`/api/feedback/${feedbackId}/retry`, { method: 'POST' }),
   /* automations: scheduled pulls and agent tasks */
@@ -658,7 +989,7 @@ export const api = {
     }),
   /* integrations: per-user connections to outside services */
   integrations: () => req<IntegrationsStatus>('/api/integrations'),
-  startMetaConnect: () => req<{ url: string }>('/api/integrations/meta/start', { method: 'POST' }),
+  automationLinearTeams: () => req<{ id: string; name: string; key: string }[]>('/api/integrations/linear/teams'),
   disconnectMeta: () => req<IntegrationsStatus>('/api/integrations/meta', { method: 'DELETE' }),
 }
 
@@ -678,9 +1009,35 @@ export interface AdminUser {
   canvasCount: number
 }
 
+export interface AdminAgentFeedback extends AgentFeedbackReport {
+  user?: { id: string; name: string; email: string }
+}
+
+export interface AdminAgentFeedbackPage {
+  reports: AdminAgentFeedback[]
+  counts: Record<AgentFeedbackKind, number>
+  hasMore: boolean
+}
+
+export interface AdminStats {
+  users: number
+  canvases: number
+  frames: number
+  agentFeedback: number
+}
+
+/** Admin → Sign-in: the policy, and what it depends on. */
+export interface AdminInstanceSettings {
+  settings: InstanceSettings
+  providers: { enabled: boolean; displayName?: string; google: boolean; microsoft: boolean; apple: boolean }
+  workspaces: { id: string; name: string; memberCount: number }[]
+  /** has an admin signed in through SSO yet? (the auto-redirect guard) */
+  ssoAdminSignedIn: boolean
+}
+
 /** Instance-admin surface. Every route 404s for non-admins, so a failure here
  *  is indistinguishable from the feature not existing — which is the point. */
-/** An invite link waiting to be used (server/instanceSettings.ts). */
+/** An invite link waiting to be used (server/instanceConfig.ts). */
 export interface AdminInvite {
   email: string
   invitedBy: string
@@ -704,7 +1061,10 @@ export interface AdminModels {
 
 export const adminApi = {
   canvases: () => req<{ total: number; canvases: AdminCanvas[] }>('/api/admin/canvases'),
-  stats: () => req<{ users: number; canvases: number; frames: number }>('/api/admin/stats'),
+  instanceSettings: () => req<AdminInstanceSettings>('/api/admin/instance-settings'),
+  updateInstanceSettings: (patch: InstanceSettingsPatch) =>
+    req<AdminInstanceSettings>('/api/admin/instance-settings', { method: 'PATCH', body: JSON.stringify(patch) }),
+  stats: () => req<AdminStats>('/api/admin/stats'),
   users: () => req<AdminUser[]>('/api/admin/users'),
   update: (fresh = false) => req<UpdateInfo>(`/api/admin/update${fresh ? '?fresh=1' : ''}`),
   installUpdate: (tag: string) =>
@@ -722,6 +1082,13 @@ export const adminApi = {
       method: 'POST',
       body: JSON.stringify({ model }),
     }),
+  agentFeedback: (query: { kind?: AgentFeedbackKind; q?: string; before?: AdminAgentFeedback }) => {
+    const params = new URLSearchParams()
+    if (query.kind) params.set('kind', query.kind)
+    if (query.q) params.set('q', query.q)
+    if (query.before) params.set('before', `${query.before.at}:${query.before.id}`)
+    return req<AdminAgentFeedbackPage>(`/api/admin/agent-feedback?${params}`)
+  },
 
   /* better-auth's own endpoints, not ours: they swap the session cookie, so
      every caller reloads afterwards rather than trying to reconcile state. */
