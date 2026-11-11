@@ -955,8 +955,9 @@ async function writeComment(c: ElementComment): Promise<void> {
     frameId: c.frameId ?? null,
     elementId: c.elementId ?? null,
     elementOrigin: c.elementOrigin ?? null,
-    /* the pre-element-id anchor is spent once the comment is saved again */
-    selector: null,
+    /* the pre-element-id path is kept only beside the element id it was turned into: a row with no
+       element id and a selector is what the boot backfill picks up, so any other row spends it */
+    selector: c.elementId != null ? (c.legacySelector ?? null) : null,
     snippet: c.snippet,
     pageId: c.pageId ?? null,
     x: c.x ?? null,
@@ -1540,6 +1541,7 @@ export async function hydrate(): Promise<Hydrated> {
       ...(row.resolvedAt != null ? { resolvedAt: row.resolvedAt } : {}),
       ...(row.parentId != null ? { parentId: row.parentId } : {}),
       ...(row.anchor != null ? { anchor: row.anchor } : {}),
+      ...(row.elementId != null && row.selector ? { legacySelector: row.selector } : {}),
       ...(row.fromKind === 'user' || row.fromKind === 'agent' ? { fromKind: row.fromKind as ActorKind } : {}),
       ...(row.mentions ? { mentions: row.mentions.split(',').filter(Boolean) } : {}),
     })
