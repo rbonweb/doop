@@ -78,12 +78,37 @@ function canvasColumns(c: Canvas) {
   }
 }
 
+/* Writes to one canvas (its row, link password, members, domain grants) run in the order they were
+   made. Each setting used to be its own fire-and-forget upsert, and on a connection pool a stale
+   snapshot of the row could commit after a newer one and put a column back (a share link's audience
+   went back to unset, so signed-out visitors were asked to sign in). The queue never rejects: a
+   failed write is logged and the next one still runs. */
+const canvasWrites = new Map<string, Promise<void>>()
+
+function queueCanvasWrite(canvasId: string, write: () => PromiseLike<unknown>): Promise<void> {
+  const run = async () => {
+    try {
+      await write()
+    } catch (err) {
+      console.error('[db] write failed', err)
+    }
+  }
+  const done = (canvasWrites.get(canvasId) ?? Promise.resolve()).then(run)
+  canvasWrites.set(canvasId, done)
+  void done.then(() => {
+    if (canvasWrites.get(canvasId) === done) canvasWrites.delete(canvasId)
+  })
+  return done
+}
+
 export function saveCanvas(c: Canvas) {
-  swallow(
+  /* the snapshot is taken now, so the last call's state is the one that lands last */
+  const columns = canvasColumns(c)
+  void queueCanvasWrite(c.id, () =>
     db
       .insert(t.canvases)
-      .values({ id: c.id, ...canvasColumns(c), createdAt: c.createdAt })
-      .onConflictDoUpdate({ target: t.canvases.id, set: canvasColumns(c) }),
+      .values({ id: c.id, ...columns, createdAt: c.createdAt })
+      .onConflictDoUpdate({ target: t.canvases.id, set: columns }),
   )
 }
 
@@ -151,11 +176,13 @@ export function saveMember(
   addedAt: number,
   role: MemberRole = 'edit',
 ) {
-  swallow(db.insert(t.canvasMembers).values({ canvasId, userId, role, addedBy, addedAt }).onConflictDoNothing())
+  void queueCanvasWrite(canvasId, () =>
+    db.insert(t.canvasMembers).values({ canvasId, userId, role, addedBy, addedAt }).onConflictDoNothing(),
+  )
 }
 
 export function saveMemberRole(canvasId: string, userId: string, role: MemberRole) {
-  swallow(
+  void queueCanvasWrite(canvasId, () =>
     db
       .update(t.canvasMembers)
       .set({ role })
@@ -167,11 +194,13 @@ export function saveMemberRole(canvasId: string, userId: string, role: MemberRol
  *  canvasColumns (which is built from the client-visible Canvas): it has its own
  *  write, and saveCanvas never touches the column. null clears it. */
 export function saveLinkPasswordHash(canvasId: string, hash: string | null) {
-  swallow(db.update(t.canvases).set({ linkPasswordHash: hash }).where(eq(t.canvases.id, canvasId)))
+  void queueCanvasWrite(canvasId, () =>
+    db.update(t.canvases).set({ linkPasswordHash: hash }).where(eq(t.canvases.id, canvasId)),
+  )
 }
 
 export function deleteMember(canvasId: string, userId: string) {
-  swallow(
+  void queueCanvasWrite(canvasId, () =>
     db.delete(t.canvasMembers).where(and(eq(t.canvasMembers.canvasId, canvasId), eq(t.canvasMembers.userId, userId))),
   )
 }
@@ -774,13 +803,16 @@ export function deleteCanvas(canvasId: string) {
   swallow(db.delete(t.memoryReferences).where(eq(t.memoryReferences.canvasId, canvasId)))
   swallow(db.delete(t.decisions).where(eq(t.decisions.canvasId, canvasId)))
   swallow(db.delete(t.memoryProposals).where(eq(t.memoryProposals.canvasId, canvasId)))
-  swallow(db.delete(t.canvasMembers).where(eq(t.canvasMembers.canvasId, canvasId)))
+  void queueCanvasWrite(canvasId, () => db.delete(t.canvasMembers).where(eq(t.canvasMembers.canvasId, canvasId)))
   swallow(db.delete(t.frameSeen).where(eq(t.frameSeen.canvasId, canvasId)))
   swallow(db.delete(t.canvasVisits).where(eq(t.canvasVisits.canvasId, canvasId)))
-  swallow(db.delete(t.canvasDomainGrants).where(eq(t.canvasDomainGrants.canvasId, canvasId)))
+  void queueCanvasWrite(canvasId, () =>
+    db.delete(t.canvasDomainGrants).where(eq(t.canvasDomainGrants.canvasId, canvasId)),
+  )
   swallow(db.delete(t.canvasAccessRequests).where(eq(t.canvasAccessRequests.canvasId, canvasId)))
   swallow(db.delete(t.canvasNotes).where(eq(t.canvasNotes.canvasId, canvasId)))
-  swallow(db.delete(t.canvases).where(eq(t.canvases.id, canvasId)))
+  /* behind every queued write of the canvas, so none can put the row back */
+  void queueCanvasWrite(canvasId, () => db.delete(t.canvases).where(eq(t.canvases.id, canvasId)))
 }
 
 export function deleteFrame(frameId: string) {
@@ -1086,7 +1118,7 @@ export async function ensureCanvasVisit(userId: string, canvasId: string, now: n
 
 /* Sharing by email domain. Hot path: hydrated into the store at boot. */
 export function saveDomainGrant(g: DomainGrant): Promise<void> {
-  return settled(
+  return queueCanvasWrite(g.canvasId, () =>
     db
       .insert(t.canvasDomainGrants)
       .values(g)
@@ -1098,7 +1130,7 @@ export function saveDomainGrant(g: DomainGrant): Promise<void> {
 }
 
 export function deleteDomainGrant(canvasId: string, domain: string): Promise<void> {
-  return settled(
+  return queueCanvasWrite(canvasId, () =>
     db
       .delete(t.canvasDomainGrants)
       .where(and(eq(t.canvasDomainGrants.canvasId, canvasId), eq(t.canvasDomainGrants.domain, domain))),
