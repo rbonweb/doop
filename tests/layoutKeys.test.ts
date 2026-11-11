@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Canvas, Frame } from '../shared/types'
 import { DEVICES } from '../shared/devices'
 
@@ -10,8 +10,10 @@ vi.mock('../src/lib/posthog', () => ({ posthog: { capture: vi.fn() } }))
 const { useStore } = await import('../src/lib/store')
 const { applyDevice, clearLayoutSnapshots, restoreDevices, tidyFrames } = await import('../src/lib/layoutEdits')
 const { clearHistory, undo } = await import('../src/lib/history')
-const { dispatchShortcut, registerShortcut } = await import('../src/lib/shortcuts')
-const { canvasShortcuts } = await import('../src/lib/canvasShortcuts')
+const { dispatchActionKey, setActionHost } = await import('../src/lib/actions/registry')
+const { toolForKey } = await import('../src/lib/tools')
+const { applyEscape, escapeModeNow } = await import('../src/lib/actions/escape')
+type ActionHost = import('../src/lib/actions/registry').ActionHost
 
 const frame = (id: string, x: number, y: number, width: number, height: number): Frame => ({
   id,
@@ -142,12 +144,48 @@ describe('tidy (⇧T)', () => {
 })
 
 describe('the keys', () => {
-  const removers: (() => void)[] = []
-  beforeEach(() => {
-    removers.splice(0).forEach((remove) => remove())
-    removers.push(...canvasShortcuts.map(registerShortcut))
+  const host = (): ActionHost => ({
+    canvasId: 'c1',
+    guest: false,
+    presenting: false,
+    hideUiActive: true,
+    agentsOpen: false,
+    boardOpen: false,
+    openPalette: vi.fn(),
+    openAgent: vi.fn(),
+    openShortcuts: openShortcuts,
+    goToFiles: vi.fn(),
+    openDocs: vi.fn(),
+    contactSupport: vi.fn(),
+    openFind: vi.fn(),
+    findStep: vi.fn(),
+    openExport: vi.fn(),
+    openImport: vi.fn(),
+    openVersionHistory: vi.fn(),
+    openLink: vi.fn(),
+    placeImage: vi.fn(),
+    newCanvas: vi.fn(),
+    duplicateCanvas: vi.fn(),
+    present: vi.fn(),
+    toggleHideUi: vi.fn(),
+    toggleAgents: vi.fn(),
+    toggleBoard: vi.fn(),
   })
-  const press = (init: KeyboardEventInit) => dispatchShortcut(new KeyboardEvent('keydown', { bubbles: true, ...init }))
+  const openShortcuts = vi.fn()
+  beforeEach(() => {
+    openShortcuts.mockClear()
+    setActionHost(host())
+  })
+  afterEach(() => setActionHost(null))
+  /* the page's keyboard: the registry first, then Esc, which leaves a mode before it clears the selection */
+  const press = (init: KeyboardEventInit) => {
+    const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+    if (e.key === 'Escape') {
+      applyEscape(escapeModeNow())
+      return true
+    }
+    return dispatchActionKey(e, false)
+  }
 
   it('1 sizes to mobile and 0 puts it back', () => {
     const before = rects()
@@ -193,7 +231,8 @@ describe('the keys', () => {
     useStore.setState({ selectedIds: ['a'], selectedId: 'a' })
     press({ key: 'l' })
     expect(useStore.getState().laser).toBe(true)
-    press({ key: 'c' })
+    /* C is the Stage's key: it picks the tool through the store */
+    useStore.getState().setTool('comment')
     expect(useStore.getState().tool).toBe('comment')
     expect(useStore.getState().laser).toBe(false)
     press({ key: 'l' })
@@ -202,7 +241,7 @@ describe('the keys', () => {
     press({ key: 'Escape' })
     expect(useStore.getState().laser).toBe(false)
     expect(useStore.getState().selectedIds).toEqual(['a'])
-    press({ key: 'c' })
+    useStore.getState().setTool('comment')
     press({ key: 'Escape' })
     expect(useStore.getState().tool).toBe('select')
     expect(useStore.getState().selectedIds).toEqual(['a'])
@@ -210,7 +249,7 @@ describe('the keys', () => {
     expect(useStore.getState().selectedIds).toEqual([])
   })
 
-  it('picks a tool with its key and leaves the select tool when Esc is pressed', () => {
+  it('picks a tool with its key (the Stage reads toolForKey) and leaves it when Esc is pressed', () => {
     for (const [key, tool] of [
       ['v', 'select'],
       ['h', 'hand'],
@@ -220,16 +259,18 @@ describe('the keys', () => {
       ['p', 'path'],
       ['t', 'text'],
     ] as const) {
-      expect(press({ key }), key).toBe(true)
+      /* the registry binds no tool key: the Stage's own listener picks the tool, and the registry leaves the key alone */
+      expect(press({ key }), key).toBe(false)
+      useStore.getState().setTool(toolForKey(key)!)
       expect(useStore.getState().tool, key).toBe(tool)
     }
     press({ key: 'Escape' })
     expect(useStore.getState().tool).toBe('select')
   })
 
-  it('? opens the shortcuts dialog', () => {
+  it('? opens the shortcuts sheet', () => {
     press({ key: '?', shiftKey: true })
-    expect(useStore.getState().shortcutsOpen).toBe(true)
+    expect(openShortcuts).toHaveBeenCalledTimes(1)
   })
 
   describe.each(['view', 'comment'] as const)('with the %s role', (role) => {
@@ -244,14 +285,10 @@ describe('the keys', () => {
         { key: '2', code: 'Digit2' },
         { key: '0', code: 'Digit0' },
         { key: 'T', shiftKey: true, code: 'KeyT' },
-        { key: 'f' },
-        { key: 'r' },
-        { key: 'o' },
-        { key: 'p' },
-        { key: 't' },
       ]) {
         expect(press(init)).toBe(false)
       }
+      for (const key of ['f', 'r', 'o', 'p', 't']) useStore.getState().setTool(toolForKey(key)!)
       expect(useStore.getState().tool).toBe('select')
       expect(rects()).toEqual(before)
       expect(updateFrame).not.toHaveBeenCalled()
@@ -277,22 +314,25 @@ describe('the keys', () => {
       expect(press({ key: '1', shiftKey: true, code: 'Digit1' })).toBe(true)
       expect(press({ key: 'a', metaKey: true })).toBe(true)
       const visible = useStore.getState().notesVisible
-      expect(press({ key: 'n' })).toBe(true)
+      /* a bare N steps to the next frame; the notes are on ⌥N */
+      expect(press({ key: 'Dead', code: 'KeyN', altKey: true })).toBe(true)
       expect(useStore.getState().notesVisible).toBe(!visible)
     })
   })
 
   it('the comment tool needs the comment role: view is refused, comment is allowed', () => {
     useStore.setState({ role: 'view' })
-    expect(press({ key: 'c' })).toBe(false)
+    useStore.getState().setTool('comment')
     expect(useStore.getState().tool).toBe('select')
     useStore.setState({ role: 'comment' })
-    expect(press({ key: 'c' })).toBe(true)
+    useStore.getState().setTool('comment')
     expect(useStore.getState().tool).toBe('comment')
   })
 
-  it('a canvas whose role has not arrived yet grants nothing', () => {
-    useStore.setState({ role: null })
+  it('a canvas whose own role is view grants nothing before the store role is set', () => {
+    /* the room hands the role on the canvas copy; the one rule (roleOf) reads it when the store's own is still null */
+    const canvas = useStore.getState().canvas!
+    useStore.setState({ role: null, canvas: { ...canvas, role: 'view' } })
     expect(press({ key: 't' })).toBe(false)
     expect(press({ key: 'T', shiftKey: true, code: 'KeyT' })).toBe(false)
     expect(press({ key: 'c' })).toBe(false)

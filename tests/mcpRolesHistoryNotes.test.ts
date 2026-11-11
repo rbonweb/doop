@@ -15,6 +15,7 @@ const persistMock = vi.hoisted(() => ({
   getFrameVersion: vi.fn(async () => undefined as unknown),
 }))
 vi.mock('../server/db/persist.ts', () => ({
+  saveFrameNow: async () => {},
   saveTask: () => {},
   saveFeedback: () => {},
   saveComment: () => {},
@@ -52,11 +53,12 @@ const CANVAS: Canvas = {
   frames: [],
   notes: [NOTE],
 }
+const HTML = '<h1>Hi</h1>'
 const FRAME: Frame = {
   id: 'f1',
   canvasId: CANVAS.id,
   name: 'Hero',
-  html: '<h1>Hi</h1>',
+  html: HTML,
   x: 0,
   y: 0,
   width: 640,
@@ -138,12 +140,19 @@ const SLIDE_EDITS: [string, Record<string, unknown>][] = [
 
 beforeEach(() => {
   vi.restoreAllMocks()
+  FRAME.html = HTML
   persistMock.listFrameVersions.mockResolvedValue([{ ...VERSION, html: undefined }])
   persistMock.getFrameVersion.mockResolvedValue(VERSION)
   vi.spyOn(store, 'getCanvas').mockImplementation((id: string) => (id === CANVAS.id ? CANVAS : undefined))
   vi.spyOn(store, 'getFrame').mockImplementation((id: string) =>
     id === FRAME.id ? FRAME : id === SLIDE.id ? SLIDE : undefined,
   )
+  /* the element-id stamp a pinned comment makes is an annotation write to the frame's HTML */
+  vi.spyOn(store, 'updateFrame').mockImplementation((id, patch) => {
+    if (id !== FRAME.id) return undefined
+    Object.assign(FRAME, patch)
+    return FRAME
+  })
   vi.spyOn(store, 'findNote').mockImplementation((id: string) =>
     id === NOTE.id ? { note: NOTE, canvasId: CANVAS.id } : undefined,
   )

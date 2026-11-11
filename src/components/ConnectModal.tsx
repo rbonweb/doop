@@ -4,20 +4,22 @@ import { navigate } from '../App'
 import { useStore } from '../lib/store'
 import { roleByAgentName } from '../../shared/agents'
 import { posthog } from '../lib/posthog'
+import { useT, type PlainMessageKey, type Translate } from '../lib/i18n'
 import { canUseChatGPTPublicEndpoint, CHATGPT_CONNECTION_GUIDE, CHATGPT_PLUGINS_URL } from '../lib/chatgptConnection'
-import { AgentIcon } from './AgentIcon'
 import { ClaudeDesktopInstall } from './ClaudeDesktopInstall'
 import { canAddToClaudeDesktop, claudeConnectorInstallUrl } from '../lib/claudeConnection'
 import { CursorInstall } from './CursorInstall'
 import { CodexInstall } from './CodexInstall'
+import { AppIcon, type AppIconBrand } from './ui/brand-mark'
 import { Button } from './ui/button'
+import { ChoiceList, ChoiceRow } from './ui/choice-list'
 import { CodeBlock } from './ui/code-block'
 import { Disclosure } from './ui/collapsible'
 import { Dot } from './ui/dot'
-import { ChevronLeftIcon, PuzzleIcon } from './ui/icons'
+import { CheckIcon, ChevronLeftIcon } from './ui/icons'
 import { Modal, ModalActions, ModalLede, ModalSpacer, ModalTitle } from './ui/modal'
-import { barPrimaryBtn } from './TopBar'
 import { cn } from '@/lib/utils'
+import { isDesktopShell } from '../lib/shell'
 
 /**
  * "Connect AI" is about agents that join the canvas from outside: Claude Code,
@@ -27,42 +29,33 @@ import { cn } from '@/lib/utils'
  * the prompt bar's allowance meter — not here.
  */
 
-type AgentId = 'claude-code' | 'claude' | 'chatgpt' | 'codex' | 'cursor' | 'mcp'
+type AgentId = 'claude-code' | 'claude' | 'chatgpt' | 'codex' | 'cursor' | 'mcp' | 'headless'
 type View = 'agents' | AgentId
 type ClaudeConnection = 'desktop' | 'web'
+/** how a generic MCP client signs in: a person approves it in a browser, or it sends an agent key */
+type McpConnection = 'browser' | 'key'
 
-interface AgentOption {
+/** a product's own name stays as it is; the generic client is named in the reader's language */
+type AgentOption = {
   id: AgentId
-  name: string
-  blurb: string
-  icon: ReactNode
-}
+  blurb: PlainMessageKey
+  /** its app icon, as Settings → Doop Agent shows the providers */
+  icon: AppIconBrand
+} & ({ name: string } | { nameKey: PlainMessageKey })
 
 const AGENTS: AgentOption[] = [
-  {
-    id: 'claude-code',
-    name: 'Claude Code',
-    blurb: 'Connect from your terminal',
-    icon: <AgentIcon name="claude" size={20} />,
-  },
-  { id: 'claude', name: 'Claude', blurb: 'Add Doop to Claude', icon: <AgentIcon name="claude" size={20} /> },
-  { id: 'chatgpt', name: 'ChatGPT', blurb: 'Connect in your browser', icon: <AgentIcon name="gpt" size={20} /> },
-  { id: 'codex', name: 'Codex', blurb: 'ChatGPT desktop and Codex CLI', icon: <AgentIcon name="codex" size={20} /> },
-  {
-    id: 'cursor',
-    name: 'Cursor',
-    blurb: 'Add Doop to Cursor',
-    icon: <AgentIcon name="cursor" size={20} />,
-  },
-  {
-    id: 'mcp',
-    name: 'Other MCP client',
-    blurb: 'Use a manual connection',
-    icon: <PuzzleIcon width={20} height={20} />,
-  },
+  { id: 'claude-code', name: 'Claude Code', blurb: 'connect.blurbClaudeCode', icon: 'claude-code' },
+  { id: 'claude', name: 'Claude', blurb: 'connect.blurbClaude', icon: 'claude' },
+  { id: 'chatgpt', name: 'ChatGPT', blurb: 'connect.blurbChatgpt', icon: 'openai' },
+  { id: 'codex', name: 'Codex', blurb: 'connect.blurbCodex', icon: 'codex' },
+  { id: 'cursor', name: 'Cursor', blurb: 'connect.blurbCursor', icon: 'cursor' },
+  { id: 'mcp', nameKey: 'connect.otherClientName', blurb: 'connect.blurbOtherClient', icon: 'mcp' },
+  { id: 'headless', nameKey: 'connect.headlessName', blurb: 'connect.blurbHeadless', icon: 'headless' },
 ]
 
 const agentById = (id: AgentId): AgentOption => AGENTS.find((agent) => agent.id === id) ?? AGENTS[0]!
+
+const agentName = (agent: AgentOption, t: Translate): string => ('name' in agent ? agent.name : t(agent.nameKey))
 
 /** `canvasId` is optional: opened from the home dashboard there is no canvas to
  *  suggest a prompt for, and no presence connection to watch for an arrival. */
@@ -99,42 +92,26 @@ export function ConnectModal({
 /* ---------- pick the agent, then its three steps ---------- */
 
 function AgentPicker({ onPick }: { onPick: (agent: AgentId) => void }) {
-  const [agent, setAgent] = useState<AgentId>('claude-code')
+  const t = useT()
   return (
-    <>
-      <div className={body}>
-        <ModalTitle>Choose your agent</ModalTitle>
-        <ModalLede>
-          Let an agent you already use work on this canvas via MCP. Choose yours to see its connection instructions.
-        </ModalLede>
-
-        <div className="mt-6 grid gap-3 sm:grid-cols-2">
-          {AGENTS.map((option) => (
-            <ChoiceCard
-              key={option.id}
-              selected={agent === option.id}
-              onClick={() => setAgent(option.id)}
-              icon={option.icon}
-              title={option.name}
-              blurb={option.blurb}
-            />
-          ))}
-        </div>
-      </div>
-
-      <ModalActions className={footer}>
-        <Button
-          variant="primary"
-          className={barPrimaryBtn}
-          onClick={() => {
-            posthog.capture('connect_ai_agent_chosen', { agent })
-            onPick(agent)
-          }}
-        >
-          Connect
-        </Button>
-      </ModalActions>
-    </>
+    <div className={body}>
+      <ModalTitle>{t('connect.chooseTitle')}</ModalTitle>
+      <ModalLede>{t('connect.chooseLede')}</ModalLede>
+      <ChoiceList className="mt-5">
+        {AGENTS.map((option) => (
+          <ChoiceRow
+            key={option.id}
+            icon={<AppIcon brand={option.icon} />}
+            title={agentName(option, t)}
+            description={t(option.blurb)}
+            onClick={() => {
+              posthog.capture('connect_ai_agent_chosen', { agent: option.id })
+              onPick(option.id)
+            }}
+          />
+        ))}
+      </ChoiceList>
+    </div>
   )
 }
 
@@ -145,41 +122,80 @@ interface Step {
   action?: ReactNode
 }
 
+interface StepOptions {
+  claudeConnection: ClaudeConnection
+  mcpConnection: McpConnection
+  canvasId?: string | undefined
+  /** opens Settings → Agent keys, coming back to this canvas */
+  openAgentKeys: () => void
+}
+
+/** An agent with no browser to sign in with: an agent key, sent as a bearer header. */
+function agentKeySteps(t: Translate, mcpUrl: string, pointAt: Step, openAgentKeys: () => void) {
+  const config = JSON.stringify(
+    { mcpServers: { doop: { type: 'http', url: mcpUrl, headers: { Authorization: 'Bearer dpk_…' } } } },
+    null,
+    2,
+  )
+  return {
+    lede: t('connect.agentKeyLede'),
+    steps: [
+      {
+        title: t('connect.agentKeyCreateTitle'),
+        body: t('connect.agentKeyCreateBody'),
+        action: (
+          <Button variant="solid" className="mt-2.5" onClick={openAgentKeys}>
+            {t('connect.agentKeyOpen')}
+          </Button>
+        ),
+      },
+      { title: t('connect.agentKeySendTitle'), body: t('connect.agentKeySendBody'), code: config },
+      pointAt,
+    ],
+  }
+}
+
 function agentSteps(
+  t: Translate,
   agent: AgentId,
   mcpUrl: string,
   prompt: string,
-  claudeConnection: ClaudeConnection,
-  canvasId?: string,
+  { claudeConnection, mcpConnection, canvasId, openAgentKeys }: StepOptions,
 ): { lede: string; steps: Step[] } {
   const jsonConfig = JSON.stringify({ mcpServers: { doop: { type: 'http', url: mcpUrl } } }, null, 2)
   const pointAt: Step = {
-    title: 'Point it at this canvas',
-    body: prompt
-      ? 'Paste this as your first message. Everything else the agent needs comes from the server.'
-      : 'Open a canvas and tell the agent to work on it. Everything else it needs comes from the server.',
+    title: t('connect.pointAtTitle'),
+    body: prompt ? t('connect.pointAtWithPrompt') : t('connect.pointAtNoPrompt'),
     code: prompt || undefined,
   }
   switch (agent) {
     case 'claude-code':
       return {
-        lede: 'Three steps, about a minute. Claude Code then designs on this canvas as you.',
+        lede: t('connect.claudeCodeLede'),
         steps: [
           {
-            title: 'Add Doop as an MCP server',
+            title: t('connect.claudeCodeAddTitle'),
             body: (
               <>
-                Run this once in any terminal. It registers the <code>doop</code> server for every project.
+                {t('connect.claudeCodeAddBefore')}
+                <code>doop</code>
+                {t('connect.claudeCodeAddAfter')}
               </>
             ),
             code: `claude mcp add --transport http doop "${mcpUrl}"`,
           },
           {
-            title: 'Sign in from Claude Code',
+            title: t('connect.claudeCodeSignInTitle'),
             body: (
               <>
-                Inside Claude Code type <code>/mcp</code>, pick <strong>doop</strong>, then{' '}
-                <strong>Authenticate</strong>. A browser tab opens so you can approve the connection.
+                {t('connect.claudeCodeSignInBefore')}
+                <code>/mcp</code>
+                {t('connect.claudeCodeSignInPick')}
+                <strong>doop</strong>
+                {t('connect.claudeCodeSignInThen')}
+                {/* Claude Code's own menu label, which it shows in English */}
+                <strong>Authenticate</strong>
+                {t('connect.claudeCodeSignInAfter')}
               </>
             ),
           },
@@ -189,43 +205,41 @@ function agentSteps(
     case 'claude':
       if (claudeConnection === 'desktop') {
         return {
-          lede: 'Add Doop from the desktop app, confirm in Claude, and start designing together.',
+          lede: t('connect.claudeDesktopLede'),
           steps: [
             {
-              title: 'Add Doop to Claude Desktop',
-              body: 'Click Add to Claude in the Doop desktop app, then confirm the installation in Claude. Your Doop server address is filled in for you.',
+              title: t('connect.claudeDesktopAddTitle'),
+              body: t('connect.claudeDesktopAddBody'),
               action: <ClaudeDesktopInstall mcpUrl={mcpUrl} />,
             },
             {
-              title: 'Connect your Doop account',
-              body: 'Enable the extension in Claude. Sign in to Doop in the browser that opens and approve the connection.',
+              title: t('connect.claudeDesktopConnectTitle'),
+              body: t('connect.claudeDesktopConnectBody'),
             },
             {
               ...pointAt,
-              body: prompt
-                ? 'Start a new Claude chat, enable Doop in the tools menu, and send this as your first message.'
-                : 'Start a new Claude chat, enable Doop in the tools menu, and tell it which canvas to work on.',
+              body: prompt ? t('connect.claudeDesktopPointWithPrompt') : t('connect.claudeDesktopPointNoPrompt'),
             },
           ],
         }
       }
       if (!claudeConnectorInstallUrl(mcpUrl)) {
         return {
-          lede: 'Claude’s online connector needs a publicly reachable HTTPS server.',
+          lede: t('connect.claudePublicLede'),
           steps: [
             {
-              title: 'Use the desktop connection for this server',
-              body: 'This Doop address is local or uses HTTP. Choose Desktop app above to connect from your computer, or open Doop at its public HTTPS address.',
+              title: t('connect.claudeLocalTitle'),
+              body: t('connect.claudeLocalBody'),
             },
           ],
         }
       }
       return {
-        lede: 'Add Doop to your Claude account, approve the connection, and start designing. No download needed.',
+        lede: t('connect.claudeWebLede'),
         steps: [
           {
-            title: 'Add Doop to Claude',
-            body: 'Open Claude with Doop’s name and server address already filled in. Review the details and add the connector.',
+            title: t('connect.claudeWebAddTitle'),
+            body: t('connect.claudeWebAddBody'),
             action: (
               <Button asChild variant="solid" className="mt-2.5">
                 <a
@@ -234,36 +248,34 @@ function agentSteps(
                   rel="noopener noreferrer"
                   onClick={() => posthog.capture('claude_connector_opened')}
                 >
-                  Add to Claude
+                  {t('connect.addToClaude')}
                 </a>
               </Button>
             ),
           },
           {
-            title: 'Approve the sign-in',
-            body: 'Click Connect on the new connector. A browser tab opens so you can approve the connection.',
+            title: t('connect.approveSignInTitle'),
+            body: t('connect.claudeWebApproveBody'),
           },
           {
             ...pointAt,
-            body: prompt
-              ? 'In a new chat enable Doop under the tools menu and send this as your first message.'
-              : 'In a new chat enable Doop under the tools menu and tell it which canvas to work on.',
+            body: prompt ? t('connect.claudeWebPointWithPrompt') : t('connect.claudeWebPointNoPrompt'),
           },
         ],
       }
     case 'chatgpt':
       if (!canUseChatGPTPublicEndpoint(mcpUrl)) {
         return {
-          lede: 'ChatGPT needs a public HTTPS address or a secure tunnel to reach this Doop server.',
+          lede: t('connect.chatgptPublicLede'),
           steps: [
             {
-              title: 'Make your Doop server reachable',
-              body: 'ChatGPT cannot reach this address directly. Open your public HTTPS Doop address and start this connection there, or configure an OpenAI Secure MCP Tunnel for this server.',
+              title: t('connect.chatgptReachTitle'),
+              body: t('connect.chatgptReachBody'),
               code: mcpUrl,
               action: (
                 <Button asChild variant="solid" className="mt-2.5">
                   <a href={CHATGPT_CONNECTION_GUIDE} target="_blank" rel="noopener noreferrer">
-                    View ChatGPT setup guide
+                    {t('connect.chatgptGuide')}
                   </a>
                 </Button>
               ),
@@ -272,14 +284,18 @@ function agentSteps(
         }
       }
       return {
-        lede: 'No download. Open ChatGPT, paste the server address below, and approve the Doop connection.',
+        lede: t('connect.chatgptLede'),
         steps: [
           {
-            title: 'Open ChatGPT plugins',
+            title: t('connect.chatgptOpenTitle'),
             body: (
               <>
-                Click the <strong>+</strong> button on the Plugins page, then <strong>Add custom MCP server</strong>.
-                Your account or workspace must allow custom servers.
+                {t('connect.chatgptOpenBefore')}
+                <strong>+</strong>
+                {t('connect.chatgptOpenMiddle')}
+                {/* ChatGPT's own menu label */}
+                <strong>Add custom MCP server</strong>
+                {t('connect.chatgptOpenAfter')}
               </>
             ),
             action: (
@@ -290,42 +306,45 @@ function agentSteps(
                   rel="noopener noreferrer"
                   onClick={() => posthog.capture('chatgpt_connection_opened')}
                 >
-                  Open ChatGPT setup
+                  {t('connect.chatgptOpenButton')}
                 </a>
               </Button>
             ),
           },
           {
-            title: 'Add Doop and sign in',
+            title: t('connect.chatgptAddTitle'),
             body: (
               <>
-                Name it <strong>Doop</strong>, describe it as a design canvas, and paste this as the MCP server URL.
-                Choose <strong>OAuth</strong>, review the permissions, then select <strong>Create as a plugin</strong>.
-                Sign in to Doop when prompted and install the resulting plugin.
+                {t('connect.chatgptAddBefore')}
+                <strong>Doop</strong>
+                {t('connect.chatgptAddDescribe')}
+                <strong>OAuth</strong>
+                {t('connect.chatgptAddReview')}
+                {/* ChatGPT's own button label */}
+                <strong>Create as a plugin</strong>
+                {t('connect.chatgptAddAfter')}
               </>
             ),
             code: mcpUrl,
           },
           {
             ...pointAt,
-            body: prompt
-              ? 'Start a new chat, type @ and select Doop, then send this as your first message.'
-              : 'Start a new chat, type @ and select Doop, then tell it which canvas to work on.',
+            body: prompt ? t('connect.chatgptPointWithPrompt') : t('connect.chatgptPointNoPrompt'),
           },
         ],
       }
     case 'codex':
       return {
-        lede: 'Add Doop from the desktop app, sign in, and start designing with Codex.',
+        lede: t('connect.codexLede'),
         steps: [
           {
-            title: 'Add Doop to Codex',
-            body: 'Doop Desktop configures Codex for you. This works with Codex CLI and the Codex tab in the ChatGPT desktop app.',
+            title: t('connect.codexAddTitle'),
+            body: t('connect.codexAddBody'),
             action: <CodexInstall mcpUrl={mcpUrl} canvasId={canvasId} />,
           },
           {
-            title: 'Sign in from Codex',
-            body: 'Open a new Codex chat. If Doop needs authentication, sign in from its MCP settings. For Codex CLI, run the command below and approve the connection in your browser.',
+            title: t('connect.codexSignInTitle'),
+            body: t('connect.codexSignInBody'),
             code: 'codex mcp login doop',
           },
           pointAt,
@@ -333,42 +352,44 @@ function agentSteps(
       }
     case 'cursor':
       return {
-        lede: 'Add Doop to Cursor, sign in, and start designing together.',
+        lede: t('connect.cursorLede'),
         steps: [
           {
-            title: 'Add Doop to Cursor',
-            body: 'Open Cursor and review the server connection. No file download needed.',
+            title: t('connect.cursorAddTitle'),
+            body: t('connect.cursorAddBody'),
             action: <CursorInstall mcpUrl={mcpUrl} />,
           },
           {
-            title: 'Approve the sign-in',
-            body: 'Enable the doop server in Cursor and complete its browser sign-in. Your agent can then work on the canvases you can access.',
+            title: t('connect.approveSignInTitle'),
+            body: t('connect.cursorApproveBody'),
           },
           {
             ...pointAt,
-            body: prompt
-              ? 'Open the Agent chat and send this as your first message.'
-              : 'Open the Agent chat and tell it which canvas to work on.',
+            body: prompt ? t('connect.cursorPointWithPrompt') : t('connect.cursorPointNoPrompt'),
           },
         ],
       }
+    case 'headless':
+      return agentKeySteps(t, mcpUrl, pointAt, openAgentKeys)
     case 'mcp':
+      if (mcpConnection === 'key') return agentKeySteps(t, mcpUrl, pointAt, openAgentKeys)
       return {
-        lede: 'Doop is a streamable-HTTP MCP server with OAuth. Any client that supports that can design here.',
+        lede: t('connect.mcpLede'),
         steps: [
           {
-            title: "Add this server to your client's MCP config",
+            title: t('connect.mcpConfigTitle'),
             body: (
               <>
-                Windsurf, Zed, Cline and VS Code all read a JSON file like this. Paste the <code>doop</code> entry into
-                it.
+                {t('connect.mcpConfigBefore')}
+                <code>doop</code>
+                {t('connect.mcpConfigAfter')}
               </>
             ),
             code: jsonConfig,
           },
           {
-            title: 'Approve the sign-in',
-            body: 'The first time your client connects, a browser tab opens to authorize it. The agent then works as you, and its edits are attributed to you.',
+            title: t('connect.approveSignInTitle'),
+            body: t('connect.mcpApproveBody'),
           },
           pointAt,
         ],
@@ -389,7 +410,9 @@ function AgentSteps({
   onBack: () => void
   onClose: () => void
 }) {
+  const t = useT()
   const option = agentById(agent)
+  const name = agentName(option, t)
   const mcpUrl = `${location.origin}/mcp`
   const [claudeConnection, setClaudeConnection] = useState<ClaudeConnection>(() =>
     canAddToClaudeDesktop() || !claudeConnectorInstallUrl(mcpUrl) ? 'desktop' : 'web',
@@ -400,34 +423,53 @@ function AgentSteps({
   const prompt = canvasId
     ? `Work on Doop canvas ${canvasId}. Start with get_guide({ topic: "doop-instructions" }) and follow it.`
     : ''
-  const { lede, steps } = agentSteps(agent, mcpUrl, prompt, claudeConnection, canvasId)
+  const [mcpConnection, setMcpConnection] = useState<McpConnection>('browser')
+  /* a browser keeps these steps open beside the new tab; the desktop shell's
+     tabs hold canvases only, and the system browser may not be signed in, so
+     there it goes in place and Settings' back link returns to the canvas */
+  const openAgentKeys = () => {
+    const from = canvasId ? `&from=${encodeURIComponent(`/c/${canvasId}`)}` : ''
+    if (isDesktopShell()) navigate(`/settings?pane=keys${from}`)
+    else window.open('/settings?pane=keys', '_blank', 'noopener')
+  }
+  const { lede, steps } = agentSteps(t, agent, mcpUrl, prompt, {
+    claudeConnection,
+    mcpConnection,
+    canvasId,
+    openAgentKeys,
+  })
   return (
     <>
       <div className={body}>
         <div className="flex items-center gap-3.5">
-          <span className="grid size-11 shrink-0 place-items-center rounded-[11px] border border-line-soft bg-paper">
-            {option.icon}
-          </span>
+          <AppIcon brand={option.icon} size={40} />
           <div>
-            <ModalTitle>Connect {option.name}</ModalTitle>
+            <ModalTitle>{t('connect.connectAgentTitle', { name })}</ModalTitle>
             <ModalLede className="mt-1">{lede}</ModalLede>
           </div>
         </div>
 
         {agent === 'claude' && (
-          <div className="mt-5 flex gap-2" role="group" aria-label="Claude connection method">
-            {(['web', 'desktop'] as const).map((connection) => (
-              <Button
-                key={connection}
-                size="sm"
-                variant={claudeConnection === connection ? 'solid' : 'ghost'}
-                aria-pressed={claudeConnection === connection}
-                onClick={() => setClaudeConnection(connection)}
-              >
-                {connection === 'desktop' ? 'Desktop app' : 'Connect online'}
-              </Button>
-            ))}
-          </div>
+          <MethodSwitch
+            label={t('connect.claudeMethodAria')}
+            value={claudeConnection}
+            onChange={setClaudeConnection}
+            options={[
+              { id: 'web', label: t('connect.connectOnline') },
+              { id: 'desktop', label: t('connect.desktopApp') },
+            ]}
+          />
+        )}
+        {agent === 'mcp' && (
+          <MethodSwitch
+            label={t('connect.mcpMethodAria')}
+            value={mcpConnection}
+            onChange={setMcpConnection}
+            options={[
+              { id: 'browser', label: t('connect.mcpBrowser') },
+              { id: 'key', label: t('connect.mcpAgentKey') },
+            ]}
+          />
         )}
 
         <ol className="mt-6">
@@ -436,7 +478,7 @@ function AgentSteps({
               key={step.title}
               className={cn('grid grid-cols-[28px_1fr] gap-3.5', i > 0 && 'mt-3.5 border-t border-line-soft pt-3.5')}
             >
-              <span className="mt-px grid size-[26px] place-items-center rounded-full bg-ink text-xs font-bold text-white">
+              <span className="mt-px grid size-[26px] place-items-center rounded-full bg-ink text-xs font-bold text-paper">
                 {i + 1}
               </span>
               <div>
@@ -452,43 +494,29 @@ function AgentSteps({
         </ol>
 
         {agent === 'claude' && claudeConnection === 'web' && claudeConnectorInstallUrl(mcpUrl) && (
-          <Disclosure label="Connection help" className="mt-4 text-label leading-relaxed text-ink-soft">
+          <Disclosure label={t('connect.connectionHelp')} className="mt-4 text-label leading-relaxed text-ink-soft">
             <p>
-              If Claude asks you to sign in first, return here and click Add to Claude again. You can also use{' '}
-              <strong>Customize → Connectors → Add custom connector</strong> in Claude with this address:
+              {t('connect.helpBefore')}
+              {/* Claude's own menu path */}
+              <strong>Customize → Connectors → Add custom connector</strong>
+              {t('connect.helpAfter')}
             </p>
             <CodeBlock text={mcpUrl} className="mt-2" />
           </Disclosure>
         )}
-
-        {agent === 'mcp' && (
-          <p className="mt-4 text-xs leading-[1.5] text-ink-faint">
-            No browser to sign in with (n8n, Mastra, CI)? Mint an agent key in{' '}
-            <button
-              type="button"
-              className="font-medium text-accent-ink underline underline-offset-2"
-              onClick={() =>
-                navigate(`/settings?pane=keys${canvasId ? `&from=${encodeURIComponent(`/c/${canvasId}`)}` : ''}`)
-              }
-            >
-              Settings → Agent keys
-            </button>{' '}
-            and send it as <code>Authorization: Bearer dpk_…</code>. The key acts as you, on the canvases you can reach.
-          </p>
-        )}
       </div>
 
       <ModalActions className={footer}>
-        {canvasId && showAgentStatus ? <AgentArrival name={option.name} /> : <ModalSpacer />}
+        {canvasId && showAgentStatus ? <AgentArrival name={name} /> : <ModalSpacer />}
         <button
           type="button"
           className="inline-flex items-center gap-1 rounded-sm px-2 py-2 text-xs font-medium text-ink-soft hover:text-ink"
           onClick={onBack}
         >
           <ChevronLeftIcon width={14} height={14} />
-          Back
+          {t('common.back')}
         </button>
-        <Button onClick={onClose}>Done</Button>
+        <Button onClick={onClose}>{t('connect.done')}</Button>
       </ModalActions>
     </>
   )
@@ -503,44 +531,33 @@ function AgentSteps({
 const body = 'min-h-0 flex-1 overflow-y-auto p-5'
 const footer = 'mt-0 shrink-0 items-center border-t border-line-soft bg-surface px-5 py-4'
 
-function ChoiceCard({
-  selected,
-  onClick,
-  icon,
-  title,
-  blurb,
+/** The pressed-button pair that picks how an agent connects (Claude's app
+ *  or online; a generic client's browser sign-in or agent key). */
+function MethodSwitch<T extends string>({
+  label,
+  value,
+  onChange,
+  options,
 }: {
-  selected: boolean
-  onClick: () => void
-  icon: ReactNode
-  title: string
-  blurb: string
+  label: string
+  value: T
+  onChange: (value: T) => void
+  options: { id: T; label: string }[]
 }) {
   return (
-    <button
-      type="button"
-      aria-pressed={selected}
-      onClick={onClick}
-      className={cn(
-        'relative flex items-center gap-3 rounded-card border bg-surface py-3.5 pl-3.5 pr-9 text-left text-ink transition-colors',
-        selected ? 'border-brand ring-3 ring-brand/15' : 'border-line hover:border-ink-faint',
-      )}
-    >
-      <span className="grid size-9 shrink-0 place-items-center rounded-[9px] border border-line-soft bg-paper">
-        {icon}
-      </span>
-      <span className="block">
-        <span className="block text-copy font-semibold">{title}</span>
-        <span className="mt-0.5 block text-xs leading-[1.5] text-ink-soft">{blurb}</span>
-      </span>
-      <span
-        aria-hidden
-        className={cn(
-          'absolute right-4 top-1/2 size-4 -translate-y-1/2 rounded-full border',
-          selected ? 'border-[5px] border-brand' : 'border-line',
-        )}
-      />
-    </button>
+    <div className="mt-5 flex gap-2" role="group" aria-label={label}>
+      {options.map((option) => (
+        <Button
+          key={option.id}
+          size="sm"
+          variant={value === option.id ? 'solid' : 'ghost'}
+          aria-pressed={value === option.id}
+          onClick={() => onChange(option.id)}
+        >
+          {option.label}
+        </Button>
+      ))}
+    </div>
   )
 }
 
@@ -548,6 +565,7 @@ function ChoiceCard({
  *  joins this canvas's presence, so nobody is left wondering whether the
  *  OAuth dance actually worked. */
 export function AgentArrival({ name }: { name?: string }) {
+  const t = useT()
   const presences = useStore((s) => s.presences)
   const arrived = useMemo(
     () => Object.values(presences).find((p) => p.kind === 'agent' && !roleByAgentName(p.name)),
@@ -555,12 +573,13 @@ export function AgentArrival({ name }: { name?: string }) {
   )
   return arrived ? (
     <span className="mr-auto inline-flex items-center gap-[7px] text-body text-success-ink">
-      ✓ {arrived.name} is here — it worked
+      <CheckIcon size={14} />
+      {t('connect.arrived', { name: arrived.name })}
     </span>
   ) : (
     <span className="mr-auto inline-flex items-center gap-[7px] text-body text-ink-faint">
-      <Dot className="animate-[arrival-pulse_1.6s_ease-in-out_infinite] bg-brand" /> listening for{' '}
-      {name ?? 'your agent'}…
+      <Dot className="animate-[arrival-pulse_1.6s_ease-in-out_infinite] bg-brand" />{' '}
+      {t('connect.listening', { name: name ?? t('connect.yourAgent') })}
     </span>
   )
 }

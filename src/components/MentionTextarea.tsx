@@ -58,10 +58,11 @@ export const MentionTextarea = forwardRef<
     myId?: string
     className?: string
     placeholder?: string
+    ariaLabel?: string
     onKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void
   }
 >(function MentionTextarea(
-  { canvasId, value, onChange, people, agents, myId, className, placeholder, onKeyDown },
+  { canvasId, value, onChange, people, agents, myId, className, placeholder, ariaLabel, onKeyDown },
   ref,
 ) {
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -139,6 +140,7 @@ export const MentionTextarea = forwardRef<
         className={className}
         value={value}
         placeholder={placeholder}
+        aria-label={ariaLabel}
         onChange={(event) => {
           onChange(event.target.value)
           setCaret(event.target.selectionStart)

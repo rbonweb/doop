@@ -14,6 +14,7 @@ import {
 } from '../../shared/marks'
 import { canvasPages, framePageId } from '../../shared/pages'
 import { api } from './api'
+import { t } from './i18n'
 import { useStore } from './store'
 
 /**
@@ -114,7 +115,7 @@ export function markAllSeen(): number {
   const { marks } = useMarks.getState()
   const fresh = canvas.frames.filter((frame) => marks[frame.id] === 'new')
   if (fresh.length === 0) {
-    pushNotice('Nothing new to mark as seen')
+    pushNotice(t('actions.nothingToMarkSeen'))
     return 0
   }
   const seen = { ...input.seen }

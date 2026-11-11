@@ -1,0 +1,1 @@
+ALTER TABLE "canvases" ADD COLUMN IF NOT EXISTS "guides" jsonb;

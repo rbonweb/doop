@@ -1,12 +1,16 @@
+import { parse, type DefaultTreeAdapterTypes as Tree } from 'parse5'
 import { nanoid } from 'nanoid'
-import { and, eq } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray } from 'drizzle-orm'
 import { db } from './db/index.ts'
 import * as t from './db/schema.ts'
 import * as storage from './storage.ts'
+import type { FrameImage } from '../shared/imageDescriptions.ts'
+import { emitCanvasEvent } from './events.ts'
+import { htmlLoaded } from './frameHtml.ts'
 import { store } from './store.ts'
 
 /**
- * Uploaded assets: images, plus CSS stylesheets for the callers that opt in. Bytes live in object storage (server/storage.ts), one metadata row per asset in the assets table (including the canvas it was uploaded for). Frame HTML is the ground truth for which assets are still in use, tracked as a projection in asset_refs: every durable frame write re-extracts that frame's /a/<id> references (db/persist.ts), and boot rebuilds the whole table from hydrated frames — so a failed fire-and-forget write self-heals. Nothing is ever deleted; if cleanup is wanted some day, asset_refs is the ledger to build it on.
+ * Uploaded assets: images, the files of font libraries, plus CSS stylesheets for the callers that opt in. Bytes live in object storage (server/storage.ts), one metadata row per asset in the assets table (including the canvas it was uploaded for). Frame HTML is the ground truth for which assets are still in use, tracked as a projection in asset_refs: every durable frame write re-extracts that frame's /a/<id> references (db/persist.ts), and boot rebuilds the whole table from the stored frames — so a failed fire-and-forget write self-heals. Nothing is ever deleted; if cleanup is wanted some day, asset_refs is the ledger to build it on.
  *
  * Images are immutable. A stylesheet can be replaced in place (replaceAsset): same id and URL, a bumped `version`. Version 1 stays at `<id>.<ext>`; version n > 1 lives at `<id>-v<n>.<ext>`. An object served under a version number is never overwritten, so `?v=<n>` is safe to cache forever.
  */
@@ -33,6 +37,13 @@ export interface AssetAcceptance {
 
 const IMAGES_ONLY_ERROR = 'unsupported file type — png, jpg, webp, gif and svg are accepted'
 const WITH_CSS_ERROR = 'unsupported file type — png, jpg, webp, gif, svg and css are accepted'
+
+/** Raster images a vision model can read; svg is markup, so it is not described. */
+const DESCRIBABLE_MIMES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+export function isDescribableImage(mime: string): boolean {
+  return DESCRIBABLE_MIMES.has(mime)
+}
 
 /* trust the bytes, not the sender: content sniffing decides the type */
 export function sniffMime(buf: Buffer, accept: AssetAcceptance = {}): AssetMime | undefined {
@@ -222,7 +233,16 @@ export async function createAsset(
     throw new Error(`file is ${(buf.length / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB`)
   const mime = sniffMime(buf, accept)
   if (!mime) throw new Error(accept.stylesheets ? WITH_CSS_ERROR : IMAGES_ONLY_ERROR)
-  const ext = MIME_EXT[mime]
+  return storeAsset(buf, { mime, ext: MIME_EXT[mime] }, meta)
+}
+
+/** Store bytes whose type the caller has already established (images and stylesheets via createAsset, fonts via server/fonts.ts) under a fresh /a/ id. */
+export async function storeAsset(
+  buf: Buffer,
+  type: { mime: string; ext: string },
+  meta: { canvasId?: string; ownerId?: string; uploadedBy: string },
+): Promise<AssetMeta> {
+  const { mime, ext } = type
   const id = nanoid(10)
   /* object first, row second: an orphaned object is swept later, but a row
      without bytes would serve 404s forever */
@@ -230,6 +250,7 @@ export async function createAsset(
   await db.insert(t.assets).values({
     id,
     canvasId: meta.canvasId ?? null,
+    /* Stable authenticated uploader ID; uploadedBy is only a display name. */
     ownerId: meta.ownerId ?? null,
     mime,
     ext,
@@ -237,7 +258,64 @@ export async function createAsset(
     uploadedBy: meta.uploadedBy,
     createdAt: Date.now(),
   })
-  return { id, mime, ext, size: buf.length }
+  const asset = { id, mime, ext, size: buf.length }
+  if (meta.canvasId && isDescribableImage(mime))
+    emitCanvasEvent(meta.canvasId, { type: 'asset.stored', asset: { ...asset, canvasId: meta.canvasId } })
+  return asset
+}
+
+/** Only a standalone image layer is reference material; detached designs also
+ * carry data-doop-canvas-element, so the marker alone is not enough. */
+export function isStandaloneImage(html: string): boolean {
+  const isElement = (node: Tree.ChildNode): node is Tree.Element => 'tagName' in node
+  const doc = parse(html)
+  const root = doc.childNodes.filter(isElement).find((node) => node.tagName === 'html')
+  const body = root?.childNodes.filter(isElement).find((node) => node.tagName === 'body')
+  if (!body?.attrs.some((attr) => attr.name === 'data-doop-canvas-element')) return false
+  const content = body.childNodes.filter(
+    (node) => node.nodeName !== '#comment' && !(node.nodeName === '#text' && 'value' in node && !node.value.trim()),
+  )
+  const image = content[0]
+  return (
+    content.length === 1 &&
+    !!image &&
+    isElement(image) &&
+    image.tagName === 'img' &&
+    image.attrs.some((attr) => attr.name === 'data-doop-drawing' && attr.value === 'image')
+  )
+}
+
+/** The images each frame references, with their descriptions, for agents
+ *  reading the canvas: one query over asset_refs, grouped by frame. A frame
+ *  with no raster image is absent from the map. */
+export async function imagesForFrames(frameIds: string[]): Promise<Map<string, FrameImage[]>> {
+  const images = new Map<string, FrameImage[]>()
+  if (frameIds.length === 0) return images
+  let rows: { frameId: string; id: string; ext: string; mime: string; description: string | null }[]
+  try {
+    rows = await db
+      .select({
+        frameId: t.assetRefs.frameId,
+        id: t.assets.id,
+        ext: t.assets.ext,
+        mime: t.assets.mime,
+        description: t.assets.description,
+      })
+      .from(t.assetRefs)
+      .innerJoin(t.assets, eq(t.assetRefs.assetId, t.assets.id))
+      .where(inArray(t.assetRefs.frameId, frameIds))
+  } catch (err) {
+    /* an enrichment: a canvas read must never fail because of it */
+    console.error('[assets] could not read frame images', err)
+    return images
+  }
+  for (const row of rows) {
+    if (!isDescribableImage(row.mime)) continue
+    const list = images.get(row.frameId) ?? []
+    list.push({ src: `/a/${row.id}.${row.ext}`, description: row.description })
+    images.set(row.frameId, list)
+  }
+  return images
 }
 
 /** Where a revision's bytes live: version 1 is the original upload at `<id>.<ext>`, later versions get a key of their own, so no key ever changes content once it is served. */
@@ -250,12 +328,13 @@ export type AssetVersionMeta = AssetMeta & { version: number }
 export async function getAsset(
   id: string,
   version?: number,
+  signal?: AbortSignal,
 ): Promise<{ meta: AssetVersionMeta; buf: Buffer; latest: number } | null> {
   const [row] = await db.select().from(t.assets).where(eq(t.assets.id, id))
   if (!row) return null
   const wanted = row.mime === CSS_MIME && version !== undefined ? version : row.version
   if (!Number.isInteger(wanted) || wanted < 1 || wanted > row.version) return null
-  const buf = await storage.getObject(revisionKey(row.id, wanted, row.ext))
+  const buf = await storage.getObject(revisionKey(row.id, wanted, row.ext), signal)
   if (!buf) return null
   return {
     meta: { id: row.id, mime: row.mime, ext: row.ext, size: buf.length, version: wanted },
@@ -270,13 +349,13 @@ export function assetIdFromUrl(url: string): string | undefined {
   return /^\/a\/([A-Za-z0-9_-]+)\.[a-z0-9]+(?:[?#].*)?$/.exec(path)?.[1]
 }
 
-/** Ids of the frames whose HTML links this asset: the asset_refs projection, plus a scan of the frames in memory. persist writes asset_refs on a debounce, so a frame created just before a replace is only in the scan. */
+/** Ids of the frames whose HTML links this asset: the asset_refs projection, plus a scan of the frame HTML held in memory. Frame HTML is loaded per canvas (store.ts), so the scan reads only frames whose HTML is loaded and never triggers a load. persist writes asset_refs on a debounce and keeps a canvas loaded while a frame write is pending, so a frame created or edited just before a replace is always in the scan. */
 export async function framesReferencingAsset(id: string): Promise<string[]> {
   const rows = await db.select({ frameId: t.assetRefs.frameId }).from(t.assetRefs).where(eq(t.assetRefs.assetId, id))
   const ids = new Set(rows.map((r) => r.frameId))
   const needle = `/a/${id}.`
   for (const canvas of store.canvases.values())
-    for (const frame of canvas.frames) if (frame.html.includes(needle)) ids.add(frame.id)
+    for (const frame of canvas.frames) if (htmlLoaded(frame) && frame.html.includes(needle)) ids.add(frame.id)
   return [...ids]
 }
 
@@ -404,13 +483,28 @@ export async function fetchRemote(rawUrl: string): Promise<Buffer> {
   throw new Error('too many redirects')
 }
 
-/** Rebuild the asset_refs projection from a full set of frames — called at
- *  boot with the frames hydrate just loaded (no extra I/O), which both
- *  backfills pre-existing content and heals any drift from failed
- *  write-through. Incremental upkeep afterwards lives in db/persist.ts. */
-export async function reconcileAssetRefs(frames: { id: string; html: string }[]): Promise<number> {
+const RECONCILE_PAGE = 500
+
+/** Rebuild the asset_refs projection from every stored frame — called at
+ *  boot, which both backfills pre-existing content and heals any drift from
+ *  failed write-through. Frame HTML is read a page at a time, since the
+ *  server no longer holds it all (store.ts). Incremental upkeep afterwards
+ *  lives in db/persist.ts. */
+export async function reconcileAssetRefs(): Promise<number> {
   const rows: { assetId: string; frameId: string }[] = []
-  for (const f of frames) for (const assetId of extractAssetIds(f.html)) rows.push({ assetId, frameId: f.id })
+  let after = ''
+  for (;;) {
+    const page = await db
+      .select({ id: t.frames.id, html: t.frames.html })
+      .from(t.frames)
+      .where(gt(t.frames.id, after))
+      .orderBy(asc(t.frames.id))
+      .limit(RECONCILE_PAGE)
+    for (const f of page) for (const assetId of extractAssetIds(f.html)) rows.push({ assetId, frameId: f.id })
+    const last = page.at(-1)
+    if (!last || page.length < RECONCILE_PAGE) break
+    after = last.id
+  }
   await db.delete(t.assetRefs)
   for (let i = 0; i < rows.length; i += 1000) {
     await db

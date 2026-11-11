@@ -1,172 +1,133 @@
-import { randomBytes } from 'node:crypto'
-import fs from 'node:fs'
-import path from 'node:path'
-import { z } from 'zod'
-import { env } from './env.ts'
+import { and, eq, inArray } from 'drizzle-orm'
+import { db } from './db/index.ts'
+import * as t from './db/schema.ts'
+import * as authSchema from './db/auth-schema.ts'
+import * as workspaces from './workspaces.ts'
+import {
+  DEFAULT_INSTANCE_SETTINGS,
+  type InstanceSettings,
+  type InstanceSettingsPatch,
+  type InstanceSettingsRefusal,
+  type LoginPolicy,
+} from '../shared/instanceSettings.ts'
 
 /**
- * What an instance admin changes from the Admin page without a restart: the
- * models the server's own Anthropic key runs on, and the invites that let a
- * person create an account on an invite-only instance (DOOP_INVITE_ONLY).
- *
- * Kept as one small JSON file next to the rest of the instance's data
- * (data/instance.json) rather than in a table, so a fork carrying it never
- * collides with upstream's migrations. The file is read on every use, which
- * also lets deploy/doop.sh change it from outside the running server.
+ * The instance's sign-in policy: who may create an account, whether the
+ * sign-in page goes straight to SSO, and which workspace newcomers join.
+ * One row, read into memory at boot (the sign-in page and every signup ask
+ * for it) and written through on each change by an instance admin.
  */
 
-const FILE = path.join(process.cwd(), 'data', 'instance.json')
+const ROW_ID = 'instance'
 
-/** How long an invite link works. */
-const INVITE_TTL_MS = 7 * 24 * 60 * 60_000
+let current: InstanceSettings = { ...DEFAULT_INSTANCE_SETTINGS }
 
-/* names as model providers and proxies spell them: claude-opus-5,
-   anthropic/claude-sonnet-5, us.anthropic.claude-opus-5:0, my-proxy@v2 */
-const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/
-const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
-
-const inviteSchema = z.object({
-  email: z.string(),
-  token: z.string(),
-  invitedBy: z.string(),
-  createdAt: z.number(),
-  expiresAt: z.number(),
-})
-
-const settingsSchema = z.object({
-  agentModel: z.string().optional(),
-  distillModel: z.string().optional(),
-  invites: z.array(inviteSchema).default([]),
-})
-
-export type Invite = z.infer<typeof inviteSchema>
-type Settings = z.infer<typeof settingsSchema>
-
-export class SettingRefused extends Error {}
-
-function read(): Settings {
-  try {
-    return settingsSchema.parse(JSON.parse(fs.readFileSync(FILE, 'utf8')))
-  } catch {
-    /* no file yet, or one this version cannot read: start from defaults */
-    return { invites: [] }
-  }
+export async function hydrateInstanceSettings(): Promise<void> {
+  const [row] = await db.select().from(t.instanceSettings).where(eq(t.instanceSettings.id, ROW_ID))
+  current = row
+    ? {
+        emailPasswordSignup: row.emailPasswordSignup,
+        ssoAutoRedirect: row.ssoAutoRedirect,
+        defaultWorkspaceId: row.defaultWorkspaceId,
+      }
+    : { ...DEFAULT_INSTANCE_SETTINGS }
 }
 
-function write(settings: Settings): void {
-  fs.mkdirSync(path.dirname(FILE), { recursive: true })
-  fs.writeFileSync(`${FILE}.tmp`, JSON.stringify(settings, null, 2))
-  fs.renameSync(`${FILE}.tmp`, FILE)
+/** The settings as they stand, with a default workspace that no longer
+ *  exists read as none (a deleted workspace does not have to clean up here). */
+export function getInstanceSettings(): InstanceSettings {
+  const defaultWorkspaceId =
+    current.defaultWorkspaceId && workspaces.getWorkspace(current.defaultWorkspaceId)
+      ? current.defaultWorkspaceId
+      : null
+  return { ...current, defaultWorkspaceId }
 }
 
-/* ---------------------------------------------------------------- models */
-
-export interface ModelSetting {
-  /** what runs now */
-  value: string
-  /** what runs when the admin has not chosen (DOOP_*_MODEL, or Doop's own) */
-  default: string
-}
-
-export function agentModel(): string {
-  return read().agentModel || env.DOOP_AGENT_MODEL
-}
-
-export function distillModel(): string {
-  return read().distillModel || env.DOOP_DISTILL_MODEL
-}
-
-export function modelSettings(): { agent: ModelSetting; distill: ModelSetting } {
+/** What the sign-in page is told. Auto-redirect is only ever reported on
+ *  when SSO is actually configured, whatever the row says. */
+export function loginPolicy(ssoConfigured: boolean): LoginPolicy {
+  const settings = getInstanceSettings()
   return {
-    agent: { value: agentModel(), default: env.DOOP_AGENT_MODEL },
-    distill: { value: distillModel(), default: env.DOOP_DISTILL_MODEL },
+    emailPasswordSignup: settings.emailPasswordSignup,
+    ssoAutoRedirect: settings.ssoAutoRedirect && ssoConfigured,
   }
 }
 
-export function assertModelName(name: string): void {
-  if (!MODEL_NAME.test(name)) throw new SettingRefused(`"${name}" is not a model name.`)
+/** The facts a patch is checked against, gathered by the caller so the
+ *  rule itself stays a pure function (and a unit-testable one). */
+export interface PatchContext {
+  ssoConfigured: boolean
+  /** has any instance admin signed in through the OIDC provider? */
+  ssoAdminSignedIn: boolean
+  workspaceExists: (id: string) => boolean
 }
 
-/** An empty name goes back to the default. */
-export function setModels(change: { agent?: string; distill?: string }): void {
-  const settings = read()
-  for (const [key, field] of [
-    ['agent', 'agentModel'],
-    ['distill', 'distillModel'],
-  ] as const) {
-    const name = change[key]?.trim()
-    if (name === undefined) continue
-    if (name === '') {
-      delete settings[field]
-      continue
-    }
-    assertModelName(name)
-    settings[field] = name
+/**
+ * Why a patch must be refused, or null. Auto-redirect needs SSO to exist,
+ * and needs an admin to have come in through it already: turning every
+ * visitor towards a provider nobody has proven works would lock the
+ * instance out of its own admin pages.
+ */
+export function refusalFor(patch: InstanceSettingsPatch, ctx: PatchContext): InstanceSettingsRefusal | null {
+  if (patch.ssoAutoRedirect) {
+    if (!ctx.ssoConfigured) return 'sso_not_configured'
+    if (!ctx.ssoAdminSignedIn) return 'sso_no_admin_signed_in'
   }
-  write(settings)
+  if (patch.defaultWorkspaceId && !ctx.workspaceExists(patch.defaultWorkspaceId)) return 'workspace_not_found'
+  return null
 }
 
-/* --------------------------------------------------------------- invites */
-
-export function inviteOnly(): boolean {
-  return env.DOOP_INVITE_ONLY
+/** Whether any admin account has an OIDC sign-in behind it. */
+export async function ssoAdminSignedIn(): Promise<boolean> {
+  const admins = await db
+    .select({ id: authSchema.user.id })
+    .from(authSchema.user)
+    .where(eq(authSchema.user.role, 'admin'))
+  if (!admins.length) return false
+  const [row] = await db
+    .select({ id: authSchema.account.id })
+    .from(authSchema.account)
+    .where(
+      and(
+        eq(authSchema.account.providerId, 'oidc'),
+        inArray(
+          authSchema.account.userId,
+          admins.map((a) => a.id),
+        ),
+      ),
+    )
+    .limit(1)
+  return !!row
 }
 
-function live(invites: Invite[]): Invite[] {
-  const now = Date.now()
-  return invites.filter((invite) => invite.expiresAt > now)
-}
+/* writes run one after another: two admin tabs saving at once must each
+   land their own fields, not have the later one put the earlier one back */
+let chain: Promise<unknown> = Promise.resolve()
 
-export function listInvites(): Invite[] {
-  return live(read().invites).sort((a, b) => b.createdAt - a.createdAt)
+/** Apply an admin's patch: checked, written, then live. The write is awaited
+ *  so a refused or failed change never shows as applied, and only the
+ *  fields in the patch are written, so a concurrent save of other fields is
+ *  kept whichever lands last. */
+export function updateInstanceSettings(
+  patch: InstanceSettingsPatch,
+  updatedBy: string,
+  ssoConfigured: boolean,
+): Promise<{ settings: InstanceSettings } | { refusal: InstanceSettingsRefusal }> {
+  const run = chain.then(async () => {
+    const refusal = refusalFor(patch, {
+      ssoConfigured,
+      ssoAdminSignedIn: patch.ssoAutoRedirect ? await ssoAdminSignedIn() : false,
+      workspaceExists: (id) => workspaces.getWorkspace(id) !== undefined,
+    })
+    if (refusal) return { refusal }
+    const change = { ...patch, updatedAt: Date.now(), updatedBy }
+    await db
+      .insert(t.instanceSettings)
+      .values({ id: ROW_ID, ...current, ...change })
+      .onConflictDoUpdate({ target: t.instanceSettings.id, set: change })
+    current = { ...current, ...patch }
+    return { settings: getInstanceSettings() }
+  })
+  chain = run.catch(() => {})
+  return run
 }
-
-/** A new invite for `email`, replacing any earlier one for the same address. */
-export function createInvite(email: string, invitedBy: string): Invite {
-  const address = email.trim().toLowerCase()
-  if (!EMAIL.test(address)) throw new SettingRefused(`"${email}" is not an email address.`)
-  const settings = read()
-  const now = Date.now()
-  const invite = {
-    email: address,
-    token: randomBytes(24).toString('base64url'),
-    invitedBy,
-    createdAt: now,
-    expiresAt: now + INVITE_TTL_MS,
-  }
-  settings.invites = [...live(settings.invites).filter((i) => i.email !== address), invite]
-  write(settings)
-  return invite
-}
-
-export function revokeInvite(email: string): boolean {
-  const settings = read()
-  const address = email.trim().toLowerCase()
-  const before = settings.invites.length
-  settings.invites = live(settings.invites).filter((i) => i.email !== address)
-  write(settings)
-  return settings.invites.length < before
-}
-
-/** The live invite a link carries, if any. */
-export function inviteFor(token: string): Invite | undefined {
-  if (!token) return undefined
-  return live(read().invites).find((invite) => invite.token === token)
-}
-
-/** An account was made for this address: its invite is spent. */
-export function consumeInvite(email: string): void {
-  const settings = read()
-  const address = email.toLowerCase()
-  if (!settings.invites.some((i) => i.email === address)) return
-  settings.invites = live(settings.invites).filter((i) => i.email !== address)
-  write(settings)
-}
-
-export function inviteLink(invite: Invite): string {
-  const origin = env.BETTER_AUTH_URL
-  return `${origin.replace(/\/$/, '')}/?invite=${invite.token}`
-}
-
-/** The header a sign-up carries its invite token in (see src/pages/AuthPage.tsx). */
-export const INVITE_HEADER = 'x-doop-invite'

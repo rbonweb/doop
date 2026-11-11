@@ -14,6 +14,8 @@ export interface FeedbackItem {
 }
 
 export interface CommentPrompt {
+  /** the comment's id, which the agent passes back when it replies in the thread */
+  id?: string
   from: string
   /** a canvas comment (pinned to a point, not an element): the harness-built location line, which carries no
    *  person-written text beyond sanitized names. Element comments leave it out and give the four fields below. */
@@ -87,10 +89,11 @@ export function commentsSection(comments: CommentPrompt[]): string {
         const earlier = c.earlier
           .map((x) => untrustedBlock(`earlier message from ${sanitizeInline(x.from)}`, x.text))
           .join('\n')
+        const lead = c.id ? `- comment ${inlineCode(c.id)} from ${quoted(c.from)}` : `- ${quoted(c.from)}`
         const where =
           c.location !== undefined
-            ? `- ${quoted(c.from)} ${c.location}`
-            : `- ${quoted(c.from)} on frame ${inlineCode(c.frameId ?? '')} ${quoted(c.frameName ?? '')}, element ${inlineCode(c.selector ?? '')}\n` +
+            ? `${lead} ${c.location}`
+            : `${lead} on frame ${inlineCode(c.frameId ?? '')} ${quoted(c.frameName ?? '')}, element ${inlineCode(c.selector ?? '')}\n` +
               `  element HTML at comment time:\n${untrustedBlock('element HTML excerpt', c.snippet ?? '')}`
         return (
           where +

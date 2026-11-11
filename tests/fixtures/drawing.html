@@ -12,15 +12,13 @@
       import { Stage } from '/src/components/Stage.tsx'
       import { useStore } from '/src/lib/store.ts'
       import { undo, redo } from '/src/lib/history.ts'
+      import { formatSelectionText } from '/src/lib/layerEdits.ts'
       import { TooltipProvider } from '/src/components/ui/tooltip.tsx'
-      import { useShortcuts } from '/src/lib/shortcuts.ts'
-      import { canvasShortcuts } from '/src/lib/canvasShortcuts.ts'
+      import { importSvgInBrowser } from '/src/lib/svgImport.ts'
       import '/src/styles.css'
-      /* CanvasPage installs the shortcut registry; the harness has no page, so it installs it itself */
-      function Shortcuts() {
-        useShortcuts(canvasShortcuts)
-        return null
-      }
+      import { installActionKeys } from '/tests/fixtures/actionKeys.ts'
+      /* the canvas page dispatches the registry's chords (⇧C among them) */
+      installActionKeys()
       window.drawingHarness = {
         /* drawing takes the edit role, which the socket's init normally hands the store */
         seed: (canvas) => {
@@ -37,21 +35,26 @@
             cursors: { peer: cursor },
           }),
         page: (id) => useStore.getState().setActivePage(id),
+        selectFrames: (ids) => useStore.getState().selectMany(ids),
         state: () => ({
           frames: useStore.getState().canvas?.frames,
           tool: useStore.getState().tool,
+          selectedIds: useStore.getState().selectedIds,
           selectedElement: useStore.getState().selectedElement,
+          selectedElements: useStore.getState().selectedElements,
         }),
         undo,
         redo,
+        /* a Layers row pick */
+        pick: (el) => useStore.getState().pickElement(el),
+        /* several Layers rows picked, the last the primary */
+        pickMany: (frameId, selectors) => useStore.getState().pickElements(frameId, selectors),
+        formatText: (command) => formatSelectionText(command),
+        /* an SVG file read the way a paste reads it, with the browser's computed styles */
+        importSvg: (markup, name) => importSvgInBrowser(markup, name, { key: 'k' }),
       }
       createRoot(document.getElementById('root')).render(
-        React.createElement(
-          TooltipProvider,
-          null,
-          React.createElement(Shortcuts),
-          React.createElement(Stage, { onAddFrame: () => {}, rightInset: 0 }),
-        ),
+        React.createElement(TooltipProvider, null, React.createElement(Stage, { onAddFrame: () => {}, rightInset: 0 })),
       )
     </script>
   </body>

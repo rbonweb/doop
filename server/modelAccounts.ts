@@ -1,18 +1,42 @@
 import { env } from './env.ts'
+import type { RunnerPick } from '../shared/agentRunner.ts'
 import http from 'node:http'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { eq } from 'drizzle-orm'
+import { and, asc, eq, like, sql } from 'drizzle-orm'
 import { db } from './db/index.ts'
 import { modelAccounts } from './db/schema.ts'
-import { CLAUDE_MODEL_IDS, normalizeClaudeModel } from '../shared/localAgent.ts'
-import { GEMINI_MODELS, OPENROUTER_MODELS } from '../shared/modelMenu.ts'
-import { isKnownModel, modelFor } from './openaiAgent.ts'
+import {
+  DEEPSEEK_MODELS,
+  DEFAULT_ANTHROPIC_MODEL,
+  GEMINI_MODELS,
+  KIMI_CODE_MODELS,
+  KIMI_MODELS,
+  OPENROUTER_MODELS,
+  isReasoningEffort,
+  type ModelOption,
+  type ReasoningEffort,
+} from '../shared/modelMenu.ts'
+import { CLAUDE_API_MODEL, GEMINI_API_MODEL, OPENAI_API_MODEL } from './modelCatalog.ts'
+import { customProvidersEnabled } from './customProviderFetch.ts'
+import {
+  CUSTOM_PROVIDER_PREFIX,
+  MAX_CUSTOM_PROVIDERS,
+  isCustomProviderKind,
+  parseCustomHeaders,
+  parseCustomProviderConfig,
+  type CustomModel,
+  type CustomProviderConfig,
+  type CustomProviderKind,
+} from '../shared/customProvider.ts'
+import { effortFor, modelFor } from './openaiAgent.ts'
 
 /**
  * "Bring your own model": a user connects their ChatGPT subscription (or an
  * OpenAI API key) so the Doop Agent keeps working once their free tasks are
- * spent. One row per user; the tokens live only here and are never sent to a
- * browser.
+ * spent. One row per user and provider kind, so several can be connected at
+ * once; each can be switched off without losing its credential, and
+ * `agentDefaults.ts` says which one runs work nobody picked a connection for.
+ * The tokens live only here and are never sent to a browser.
  *
  * The ChatGPT path uses the same OAuth clients the Codex CLI does, against
  * auth.openai.com, with inference through ChatGPT's Codex backend. OpenAI
@@ -48,7 +72,19 @@ const REDIRECT_URI = env.CHATGPT_OAUTH_REDIRECT_URI
    fetch — an ordinary product User-Agent passes where no header at all does */
 const AUTH_USER_AGENT = env.CHATGPT_AUTH_USER_AGENT
 
-export type AccountKind = 'chatgpt' | 'openai-key' | 'anthropic-key' | 'openrouter-key' | 'gemini-key'
+/** The providers Doop knows by name. */
+export type BuiltinAccountKind =
+  | 'chatgpt'
+  | 'openai-key'
+  | 'anthropic-key'
+  | 'openrouter-key'
+  | 'gemini-key'
+  | 'deepseek-key'
+  | 'kimi-key'
+  | 'kimi-code'
+
+/** A built-in provider, or one a person connected by URL (`custom:<id>`). */
+export type AccountKind = BuiltinAccountKind | CustomProviderKind
 
 const ACCOUNT_KINDS: readonly string[] = [
   'chatgpt',
@@ -56,7 +92,10 @@ const ACCOUNT_KINDS: readonly string[] = [
   'anthropic-key',
   'openrouter-key',
   'gemini-key',
-] satisfies AccountKind[]
+  'deepseek-key',
+  'kimi-key',
+  'kimi-code',
+] satisfies BuiltinAccountKind[]
 
 export interface ModelAccount {
   userId: string
@@ -70,18 +109,50 @@ export interface ModelAccount {
   apiKey?: string
   /** model tier the user picked; unset = the server default */
   model?: string
+  /** OpenAI reasoning effort the user picked; unset = the server default */
+  effort?: ReasoningEffort
+  /** off keeps the credential but takes the account out of use */
+  enabled: boolean
   connectedAt: number
+  /** a custom provider's description; set exactly when the kind is custom */
+  custom?: CustomProviderConfig
+  /** a custom provider's extra request headers */
+  headers?: Record<string, string>
 }
 
-/** What the browser is allowed to know: never a token. */
+/** A custom provider as Settings shows it: the description, which headers
+ *  are set and whether there is a key, never their values. */
+export interface CustomProviderStatus extends CustomProviderConfig {
+  headerNames: string[]
+  hasKey: boolean
+}
+
+/** What the browser is allowed to know about one account: never a token. */
 export interface AccountStatus {
-  connected: boolean
-  kind?: AccountKind
+  kind: AccountKind
+  enabled: boolean
   email?: string
   plan?: string
   /** the model tier in effect, resolved (never null in a status) */
   model?: string
-  connectedAt?: number
+  /** the reasoning effort in effect, resolved; only the OpenAI kinds have one */
+  effort?: string
+  connectedAt: number
+  custom?: CustomProviderStatus
+}
+
+export function isBuiltinAccountKind(value: unknown): value is BuiltinAccountKind {
+  return typeof value === 'string' && ACCOUNT_KINDS.includes(value)
+}
+
+export function isAccountKind(value: unknown): value is AccountKind {
+  return isBuiltinAccountKind(value) || isCustomProviderKind(value)
+}
+
+const OPENAI_KINDS: readonly string[] = ['chatgpt', 'openai-key']
+
+export function takesReasoningEffort(kind: AccountKind): boolean {
+  return OPENAI_KINDS.includes(kind)
 }
 
 export function chatgptConnectEnabled(): boolean {
@@ -92,16 +163,49 @@ export function chatgptConnectEnabled(): boolean {
 /* storage                                                          */
 /* ---------------------------------------------------------------- */
 
+/** A stored custom provider's description and headers, re-checked on the
+ *  way out so a row written by another build can never run half-valid. */
+function customOf(row: typeof modelAccounts.$inferSelect): Pick<ModelAccount, 'custom' | 'headers'> | null {
+  if (!customProvidersEnabled()) return null
+  const config = parseCustomProviderConfig(row.custom)
+  if (!config.ok) {
+    console.warn(`[doop-agent] ignoring custom provider ${row.kind} for user ${row.userId}: ${config.error}`)
+    return null
+  }
+  let stored: unknown = {}
+  try {
+    stored = row.customHeaders ? JSON.parse(row.customHeaders) : {}
+  } catch {
+    stored = null
+  }
+  const headers = parseCustomHeaders(stored)
+  if (!headers.ok) {
+    console.warn(`[doop-agent] ignoring custom provider ${row.kind} for user ${row.userId}: unreadable headers`)
+    return null
+  }
+  return { custom: config.value, ...(Object.keys(headers.value).length ? { headers: headers.value } : {}) }
+}
+
 function toAccount(row: typeof modelAccounts.$inferSelect): ModelAccount | null {
-  if (!ACCOUNT_KINDS.includes(row.kind)) {
+  if (isCustomProviderKind(row.kind)) {
+    /* switched off by the operator, or unreadable: as if not connected */
+    const custom = customOf(row)
+    if (!custom) return null
+    return { ...baseAccount(row, row.kind), ...custom }
+  }
+  if (!isBuiltinAccountKind(row.kind)) {
     /* a kind this build doesn't know (a rollback after an upgrade, say) —
        treating it as disconnected beats running it as the wrong provider */
     console.warn(`[doop-agent] ignoring model account with unknown kind "${row.kind}" for user ${row.userId}`)
     return null
   }
+  return baseAccount(row, row.kind)
+}
+
+function baseAccount(row: typeof modelAccounts.$inferSelect, kind: AccountKind): ModelAccount {
   return {
     userId: row.userId,
-    kind: row.kind as AccountKind,
+    kind,
     ...(row.accountId ? { accountId: row.accountId } : {}),
     ...(row.email ? { email: row.email } : {}),
     ...(row.plan ? { plan: row.plan } : {}),
@@ -110,79 +214,214 @@ function toAccount(row: typeof modelAccounts.$inferSelect): ModelAccount | null 
     ...(row.expiresAt != null ? { expiresAt: row.expiresAt } : {}),
     ...(row.apiKey ? { apiKey: row.apiKey } : {}),
     ...(row.model ? { model: row.model } : {}),
+    ...(isReasoningEffort(row.reasoningEffort) ? { effort: row.reasoningEffort } : {}),
+    enabled: row.enabled,
     connectedAt: row.connectedAt,
   }
 }
 
-export async function getAccount(userId: string): Promise<ModelAccount | null> {
-  const [row] = await db.select().from(modelAccounts).where(eq(modelAccounts.userId, userId))
+/** Every account this person connected, switched on or off, oldest first. */
+export async function getAccounts(userId: string): Promise<ModelAccount[]> {
+  const rows = await db
+    .select()
+    .from(modelAccounts)
+    .where(eq(modelAccounts.userId, userId))
+    .orderBy(asc(modelAccounts.connectedAt))
+  return rows.map(toAccount).filter((account): account is ModelAccount => account !== null)
+}
+
+/** One provider's account, switched on or off, or null when not connected. */
+export async function getAccount(userId: string, kind: AccountKind): Promise<ModelAccount | null> {
+  const [row] = await db
+    .select()
+    .from(modelAccounts)
+    .where(and(eq(modelAccounts.userId, userId), eq(modelAccounts.kind, kind)))
   return row ? toAccount(row) : null
 }
 
-export async function getStatus(userId: string): Promise<AccountStatus> {
-  const account = await getAccount(userId)
-  if (!account) return { connected: false }
+export function statusOf(account: ModelAccount): AccountStatus {
   return {
-    connected: true,
     kind: account.kind,
+    enabled: account.enabled,
     ...(account.email ? { email: account.email } : {}),
     ...(account.plan ? { plan: account.plan } : {}),
     /* resolved, so the UI shows what will actually run rather than "default" */
     model: accountModelFor(account),
+    ...(takesReasoningEffort(account.kind) ? { effort: effortFor(account) } : {}),
     connectedAt: account.connectedAt,
+    ...(account.custom
+      ? {
+          custom: {
+            ...account.custom,
+            headerNames: Object.keys(account.headers ?? {}),
+            hasKey: Boolean(account.apiKey),
+          },
+        }
+      : {}),
   }
 }
 
 const DEFAULT_OPENROUTER = env.DOOP_AGENT_OPENROUTER_MODEL
 const DEFAULT_GEMINI = env.DOOP_AGENT_GEMINI_MODEL
+const DEFAULT_DEEPSEEK = env.DOOP_AGENT_DEEPSEEK_MODEL
+const DEFAULT_KIMI = env.DOOP_AGENT_KIMI_MODEL
+const DEFAULT_KIMI_CODE = env.DOOP_AGENT_KIMI_CODE_MODEL
+
+/* the kinds whose menu is a hand-checked roster and nothing else: the roster's
+   vision flags are all the run-time check knows about their models */
+const ROSTERS: Partial<Record<BuiltinAccountKind, ModelOption[]>> = {
+  'openrouter-key': OPENROUTER_MODELS,
+  'deepseek-key': DEEPSEEK_MODELS,
+  'kimi-key': KIMI_MODELS,
+  'kimi-code': KIMI_CODE_MODELS,
+}
+
+function rosterPolicy(roster: ModelOption[], fallback: string) {
+  return {
+    resolve: (model?: string) => model || fallback,
+    isKnown: (model: string) => roster.some((option) => option.id === model),
+  }
+}
+
+interface ModelPolicy {
+  resolve(model?: string): string
+  isKnown(model: string): boolean
+}
 
 /* per-kind model policy: how a stored (possibly unset or stale) model id
    resolves to the one that will run, and which ids the picker may set */
-const MODEL_POLICY: Record<AccountKind, { resolve(model?: string): string; isKnown(model: string): boolean }> = {
-  chatgpt: { resolve: (model) => modelFor({ model }), isKnown: isKnownModel },
-  'openai-key': { resolve: (model) => modelFor({ model }), isKnown: isKnownModel },
+const MODEL_POLICY: Record<BuiltinAccountKind, ModelPolicy> = {
+  /* the catalog-backed kinds take any id shaped like their provider's: the
+     picker offers what the provider's catalog lists (server/modelCatalog.ts)
+     and the run is the final check, as it always was */
+  chatgpt: { resolve: (model) => modelFor({ model }), isKnown: (model) => OPENAI_API_MODEL.test(model) },
+  'openai-key': { resolve: (model) => modelFor({ model }), isKnown: (model) => OPENAI_API_MODEL.test(model) },
+  /* any Claude id the catalog offered (or the user typed) runs as is; an
+     unset model, or a Claude Code alias saved by an older build, falls back
+     to the curated default — the Messages API takes full ids only */
   'anthropic-key': {
-    resolve: normalizeClaudeModel,
-    isKnown: (model) => CLAUDE_MODEL_IDS.some((id) => id === model),
+    resolve: (model) => (model && CLAUDE_API_MODEL.test(model) ? model : DEFAULT_ANTHROPIC_MODEL),
+    isKnown: (model) => CLAUDE_API_MODEL.test(model),
   },
-  'openrouter-key': {
-    resolve: (model) => model || DEFAULT_OPENROUTER,
-    isKnown: (model) => OPENROUTER_MODELS.some((option) => option.id === model),
-  },
+  /* OpenRouter keeps its curated roster: the roster's vision flags are what
+     the run-time check knows, and its catalog mixes in text-only models */
+  'openrouter-key': rosterPolicy(OPENROUTER_MODELS, DEFAULT_OPENROUTER),
   'gemini-key': {
     resolve: (model) => model || DEFAULT_GEMINI,
-    isKnown: (model) => GEMINI_MODELS.some((option) => option.id === model),
+    isKnown: (model) => GEMINI_API_MODEL.test(model),
   },
+  /* DeepSeek and Kimi too: their catalogs list ids without saying which see images */
+  'deepseek-key': rosterPolicy(DEEPSEEK_MODELS, DEFAULT_DEEPSEEK),
+  'kimi-key': rosterPolicy(KIMI_MODELS, DEFAULT_KIMI),
+  'kimi-code': rosterPolicy(KIMI_CODE_MODELS, DEFAULT_KIMI_CODE),
 }
 
-export function accountModelFor(account: Pick<ModelAccount, 'kind' | 'model'>): string {
-  return MODEL_POLICY[account.kind].resolve(account.model)
+/* a custom provider runs the models its person listed, and only those: an
+   unset or delisted pick runs on the first of them */
+function customPolicy(config: CustomProviderConfig): ModelPolicy {
+  const isKnown = (model: string) => config.models.some((option) => option.id === model)
+  return {
+    resolve: (model) => (model && isKnown(model) ? model : (config.models[0]?.id ?? '')),
+    isKnown,
+  }
+}
+
+type PolicySubject = Pick<ModelAccount, 'kind' | 'custom'>
+
+function policyFor(account: PolicySubject): ModelPolicy {
+  if (isBuiltinAccountKind(account.kind)) return MODEL_POLICY[account.kind]
+  if (!account.custom) throw new Error(`${account.kind} has no provider description`)
+  return customPolicy(account.custom)
+}
+
+export function accountModelFor(account: PolicySubject & Pick<ModelAccount, 'model'>): string {
+  return policyFor(account).resolve(account.model)
+}
+
+/** Whether the picker may set this id on this account. */
+export function isKnownAccountModel(account: PolicySubject, model: string): boolean {
+  return policyFor(account).isKnown(model)
+}
+
+/** The custom provider model this account resolves to, with its flags. */
+export function customModelFor(account: ModelAccount): CustomModel | undefined {
+  const model = accountModelFor(account)
+  return account.custom?.models.find((option) => option.id === model)
+}
+
+/** The account as one card asked to run it: the pick's model where the kind
+ *  knows it, its effort where the kind has the dial, the account's own
+ *  otherwise. The row is untouched; this is for one run. */
+export function accountWithPick(account: ModelAccount, pick: RunnerPick | undefined): ModelAccount {
+  if (!pick || pick.provider !== account.kind) return account
+  return {
+    ...account,
+    ...(pick.model && isKnownAccountModel(account, pick.model) ? { model: pick.model } : {}),
+    ...(takesReasoningEffort(account.kind) && isReasoningEffort(pick.effort) ? { effort: pick.effort } : {}),
+  }
 }
 
 /** Whether the model this account resolves to can see images. An id off the
  *  curated menu (a server env override) is trusted to have vision except on
- *  OpenRouter, whose roster mixes text-only models — there the conservative
- *  answer is a degraded run rather than a 400 on the first screenshot. */
-export function accountVisionFor(account: Pick<ModelAccount, 'kind' | 'model'>): boolean {
+ *  the roster kinds, whose rosters mix text-only models — there the
+ *  conservative answer is a degraded run rather than a 400 on the first
+ *  screenshot. */
+export function accountVisionFor(account: PolicySubject & Pick<ModelAccount, 'model'>): boolean {
   const model = accountModelFor(account)
-  const menu =
-    account.kind === 'openrouter-key' ? OPENROUTER_MODELS : account.kind === 'gemini-key' ? GEMINI_MODELS : null
+  /* a custom provider's models say for themselves, as their person set them */
+  if (account.custom) return account.custom.models.find((option) => option.id === model)?.vision ?? false
+  if (!isBuiltinAccountKind(account.kind)) return false
+  const roster = ROSTERS[account.kind]
+  const menu = roster ?? (account.kind === 'gemini-key' ? GEMINI_MODELS : null)
   if (!menu) return true
   const option = menu.find((entry) => entry.id === model)
   if (option) return option.vision
-  return account.kind !== 'openrouter-key'
+  return !roster
 }
 
-/** Change which model tier this account runs on. */
-export async function setAccountModel(userId: string, model: string): Promise<AccountStatus> {
-  const account = await getAccount(userId)
-  if (!account) throw new Error('no model account connected')
-  if (!MODEL_POLICY[account.kind].isKnown(model)) throw new Error('unknown model')
-  await save({ ...account, model })
-  return getStatus(userId)
+/** Change which model tier one account runs on. */
+export async function setAccountModel(userId: string, kind: AccountKind, model: string): Promise<void> {
+  const account = await getAccount(userId, kind)
+  if (!account) throw new Error('that account is not connected')
+  if (!isKnownAccountModel(account, model)) throw new Error('unknown model')
+  await savePick(account, { model })
 }
 
-async function save(account: Omit<ModelAccount, 'connectedAt'>): Promise<void> {
+/** Change how hard a connected OpenAI model thinks per turn. */
+export async function setAccountEffort(userId: string, kind: AccountKind, effort: string): Promise<void> {
+  const account = await getAccount(userId, kind)
+  if (!account) throw new Error('that account is not connected')
+  if (!takesReasoningEffort(account.kind)) throw new Error('only OpenAI models take a reasoning effort')
+  if (!isReasoningEffort(effort)) throw new Error('unknown reasoning effort')
+  await savePick(account, { reasoningEffort: effort })
+}
+
+/** Switch one account on or off, keeping its credential. */
+export async function setAccountEnabled(userId: string, kind: AccountKind, enabled: boolean): Promise<void> {
+  const account = await getAccount(userId, kind)
+  if (!account) throw new Error('that account is not connected')
+  await savePick(account, { enabled })
+}
+
+/** Write ONLY the picked column, and only onto the account the pick was
+ *  checked against. A whole-row upsert here would carry the tokens read
+ *  moments ago back over a refresh that landed in between (the refresh token
+ *  is single-use, so that forces a reconnect), and two picks made at once
+ *  would undo each other; matching the kind keeps a pick validated for one
+ *  provider off an account that switched to another meanwhile. */
+async function savePick(
+  account: Pick<ModelAccount, 'userId' | 'kind'>,
+  pick: { model: string } | { reasoningEffort: string } | { enabled: boolean },
+): Promise<void> {
+  const written = await db
+    .update(modelAccounts)
+    .set({ ...pick, updatedAt: Date.now() })
+    .where(and(eq(modelAccounts.userId, account.userId), eq(modelAccounts.kind, account.kind)))
+    .returning({ userId: modelAccounts.userId })
+  if (!written.length) throw new Error('the connected account changed — pick again')
+}
+
+async function save(account: Omit<ModelAccount, 'connectedAt' | 'enabled'>): Promise<void> {
   const now = Date.now()
   const row = {
     userId: account.userId,
@@ -195,6 +434,9 @@ async function save(account: Omit<ModelAccount, 'connectedAt'>): Promise<void> {
     expiresAt: account.expiresAt ?? null,
     apiKey: account.apiKey ?? null,
     model: account.model ?? null,
+    reasoningEffort: account.effort ?? null,
+    /* a connection, or a reconnection, is meant to be used */
+    enabled: true,
     connectedAt: now,
     updatedAt: now,
   }
@@ -202,9 +444,9 @@ async function save(account: Omit<ModelAccount, 'connectedAt'>): Promise<void> {
     .insert(modelAccounts)
     .values(row)
     .onConflictDoUpdate({
-      target: modelAccounts.userId,
+      target: [modelAccounts.userId, modelAccounts.kind],
       set: {
-        kind: row.kind,
+        enabled: true,
         accountId: row.accountId,
         email: row.email,
         plan: row.plan,
@@ -213,13 +455,23 @@ async function save(account: Omit<ModelAccount, 'connectedAt'>): Promise<void> {
         expiresAt: row.expiresAt,
         apiKey: row.apiKey,
         model: row.model,
+        reasoningEffort: row.reasoningEffort,
         updatedAt: row.updatedAt,
       },
     })
 }
 
-export async function disconnect(userId: string): Promise<void> {
-  await db.delete(modelAccounts).where(eq(modelAccounts.userId, userId))
+export async function disconnect(userId: string, kind: AccountKind): Promise<void> {
+  await db.delete(modelAccounts).where(and(eq(modelAccounts.userId, userId), eq(modelAccounts.kind, kind)))
+}
+
+/** What a ChatGPT token refresh changes on the account. */
+interface RefreshedTokens {
+  accessToken: string
+  refreshToken: string
+  expiresAt: number
+  accountId?: string
+  plan?: string
 }
 
 /**
@@ -228,10 +480,7 @@ export async function disconnect(userId: string): Promise<void> {
  * the row re-created, and changing the model mid-refresh would see it reverted
  * to whatever this refresh started with.
  */
-async function saveRefreshedTokens(
-  userId: string,
-  tokens: { accessToken: string; refreshToken: string; expiresAt: number; accountId?: string; plan?: string },
-): Promise<void> {
+async function saveRefreshedTokens(userId: string, tokens: RefreshedTokens): Promise<void> {
   await db
     .update(modelAccounts)
     .set({
@@ -242,7 +491,7 @@ async function saveRefreshedTokens(
       ...(tokens.plan ? { plan: tokens.plan } : {}),
       updatedAt: Date.now(),
     })
-    .where(eq(modelAccounts.userId, userId))
+    .where(and(eq(modelAccounts.userId, userId), eq(modelAccounts.kind, 'chatgpt')))
 }
 
 /* ---------------------------------------------------------------- */
@@ -383,7 +632,7 @@ function readIdToken(idToken: string | undefined): IdTokenClaims {
 }
 
 /** Finish the flow: exchange the pasted code and store the account. */
-export async function completeChatgptAuth(userId: string, pastedInput: string): Promise<AccountStatus> {
+export async function completeChatgptAuth(userId: string, pastedInput: string): Promise<void> {
   sweepPending()
   const { code, state } = parseAuthCode(pastedInput)
   /* the verifier is looked up by the state we minted; without a state we fall
@@ -421,7 +670,7 @@ async function exchangeAndSave(
   code: string,
   verifier: string,
   redirectUri: string = REDIRECT_URI,
-): Promise<AccountStatus> {
+): Promise<void> {
   const tokens = await tokenRequest({
     grant_type: 'authorization_code',
     code,
@@ -445,7 +694,6 @@ async function exchangeAndSave(
     refreshToken: tokens.refresh_token,
     expiresAt: Date.now() + (tokens.expires_in ?? 3600) * 1000,
   })
-  return getStatus(userId)
 }
 
 /* ---------------------------------------------------------------- */
@@ -701,7 +949,7 @@ export function startCallbackCatcher(): Promise<boolean> {
 
 /* what a plausible key looks like, per provider — a shape check only, never a
    live call; the first run surfaces a bad key as ModelAuthError anyway */
-const KEY_SHAPES: Partial<Record<AccountKind, { test(key: string): boolean; hint: string }>> = {
+const KEY_SHAPES: Partial<Record<BuiltinAccountKind, { test(key: string): boolean; hint: string }>> = {
   'openai-key': {
     test: (key) => key.startsWith('sk-'),
     hint: 'That does not look like an OpenAI API key (they start with "sk-")',
@@ -720,43 +968,141 @@ const KEY_SHAPES: Partial<Record<AccountKind, { test(key: string): boolean; hint
     test: (key) => key.length >= 30 && !/\s/.test(key),
     hint: 'That does not look like a Gemini API key (a long single token, usually starting with "AIza")',
   },
+  'deepseek-key': {
+    test: (key) => key.startsWith('sk-') && key.length >= 20 && !/\s/.test(key),
+    hint: 'That does not look like a DeepSeek API key (they start with "sk-")',
+  },
+  'kimi-key': {
+    test: (key) => key.startsWith('sk-') && key.length >= 20 && !/\s/.test(key),
+    hint: 'That does not look like a Kimi API key (they start with "sk-")',
+  },
+  'kimi-code': {
+    /* the Kimi Code console's format is not documented: one long token */
+    test: (key) => key.length >= 20 && !/\s/.test(key),
+    hint: 'That does not look like a Kimi Code key (copy it from the Kimi Code console)',
+  },
 }
 
-async function connectKey(userId: string, kind: AccountKind, apiKey: string): Promise<AccountStatus> {
+async function connectKey(userId: string, kind: BuiltinAccountKind, apiKey: string): Promise<void> {
   const key = apiKey.trim()
   const shape = KEY_SHAPES[kind]
   if (!shape) throw new Error(`${kind} accounts do not connect with an API key`)
   if (!shape.test(key)) throw new Error(shape.hint)
-  const previous = await getAccount(userId)
+  const previous = await getAccount(userId, kind)
   await save({
     userId,
     kind,
     apiKey: key,
-    /* a rotation keeps the chosen model; switching providers resets it */
-    model: previous?.kind === kind ? previous.model : undefined,
+    /* a rotation keeps the chosen model and effort */
+    ...(previous ? { model: previous.model, effort: previous.effort } : {}),
   })
-  return getStatus(userId)
 }
 
-export function connectApiKey(userId: string, apiKey: string): Promise<AccountStatus> {
+export function connectApiKey(userId: string, apiKey: string): Promise<void> {
   return connectKey(userId, 'openai-key', apiKey)
 }
 
-export function connectAnthropicKey(userId: string, apiKey: string): Promise<AccountStatus> {
+export function connectAnthropicKey(userId: string, apiKey: string): Promise<void> {
   return connectKey(userId, 'anthropic-key', apiKey)
 }
 
-export function connectOpenRouterKey(userId: string, apiKey: string): Promise<AccountStatus> {
+export function connectOpenRouterKey(userId: string, apiKey: string): Promise<void> {
   return connectKey(userId, 'openrouter-key', apiKey)
 }
 
-export function connectGeminiKey(userId: string, apiKey: string): Promise<AccountStatus> {
+export function connectGeminiKey(userId: string, apiKey: string): Promise<void> {
   return connectKey(userId, 'gemini-key', apiKey)
+}
+
+export function connectDeepSeekKey(userId: string, apiKey: string): Promise<void> {
+  return connectKey(userId, 'deepseek-key', apiKey)
+}
+
+export function connectKimiKey(userId: string, apiKey: string): Promise<void> {
+  return connectKey(userId, 'kimi-key', apiKey)
+}
+
+export function connectKimiCodeKey(userId: string, apiKey: string): Promise<void> {
+  return connectKey(userId, 'kimi-code', apiKey)
+}
+
+/* ---------------------------------------------------------------- */
+/* custom providers                                                 */
+/* ---------------------------------------------------------------- */
+
+/** What a custom provider's key or headers become on an edit: a new value,
+ *  or (undefined) the stored one kept. */
+export interface CustomProviderSecrets {
+  apiKey?: string
+  headers?: Record<string, string>
+}
+
+function newCustomKind(): CustomProviderKind {
+  return `${CUSTOM_PROVIDER_PREFIX}${randomBytes(9).toString('hex')}`
+}
+
+/** Connect a custom provider beside everything else; its kind is minted
+ *  here, never taken from the request. */
+export async function connectCustomProvider(
+  userId: string,
+  config: CustomProviderConfig,
+  secrets: CustomProviderSecrets,
+): Promise<CustomProviderKind> {
+  const kind = newCustomKind()
+  const now = Date.now()
+  /* count and insert under a per-person lock, so two adds racing at nine
+     cannot both see room for a tenth */
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`custom-providers:${userId}`}))`)
+    const existing = await tx
+      .select({ kind: modelAccounts.kind })
+      .from(modelAccounts)
+      .where(and(eq(modelAccounts.userId, userId), like(modelAccounts.kind, `${CUSTOM_PROVIDER_PREFIX}%`)))
+    if (existing.length >= MAX_CUSTOM_PROVIDERS) {
+      throw new Error(`You can connect at most ${MAX_CUSTOM_PROVIDERS} custom providers`)
+    }
+    await tx.insert(modelAccounts).values({
+      userId,
+      kind,
+      apiKey: secrets.apiKey || null,
+      custom: config,
+      customHeaders: secrets.headers && Object.keys(secrets.headers).length ? JSON.stringify(secrets.headers) : null,
+      model: config.models[0]?.id ?? null,
+      enabled: true,
+      connectedAt: now,
+      updatedAt: now,
+    })
+  })
+  return kind
+}
+
+/** Change a custom provider's description, and its key or headers where
+ *  new ones are given. Its on/off state, default mark and picked model stay
+ *  (a model no longer listed runs on the first one listed). */
+export async function updateCustomProvider(
+  userId: string,
+  kind: CustomProviderKind,
+  config: CustomProviderConfig,
+  secrets: CustomProviderSecrets,
+): Promise<void> {
+  const written = await db
+    .update(modelAccounts)
+    .set({
+      custom: config,
+      ...(secrets.apiKey !== undefined ? { apiKey: secrets.apiKey || null } : {}),
+      ...(secrets.headers !== undefined
+        ? { customHeaders: Object.keys(secrets.headers).length ? JSON.stringify(secrets.headers) : null }
+        : {}),
+      updatedAt: Date.now(),
+    })
+    .where(and(eq(modelAccounts.userId, userId), eq(modelAccounts.kind, kind)))
+    .returning({ userId: modelAccounts.userId })
+  if (!written.length) throw new Error('that provider is not connected')
 }
 
 /* refreshes are per-user serialized: two runs starting together must not both
    spend the single-use refresh token */
-const refreshing = new Map<string, Promise<ModelAccount>>()
+const refreshing = new Map<string, Promise<RefreshedTokens>>()
 const REFRESH_MARGIN_MS = 120_000
 
 /** A ChatGPT account with a live access token, refreshing it if it is close
@@ -766,6 +1112,13 @@ export async function withFreshToken(account: ModelAccount): Promise<ModelAccoun
   if (account.kind !== 'chatgpt') return account
   if (!account.refreshToken) throw new Error('ChatGPT connection is missing its refresh token — reconnect it')
   if ((account.expiresAt ?? 0) - REFRESH_MARGIN_MS > Date.now() && account.accessToken) return account
+  /* callers racing one refresh share only the new credentials: each keeps its
+     own model and effort, since two tasks may run different picks */
+  return { ...account, ...(await refreshedTokens(account)) }
+}
+
+/** One refresh per user at a time; its credentials, nothing else. */
+function refreshedTokens(account: ModelAccount): Promise<RefreshedTokens> {
   const inFlight = refreshing.get(account.userId)
   if (inFlight) return inFlight
   const task = (async () => {
@@ -778,23 +1131,16 @@ export async function withFreshToken(account: ModelAccount): Promise<ModelAccoun
     if (!tokens.access_token) throw new Error('OpenAI did not return a refreshed access token')
     const claims = readIdToken(tokens.id_token)
     const auth = claims['https://api.openai.com/auth'] ?? {}
-    const next: ModelAccount = {
-      ...account,
+    const fresh: RefreshedTokens = {
       accessToken: tokens.access_token,
       /* rotation is optional — keep the current token when none comes back */
-      refreshToken: tokens.refresh_token || account.refreshToken,
+      refreshToken: tokens.refresh_token || account.refreshToken!,
       expiresAt: Date.now() + (tokens.expires_in ?? 3600) * 1000,
       ...(auth.chatgpt_account_id ? { accountId: auth.chatgpt_account_id } : {}),
       ...(auth.chatgpt_plan_type ? { plan: auth.chatgpt_plan_type } : {}),
     }
-    await saveRefreshedTokens(account.userId, {
-      accessToken: next.accessToken!,
-      refreshToken: next.refreshToken!,
-      expiresAt: next.expiresAt!,
-      ...(auth.chatgpt_account_id ? { accountId: auth.chatgpt_account_id } : {}),
-      ...(auth.chatgpt_plan_type ? { plan: auth.chatgpt_plan_type } : {}),
-    })
-    return next
+    await saveRefreshedTokens(account.userId, fresh)
+    return fresh
   })().finally(() => refreshing.delete(account.userId))
   refreshing.set(account.userId, task)
   return task

@@ -1,7 +1,12 @@
+import { CAPTURE_PREFIX, pasteWebCapture } from '../lib/webCapture'
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { useStore } from '../lib/store'
-import { EXPORT_SHORTCUT } from '../lib/keys'
-import { canHideUi } from '../lib/hideUi'
+import { canEditOpenCanvas, pickedSelectors, useStore } from '../lib/store'
+import { MOD_KEY, PRESENT_SHORTCUT_HINT, isControlTarget, isTypingTarget } from '../lib/keys'
+import { enterSelection, exitSelection, selectSibling } from '../lib/selectionKeys'
+import { dispatchActionKey, setActionHost, type ActionHost } from '../lib/actions/registry'
+import { applyEscape, escapeModeNow, type EscapeMode } from '../lib/actions/escape'
+import { presentStartFrame, startPresenting } from '../lib/present'
+import { canHideUi, hideUiHinted } from '../lib/hideUi'
 import { connect, disconnect, sendWs } from '../lib/ws'
 import {
   api,
@@ -16,6 +21,7 @@ import {
 import { navigate } from '../App'
 import { DoopMark } from '../components/Logo'
 import {
+  BarDivider,
   BarPill,
   TopBar,
   TopBarTitle,
@@ -23,11 +29,14 @@ import {
   barPillBtn,
   barPillIconBtn,
   barPrimaryBtn,
+  barPrimaryCompactBtn,
 } from '../components/TopBar'
 import { LivePresence } from '../components/LivePresence'
-import { ensureTab } from '../lib/desktop'
+import { ensureTab, openExternal } from '../lib/desktop'
 import { Stage } from '../components/Stage'
+import { COMPONENT_DRAG_TYPE, dropComponent } from '../lib/components'
 import { Inspector } from '../components/Inspector'
+import { PagePanel } from '../components/PagePanel'
 import { ElementPanel } from '../components/ElementPanel'
 import { ActivityPanel } from '../components/ActivityPanel'
 import { ConnectModal } from '../components/ConnectModal'
@@ -37,51 +46,76 @@ import { MobilePanelTabs, SideRail } from '../components/SideRail'
 import { MarksChip, MarksController } from '../components/MarksChip'
 import { LayersPanel, LayersRailToggle } from '../components/LayersPanel'
 import { Onboarding } from '../components/Onboarding'
+import { AccessBanner } from '../components/AccessBanner'
 import { ShareModal } from '../components/ShareModal'
+import { FrameExportModal } from '../components/FrameExportModal'
+import { AppIcon } from '../components/ui/brand-mark'
+import { pageFrames } from '../../shared/pages'
+import type { Frame } from '../../shared/types'
 import { ImportStepFooter, ImportStepHeader, SourcePicker } from '../components/ImportSources'
 import { importSources } from '../components/importSourceList'
 import { PresentMode } from '../components/PresentMode'
-import { startPresenting } from '../lib/present'
-import { FrameExportModal } from '../components/FrameExportModal'
+import { CommandPalette } from '../components/CommandPalette'
+import { MainMenu } from '../components/MainMenu'
+import { ShortcutsSheet } from '../components/ShortcutsSheet'
+import { FindBar } from '../components/FindBar'
+import { LinkDialog } from '../components/LinkDialog'
+import { FrameHistoryModal } from '../components/FrameHistoryModal'
 import { getIdentity, setName } from '../lib/identity'
-import { hasFrameClip, pasteFrameCentered, pasteImagesCentered } from '../lib/frameClipboard'
+import {
+  copyFrames,
+  dropFiles,
+  hasFrameClip,
+  hasIncoming,
+  pasteFrameCentered,
+  pasteFilesCentered,
+  splitIncoming,
+  svgMarkupOf,
+} from '../lib/frameClipboard'
 import { clearHistory } from '../lib/history'
+import { deleteSelection, nudgeSelection } from '../lib/layerEdits'
+import { copyPicked, hasElementClip, pasteLayer } from '../lib/elementClipboard'
+import { isCanvasClipboard, writeCanvasClipboard } from '../lib/canvasClipboard'
 import { clearLayoutSnapshots } from '../lib/layoutEdits'
-import { useShortcuts } from '../lib/shortcuts'
-import { canvasShortcuts } from '../lib/canvasShortcuts'
-import { ShortcutsDialog } from '../components/ShortcutsDialog'
 import { useSelectedFrames } from '../lib/useSelectedFrames'
-import { canEditNow, roleBadge, useCanComment, useCanEdit } from '../lib/role'
+import { useCanComment, useCanEdit } from '../lib/role'
 import { GuestNamePrompt, NoAccess } from '../components/AccessScreens'
 import { authClient } from '../lib/auth'
-import { posthog } from '../lib/posthog'
+import { avatarUrl } from '../../shared/avatar'
+import { openSupportChat, posthog } from '../lib/posthog'
 import { useIsMobile } from '../hooks/use-mobile'
 import { cn } from '@/lib/utils'
 import { Button } from '../components/ui/button'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../components/ui/sheet'
 import { AuthCard, AuthCardText, AuthScreen } from '../components/ui/screen'
 import {
+  ArrowLeftIcon,
   BrainIcon,
   CopyIcon,
-  DownloadIcon,
-  FolderIcon,
+  ExportIcon,
+  GearIcon,
   GithubIcon,
+  GridIcon,
   ImportIcon,
   LayersIcon,
+  LinkIcon,
   MoreHorizontalIcon,
   PlayIcon,
   PlusIcon,
-  GearIcon,
-  RadioTowerIcon,
+  PrototypeModeIcon,
   ShareIcon,
   ShareUpIcon,
-  WebIcon,
   XIcon,
 } from '../components/ui/icons'
-import { Badge } from '../components/ui/badge'
-import { Segmented, SegmentedItem } from '../components/ui/segmented'
+import { Badge, badgeVariants } from '../components/ui/badge'
 import { Board } from '../components/Board'
-import { PagesPanel } from '../components/PagesPanel'
+import { Pressable } from '../components/ui/pressable'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../components/ui/dropdown-menu'
 import { SelectionBar, SelectionBarAction } from '../components/ui/selection-bar'
 import { Input } from '../components/ui/input'
 import { Field } from '../components/ui/field'
@@ -93,31 +127,85 @@ import { Note } from '../components/ui/note'
 import { Textarea } from '../components/ui/textarea'
 import { Modal, ModalActions, ModalEyebrow, ModalLede, ModalTitle } from '../components/ui/modal'
 import { createCenteredFrame } from '../lib/framePlacement'
+import { RULER_PX } from '../components/Rulers'
+import { NO_CANVAS, onViewCommand, syncViewMenu } from '../lib/viewMenu'
+import { AGENTS_MIN, LAYERS_MIN, fitPanelWidths } from '../lib/panelWidths'
+import { loadCanvasFonts } from '../lib/customFonts'
+import { t as translate, useT } from '../lib/i18n'
+import { NO_INSETS, type StageInsets } from '../lib/viewFit'
+import { usePanelLayout } from '../lib/panelLayout'
 
 /* The floating chrome's geometry, in px from the canvas area's edges. The
-   panels sit 14px in from the edge; on the right the Agents panel (280)
+   panels sit 14px in from the edge; on the right the resizable Agents panel
    always hugs the edge, the Inspector (244) opens to its left, and the icon
    islands (40) sit left of whatever is open. On the left the tool rail follows the Layers
-   panel (264), or its collapsed 40px island. --chrome-left/--chrome-right
-   mark where the open canvas begins and ends, for the zoom pill and toasts. */
+   panel, or its collapsed 40px island. --chrome-left/--chrome-right
+   mark where the open canvas begins and ends, for the zoom pill and toasts.
+   With rulers on, the chrome layer starts RULER_PX further in on the top
+   and left; --chrome-top and --rail-left include that, these offsets do not.
+   Docked (Settings → Appearance → Canvas panels), the same pieces are
+   columns flush with each other and the window's edges, and the stage
+   itself fills the gap between them, rulers and all. */
 const EDGE = 14
+const ARROW_NUDGE: Record<string, [number, number]> = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, -1],
+  ArrowDown: [0, 1],
+}
 const LAYERS_W = 264
 const RAIL_W = 40
 const INSPECTOR_W = 244
+/* the bar's height on desktop */
+const BAR_H = 50
+/* the docked bar is a flat strip, so it can sit a little tighter */
+const DOCKED_BAR_H = 44
+/* how far what floats over the canvas keeps from a docked column */
+const FLOAT_GAP = 10
+/* the narrowest stage docked panels squeeze it to, while their minimums allow */
+const DOCKED_STAGE_MIN = 320
 const AGENTS_W = 280
+const PANEL_WIDTH_KEY = 'doop:canvas-panel-widths'
+
+function readPanelWidths(): { layers: number; agents: number } {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(PANEL_WIDTH_KEY) ?? 'null')
+    if (saved && typeof saved === 'object' && 'layers' in saved && 'agents' in saved) {
+      return {
+        layers: typeof saved.layers === 'number' && Number.isFinite(saved.layers) ? saved.layers : LAYERS_W,
+        agents: typeof saved.agents === 'number' && Number.isFinite(saved.agents) ? saved.agents : AGENTS_W,
+      }
+    }
+  } catch {
+    /* Unavailable or invalid storage must not prevent opening a canvas. */
+  }
+  return { layers: LAYERS_W, agents: AGENTS_W }
+}
 
 function chromeLayout({
   layersOpen,
   propertiesShown,
   agentsOpen,
+  layersWidth,
+  agentsWidth,
+  docked,
 }: {
   layersOpen: boolean
   propertiesShown: boolean
   agentsOpen: boolean
+  layersWidth: number
+  agentsWidth: number
+  docked: boolean
 }) {
-  const toolRail = layersOpen ? EDGE + LAYERS_W + 12 : EDGE + RAIL_W + 10
-  const properties = agentsOpen ? EDGE + AGENTS_W + 8 : EDGE
-  const island = propertiesShown ? properties + INSPECTOR_W + 10 : agentsOpen ? EDGE + AGENTS_W + 10 : EDGE
+  if (docked) {
+    const toolRail = layersOpen ? layersWidth : RAIL_W
+    const properties = agentsOpen ? agentsWidth : 0
+    const island = propertiesShown ? properties + INSPECTOR_W : properties
+    return { toolRail, properties, island, left: toolRail + RAIL_W, right: island + RAIL_W }
+  }
+  const toolRail = layersOpen ? EDGE + layersWidth + 12 : EDGE + RAIL_W + 10
+  const properties = agentsOpen ? EDGE + agentsWidth + 8 : EDGE
+  const island = propertiesShown ? properties + INSPECTOR_W + 10 : agentsOpen ? EDGE + agentsWidth + 10 : EDGE
   return { toolRail, properties, island, left: toolRail + RAIL_W + 16, right: island + RAIL_W + 10 }
 }
 
@@ -145,7 +233,20 @@ const STARTER_HTML = `<!doctype html>
 const importNoteCls = 'mt-2.5 text-[11.5px] leading-[1.4] text-ink-faint'
 const errorNoteCls = 'mt-2.5 text-[13px] text-accent-ink'
 
-export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string; guestEntry?: boolean }) {
+export function CanvasPage({
+  canvasId,
+  guestEntry = false,
+  onSignUp,
+  onSignIn,
+}: {
+  canvasId: string
+  /** a signed-out visitor on a link-shared canvas (GuestCanvas has passed the share gate): no account chrome, and a
+   *  banner asking them to sign up (AccessBanner) */
+  guestEntry?: boolean
+  onSignUp?: () => void
+  onSignIn?: () => void
+}) {
+  const t = useT()
   const canvas = useStore((s) => s.canvas)
   /* what this connection may do: only editors get the tools, inspector, layers and the Agents composer, and
      commenters get the comments panel; the server refuses the rest regardless */
@@ -155,12 +256,43 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
   const guest = useStore((s) => s.guest) || guestEntry
   const noAccess = useStore((s) => s.noAccess)
   const guestNameRequest = useStore((s) => s.guestNameRequest)
-  const badge = roleBadge(role, guest)
+  const badge =
+    role === 'view'
+      ? guest
+        ? t('canvas.viewOnlyGuest')
+        : t('canvas.viewOnly')
+      : role === 'comment'
+        ? guest
+          ? t('canvas.canCommentGuest')
+          : t('canvas.canComment')
+        : null
   const connected = useStore((s) => s.connected)
   const presences = useStore((s) => s.presences)
   const selectedId = useStore((s) => s.selectedId)
   const select = useStore((s) => s.select)
+  /* a view or comment share link: the canvas opens read-only — no imports, no property panels, no edit shortcuts.
+     The server refuses those writes regardless; this keeps the UI from offering them. Until the join is answered
+     the role is unknown and the page is read-only. */
+  const readOnly = !canEdit
+  const editorReady = canEdit && canvas?.id === canvasId
   const isMobile = useIsMobile()
+  const prototypeMode = useStore((s) => s.prototypeMode)
+  const [panelWidths, setPanelWidths] = useState(readPanelWidths)
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
+  useEffect(() => {
+    const updateWidth = () => setViewportWidth(window.innerWidth)
+    window.addEventListener('resize', updateWidth)
+    return () => window.removeEventListener('resize', updateWidth)
+  }, [])
+  useEffect(() => {
+    try {
+      localStorage.setItem(PANEL_WIDTH_KEY, JSON.stringify(panelWidths))
+    } catch {
+      /* Resizing still works when preferences cannot be saved. */
+    }
+  }, [panelWidths])
+  /* open on desktop: an editor gets the Agents panel, a commenter (a guest with a comment link included) its Comments
+     tab alone (ActivityPanel). Below comment there is no panel — the team's conversation is not sent to them. */
   const [showActivity, setShowActivity] = useState(() => !window.matchMedia('(max-width: 900px)').matches)
   /* ?connect=1 (the "connect your agent" email) lands on the Connect AI
      modal; the flag comes off the URL once the page is up so a reload or a
@@ -179,16 +311,14 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
   const presentFrameId = useStore((s) => s.presentFrameId)
   /* leaving the canvas ends a presentation, so the next canvas starts with its frames awake */
   useEffect(() => () => useStore.getState().setPresenting(false), [])
-  /* ⌘. acts only over the canvas, outside PresentMode */
-  const hideUiActive = canHideUi({ view: 'canvas', presenting })
-  /* ⌘K (lib/canvasShortcuts.ts) asks for the Agents composer: this page opens the panel it lives in. The request is a
-     timestamp in the store, compared during render rather than in an effect. */
-  const composerFocusAt = useStore((s) => s.composerFocusAt)
-  const [seenComposerFocus, setSeenComposerFocus] = useState(composerFocusAt)
-  if (seenComposerFocus !== composerFocusAt) {
-    setSeenComposerFocus(composerFocusAt)
-    setShowActivity(true)
-  }
+  /* ⌘. acts only over the canvas view, outside PresentMode */
+  const hideUiActive = canHideUi({ view, presenting })
+  const activePageId = useStore((s) => s.activePageId)
+  /* Play starts on the selected frame, or on the page's flow start */
+  const playFrom = useMemo(
+    () => presentStartFrame(canvas, selectedId, activePageId),
+    [selectedId, canvas, activePageId],
+  )
   /* returning from a GitHub App install: the setup redirect appends a signed
      pass — pull it off the URL and open the import modal on the repo picker */
   const [ghInstallPass, setGhInstallPass] = useState<string | null>(() => {
@@ -219,6 +349,15 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
   const [showMobileLayers, setShowMobileLayers] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
+  /* the action registry's surfaces: ⌘K, the shortcuts sheet, the find bar,
+     the link dialog and a frame's version history */
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [find, setFind] = useState<'find' | 'replace' | null>(null)
+  const [findStep, setFindStep] = useState<{ dir: 1 | -1; at: number } | null>(null)
+  const [linkOpen, setLinkOpen] = useState(false)
+  const [historyFrame, setHistoryFrame] = useState<Frame | null>(null)
+  const placeImageRef = useRef<HTMLInputElement>(null)
   const storeNotice = useStore((s) => s.notice)
   const updateReady = useStore((s) => s.updateReady)
   const limitWall = useStore((s) => s.limitWall)
@@ -233,7 +372,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
   }, [canvas, canvasId])
 
   useEffect(() => {
-    connect(canvasId)
+    connect(canvasId, guest)
     return () => {
       disconnect()
       useStore.getState().setCanvas(null)
@@ -245,49 +384,297 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
       clearHistory()
       clearLayoutSnapshots()
       useStore.getState().setLaser(false)
-      useStore.getState().setShortcutsOpen(false)
     }
-  }, [canvasId, select])
+  }, [canvasId, guest, select])
+
+  /* the font library, again when the canvas moves between workspaces (its
+     library is the workspace's) and on return to the tab, so a font
+     uploaded in Settings in another tab shows up without a reload */
+  const loadedCanvasId = canvas?.id === canvasId ? canvasId : null
+  const fontScope = canvas?.workspaceId ?? null
+  useEffect(() => {
+    /* a guest's frames carry their faces already; the library is for the Design panel */
+    if (!loadedCanvasId || guest) return
+    loadCanvasFonts(loadedCanvasId)
+    const refresh = () => {
+      if (document.visibilityState === 'visible') loadCanvasFonts(loadedCanvasId)
+    }
+    document.addEventListener('visibilitychange', refresh)
+    return () => document.removeEventListener('visibilitychange', refresh)
+  }, [loadedCanvasId, fontScope, guest])
 
   /* broadcast which frame I'm focused on */
   useEffect(() => {
     sendWs({ type: 'editing', frameId: selectedId })
   }, [selectedId])
 
-  /* every keyboard shortcut lives in the registry (lib/shortcuts.ts, the canvas's own table in lib/canvasShortcuts.ts);
-     ⌘V is the exception below. Entries that change the canvas carry a role guard there, so below edit only Esc, zoom
-     and the like run. */
-  useShortcuts(canvasShortcuts)
-
-  /* ⌘V lands here as a real paste event: clipboard images upload and drop in
-     as frames; otherwise a copied frame (⌘C) pastes centered. Handled on
-     'paste' rather than keydown so the browser hands us the clipboard bytes
-     without a permission prompt. */
+  /* the canvas's keyboard: every chord in the action registry (the ⌘K
+     palette's commands), then the keys with rules of their own — ⌫, the
+     selection walk on ↩ and Tab, the arrow nudge and Esc */
   useEffect(() => {
-    function onPaste(e: ClipboardEvent) {
-      const t = e.target as HTMLElement
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return
-      if (!canEditNow()) return
-      const images = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'))
-      if (images.length) {
+    function onKey(e: KeyboardEvent) {
+      const typing = isTypingTarget(e.target)
+      if (dispatchActionKey(e, typing)) return
+      if (typing) return
+      /* a picked element (from the canvas or the layers tree) is what ⌫
+         removes — the frame it lives in only goes when nothing inside it is
+         selected. Auto-repeat is ignored: a held key must not take the
+         element and then, on the next repeat, the frame under it. The key is
+         always claimed, deleted something or not: an unhandled Backspace is
+         "back" to some engines (WebKitGTK, the Linux desktop app), and a
+         canvas must never leave the page for it. */
+      const mayEdit = canEditOpenCanvas(useStore.getState())
+      if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault()
-        pasteImagesCentered(canvasId, images).catch((err: Error) => {
-          setToast(`Couldn’t paste image — ${err.message}`)
+        if (mayEdit && !e.repeat) deleteSelection()
+      }
+      /* Figma's walk of the selection: ↩ into it, ⇧↩ out to the parent, Tab
+         and ⇧Tab along the siblings. Only the bare keys, and only when no
+         control (a button, a menu, the Layers tree) has the keyboard — there
+         ↩ presses and Tab moves focus, as they must. An unhandled key is left
+         alone, so Tab still walks the chrome when nothing is selected. */
+      const bare = !e.metaKey && !e.ctrlKey && !e.altKey
+      if (bare && !presenting && (e.key === 'Enter' || e.key === 'Tab') && !isControlTarget(e.target)) {
+        const moved =
+          e.key === 'Enter' ? (e.shiftKey ? exitSelection() : enterSelection()) : selectSibling(e.shiftKey ? -1 : 1)
+        if (moved) {
+          e.preventDefault()
+          return
+        }
+      }
+      const nudge = ARROW_NUDGE[e.key]
+      if (mayEdit && nudge && !e.defaultPrevented && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const step = e.shiftKey ? 10 : 1
+        if (nudgeSelection(nudge[0] * step, nudge[1] * step)) e.preventDefault()
+        return
+      }
+      if (e.key === 'Escape') {
+        /* leaves the laser or a tool first, and only then clears the selection */
+        applyEscape(escapeMode)
+        escapeMode = null
+      }
+    }
+    /* the Stage drops a tool on this very key, so the mode is read as the key goes down */
+    let escapeMode: EscapeMode = null
+    function noteEscape(e: KeyboardEvent) {
+      escapeMode = e.key === 'Escape' ? escapeModeNow() : null
+    }
+    window.addEventListener('keydown', noteEscape, true)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', noteEscape, true)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [canvasId, presenting]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* Native copy/paste events let us write the selection's token and read
+     clipboard images without asking for clipboard-read permission. */
+  useEffect(() => {
+    function onCopy(e: ClipboardEvent) {
+      if (isTypingTarget(e.target) || window.getSelection()?.toString() || !e.clipboardData) return
+      const state = useStore.getState()
+      const picked = state.selectedElement
+      const frame = state.canvas?.frames.find((f) => f.id === picked?.frameId)
+      let copy: () => boolean | void
+      if (picked) {
+        if (!frame) return
+        const selectors = pickedSelectors(state)
+        copy = () => copyPicked(frame, selectors)
+      } else {
+        const frames = state.canvas?.frames.filter((f) => state.selectedIds.includes(f.id)) ?? []
+        if (!frames.length) return
+        copy = () => copyFrames(frames)
+      }
+      if (writeCanvasClipboard(copy, e.clipboardData)) e.preventDefault()
+    }
+    function onPaste(e: ClipboardEvent) {
+      if (isTypingTarget(e.target)) return
+      /* every paste lands a frame or a layer */
+      if (!canEditOpenCanvas(useStore.getState())) return
+      const captureText = e.clipboardData?.getData('text/plain') ?? ''
+      if (captureText.startsWith(CAPTURE_PREFIX)) {
+        e.preventDefault()
+        void pasteWebCapture(canvasId, captureText).catch((error: Error) => {
+          setToast(error.message)
           window.setTimeout(() => setToast(null), 4000)
         })
-      } else if (hasFrameClip()) {
+        return
+      }
+      /* bitmaps land as pictures, SVGs as editable shapes and PDFs as pages, in one row */
+      const incoming = splitIncoming([...(e.clipboardData?.files ?? [])], svgMarkupOf(e.clipboardData))
+      if (hasIncoming(incoming)) {
+        e.preventDefault()
+        pasteFilesCentered(canvasId, incoming).catch((err: Error) => {
+          setToast(translate('canvas.pasteImageFailed', { error: err.message }))
+          window.setTimeout(() => setToast(null), 4000)
+        })
+      } else if (isCanvasClipboard(e.clipboardData) && hasElementClip()) {
+        e.preventDefault()
+        const state = useStore.getState()
+        const picked = state.selectedElement
+        const frame = state.canvas?.frames.find((f) => f.id === (picked?.frameId ?? state.selectedId))
+        if (frame) pasteLayer(frame, picked?.selector ?? null)
+      } else if (isCanvasClipboard(e.clipboardData) && hasFrameClip()) {
         e.preventDefault()
         pasteFrameCentered(canvasId)
       }
     }
+    window.addEventListener('copy', onCopy)
     window.addEventListener('paste', onPaste)
-    return () => window.removeEventListener('paste', onPaste)
+    return () => {
+      window.removeEventListener('copy', onCopy)
+      window.removeEventListener('paste', onPaste)
+    }
+  }, [canvasId])
+
+  /* Image, SVG and PDF files dragged in from the desktop land as frames
+     centered on the drop point. Every file drag is claimed, so a drop the
+     canvas cannot take (a viewer, a spreadsheet) is refused instead of the browser opening the file in
+     place of the canvas; a drop the composer already took is left to it.
+     While a file is over the page every frame keeps its shield up, or a
+     frame being edited would swallow the drop in its iframe. Enter and leave
+     fire for every element crossed, so a count tells when the drag is gone. */
+  useEffect(() => {
+    /* files from outside, or a component card from the Components panel; both
+       need the frames' shields up so the drop reaches the window */
+    const carriesComponent = (e: DragEvent) => e.dataTransfer?.types.includes(COMPONENT_DRAG_TYPE) ?? false
+    const carriesFiles = (e: DragEvent) => (e.dataTransfer?.types.includes('Files') ?? false) || carriesComponent(e)
+    let depth = 0
+    const setDragging = useStore.getState().setFileDragging
+    function onDragEnter(e: DragEvent) {
+      if (!carriesFiles(e)) return
+      depth += 1
+      setDragging(true)
+    }
+    function onDragLeave(e: DragEvent) {
+      if (!carriesFiles(e)) return
+      depth = Math.max(0, depth - 1)
+      if (!depth) setDragging(false)
+    }
+    function endDrag() {
+      depth = 0
+      setDragging(false)
+    }
+    function onDragOver(e: DragEvent) {
+      if (!carriesFiles(e) || e.defaultPrevented) return
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = canEditOpenCanvas(useStore.getState()) ? 'copy' : 'none'
+    }
+    function onDrop(e: DragEvent) {
+      endDrag()
+      if (!carriesFiles(e) || e.defaultPrevented) return
+      e.preventDefault()
+      if (!canEditOpenCanvas(useStore.getState())) return
+      const componentId = e.dataTransfer?.getData(COMPONENT_DRAG_TYPE)
+      if (componentId) {
+        void dropComponent(componentId, { x: e.clientX, y: e.clientY })
+        return
+      }
+      const incoming = splitIncoming([...(e.dataTransfer?.files ?? [])])
+      if (!hasIncoming(incoming)) return
+      dropFiles(canvasId, incoming, { x: e.clientX, y: e.clientY }).catch((err: Error) => {
+        setToast(translate('canvas.dropImageFailed', { error: err.message }))
+        window.setTimeout(() => setToast(null), 4000)
+      })
+    }
+    window.addEventListener('dragenter', onDragEnter)
+    window.addEventListener('dragleave', onDragLeave)
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('drop', onDrop)
+    window.addEventListener('dragend', endDrag)
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter)
+      window.removeEventListener('dragleave', onDragLeave)
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('drop', onDrop)
+      window.removeEventListener('dragend', endDrag)
+      endDrag()
+    }
   }, [canvasId])
 
   function showToast(msg: string) {
     setToast(msg)
     window.setTimeout(() => setToast(null), 2000)
   }
+
+  /* ⌘. and View > Show/Hide UI: the first hide in a browser says how to undo it */
+  function toggleHideUi() {
+    useStore.getState().toggleUiHidden()
+    if (useStore.getState().uiHidden && !hideUiHinted()) showToast(translate('canvas.uiHidden', { key: MOD_KEY }))
+  }
+
+  /* Export lists the page's frames, with the canvas selection pre-checked */
+  function openExport() {
+    const s = useStore.getState()
+    if (!s.canvas) return
+    const frames = s.activePageId ? pageFrames(s.canvas, s.activePageId) : s.canvas.frames
+    s.openExport(s.selectedIds.filter((id) => frames.some((f) => f.id === id)))
+  }
+
+  /* the agent's composer: ⌘/ (and / outside a field) opens the side panel on
+     the Agents tab and puts the keyboard there. Asking for the composer ends
+     ⌘. hide-UI — a field under `hidden` cannot take focus. */
+  function openAgent() {
+    const state = useStore.getState()
+    /* the composer is an editor's: readers (and guests) have none */
+    if (guest || !state.canvas || !canEditOpenCanvas(state)) return
+    setShowActivity(true)
+    if (state.uiHidden) state.toggleUiHidden()
+    state.setPanelTab('tasks')
+    state.requestComposerFocus()
+  }
+
+  /* lend the action registry what only this page holds, fresh every render */
+  useEffect(() => {
+    const host: ActionHost = {
+      canvasId,
+      guest,
+      presenting,
+      hideUiActive,
+      agentsOpen: showActivity,
+      openPalette: () => setPaletteOpen(true),
+      openAgent,
+      openShortcuts: () => setShortcutsOpen(true),
+      goToFiles: () => navigate('/'),
+      openDocs: () => {
+        /* the desktop shell drops window.open, so it hands the page to the system browser */
+        if (!openExternal(`${location.origin}/docs`)) window.open('/docs', '_blank', 'noopener,noreferrer')
+      },
+      contactSupport: () => void openSupportChat(),
+      openFind: (mode) => setFind((open) => (open === 'replace' ? open : mode)),
+      findStep: (dir) => {
+        setFind((open) => open ?? 'find')
+        setFindStep({ dir, at: Date.now() })
+      },
+      openExport,
+      openImport: () => setShowImport(true),
+      openVersionHistory: () => {
+        const s = useStore.getState()
+        setHistoryFrame(s.canvas?.frames.find((f) => f.id === s.selectedId) ?? null)
+      },
+      openLink: () => setLinkOpen(true),
+      placeImage: () => placeImageRef.current?.click(),
+      newCanvas: () => {
+        api
+          .createCanvas('Untitled canvas', useStore.getState().canvas?.workspaceId)
+          .then((made) => navigate(`/c/${made.id}`))
+          .catch((err: Error) => showToast(err.message))
+      },
+      duplicateCanvas: () => {
+        api
+          .duplicateCanvas(canvasId)
+          .then((made) => navigate(`/c/${made.id}`))
+          .catch((err: Error) => showToast(err.message))
+      },
+      present: () => startPresenting(),
+      boardOpen: view === 'board',
+      toggleBoard: () => setView((current) => (current === 'board' ? 'canvas' : 'board')),
+      toggleHideUi,
+      toggleAgents: () => setShowActivity((open) => !open),
+    }
+    setActionHost(host)
+  })
+  useEffect(() => () => setActionHost(null), [])
 
   /* a pending Memory suggestion gets its own toast beside the side panel;
      clicking it jumps to the Memory tab, ✕ mutes it for this session */
@@ -315,12 +702,16 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
   }, [latestDecision])
 
   async function addFrame() {
+    if (readOnly) return
     const n = (canvas?.frames.length ?? 0) + 1
     const frame = await createCenteredFrame(canvasId, `Frame ${n}`, STARTER_HTML)
     select(frame.id)
   }
 
   const me = getIdentity()
+  /* the face's photo comes from the account, not the room: our own presence
+     is never in the roster */
+  const { data: session } = authClient.useSession()
   const others = useMemo(
     () => Object.values(presences).filter((p) => p.clientId !== me.clientId),
     [presences, me.clientId],
@@ -333,6 +724,12 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
     () => (exportIds ? exportIds.flatMap((id) => canvas?.frames.find((f) => f.id === id) ?? []) : []),
     [exportIds, canvas],
   )
+  /* the Export picker lists the page's frames, the selection checked (all of them when nothing is selected) */
+  const exportPageFrames = useMemo(
+    () => (!canvas ? [] : activePageId ? pageFrames(canvas, activePageId) : canvas.frames),
+    [canvas, activePageId],
+  )
+  const exportFrame = exportTargets[0] ?? exportPageFrames[0]
   /* the panel only shows when a frame-name click (or deep link) opened it —
      selecting a frame by clicking its surface must not slide it in */
   const inspectorOpen = useStore((s) => s.inspectorOpen)
@@ -347,16 +744,101 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
   const selectedElement = useStore((s) => s.selectedElement)
   const elementPanelOpen = useStore((s) => s.elementPanelOpen)
   const panelElement = elementPanelOpen && selectedElement?.frameId === selectedFrame?.id ? selectedElement : null
-  /* the frame Inspector or the element panel, whichever has the slot */
-  const propertiesShown = !!selectedFrame && !deferPanel && (!!panelElement || inspectorOpen)
-  const chrome = chromeLayout({ layersOpen, propertiesShown, agentsOpen: showActivity })
+  /* with nothing selected the slot is the page's own settings, once opened
+     from the rail, until closed */
+  const pagePanelOpen = useStore((s) => s.pagePanelOpen)
+  const pageShown = !readOnly && !selectedFrame && pagePanelOpen && !deferPanel
+  /* the frame Inspector, the element panel or the Page panel, whichever has the slot */
+  const propertiesShown =
+    (!readOnly && !!selectedFrame && !deferPanel && (!!panelElement || inspectorOpen)) || pageShown
+  /* ⇧R docks the rulers on the canvas's top and left edges; the bar and the
+     floating chrome step in past them (the same test Stage draws them by) */
+  const rulers = useStore((s) => s.rulers)
+  const chromeHidden = useStore((s) => s.uiHidden)
+  const rulersShown = rulers && !chromeHidden && !isMobile
+  /* docked panels: the stage sits between the columns, under a solid bar */
+  const docked = usePanelLayout() === 'docked' && !isMobile
+  const panelSurface = docked ? 'docked' : 'floating'
+  /* docked, the rulers sit on the stage's own edges inside the columns, so
+     nothing steps in past them */
+  const rulerInset = rulersShown && !docked ? RULER_PX : 0
+  const hasSelection = useStore((s) => s.selectedIds.length > 0)
+
+  const fixedChrome = chromeLayout({
+    layersOpen,
+    propertiesShown,
+    agentsOpen: showActivity,
+    layersWidth: 0,
+    agentsWidth: 0,
+    docked,
+  })
+  const panels = fitPanelWidths({
+    saved: panelWidths,
+    viewport: viewportWidth,
+    /* docked, the panels squeeze the stage itself, so it keeps a usable width */
+    reserved: fixedChrome.left + fixedChrome.right + rulerInset + (docked ? DOCKED_STAGE_MIN : 0),
+    layersOpen,
+    agentsOpen: showActivity,
+  })
+  const layersWidth = panels.layers
+  const agentsWidth = panels.agents
+  const chrome = chromeLayout({
+    layersOpen,
+    propertiesShown,
+    agentsOpen: showActivity,
+    layersWidth,
+    agentsWidth,
+    docked,
+  })
+
+  /* the desktop shell's View menu: its toggles act here, and it mirrors
+     their state; leaving the canvas disables its canvas items */
+  useEffect(
+    () =>
+      onViewCommand((command) => {
+        const s = useStore.getState()
+        if (command === 'rulers') s.toggleRulers()
+        else if (command === 'ui' && hideUiActive) toggleHideUi()
+        else if (command === 'layers') s.setLayersOpen(!s.layersOpen)
+        else if (command === 'agents') setShowActivity((open) => !open)
+      }),
+    [hideUiActive], // eslint-disable-line react-hooks/exhaustive-deps
+  )
+  useEffect(() => {
+    syncViewMenu({
+      canvas: true,
+      rulers,
+      ui: !uiHidden,
+      uiToggle: hideUiActive,
+      layers: layersOpen,
+      agents: showActivity,
+      selection: hasSelection,
+    })
+  }, [rulers, uiHidden, hideUiActive, layersOpen, showActivity, hasSelection])
+  useEffect(() => () => syncViewMenu(NO_CANVAS), [])
   const chromeVars = {
-    '--chrome-top': isMobile ? '0px' : '50px',
-    '--rail-left': `${chrome.toolRail}px`,
-    '--chrome-left': `${chrome.left}px`,
-    '--chrome-right': `${chrome.right}px`,
+    '--chrome-top': isMobile ? '0px' : `${(docked ? DOCKED_BAR_H : BAR_H) + rulerInset}px`,
+    '--rail-left': `${chrome.toolRail + rulerInset}px`,
+    /* what floats over the canvas (the zoom pill, toasts) keeps clear of a
+       docked column's edge */
+    '--chrome-left': `${chrome.left + (docked ? FLOAT_GAP : 0)}px`,
+    '--chrome-right': `${chrome.right + (docked ? FLOAT_GAP : 0)}px`,
   } as CSSProperties
-  const meFace = { name: me.name, color: presences[me.clientId]?.color ?? 'var(--brand)' }
+  /* what the bar and the floating chrome cover of the stage, which spans the
+     whole window; phones open their panels as sheets over everything */
+  const stageInsets: StageInsets =
+    isMobile || uiHidden || docked
+      ? NO_INSETS
+      : { top: BAR_H + rulerInset, right: chrome.right, bottom: 0, left: chrome.left + rulerInset }
+  /* docked, the stage is the gap between the bar and the columns; ⌘. gives
+     it the whole window back */
+  const stageBounds: StageInsets | undefined =
+    docked && !uiHidden ? { top: DOCKED_BAR_H, right: chrome.right, bottom: 0, left: chrome.left } : undefined
+  const meFace = {
+    name: me.name,
+    image: avatarUrl(session?.user.image),
+    color: presences[me.clientId]?.color ?? 'var(--brand)',
+  }
 
   function openConnect() {
     posthog.capture('agent_connection_opened')
@@ -369,13 +851,10 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
   if (canvasNotFound) {
     return (
       <AuthScreen>
-        <AuthCard title="Canvas not found" align="center">
-          <AuthCardText>
-            &ldquo;{canvasId}&rdquo; doesn&rsquo;t match a canvas we know about. It may have been deleted, or the link
-            may be wrong.
-          </AuthCardText>
+        <AuthCard title={t('canvas.notFoundTitle')} align="center">
+          <AuthCardText>{t('canvas.notFoundBody', { id: canvasId })}</AuthCardText>
           <Button className="self-center" onClick={() => navigate('/')}>
-            Back to your canvases
+            {t('canvas.backToCanvases')}
           </Button>
         </AuthCard>
       </AuthScreen>
@@ -388,7 +867,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
   return (
     /* --app-inset is 0 normally; the impersonation shell raises it so this
        fixed layer starts below the banner instead of under it */
-    <div className="fixed inset-x-0 bottom-0 top-[var(--app-inset,0px)] bg-paper">
+    <div className="fixed inset-x-0 bottom-0 top-[var(--app-inset,0px)] bg-canvas">
       <MarksController canvasId={canvasId} />
       {/* Floating pills over the canvas, which shows through the transparent
           bar: the title pill on the left, live presence centred, sharing on
@@ -398,68 +877,59 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
           unmounting it, so what it holds — a composer draft, the expanded
           layers, a scroll position — is exactly as it was when ⌘. brings it
           back. */}
-      <TopBar variant="canvas" className={cn(uiHidden && 'hidden')}>
+      {/* with rulers on, the top ruler takes the window's top edge and the
+          bar's pills float below it */}
+      <TopBar
+        variant={docked ? 'docked' : 'canvas'}
+        className={cn(uiHidden && 'hidden')}
+        style={rulerInset ? { top: rulerInset, left: rulerInset } : undefined}
+      >
         <div className="flex min-w-0 items-center gap-2 max-xs:basis-full">
           <BarPill className="min-w-0 gap-1 pr-3 pl-1">
-            {guest ? (
-              <span className="grid size-[30px] place-items-center">
-                <DoopMark size={18} />
-              </span>
-            ) : (
-              <Tooltip label="All canvases" side="bottom" align="start">
+            <MainMenu
+              trigger={
                 <Button
                   variant="bare"
                   size="icon-sm"
                   className={barPillIconBtn}
-                  aria-label="All canvases"
-                  onClick={() => navigate('/')}
+                  aria-label={t('actions.mainMenu')}
+                  title={t('actions.mainMenu')}
                 >
-                  <FolderIcon className="size-3.5" />
+                  <DoopMark size={14} />
                 </Button>
-              </Tooltip>
-            )}
-            <CanvasName />
-            {canEdit && (
-              <Badge className="max-md:hidden" title="Canvas id — agents use this with the MCP tools">
-                {canvasId}
-              </Badge>
-            )}
+              }
+            />
+            <CanvasName readOnly={readOnly} />
             {badge && (
               <Badge
                 tone="outline"
                 className="shrink-0 animate-[chip-in_0.25s_ease]"
-                title={
-                  role === 'view'
-                    ? 'You can look around and present, but not change anything'
-                    : 'You can leave comments, but not change the design'
-                }
+                title={t('canvas.readOnlyBadgeTitle')}
               >
                 {badge}
               </Badge>
             )}
+            <CanvasIdMenu canvasId={canvasId} onCopied={showToast} />
             {connected ? (
-              <span className="ml-1 whitespace-nowrap text-ink-faint max-lg:hidden">— Auto-saved</span>
+              /* nothing to save for someone who can only look */
+              !readOnly && (
+                <span className="ml-1 whitespace-nowrap text-ink-faint max-lg:hidden">{t('canvas.autoSaved')}</span>
+              )
             ) : (
-              <span className="ml-1 whitespace-nowrap text-accent-ink">— Reconnecting…</span>
+              <span className="ml-1 whitespace-nowrap text-accent-ink">{t('canvas.reconnecting')}</span>
             )}
           </BarPill>
           {/* what is waiting for you on this canvas; the U key jumps to it */}
           <span className="contents max-md:hidden">
             <MarksChip />
           </span>
-          {canEdit && (
-            <Segmented
-              className="shrink-0 max-xs:order-2"
-              aria-label="View"
-              value={view}
-              onValueChange={(next) => setView(next as 'canvas' | 'board')}
-            >
-              <SegmentedItem value="canvas">Canvas</SegmentedItem>
-              <SegmentedItem value="board">Board</SegmentedItem>
-            </Segmented>
-          )}
         </div>
-        <div className="chrome-layer absolute top-3.5 left-1/2 -translate-x-1/2 max-[1180px]:hidden">
+        <div
+          className={cn(
+            'chrome-layer absolute left-1/2 -translate-x-1/2 max-[1180px]:hidden',
+            docked ? 'top-1' : 'top-3.5',
+          )}
+        >
           <LivePresence me={meFace} others={others} onRenameSelf={() => setRenaming(true)} />
         </div>
         <div className="ml-auto flex flex-none items-center gap-2 max-md:hidden">
@@ -467,65 +937,57 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
               the plain avatar stack (and its follow buttons) over here */}
           <div
             className="mr-1 flex items-center min-[1181px]:hidden"
-            title={others.map((p) => p.name).join(', ') || 'Just you here'}
+            title={others.map((p) => p.name).join(', ') || t('canvas.justYou')}
           >
-            <PresenceFace name={meFace.name} color={meFace.color} kind="user" />
+            <PresenceFace name={meFace.name} image={meFace.image} color={meFace.color} kind="user" />
             <span className="-ml-[7px] flex items-center">
               <PeerAvatars others={others} />
             </span>
           </div>
-          {canEdit && (
-            <BarPill>
-              <Button
-                variant="bare"
-                className={barPillBtn}
-                onClick={() => setShowImport(true)}
-                title="Import a live web page as a frame"
-              >
-                <ImportIcon className="size-3.5" />
-                Import
-              </Button>
-            </BarPill>
-          )}
-          {/* always in the bar so it can be found; it waits for a selection to know what to export */}
-          {view === 'canvas' && (
-            <BarPill>
-              <Button
-                variant="bare"
-                className={cn(barPillBtn, 'disabled:opacity-40')}
-                disabled={!selectedFrames.length}
-                title={
-                  selectedFrames.length
-                    ? `Export ${selectedFrames.length > 1 ? `${selectedFrames.length} frames` : 'the selected frame'} as PNG or JPG (${EXPORT_SHORTCUT})`
-                    : 'Select a frame to export it'
-                }
-                onClick={() => useStore.getState().openExport(selectedFrames.map((f) => f.id))}
-              >
-                <DownloadIcon className="size-3.5" aria-hidden />
-                Export
-                {selectedFrames.length > 1 && (
-                  <span className="rounded-full bg-ink px-1.5 py-px font-mono text-micro text-paper">
-                    {selectedFrames.length}
-                  </span>
-                )}
-              </Button>
-            </BarPill>
-          )}
+          <BarPill>
+            {!readOnly && (
+              <>
+                <Button
+                  variant="bare"
+                  className={barPillBtn}
+                  onClick={() => setShowImport(true)}
+                  title={t('canvas.importTitle')}
+                >
+                  <ImportIcon className="size-3.5" />
+                  {t('canvas.import')}
+                </Button>
+                <BarDivider className="mx-0.5" />
+              </>
+            )}
+            <Button variant="bare" className={barPillBtn} onClick={openExport} title={t('canvas.exportTitle')}>
+              <ExportIcon className="size-3.5" />
+              {t('canvas.export')}
+            </Button>
+          </BarPill>
           <BarPill>
             {!guest && (
               <Button variant="bare" className={barPillBtn} onClick={() => setShowShare(true)}>
                 <ShareUpIcon className="size-3.5" />
-                Share
+                {t('canvas.share')}
               </Button>
             )}
-            <Tooltip label={selectedId ? 'Present from this frame (⇧P)' : 'Present this page (⇧P)'} side="bottom">
+            <Tooltip
+              label={
+                selectedId
+                  ? `${t('canvas.presentFromFrame')} · ${PRESENT_SHORTCUT_HINT}`
+                  : playFrom
+                    ? `${t('canvas.presentPrototype')} · ${PRESENT_SHORTCUT_HINT}`
+                    : t('canvas.addFrameToPresent')
+              }
+              side="bottom"
+            >
               <span className="inline-flex">
                 <Button
                   variant="bare"
                   size="icon-sm"
                   className={barPillIconBtn}
-                  aria-label="Present"
-                  disabled={!canvas?.frames.length}
+                  aria-label={t('canvas.presentPrototypeLabel')}
+                  disabled={!playFrom}
                   onClick={() => startPresenting()}
                 >
                   <PlayIcon className="size-3.5" />
@@ -533,46 +995,47 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
               </span>
             </Tooltip>
           </BarPill>
-          {guest && (
+          {/* the bar's one black action — it opens the MCP connection modal;
+              an agent connected through a view or comment link could not
+              change anything, so readers are not offered it */}
+          {!readOnly && (
             <Button
               variant="primary"
-              className={barPrimaryBtn}
-              onClick={() => location.assign(`/c/${canvasId}?signin=1`)}
+              className={cn(docked ? barPrimaryCompactBtn : barPrimaryBtn, 'shadow-ring')}
+              onClick={openConnect}
             >
-              Sign in
-            </Button>
-          )}
-          {/* the bar's one black action — it opens the MCP connection modal */}
-          {canEdit && (
-            <Button variant="primary" className={barPrimaryBtn} onClick={openConnect}>
               <PlusIcon className="size-3.5" strokeWidth={1.4} />
-              Connect AI
+              {t('canvas.connectAi')}
             </Button>
           )}
         </div>
         <div className="ml-auto hidden items-center gap-1.5 max-md:flex max-xs:order-3">
           <div
             className="mr-1 flex items-center max-sm:hidden"
-            title={others.map((p) => p.name).join(', ') || 'Just you here'}
+            title={others.map((p) => p.name).join(', ') || t('canvas.justYou')}
           >
-            <PresenceFace name={meFace.name} color={meFace.color} kind="user" />
+            <PresenceFace name={meFace.name} image={meFace.image} color={meFace.color} kind="user" />
             <span className="-ml-[7px] flex items-center">
               <PeerAvatars others={others} />
             </span>
           </div>
-          {canEdit && (
-            <Button variant="primary" className={barPrimaryBtn} onClick={openConnect}>
+          {!readOnly && (
+            <Button
+              variant="primary"
+              className={cn(docked ? barPrimaryCompactBtn : barPrimaryBtn, 'shadow-ring')}
+              onClick={openConnect}
+            >
               <PlusIcon className="size-3.5" strokeWidth={1.4} />
-              <span className="max-sm:hidden">Connect AI</span>
-              <span className="sm:hidden">AI</span>
+              <span className="max-sm:hidden">{t('canvas.connectAi')}</span>
+              <span className="sm:hidden">{t('canvas.connectAiShort')}</span>
             </Button>
           )}
-          <Tooltip label="Canvas actions" side="bottom" align="end">
+          <Tooltip label={t('canvas.canvasActions')} side="bottom" align="end">
             <Button
               variant="ghost"
               size="icon"
               className={barIconBtn}
-              aria-label="Canvas actions"
+              aria-label={t('canvas.canvasActions')}
               onClick={() => setShowMobileActions(true)}
             >
               <MoreHorizontalIcon className="size-4" />
@@ -587,20 +1050,32 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
       <div className="absolute inset-0 overflow-hidden" style={chromeVars}>
         {view === 'board' && canEdit ? (
           /* the Board is the canvas's task queue: cards humans leave for agents; it takes the whole area below the bar */
-          <div className="absolute inset-x-0 bottom-0 top-[50px] overflow-auto max-md:top-14 max-xs:top-[100px]">
+          <div className="absolute inset-x-0 bottom-0 top-[var(--chrome-top)] overflow-auto max-md:top-14 max-xs:top-[100px]">
             <Board canvasId={canvasId} />
+            <Button
+              variant="ghost"
+              className="chrome-layer fixed bottom-4 left-4 gap-1.5 bg-surface shadow-float"
+              onClick={() => setView('canvas')}
+            >
+              <ArrowLeftIcon className="size-3.5" />
+              {t('canvas.boardBack')}
+            </Button>
           </div>
         ) : (
           <>
-            <Stage onAddFrame={addFrame} rightInset={isMobile ? 0 : chrome.right} />
+            {find && !presenting && !uiHidden && <FindBar mode={find} step={findStep} onClose={() => setFind(null)} />}
+            <Stage onAddFrame={addFrame} insets={stageInsets} bounds={stageBounds} docked={docked} />
             <div
               className={cn(
                 'pointer-events-none absolute inset-x-0 bottom-0 top-[50px] max-md:top-14 max-xs:top-[100px]',
                 uiHidden && 'hidden',
               )}
+              /* panel offsets are measured from this layer, so moving it past
+             the rulers moves every panel with it */
+              style={rulerInset || docked ? { top: 'var(--chrome-top)', left: rulerInset } : undefined}
             >
               <div className="chrome-layer pointer-events-none absolute top-3.5 right-[var(--chrome-right)] z-30 flex flex-col items-end gap-2 transition-[right] duration-150 [&>*]:pointer-events-auto max-md:top-[56px] max-md:right-2 max-md:left-2">
-                {canEdit &&
+                {!readOnly &&
                   pendingProposal &&
                   mutedProposal !== pendingProposal.id &&
                   !(showActivity && panelTab === 'memory') && (
@@ -613,25 +1088,25 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
                           setShowActivity(true)
                         }}
                       >
-                        <DoopMark size={12} /> Memory suggestion — review
+                        <DoopMark size={12} /> {t('canvas.memorySuggestionReview')}
                       </Button>
                       <Button
                         variant="bare"
                         size="icon-sm"
                         className="mr-1 size-6 rounded-[6px] text-ink-faint"
-                        title="Hide for now"
-                        aria-label="Hide for now"
+                        title={t('canvas.hideForNow')}
+                        aria-label={t('canvas.hideForNow')}
                         onClick={() => setMutedProposal(pendingProposal.id)}
                       >
                         <XIcon className="size-3" />
                       </Button>
                     </div>
                   )}
-                {canEdit && decisionToast && (
+                {!readOnly && decisionToast && (
                   <Button
                     variant="bare"
                     className="max-w-full items-center gap-2.5 whitespace-normal rounded-[12px] bg-surface px-3.5 py-2.5 text-left font-normal shadow-pop transition-shadow hover:bg-surface hover:shadow-ring-hover sm:max-w-[320px] [&_svg]:text-ink-soft"
-                    title="Open Memory"
+                    title={t('canvas.openMemory')}
                     onClick={() => {
                       useStore.getState().setPanelTab('memory')
                       setShowActivity(true)
@@ -640,7 +1115,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
                   >
                     <BrainIcon className="size-4" />
                     <span>
-                      <b className="block text-[12.5px] font-medium text-ink">Saved to Memory</b>
+                      <b className="block text-[12.5px] font-medium text-ink">{t('canvas.savedToMemory')}</b>
                       <span className="mt-[1px] block text-[12px] leading-[1.4] text-ink-soft">{decisionToast}</span>
                     </span>
                   </Button>
@@ -653,20 +1128,42 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
                 /* phones have no right-click and no top-bar action group, so a selection brings its own Export */
                 <div className="chrome-layer absolute top-2 left-2 z-30 flex max-w-[calc(100vw-176px)] items-center gap-2 rounded-full bg-surface py-1 pr-1 pl-3.5 text-body font-medium text-ink-soft shadow-float animate-[chip-in_0.25s_ease]">
                   <span className="truncate">
-                    {selectedFrames.length > 1 ? `${selectedFrames.length} selected` : selectedFrames[0]?.name}
+                    {selectedFrames.length > 1
+                      ? t('canvas.selectedCount', { count: selectedFrames.length })
+                      : selectedFrames[0]?.name}
                   </span>
                   <Button
                     variant="primary"
                     className="h-7 shrink-0 gap-1.5 rounded-full px-3 text-body"
-                    onClick={() => useStore.getState().openExport(selectedFrames.map((f) => f.id))}
+                    onClick={openExport}
                   >
-                    <DownloadIcon className="size-3.5" aria-hidden />
-                    Export
+                    <ExportIcon className="size-3.5" aria-hidden />
+                    {t('canvas.export')}
                   </Button>
                 </div>
               )}
-              {canEdit && <Onboarding canvasId={canvasId} />}
-              {!isMobile && canEdit && (layersOpen ? <LayersPanel onAddFrame={addFrame} /> : <LayersRailToggle />)}
+              {!readOnly && <Onboarding canvasId={canvasId} />}
+              <AccessBanner guest={guest} onSignUp={onSignUp} onSignIn={onSignIn} />
+              {!isMobile &&
+                (layersOpen ? (
+                  <LayersPanel
+                    onAddFrame={addFrame}
+                    surface={panelSurface}
+                    resize={{
+                      label: t('canvas.resizeLayers'),
+                      edge: 'right',
+                      width: layersWidth,
+                      min: LAYERS_MIN,
+                      max: panels.layersMax,
+                      /* the other panel keeps the width it shows, not a larger saved
+                     one the window had squeezed */
+                      onResize: (layers) =>
+                        setPanelWidths((widths) => ({ layers, agents: showActivity ? panels.agents : widths.agents })),
+                    }}
+                  />
+                ) : (
+                  <LayersRailToggle docked={docked} />
+                ))}
               {isMobile && canComment && !showActivity && (
                 <MobilePanelTabs
                   onOpen={(tab) => {
@@ -675,31 +1172,53 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
                   }}
                 />
               )}
-              {!isMobile && canEdit && selectedFrame && panelElement && !deferPanel && (
+              {!isMobile && !readOnly && selectedFrame && panelElement && !deferPanel && (
                 <ElementPanel
                   /* keyed by frame, not element: picking the next element swaps
                  the values in place instead of remounting the panel blank */
                   key={selectedFrame.id}
                   frame={selectedFrame}
                   selector={panelElement.selector}
+                  surface={panelSurface}
                   style={{ right: chrome.properties }}
                 />
               )}
-              {!isMobile && canEdit && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
-                <Inspector frame={selectedFrame} style={{ right: chrome.properties }} />
+              {!isMobile && !readOnly && selectedFrame && inspectorOpen && !panelElement && !deferPanel && (
+                <Inspector frame={selectedFrame} surface={panelSurface} style={{ right: chrome.properties }} />
               )}
+              {!isMobile && pageShown && <PagePanel surface={panelSurface} style={{ right: chrome.properties }} />}
               {!isMobile && canComment && showActivity && (
-                <ActivityPanel canvasId={canvasId} onClose={() => setShowActivity(false)} style={{ right: EDGE }} />
+                <ActivityPanel
+                  canvasId={canvasId}
+                  onClose={() => setShowActivity(false)}
+                  surface={panelSurface}
+                  style={{ right: docked ? 0 : EDGE }}
+                  resize={{
+                    label: t('canvas.resizeAgents'),
+                    edge: 'left',
+                    width: agentsWidth,
+                    min: AGENTS_MIN,
+                    max: panels.agentsMax,
+                    onResize: (agents) =>
+                      setPanelWidths((widths) => ({ agents, layers: layersOpen ? panels.layers : widths.layers })),
+                  }}
+                />
               )}
               {!isMobile && canComment && (
                 <SideRail
                   style={{ right: chrome.island }}
+                  docked={docked}
                   agentsOpen={showActivity}
                   onToggleAgents={() => setShowActivity((open) => !open)}
                   inspectorOpen={propertiesShown}
-                  inspectorAvailable={!!selectedFrame}
+                  inspectorAvailable={!readOnly}
+                  inspectTarget={selectedFrame ? 'frame' : 'page'}
                   onToggleInspector={() => {
                     const s = useStore.getState()
+                    if (!selectedFrame) {
+                      s.setPagePanelOpen(!s.pagePanelOpen)
+                      return
+                    }
                     if (propertiesShown) {
                       /* the element panel and the inspector share the slot —
                      hiding it closes whichever is showing */
@@ -709,6 +1228,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
                   }}
                   me={meFace}
                   onRenameSelf={() => setRenaming(true)}
+                  guest={guest}
                 />
               )}
             </div>
@@ -724,29 +1244,26 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
               className="gap-0 rounded-t-2xl border-line bg-surface p-0 pb-[env(safe-area-inset-bottom)] shadow-pop"
             >
               <div className="border-b border-line-soft px-5 py-4 pr-14">
-                <SheetTitle className="font-display text-lg font-extrabold">Canvas actions</SheetTitle>
+                <SheetTitle className="font-display text-lg font-extrabold">{t('canvas.canvasActions')}</SheetTitle>
                 <SheetDescription className="mt-1 text-xs text-ink-soft">
-                  Layers, import, export, share, or your account settings.
+                  {t('canvas.canvasActionsDescription')}
                 </SheetDescription>
               </div>
               {/* the same glyphs as the desktop bar and islands; editors find
                   pages in the Layers sheet, as on desktop, and everyone else
                   switches pages here */}
-              {!canEdit && <PagesPanel />}
               <div className="grid gap-2 p-4 [&_svg]:size-3.5 [&_svg]:text-ink-soft">
-                {canEdit && (
-                  <Button
-                    variant="ghost"
-                    className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
-                    onClick={() => {
-                      setShowMobileActions(false)
-                      setShowMobileLayers(true)
-                    }}
-                  >
-                    <LayersIcon /> Layers
-                  </Button>
-                )}
-                {canEdit && (
+                <Button
+                  variant="ghost"
+                  className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
+                  onClick={() => {
+                    setShowMobileActions(false)
+                    setShowMobileLayers(true)
+                  }}
+                >
+                  <LayersIcon /> {t('canvas.layers')}
+                </Button>
+                {!readOnly && (
                   <Button
                     variant="ghost"
                     className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
@@ -755,7 +1272,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
                       setShowImport(true)
                     }}
                   >
-                    <ImportIcon /> Import website
+                    <ImportIcon /> {t('canvas.importWebsite')}
                   </Button>
                 )}
                 {!guest && (
@@ -767,7 +1284,32 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
                       setShowShare(true)
                     }}
                   >
-                    <ShareIcon /> Share canvas
+                    <ShareIcon /> {t('canvas.shareCanvas')}
+                  </Button>
+                )}
+                {/* the phone's tool strip has no room for the Edit / Prototype
+                    switch, so Prototype mode toggles here */}
+                <Button
+                  variant="ghost"
+                  className="h-11 justify-start gap-2.5 border-line bg-surface px-4 aria-pressed:bg-paper-deep"
+                  aria-pressed={prototypeMode}
+                  onClick={() => {
+                    setShowMobileActions(false)
+                    useStore.getState().setPrototypeMode(!prototypeMode)
+                  }}
+                >
+                  <PrototypeModeIcon /> {prototypeMode ? t('canvas.leavePrototypeMode') : t('canvas.prototypeMode')}
+                </Button>
+                {!readOnly && (
+                  <Button
+                    variant="ghost"
+                    className="h-11 justify-start gap-2.5 border-line bg-surface px-4"
+                    onClick={() => {
+                      setShowMobileActions(false)
+                      setView(view === 'board' ? 'canvas' : 'board')
+                    }}
+                  >
+                    <GridIcon /> {view === 'board' ? t('canvas.boardBack') : t('actions.board')}
                   </Button>
                 )}
                 {!guest && (
@@ -776,13 +1318,13 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
                     className="h-11 justify-start gap-2.5 px-4 text-ink-soft"
                     onClick={() => navigate('/settings')}
                   >
-                    <GearIcon /> Settings
+                    <GearIcon /> {t('shell.settings')}
                   </Button>
                 )}
               </div>
             </SheetContent>
           </Sheet>
-          <Sheet open={canEdit && showMobileLayers && !uiHidden} onOpenChange={setShowMobileLayers}>
+          <Sheet open={showMobileLayers && !uiHidden} onOpenChange={setShowMobileLayers}>
             <SheetContent
               side="bottom"
               showCloseButton={false}
@@ -792,7 +1334,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
               onOpenAutoFocus={(e) => e.preventDefault()}
               className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
             >
-              <SheetTitle className="sr-only">Layers</SheetTitle>
+              <SheetTitle className="sr-only">{t('canvas.layers')}</SheetTitle>
               <LayersPanel onAddFrame={addFrame} surface="inline" onClose={() => setShowMobileLayers(false)} />
             </SheetContent>
           </Sheet>
@@ -800,7 +1342,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
               the open state they read from is untouched, so they are back
               as they were when ⌘. restores the chrome */}
           <Sheet
-            open={canEdit && !!selectedFrame && inspectorOpen && !deferPanel && !uiHidden}
+            open={!readOnly && !!selectedFrame && inspectorOpen && !deferPanel && !uiHidden}
             onOpenChange={(open) => {
               if (!open) select(null)
             }}
@@ -810,7 +1352,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
               showCloseButton={false}
               className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
             >
-              <SheetTitle className="sr-only">Frame inspector</SheetTitle>
+              <SheetTitle className="sr-only">{t('canvas.frameInspector')}</SheetTitle>
               {selectedFrame && <Inspector frame={selectedFrame} surface="inline" />}
             </SheetContent>
           </Sheet>
@@ -820,16 +1362,13 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
               showCloseButton={false}
               className="max-h-[calc(100svh-56px)] gap-0 rounded-t-2xl border-line bg-surface p-0 shadow-pop data-[side=bottom]:h-[min(78svh,680px)]"
             >
-              <SheetTitle className="sr-only">Canvas activity</SheetTitle>
+              <SheetTitle className="sr-only">{t('canvas.canvasActivity')}</SheetTitle>
               <ActivityPanel canvasId={canvasId} onClose={() => setShowActivity(false)} surface="inline" />
             </SheetContent>
           </Sheet>
         </>
       )}
 
-      {exportTargets.length > 0 && (
-        <FrameExportModal frames={exportTargets} onClose={() => useStore.getState().closeExport()} />
-      )}
       {guestNameRequest && (
         <GuestNamePrompt
           onDone={(name) => {
@@ -843,9 +1382,43 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
         />
       )}
       {renaming && <RenameSelfModal current={me.name} onClose={() => setRenaming(false)} />}
-      {showConnect && canEdit && <ConnectModal canvasId={canvasId} onClose={() => setShowConnect(false)} />}
-      <ShortcutsDialog />
-      {presenting && presentFrameId && <PresentMode startId={presentFrameId} onClose={() => setPresenting(false)} />}
+      {/* ?connect=1 and ?import=1 can ask for these on any link; only an editor gets them */}
+      {showConnect && editorReady && <ConnectModal canvasId={canvasId} onClose={() => setShowConnect(false)} />}
+      {presenting && presentFrameId && <PresentMode frameId={presentFrameId} onClose={() => setPresenting(false)} />}
+      {paletteOpen && (
+        <CommandPalette
+          onClose={() => setPaletteOpen(false)}
+          onAsk={
+            guest || readOnly
+              ? null
+              : (prompt) => {
+                  useStore.getState().setComposerDraft(canvasId, prompt)
+                  openAgent()
+                }
+          }
+        />
+      )}
+      {shortcutsOpen && <ShortcutsSheet onClose={() => setShortcutsOpen(false)} />}
+      {linkOpen && <LinkDialog onClose={() => setLinkOpen(false)} />}
+      {historyFrame && <FrameHistoryModal frame={historyFrame} onClose={() => setHistoryFrame(null)} />}
+      <Input
+        ref={placeImageRef}
+        type="file"
+        accept="image/*,.svg,.pdf,application/pdf"
+        multiple
+        hidden
+        tabIndex={-1}
+        aria-hidden
+        onChange={(e) => {
+          const files = [...(e.target.files ?? [])]
+          e.target.value = ''
+          const incoming = splitIncoming(files)
+          if (!hasIncoming(incoming)) return
+          pasteFilesCentered(canvasId, incoming).catch((err: Error) =>
+            showToast(translate('canvas.pasteImageFailed', { error: err.message })),
+          )
+        }}
+      />
       {showShare && canvas && (
         <ShareModal
           key={canvas.id}
@@ -857,7 +1430,7 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
           onClose={() => setShowShare(false)}
           onCopied={() => {
             setShowShare(false)
-            showToast('Canvas link copied')
+            showToast(t('canvas.linkCopied'))
           }}
         />
       )}
@@ -872,7 +1445,15 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
           }}
         />
       )}
-      {showImport && canEdit && (
+      {exportIds && exportFrame && (
+        <FrameExportModal
+          frame={exportFrame}
+          groupFrames={exportTargets}
+          pageFrames={exportPageFrames}
+          onClose={() => useStore.getState().closeExport()}
+        />
+      )}
+      {showImport && editorReady && (
         <ImportModal
           canvasId={canvasId}
           installPass={ghInstallPass}
@@ -886,21 +1467,21 @@ export function CanvasPage({ canvasId, guestEntry = false }: { canvasId: string;
             setShowImport(false)
             setView('canvas')
             select(frameIds[0] ?? null)
-            const imported = frameIds.length === 1 ? '1 item imported' : `${frameIds.length} items imported`
-            showToast(failedCount ? `${imported} · ${failedCount} failed` : imported)
+            const imported = t('canvas.itemsImported', { count: frameIds.length })
+            showToast(failedCount ? t('canvas.importedWithFailures', { imported, failed: failedCount }) : imported)
           }}
           onQueued={(cardCount) => {
             setShowImport(false)
             setGhInstallPass(null)
             setView('board')
-            showToast(`${cardCount} ${cardCount === 1 ? 'card' : 'cards'} queued — Doop is on it`)
+            showToast(t('canvas.cardsQueued', { count: cardCount }))
           }}
         />
       )}
       {updateReady ? (
         <Toast>
-          doop was updated
-          <ToastAction onClick={() => location.reload()}>Reload</ToastAction>
+          {t('canvas.appUpdated')}
+          <ToastAction onClick={() => location.reload()}>{t('canvas.reload')}</ToastAction>
         </Toast>
       ) : toast ? (
         <Toast>{toast}</Toast>
@@ -948,6 +1529,7 @@ function ImportModal({
 }) {
   /* which source's screen is open — null is the picker; landing back from
      GitHub's install flow jumps straight to that screen */
+  const t = useT()
   const [source, setSource] = useState<string | null>(installPass || installError ? 'github' : initialSource)
   const [url, setUrl] = useState('')
   const [wholeSite, setWholeSite] = useState(false)
@@ -982,7 +1564,7 @@ function ImportModal({
       posthog.capture('page_imported')
       onDone([frame.id], 0)
     } catch (e) {
-      setError(errorMessage(e, 'import failed'))
+      setError(errorMessage(e, t('canvas.errImportFailed')))
       setBusy(null)
     }
   }
@@ -998,7 +1580,7 @@ function ImportModal({
       posthog.capture('site_pages_discovered', { page_count: found.pages.length, truncated: found.truncated })
       setBusy(null)
     } catch (e) {
-      setError(errorMessage(e, 'page discovery failed'))
+      setError(errorMessage(e, t('canvas.errDiscoveryFailed')))
       setBusy(null)
     }
   }
@@ -1012,7 +1594,7 @@ function ImportModal({
       const result = await api.importSitePages(canvasId, urls)
       if (!result.frames.length) {
         const reason = result.failures[0]?.error
-        setError(reason ? `No pages could be imported — ${reason}` : 'No pages could be imported')
+        setError(reason ? t('canvas.errNoPagesReason', { reason }) : t('canvas.errNoPages'))
         setBusy(null)
         return
       }
@@ -1026,7 +1608,7 @@ function ImportModal({
         result.failures.length,
       )
     } catch (e) {
-      setError(errorMessage(e, 'website import failed'))
+      setError(errorMessage(e, t('canvas.errWebsiteImportFailed')))
       setBusy(null)
     }
   }
@@ -1070,11 +1652,7 @@ function ImportModal({
     try {
       const result = await api.importGithubScreens(canvasId, repoReview.connection.id, screens, extractSystem)
       if (!result.cards.length) {
-        setError(
-          result.rejected.length
-            ? 'Those screens are no longer in the repository — re-run the scan'
-            : 'Everything you picked is already on the board',
-        )
+        setError(result.rejected.length ? t('canvas.errScreensGone') : t('canvas.errAlreadyOnBoard'))
         setBusy(null)
         return
       }
@@ -1090,51 +1668,78 @@ function ImportModal({
         onClose()
         return
       }
-      setError(errorMessage(e, 'repository import failed'))
+      setError(errorMessage(e, t('canvas.errRepoImportFailed')))
       setBusy(null)
     }
   }
 
   const selectedCount = selected.size
   const laneLabel: Record<RepoScreen['source'], string> = {
-    static: 'from repo',
-    placeholder: 'agent sketch',
+    static: t('canvas.laneStatic'),
+    placeholder: t('canvas.lanePlaceholder'),
   }
   const kindLabel = (s: RepoScreen) =>
-    s.kind === 'component' ? 'component' : s.kind === 'story' ? 'story' : laneLabel[s.source]
+    s.kind === 'component'
+      ? t('canvas.kindComponent')
+      : s.kind === 'story'
+        ? t('canvas.kindStory')
+        : laneLabel[s.source]
   const KIND_ORDER: Record<RepoScreen['kind'], number> = { component: 0, story: 1, static: 2, page: 3 }
   const allScreens = repoReview?.manifest.screens ?? []
   const pageCount = allScreens.filter((s) => s.kind === 'page').length
   const visibleScreens = allScreens
     .filter((s) => showPages || s.kind !== 'page')
     .sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind])
+  /* the import button names what goes: "Import design system + 3 components" */
+  const repoCount = repoSelected.size
+  const pickedOnlyComponents =
+    repoCount === 1 ||
+    visibleScreens
+      .filter((s) => repoSelected.has(screenKey(s)))
+      .every((s) => s.kind === 'component' || s.kind === 'story')
+  const repoImportItems = [
+    extractSystem ? t('canvas.repoPieceSystem') : '',
+    repoCount
+      ? pickedOnlyComponents
+        ? t('canvas.repoPieceComponents', { count: repoCount })
+        : t('canvas.repoPieceScreens', { count: repoCount })
+      : '',
+  ]
+    .filter(Boolean)
+    .join(' + ')
 
+  const picking = !repoReview && !discovery && source === null
   return (
-    <Modal size="xl" className="sm:max-w-[820px]" onClose={() => !busy && onClose()}>
+    <Modal
+      /* the source list reads best narrow; every screen after it takes the review width */
+      size={picking ? 'lg' : 'xl'}
+      className={picking ? undefined : 'sm:max-w-[820px]'}
+      onClose={() => !busy && onClose()}
+    >
       <>
         {repoReview ? (
           <>
             <div className="flex flex-col items-start justify-between gap-2.5 sm:flex-row sm:gap-6">
               <div className="flex flex-col gap-[5px]">
-                <ModalEyebrow>Review before import</ModalEyebrow>
-                <ModalTitle>Import the design system</ModalTitle>
+                <ModalEyebrow>{t('canvas.reviewBeforeImport')}</ModalEyebrow>
+                <ModalTitle>{t('canvas.repoTitle')}</ModalTitle>
               </div>
               <Badge shape="pill">
                 {repoReview.connection.repo}@{repoReview.connection.branch}
               </Badge>
             </div>
             <ModalLede>
-              {repoReview.manifest.framework ? `A ${repoReview.manifest.framework} app. ` : ''}Doop distills the repo's
-              design system into a style guide pinned to this canvas — every agent follows it from then on. Each
-              component or page you pick becomes a card on the board: Doop sketches it from the source and lands it as a
-              frame. Whole pages are optional.
+              {repoReview.manifest.framework
+                ? `${t('canvas.repoFramework', { framework: repoReview.manifest.framework })} `
+                : ''}
+              {t('canvas.repoLede')}
             </ModalLede>
             <CheckboxCard
               checked={extractSystem}
               disabled={!!busy}
               onChange={setExtractSystem}
-              title="Extract the design system into a style guide"
-              description="Palette, type and spacing from the repo's theme — pinned to the canvas, followed by every agent."
+              title={t('canvas.extractTitle')}
+              description={t('canvas.extractDescription')}
             />
             <SelectionBar
               className="mt-4"
@@ -1146,10 +1751,10 @@ function ImportModal({
                     disabled={!!busy}
                     onClick={() => setRepoSelected(new Set(visibleScreens.map(screenKey)))}
                   >
-                    Select all
+                    {t('canvas.selectAll')}
                   </SelectionBarAction>
                   <SelectionBarAction disabled={!!busy} onClick={() => setRepoSelected(new Set())}>
-                    Clear
+                    {t('canvas.clear')}
                   </SelectionBarAction>
                 </>
               }
@@ -1160,7 +1765,7 @@ function ImportModal({
                 busy && 'opacity-[0.58]',
               )}
               role="group"
-              aria-label="Screens to import"
+              aria-label={t('canvas.screensToImport')}
             >
               {visibleScreens.map((screen, index) => (
                 <label
@@ -1202,16 +1807,12 @@ function ImportModal({
                 disabled={!!busy}
                 onClick={() => setShowPages((v) => !v)}
               >
-                {showPages ? 'hide pages' : `show ${pageCount} page${pageCount === 1 ? '' : 's'} (optional)`}
+                {showPages ? t('canvas.hidePages') : t('canvas.showPages', { count: pageCount })}
               </Button>
             )}
-            {repoReview.manifest.truncated && (
-              <p className={importNoteCls}>The repository listing was cut short — very large repos show a subset.</p>
-            )}
+            {repoReview.manifest.truncated && <p className={importNoteCls}>{t('canvas.repoTruncated')}</p>}
             {busy === 'importing' && (
-              <p className={cn(importNoteCls, 'text-accent-ink')}>
-                Doop is importing — the style guide and sketches fill in on the canvas…
-              </p>
+              <p className={cn(importNoteCls, 'text-accent-ink')}>{t('canvas.repoImporting')}</p>
             )}
             {error && <p className={errorNoteCls}>{error}</p>}
             <ModalActions className="justify-between">
@@ -1223,7 +1824,8 @@ function ImportModal({
                   setError(null)
                 }}
               >
-                ← Back
+                <ArrowLeftIcon size={14} />
+                {t('common.back')}
               </Button>
               <Button
                 variant="primary"
@@ -1231,24 +1833,8 @@ function ImportModal({
                 onClick={importRepoScreens}
               >
                 {busy === 'importing'
-                  ? 'Importing…'
-                  : [
-                      extractSystem ? 'design system' : '',
-                      repoSelected.size
-                        ? `${repoSelected.size} ${
-                            repoSelected.size === 1
-                              ? 'component'
-                              : visibleScreens
-                                    .filter((s) => repoSelected.has(screenKey(s)))
-                                    .every((s) => s.kind === 'component' || s.kind === 'story')
-                                ? 'components'
-                                : 'screens'
-                          }`
-                        : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' + ')
-                      .replace(/^./, (c) => 'Import ' + c)}
+                  ? t('canvas.importing')
+                  : repoImportItems && t('canvas.repoImport', { items: repoImportItems })}
               </Button>
             </ModalActions>
           </>
@@ -1258,11 +1844,12 @@ function ImportModal({
               <SourcePicker onPick={setSource} sources={importSources()} />
             ) : source === 'website' ? (
               <>
-                <ImportStepHeader icon={<WebIcon className="size-[22px] text-ink" />} title="Import a website" />
-                <ModalLede>
-                  Bring in one page, or discover a whole site and choose the pages you want before anything is added.
-                </ModalLede>
-                <Field className="mt-[22px]" label="Website URL" labelVariant="form" htmlFor="import-url">
+                <ImportStepHeader
+                  icon={<AppIcon brand="website" size={40} />}
+                  title={t('canvas.websiteTitle')}
+                  lede={t('canvas.websiteLede')}
+                />
+                <Field className="mt-[22px]" label={t('canvas.websiteUrl')} labelVariant="form" htmlFor="import-url">
                   <Input
                     id="import-url"
                     variant="well"
@@ -1293,32 +1880,28 @@ function ImportModal({
                   }}
                   title={
                     <>
-                      Import the entire website{' '}
+                      {t('canvas.wholeSiteTitle')}{' '}
                       <em className="ml-[7px] rounded-full bg-paper-deep px-1.5 py-px text-micro font-medium not-italic text-ink-faint">
-                        Optional
+                        {t('canvas.optional')}
                       </em>
                     </>
                   }
-                  description="Find public pages on the same site, then review the list."
+                  description={t('canvas.wholeSiteDescription')}
                 />
                 {error && <p className={errorNoteCls}>{error}</p>}
-                <ImportStepFooter
-                  note="Snapshots stay editable and commentable. Scripts are removed."
-                  onBack={() => setSource(null)}
-                  backDisabled={!!busy}
-                >
+                <ImportStepFooter note={t('canvas.websiteNote')} onBack={() => setSource(null)} backDisabled={!!busy}>
                   <Button
                     variant="primary"
                     disabled={!!busy || !url.trim()}
                     onClick={wholeSite ? discover : runSinglePage}
                   >
                     {busy === 'discovering'
-                      ? 'Finding pages…'
+                      ? t('canvas.findingPages')
                       : busy === 'importing'
-                        ? 'Importing…'
+                        ? t('canvas.importing')
                         : wholeSite
-                          ? 'Discover pages'
-                          : 'Import page'}
+                          ? t('canvas.discoverPages')
+                          : t('canvas.importPage')}
                   </Button>
                 </ImportStepFooter>
               </>
@@ -1338,15 +1921,12 @@ function ImportModal({
           <>
             <div className="flex flex-col items-start justify-between gap-2.5 sm:flex-row sm:gap-6">
               <div className="flex flex-col gap-[5px]">
-                <ModalEyebrow>Review before import</ModalEyebrow>
-                <ModalTitle>Choose pages</ModalTitle>
+                <ModalEyebrow>{t('canvas.reviewBeforeImport')}</ModalEyebrow>
+                <ModalTitle>{t('canvas.choosePages')}</ModalTitle>
               </div>
               <Badge shape="pill">{new URL(discovery.siteUrl).hostname}</Badge>
             </div>
-            <ModalLede>
-              {discovery.pages.length} {discovery.pages.length === 1 ? 'page' : 'pages'} found. Everything is selected
-              by default; uncheck anything you don’t need.
-            </ModalLede>
+            <ModalLede>{t('canvas.pagesFound', { count: discovery.pages.length })}</ModalLede>
             <SelectionBar
               className="mt-5"
               count={selectedCount}
@@ -1357,10 +1937,10 @@ function ImportModal({
                     disabled={!!busy}
                     onClick={() => setSelected(new Set(discovery.pages.map((p) => p.url)))}
                   >
-                    Select all
+                    {t('canvas.selectAll')}
                   </SelectionBarAction>
                   <SelectionBarAction disabled={!!busy} onClick={() => setSelected(new Set())}>
-                    Clear
+                    {t('canvas.clear')}
                   </SelectionBarAction>
                 </>
               }
@@ -1371,7 +1951,7 @@ function ImportModal({
                 busy && 'opacity-[0.58]',
               )}
               role="group"
-              aria-label="Pages to import"
+              aria-label={t('canvas.pagesToImport')}
             >
               {discovery.pages.map((page, index) => {
                 const pageUrl = new URL(page.url)
@@ -1405,12 +1985,10 @@ function ImportModal({
                 )
               })}
             </div>
-            {discovery.truncated && (
-              <p className={importNoteCls}>Showing the first 100 pages found. Narrow the starting URL if needed.</p>
-            )}
+            {discovery.truncated && <p className={importNoteCls}>{t('canvas.pagesTruncated')}</p>}
             {busy === 'importing' && (
               <p className={cn(importNoteCls, 'text-accent-ink')}>
-                Capturing {selectedCount} pages — larger sites can take a few minutes.
+                {t('canvas.capturingPages', { count: selectedCount })}
               </p>
             )}
             {error && <p className={errorNoteCls}>{error}</p>}
@@ -1423,12 +2001,13 @@ function ImportModal({
                   setError(null)
                 }}
               >
-                ← Back
+                <ArrowLeftIcon size={14} />
+                {t('common.back')}
               </Button>
               <Button variant="primary" disabled={!!busy || !selectedCount} onClick={importSelected}>
                 {busy === 'importing'
-                  ? `Importing ${selectedCount}…`
-                  : `Import ${selectedCount} ${selectedCount === 1 ? 'page' : 'pages'}`}
+                  ? t('canvas.importingCount', { count: selectedCount })
+                  : t('canvas.importPages', { count: selectedCount })}
               </Button>
             </ModalActions>
           </>
@@ -1441,6 +2020,7 @@ function ImportModal({
 /** Your display name, the identity on your cursor and in the feed. It lives on
  *  the account, so saving it updates the account and rejoins the canvas. */
 function RenameSelfModal({ current, onClose }: { current: string; onClose: () => void }) {
+  const t = useT()
   const [draft, setDraft] = useState(current)
   const [busy, setBusy] = useState(false)
   const clean = draft.trim()
@@ -1463,9 +2043,9 @@ function RenameSelfModal({ current, onClose }: { current: string; onClose: () =>
   return (
     <Modal size="sm" onClose={onClose}>
       <>
-        <ModalTitle>Your display name</ModalTitle>
-        <ModalLede>Shown on your cursor, in the activity feed, and on everything you leave for an agent.</ModalLede>
-        <Field className="mt-5" label="Name" labelVariant="form" htmlFor="display-name">
+        <ModalTitle>{t('canvas.displayNameTitle')}</ModalTitle>
+        <ModalLede>{t('canvas.displayNameLede')}</ModalLede>
+        <Field className="mt-5" label={t('canvas.name')} labelVariant="form" htmlFor="display-name">
           <Input
             id="display-name"
             autoFocus
@@ -1478,10 +2058,10 @@ function RenameSelfModal({ current, onClose }: { current: string; onClose: () =>
         </Field>
         <ModalActions>
           <Button variant="ghost" disabled={busy} onClick={onClose}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button variant="primary" disabled={busy || !clean || clean === current} onClick={save}>
-            {busy ? 'Saving…' : 'Save name'}
+            {busy ? t('canvas.saving') : t('canvas.saveName')}
           </Button>
         </ModalActions>
       </>
@@ -1494,6 +2074,7 @@ function RenameSelfModal({ current, onClose }: { current: string; onClose: () =>
    server-side importer can't go. */
 
 function SyncKeysSection({ canvasId, onBack }: { canvasId: string; onBack: () => void }) {
+  const t = useT()
   const [keys, setKeys] = useState<SyncKeyInfo[] | null>(null)
   const [name, setAppName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1544,34 +2125,42 @@ function SyncKeysSection({ canvasId, onBack }: { canvasId: string; onBack: () =>
   if (forbidden) {
     return (
       <>
-        <ImportStepHeader icon={<RadioTowerIcon className="size-[22px] text-ink" />} title="Sync a live app" />
-        <ModalLede>Sync keys are for canvas members — ask the owner for durable access.</ModalLede>
+        <ImportStepHeader
+          icon={<AppIcon brand="live-app" size={40} />}
+          title={t('canvas.syncTitle')}
+          lede={t('canvas.syncForbidden')}
+        />
         <ImportStepFooter onBack={onBack} />
       </>
     )
   }
   return (
     <>
-      <ImportStepHeader icon={<RadioTowerIcon className="size-[22px] text-ink" />} title="Sync a live app" />
-      <ModalLede>
-        For apps a crawler cannot reach: behind a login, a VPN, or on localhost. Paste one script tag and each screen
-        people visit lands here as a frame, imported once.
-      </ModalLede>
+      <ImportStepHeader
+        icon={<AppIcon brand="live-app" size={40} />}
+        title={t('canvas.syncTitle')}
+        lede={t('canvas.syncLede')}
+      />
       {(keys ?? []).map((k) => (
         <div key={k.id} className="flex flex-col gap-1.5">
           <div className="flex items-center gap-2 text-[13px]">
             <b className="font-semibold">{k.name}</b>
             <Note className="mr-auto">
-              {k.frames ? `${k.frames} screen${k.frames === 1 ? '' : 's'}` : k.lastUsedAt ? 'synced' : 'never synced'}
+              {k.frames
+                ? t('canvas.screens', { count: k.frames })
+                : k.lastUsedAt
+                  ? t('canvas.synced')
+                  : t('canvas.neverSynced')}
             </Note>
             <Button
               variant="bare"
               size="icon-sm"
-              className="-mr-1.5 text-[13px] hover:bg-accent-ink/10 hover:text-accent-ink"
-              title="Revoke this key"
+              className="-mr-1.5 hover:bg-accent-ink/10 hover:text-accent-ink"
+              title={t('canvas.revokeKey')}
+              aria-label={t('canvas.revokeKey')}
               onClick={() => revoke(k.id)}
             >
-              ✕
+              <XIcon size={14} />
             </Button>
           </div>
           <div className="relative">
@@ -1588,11 +2177,11 @@ function SyncKeysSection({ canvasId, onBack }: { canvasId: string; onBack: () =>
               onClick={() => copySnippet(k)}
             >
               {copiedId === k.id ? (
-                'Copied!'
+                t('canvas.copiedBang')
               ) : (
                 <>
                   <CopyIcon className="size-3.5" />
-                  Copy
+                  {t('common.copy')}
                 </>
               )}
             </Button>
@@ -1600,12 +2189,12 @@ function SyncKeysSection({ canvasId, onBack }: { canvasId: string; onBack: () =>
         </div>
       ))}
       <div className="mt-4 flex flex-col items-stretch gap-2 sm:flex-row">
-        <Field className="flex-1" label="App name" labelVariant="form" htmlFor="sync-app-name">
+        <Field className="flex-1" label={t('canvas.appName')} labelVariant="form" htmlFor="sync-app-name">
           <Input
             id="sync-app-name"
             variant="well"
             inputSize="lg"
-            placeholder="Admin dashboard"
+            placeholder={t('canvas.appNamePlaceholder')}
             value={name}
             disabled={busy}
             onChange={(e) => setAppName(e.target.value)}
@@ -1618,14 +2207,14 @@ function SyncKeysSection({ canvasId, onBack }: { canvasId: string; onBack: () =>
           disabled={busy || !name.trim()}
           onClick={create}
         >
-          Create key
+          {t('canvas.createKey')}
         </Button>
       </div>
       <ol className="mt-3 flex flex-col divide-y divide-line-soft rounded-[10px] border border-line">
         {[
-          ['Get a key for this canvas', 'The key only writes here. Revoke it from this screen at any time.'],
-          ['Paste the script tag', 'One script tag in your app’s layout. Nothing else to install.'],
-          ['Browse the app', 'Every new screen someone visits lands as a frame. Delete a frame to re-import it fresh.'],
+          [t('canvas.syncStep1Title'), t('canvas.syncStep1Detail')],
+          [t('canvas.syncStep2Title'), t('canvas.syncStep2Detail')],
+          [t('canvas.syncStep3Title'), t('canvas.syncStep3Detail')],
         ].map(([title, detail], i) => (
           <li key={title} className="flex gap-3.5 px-3.5 py-3">
             <span className="font-mono text-[11px] leading-[1.6] text-ink-faint">0{i + 1}</span>
@@ -1636,10 +2225,7 @@ function SyncKeysSection({ canvasId, onBack }: { canvasId: string; onBack: () =>
           </li>
         ))}
       </ol>
-      <ImportStepFooter
-        note="Visible page content uploads to Doop as static HTML. Input values are dropped; mark anything sensitive with data-doop-mask."
-        onBack={onBack}
-      />
+      <ImportStepFooter note={t('canvas.syncNote')} onBack={onBack} />
     </>
   )
 }
@@ -1663,6 +2249,7 @@ function GithubSection({
   onReview: (connection: GithubConnectionInfo, manifest: RepoManifest) => void
   onBack: () => void
 }) {
+  const t = useT()
   const [connections, setConnections] = useState<GithubConnectionInfo[] | null>(null)
   const [appEnabled, setAppEnabled] = useState(false)
   const [showTokenForm, setShowTokenForm] = useState(false)
@@ -1687,13 +2274,13 @@ function GithubSection({
       .catch(() => setAppEnabled(false))
   }, [canvasId])
 
-  /* back from GitHub's install screen: swap the pass for the repo list */
+  /* back from GitHub: swap the pass for the repo list */
   useEffect(() => {
     if (!installPass) return
     api
       .listInstallationRepos(canvasId, installPass)
       .then(setPickerRepos)
-      .catch((e) => failed(e, 'could not list the installed repositories'))
+      .catch((e) => failed(e, translate('canvas.errListRepos')))
   }, [canvasId, installPass])
 
   function failed(caught: unknown, fallback: string) {
@@ -1710,7 +2297,7 @@ function GithubSection({
       posthog.capture('github_app_install_started')
       location.href = url
     } catch (e) {
-      failed(e, 'could not start the GitHub install')
+      failed(e, t('canvas.errStartInstall'))
     }
   }
 
@@ -1721,11 +2308,10 @@ function GithubSection({
     try {
       const conn = await api.connectGithub(canvasId, { repo: fullName, pass: installPass })
       setConnections((c) => [conn, ...(c ?? [])])
-      setPickerRepos((r) => r?.filter((x) => x.fullName !== fullName) ?? null)
       setBusy(null)
       posthog.capture('github_repo_connected', { via: 'app' })
     } catch (e) {
-      failed(e, 'could not connect the repository')
+      failed(e, t('canvas.errConnectRepo'))
     }
   }
 
@@ -1744,7 +2330,7 @@ function GithubSection({
       setBusy(null)
       posthog.capture('github_repo_connected', { via: 'token' })
     } catch (e) {
-      failed(e, 'could not connect the repository')
+      failed(e, t('canvas.errConnectRepo'))
     }
   }
 
@@ -1761,7 +2347,7 @@ function GithubSection({
       setBusy(null)
       onReview(conn, manifest)
     } catch (e) {
-      failed(e, 'repository analysis failed')
+      failed(e, t('canvas.errAnalysis'))
     }
   }
 
@@ -1770,21 +2356,30 @@ function GithubSection({
     setConnections((c) => c?.filter((x) => x.id !== connId) ?? null)
   }
 
+  /* the picker offers what this canvas has not connected yet */
+  const unconnectedRepos = pickerRepos?.filter(
+    (r) => !connections?.some((conn) => conn.repo.toLowerCase() === r.fullName.toLowerCase()),
+  )
+
   if (forbidden) {
     return (
       <>
-        <ImportStepHeader icon={<GithubIcon width={22} height={22} />} title="Connect a GitHub repo" />
-        <ModalLede>Repo connections are for canvas members — ask the owner for durable access.</ModalLede>
+        <ImportStepHeader
+          icon={<AppIcon brand="github" size={40} />}
+          title={t('canvas.githubTitle')}
+          lede={t('canvas.githubForbidden')}
+        />
         <ImportStepFooter onBack={onBack} />
       </>
     )
   }
   return (
     <>
-      <ImportStepHeader icon={<GithubIcon width={22} height={22} />} title="Connect a GitHub repo" />
-      <ModalLede>
-        Doop reads the repo&rsquo;s routing conventions and lists its screens for review. Nothing lands until you pick.
-      </ModalLede>
+      <ImportStepHeader
+        icon={<AppIcon brand="github" size={40} />}
+        title={t('canvas.githubTitle')}
+        lede={t('canvas.githubLede')}
+      />
       <div className="mt-[22px] flex flex-col gap-2.5">
         {(connections ?? []).map((conn) => (
           <div key={conn.id} className="flex flex-col gap-1.5">
@@ -1794,32 +2389,33 @@ function GithubSection({
                 <span className="font-normal text-ink-faint">@{conn.branch}</span>
               </b>
               <Note className="mr-auto shrink-0">
-                {conn.frames ? `${conn.frames} screen${conn.frames === 1 ? '' : 's'}` : 'nothing imported yet'}
+                {conn.frames ? t('canvas.screens', { count: conn.frames }) : t('canvas.nothingImported')}
               </Note>
               <Button size="sm" className="px-2.5 text-xs" disabled={!!busy} onClick={() => analyze(conn)}>
-                {busy === conn.id ? 'Analyzing…' : 'Analyze'}
+                {busy === conn.id ? t('canvas.analyzing') : t('canvas.analyze')}
               </Button>
               <Button
                 variant="bare"
                 size="icon-sm"
-                className="-mr-1.5 text-[13px] hover:bg-accent-ink/10 hover:text-accent-ink"
-                title="Disconnect this repository"
+                className="-mr-1.5 hover:bg-accent-ink/10 hover:text-accent-ink"
+                title={t('canvas.disconnectRepo')}
+                aria-label={t('canvas.disconnectRepo')}
                 onClick={() => disconnect(conn.id)}
               >
-                ✕
+                <XIcon size={14} />
               </Button>
             </div>
           </div>
         ))}
-        {pickerRepos && (
+        {unconnectedRepos && (
           <div className="flex flex-col gap-1.5 rounded-[11px] border border-line bg-paper p-2.5">
-            <b className="text-[12px] text-ink-soft">Pick a repository to connect to this canvas</b>
-            {pickerRepos.map((r) => (
+            <b className="text-[12px] text-ink-soft">{t('canvas.pickRepo')}</b>
+            {unconnectedRepos.map((r) => (
               <div key={r.fullName} className="flex items-center gap-2 text-[13px]">
                 <GithubIcon width={13} height={13} className="shrink-0 text-ink-faint" />
                 <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[12px]">
                   {r.fullName}
-                  {r.private && <span className="ml-1.5 text-[10px] text-ink-faint">private</span>}
+                  {r.private && <span className="ml-1.5 text-[10px] text-ink-faint">{t('canvas.private')}</span>}
                 </span>
                 <Button
                   size="sm"
@@ -1827,16 +2423,28 @@ function GithubSection({
                   disabled={!!busy}
                   onClick={() => connectInstalledRepo(r.fullName)}
                 >
-                  {busy === 'connecting' ? 'Connecting…' : 'Connect'}
+                  {busy === 'connecting' ? t('canvas.connecting') : t('canvas.connect')}
                 </Button>
               </div>
             ))}
-            {!pickerRepos.length && <Note>All installed repositories are connected.</Note>}
+            {!unconnectedRepos.length && <Note>{t('canvas.allConnected')}</Note>}
+            <div className="flex items-center gap-3 pt-1">
+              <Button variant="bare" size="inline" className="text-ink-faint" asChild>
+                <a href={`/api/canvases/${canvasId}/github/app/install`} target="_blank" rel="noreferrer">
+                  {t('canvas.addRepos')}
+                </a>
+              </Button>
+              {/* asks GitHub again rather than re-reading the pass: an
+                  installation made in the other tab is only in a new one */}
+              <Button variant="bare" size="inline" className="text-ink-faint" disabled={!!busy} onClick={startInstall}>
+                {t('canvas.refreshRepos')}
+              </Button>
+            </div>
           </div>
         )}
         {appEnabled && !pickerRepos && (
           <Button variant="primary" className="justify-center self-start" disabled={!!busy} onClick={startInstall}>
-            {busy === 'connecting' ? 'Opening GitHub…' : 'Connect GitHub'}
+            {busy === 'connecting' ? t('canvas.openingGithub') : t('canvas.connectGithub')}
           </Button>
         )}
         {appEnabled && !showTokenForm && (
@@ -1846,7 +2454,7 @@ function GithubSection({
             className="self-start text-ink-faint"
             onClick={() => setShowTokenForm(true)}
           >
-            paste a token instead
+            {t('canvas.pasteToken')}
           </Button>
         )}
         {(!appEnabled || showTokenForm) && (
@@ -1855,7 +2463,7 @@ function GithubSection({
               <Input
                 variant="well"
                 className="flex-1 font-mono text-[12px]"
-                placeholder="owner/repository"
+                placeholder={t('canvas.repoPlaceholder')}
                 value={repo}
                 disabled={!!busy}
                 onChange={(e) => {
@@ -1867,7 +2475,7 @@ function GithubSection({
                 variant="well"
                 className="flex-1 font-mono text-[12px]"
                 type="password"
-                placeholder="Fine-grained token (github_pat_…)"
+                placeholder={t('canvas.tokenPlaceholder')}
                 value={token}
                 disabled={!!busy}
                 onChange={(e) => {
@@ -1883,18 +2491,14 @@ function GithubSection({
               disabled={!!busy || !repo.trim() || !token.trim()}
               onClick={connectRepo}
             >
-              {busy === 'connecting' ? 'Connecting…' : 'Connect'}
+              {busy === 'connecting' ? t('canvas.connecting') : t('canvas.connect')}
             </Button>
           </div>
         )}
         {error && <p className={errorNoteCls}>{error}</p>}
       </div>
       <ImportStepFooter
-        note={
-          appEnabled
-            ? 'Access is scoped to the repos you pick and revocable on GitHub.'
-            : 'A fine-grained, read-only token — it never leaves the server.'
-        }
+        note={appEnabled ? t('canvas.githubNoteApp') : t('canvas.githubNoteToken')}
         onBack={onBack}
         backDisabled={!!busy}
       />
@@ -1902,8 +2506,49 @@ function GithubSection({
   )
 }
 
+/* The id badge in the bar opens a menu that copies the id (what agents hand
+   the MCP tools) or the canvas link. */
+function CanvasIdMenu({ canvasId, onCopied }: { canvasId: string; onCopied: (msg: string) => void }) {
+  const t = useT()
+  async function copy(text: string, msg: string) {
+    try {
+      await navigator.clipboard.writeText(text)
+      onCopied(msg)
+    } catch {
+      onCopied(t('canvas.copyFailed'))
+    }
+  }
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        {/* Pressable forwards the trigger's ref (Badge does not), so the menu
+            anchors to the badge and focus returns to it on close */}
+        <Pressable
+          layout="inline"
+          focus="ring"
+          aria-label={t('canvas.canvasIdMenu')}
+          title={t('canvas.canvasIdTitle')}
+          className={cn(badgeVariants({ interactive: true }), 'max-md:hidden data-[state=open]:bg-current/10')}
+        >
+          {canvasId}
+        </Pressable>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="bottom" align="start" width="sm">
+        <DropdownMenuItem onSelect={() => void copy(canvasId, t('canvas.idCopied'))}>
+          <CopyIcon size="rail" />
+          {t('canvas.copyId')}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void copy(`${location.origin}/c/${canvasId}`, t('canvas.linkCopied'))}>
+          <LinkIcon size="rail" />
+          {t('canvas.copyLink')}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 /* The canvas title doubles as its rename field. */
-function CanvasName() {
+function CanvasName({ readOnly }: { readOnly: boolean }) {
   const canvas = useStore((s) => s.canvas)
   const canEdit = useCanEdit()
   /* renaming is a design edit: below edit the name is just a label */
@@ -1916,6 +2561,7 @@ function CanvasName() {
   return (
     <TopBarTitle
       pill
+      readOnly={readOnly}
       loading={!canvas}
       value={canvas?.name ?? ''}
       onCommit={(name) => {

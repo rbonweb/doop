@@ -11,6 +11,9 @@ import { isCanvasComment } from '../shared/comments.ts'
  */
 
 vi.mock('../server/db/persist.ts', () => ({
+  saveFrame: () => {},
+  saveFrameNow: async () => {},
+  saveCanvas: () => {},
   saveTask: () => {},
   saveFeedback: () => {},
   saveComment: () => {},
@@ -33,7 +36,7 @@ const HERO: Frame = {
   canvasId: 'c1',
   pageId: 'p1',
   name: 'Hero',
-  html: '<p/>',
+  html: '<h1>Hi</h1><p/>',
   x: 0,
   y: 0,
   width: 640,
@@ -74,6 +77,11 @@ beforeEach(() => {
   })
   vi.spyOn(store, 'getCanvas').mockImplementation((id) => (id === CANVAS.id ? CANVAS : undefined))
   vi.spyOn(store, 'getFrame').mockImplementation((id) => CANVAS.frames.find((f) => f.id === id))
+  /* a comment stamps its element's id into the frame: apply it to the fixture */
+  vi.spyOn(store, 'updateFrame').mockImplementation((id, patch) => {
+    const f = store.getFrame(id)
+    return f ? Object.assign(f, patch) : undefined
+  })
   unsubscribe = events.onCanvasEvent((_id, event) => void seen.push(event))
 })
 
@@ -88,7 +96,7 @@ const place = (text = 'Move the pricing closer', from = 'alice') =>
 describe('addCanvasComment', () => {
   it('pins the comment to the page point with no frame or element', () => {
     const c = place()!
-    expect(c).toMatchObject({ canvasId: 'c1', pageId: 'p1', x: 820, y: 240, selector: '', snippet: '', from: 'alice' })
+    expect(c).toMatchObject({ canvasId: 'c1', pageId: 'p1', x: 820, y: 240, snippet: '', from: 'alice' })
     expect(c.frameId).toBeUndefined()
     expect(isCanvasComment(c)).toBe(true)
     expect(actions.getComments(CANVAS.id)).toEqual([c])
@@ -125,7 +133,7 @@ describe('threads on a canvas comment', () => {
     const root = place()!
     expect(actions.openThread(root.id)).toEqual({ root })
     const reply = actions.replyToComment(root.id, 'Agreed', 'bob', 'bob')!
-    expect(reply).toMatchObject({ parentId: root.id, pageId: 'p1', x: 820, y: 240, selector: '', snippet: '' })
+    expect(reply).toMatchObject({ parentId: root.id, pageId: 'p1', x: 820, y: 240, snippet: '' })
     expect(reply.frameId).toBeUndefined()
     expect(actions.commentThread(reply).map((c) => c.text)).toEqual(['Move the pricing closer', 'Agreed'])
     expect(actions.getActivity(CANVAS.id)[0]?.message).toBe('replied to a comment on the canvas: “Agreed”')
@@ -144,8 +152,12 @@ describe('threads on a canvas comment', () => {
     expect(actions.getDecisions(CANVAS.id)[0]?.frameId).toBeUndefined()
   })
 
-  it('still needs the frame for an element comment thread', () => {
-    const root = actions.addElementComment(HERO.id, { selector: 'h1', snippet: '<h1/>', text: 'Bigger' }, 'alice')!
+  it('still needs the frame for an element comment thread', async () => {
+    const root = (await actions.addElementComment(
+      HERO.id,
+      { selector: 'h1', snippet: '<h1/>', text: 'Bigger' },
+      'alice',
+    ))!
     expect(actions.openThread(root.id)).toEqual({ root, frame: HERO })
     vi.spyOn(store, 'getFrame').mockReturnValue(undefined)
     expect(actions.openThread(root.id)).toBeUndefined()
@@ -196,8 +208,12 @@ describe('where a canvas comment leads', () => {
     expect(placeBeside({ x: 820, y: 240 }, { width: 800, height: 500 }, [HERO, PRICING])).toEqual({ x: 860, y: 480 })
   })
 
-  it("keeps a frame asked for by an element comment on that frame's page, and lets the model pick a spot", () => {
-    const c = actions.addElementComment(HERO.id, { selector: 'h1', snippet: '<h1/>', text: 'add a FAQ' }, 'alice')!
+  it("keeps a frame asked for by an element comment on that frame's page, and lets the model pick a spot", async () => {
+    const c = (await actions.addElementComment(
+      HERO.id,
+      { selector: 'h1', snippet: '<h1/>', text: 'add a FAQ' },
+      'alice',
+    ))!
     expect(placementFor(c, CANVAS)).toEqual({ pageId: 'p1' })
     const chosen = createFrameInput(
       { name: 'FAQ', width: 800, height: 500, html: '<html></html>', x: 5, y: 6 },
@@ -214,10 +230,19 @@ describe('where a canvas comment leads', () => {
     })
   })
 
-  it('keeps describing element comments by their element', () => {
-    const c = actions.addElementComment(HERO.id, { selector: '.hero h1', snippet: '<h1>Hi</h1>', text: 'x' }, 'alice')!
+  it('keeps describing element comments by their element', async () => {
+    const c = (await actions.addElementComment(
+      HERO.id,
+      { selector: 'h1', snippet: '<h1>Hi</h1>', text: 'x' },
+      'alice',
+    ))!
+    expect(c.elementId).toMatch(/^[a-z0-9]{6}$/)
     expect(describeCommentAnchor(c, CANVAS)).toBe(
-      'on frame f1 "Hero", element .hero h1\n  element HTML at comment time: <h1>Hi</h1>',
+      `on frame f1 "Hero", the element with data-doop-id="${c.elementId}"\n  element HTML at comment time: <h1>Hi</h1>`,
+    )
+    /* the element lost its id (an agent rewrote the frame): the snippet is what is left */
+    expect(describeCommentAnchor({ ...c, elementId: undefined }, CANVAS)).toBe(
+      'on frame f1 "Hero", an element that is no longer in the frame\n  element HTML at comment time: <h1>Hi</h1>',
     )
   })
 })

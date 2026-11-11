@@ -15,8 +15,20 @@ vi.mock('../server/workspaces.ts', () => ({
   workspaceMemberIds: () => [],
 }))
 
-const { canvasRole, canView, canComment, canEdit, canAccessCanvas, guestRole, hasDurableCanvasAccess } =
-  await import('../server/access.ts')
+const {
+  canvasRole,
+  canView,
+  canComment,
+  canEdit,
+  canAccessCanvas,
+  canCommentCanvas,
+  canEditCanvas,
+  guestRole,
+  guestCanvasRole,
+  hasDurableCanvasAccess,
+  roomMessageNeeds,
+} = await import('../server/access.ts')
+const { roleAllows, storedLinkAccess, toLinkAccess } = await import('../shared/canvasRole.ts')
 const { store } = await import('../server/store.ts')
 
 function canvas(extra: Partial<Canvas> = {}): Canvas {
@@ -187,3 +199,51 @@ describe('helpers', () => {
 })
 
 type LinkAccessCase = NonNullable<Canvas['linkAccess']>
+
+describe('upstream names over the same resolver', () => {
+  it('canCommentCanvas, canEditCanvas and guestCanvasRole are the fork gates', () => {
+    expect(canCommentCanvas).toBe(canComment)
+    expect(guestCanvasRole).toBe(guestRole)
+    const c = canvas({ memberIds: ['v', 'c'], memberRoles: { v: 'view', c: 'comment' } })
+    expect([canEditCanvas('v', c), canEditCanvas('c', c), canEditCanvas('owner', c)]).toEqual([false, false, true])
+  })
+
+  it('the owner passes every gate', () => {
+    const c = canvas({ linkAccess: 'view' })
+    expect([canView('owner', c), canCommentCanvas('owner', c), canEditCanvas('owner', c)]).toEqual([true, true, true])
+  })
+})
+
+describe('room messages', () => {
+  it('lets every reader share cursors and viewports but keeps frame edits to editors', () => {
+    expect(roomMessageNeeds({ type: 'cursor', x: 1, y: 2 })).toBe('view')
+    expect(roomMessageNeeds({ type: 'viewport', viewport: { x: 0, y: 0, zoom: 1, width: 1, height: 1 } })).toBe('view')
+    expect(roomMessageNeeds({ type: 'editing', frameId: 'f1' })).toBe('edit')
+    expect(roomMessageNeeds({ type: 'frame:drag', frameId: 'f1', x: 0, y: 0, width: 1, height: 1 })).toBe('edit')
+  })
+
+  it('treats a message type it does not know as an edit', () => {
+    expect(roomMessageNeeds({ type: 'frame:delete' } as never)).toBe('edit')
+  })
+})
+
+describe('link access values', () => {
+  it('ranks roles view < comment < edit < owner', () => {
+    expect(roleAllows('owner', 'edit')).toBe(true)
+    expect(roleAllows('owner', 'owner')).toBe(true)
+    expect(roleAllows('edit', 'owner')).toBe(false)
+    expect(roleAllows('edit', 'comment')).toBe(true)
+    expect(roleAllows('comment', 'comment')).toBe(true)
+    expect(roleAllows('comment', 'edit')).toBe(false)
+    expect(roleAllows('view', 'comment')).toBe(false)
+    expect(roleAllows(null, 'view')).toBe(false)
+  })
+
+  it('stores private as unset and reads legacy values back', () => {
+    expect(storedLinkAccess('none')).toBeUndefined()
+    expect(storedLinkAccess(null)).toBeUndefined()
+    expect(storedLinkAccess('edit')).toBe('edit')
+    expect(storedLinkAccess('view')).toBe('view')
+    expect(toLinkAccess('bogus')).toBe('none')
+  })
+})

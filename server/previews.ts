@@ -1,7 +1,8 @@
 import { env } from './env.ts'
 import type { Frame } from '../shared/types.ts'
-import { clampImageScale, type ImageScale } from '../shared/imageScale.ts'
+import { fitExportScale } from '../shared/exportScale.ts'
 import * as thumbs from './thumbs.ts'
+import { store } from './store.ts'
 
 /**
  * Everything behind GET /i/<frameId>.<ext> except HTTP: the in-process
@@ -34,7 +35,8 @@ const RENDERS_PER_MIN = env.PREVIEW_RENDERS_PER_MIN
 
 export interface ImageRequest {
   ext: 'png' | 'jpg'
-  scale: ImageScale
+  /** output density, already parsed and fitted (shared/exportScale.ts) */
+  scale: number
   quality: number
   /** dashboard-card variant: small, clipped, jpeg, persisted. Only
    *  meaningful for jpg — a png?preview would serve jpeg bytes under an
@@ -50,7 +52,8 @@ export type ImageResult = { status: 'ok'; buf: Buffer } | { status: 'rate-limite
 /** May reject when the render itself fails — the caller owns the 500. */
 export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageResult> {
   const preview = req.preview && req.ext === 'jpg'
-  const scale = clampImageScale(req.scale, frame)
+  /* the callers fit the scale already; fitting again changes nothing for them and keeps any other caller inside the render limits */
+  const scale = fitExportScale(frame, req.scale)
   const key = imageKey(frame.id, req.ext, scale, req.ext === 'jpg' ? req.quality : '', preview)
   /* an invalidation while a render is in flight makes its result stale: it is served to the request that asked, never cached */
   const generation = thumbs.generation(frame.id)
@@ -75,8 +78,11 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
     pending = preview
       ? /* renders AND persists — the next cold start serves from storage */
         thumbs.create(frame)
-      : loadScreenshot().then(({ renderFrame }) =>
-          renderFrame(frame, scale, { type: req.ext === 'jpg' ? 'jpeg' : 'png', quality: req.quality }),
+      : loadScreenshot().then(async ({ renderFrame }) =>
+          renderFrame(await store.renderSource(frame), scale, {
+            type: req.ext === 'jpg' ? 'jpeg' : 'png',
+            quality: req.quality,
+          }),
         )
     remember(key, pending, frame.updatedAt, () => thumbs.generation(frame.id) === started)
   }
@@ -93,7 +99,7 @@ function imageKey(id: string, ext: 'png' | 'jpg', scale: number, quality: number
  *  preview card loads `/i/<id>.png` right after it from a cookie-less sandbox
  *  iframe — anonymous, so metered. Priming turns that load into a free
  *  cached serve instead of a second render against the per-IP budget. */
-export function primeImage(frame: Frame, scale: ImageScale, png: Buffer): void {
+export function primeImage(frame: Frame, scale: number, png: Buffer): void {
   remember(imageKey(frame.id, 'png', scale, '', false), Promise.resolve(png), frame.updatedAt)
 }
 

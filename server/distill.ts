@@ -2,7 +2,7 @@ import { env } from './env.ts'
 import Anthropic from '@anthropic-ai/sdk'
 import { store } from './store.ts'
 import * as actions from './actions.ts'
-import { distillModel } from './instanceSettings.ts'
+import { distillModel } from './instanceConfig.ts'
 import { sanitizeInline, untrustedBlock } from './promptSafety.ts'
 
 /**

@@ -9,7 +9,6 @@ const comment = (id: string, frameId?: string): ElementComment => ({
   from: 'Ada',
   text: id,
   at: 1,
-  selector: frameId ? 'p' : '',
   snippet: '',
 })
 

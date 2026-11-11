@@ -167,20 +167,20 @@ describe('frame runtime doop:locate', () => {
     })
   }
 
-  it('answers with how the element was found and its current path, and reports a miss as null', async () => {
+  it('locates the element at the stored path and reports a miss as a null rect', async () => {
     mount(PAGE)
     const { selector, anchor } = capture('button')
-    expect(await locate(selector, anchor)).toMatchObject({ reqId: 'c1', how: 'path', rect: expect.any(Object) })
+    expect(await locate(selector, anchor)).toMatchObject({ reqId: 'c1', selector, rect: expect.any(Object) })
 
+    /* the runtime no longer heals a moved path (comments follow the element's data-doop-id, PLAN decision on
+       comment anchors): the reply is the path's element or nothing, and the reply names no `how` or `path` */
     mount(`<main><section><h2>Banner</h2></section>${PAGE}</main>`)
     const moved = await locate(selector, anchor)
-    expect(moved.how).toBe('scan')
-    /* the reply echoes the asked selector (the probe matches on it) and carries the element's current path separately */
     expect(moved.selector).toBe(selector)
-    expect(typeof moved.path).toBe('string')
-    expect(document.querySelector(moved.path as string)?.textContent).toBe('Start free trial')
+    expect(moved).not.toHaveProperty('how')
+    expect(moved).not.toHaveProperty('path')
 
     mount('<main><p>Gone</p></main>')
-    expect(await locate(selector, anchor)).toMatchObject({ rect: null, how: null, path: null })
+    expect(await locate(selector, anchor)).toMatchObject({ rect: null })
   })
 })

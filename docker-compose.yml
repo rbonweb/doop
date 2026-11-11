@@ -12,6 +12,8 @@ services:
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:4400}
       SIGNUP_EMAIL_DOMAINS: ${SIGNUP_EMAIL_DOMAINS:-}
       SIGNUP_ALLOWED_EMAILS: ${SIGNUP_ALLOWED_EMAILS:-}
+      # interface language for anyone who has not picked one: en (default) | pt-BR
+      DEFAULT_LOCALE: ${DEFAULT_LOCALE:-}
       # optional — see .env.example for everything else (SMTP, ANTHROPIC_API_KEY, …)
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}

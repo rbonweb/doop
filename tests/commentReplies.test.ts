@@ -4,6 +4,9 @@ import type { Frame } from '../shared/types.ts'
 /* Replies are persisted and broadcast like any comment; the unit tests only
    care about how a thread is shaped, so both sides are stubbed. */
 vi.mock('../server/db/persist.ts', () => ({
+  saveFrame: () => {},
+  saveFrameNow: async () => {},
+  saveCanvas: () => {},
   saveTask: () => {},
   saveFeedback: () => {},
   saveComment: () => {},
@@ -22,7 +25,7 @@ const FRAME: Frame = {
   id: 'f1',
   canvasId: CANVAS,
   name: 'Hero',
-  html: '<p/>',
+  html: '<h1>Hi</h1><p/>',
   x: 0,
   y: 0,
   width: 10,
@@ -46,52 +49,57 @@ beforeEach(() => {
     proposals: new Map(),
   })
   vi.spyOn(store, 'getFrame').mockImplementation((id) => (id === FRAME.id ? FRAME : undefined))
+  /* a comment stamps its element's id into the frame: apply it to the fixture */
+  vi.spyOn(store, 'updateFrame').mockImplementation((id, patch) => {
+    const f = store.getFrame(id)
+    return f ? Object.assign(f, patch) : undefined
+  })
 })
 
-function root() {
-  return actions.addElementComment(
+async function root() {
+  return (await actions.addElementComment(
     FRAME.id,
-    { selector: '.hero h1', snippet: '<h1>Hi</h1>', text: 'Too small' },
+    { selector: 'h1', snippet: '<h1>Hi</h1>', text: 'Too small' },
     'alice',
-  )!
+  ))!
 }
 
 describe('replying to a comment', () => {
-  it('threads the reply under the root and inherits its element', () => {
-    const parent = root()
+  it('threads the reply under the root and inherits its element', async () => {
+    const parent = await root()
     const reply = actions.replyToComment(parent.id, 'Agreed', 'bob')!
     expect(reply.parentId).toBe(parent.id)
-    expect(reply.selector).toBe(parent.selector)
+    expect(reply.elementId).toBe(parent.elementId)
     expect(reply.snippet).toBe(parent.snippet)
     expect(actions.commentThread(reply).map((c) => c.text)).toEqual(['Too small', 'Agreed'])
   })
 
-  it('gives every message a distinct timestamp so order survives a reload', () => {
-    const parent = root()
+  it('gives every message a distinct timestamp so order survives a reload', async () => {
+    const parent = await root()
     const first = actions.replyToComment(parent.id, 'one', 'bob')!
     const second = actions.replyToComment(parent.id, 'two', 'carol')!
     expect(first.at).toBeGreaterThan(parent.at)
     expect(second.at).toBeGreaterThan(first.at)
   })
 
-  it('re-roots a reply to a reply, keeping threads one level deep', () => {
-    const parent = root()
+  it('re-roots a reply to a reply, keeping threads one level deep', async () => {
+    const parent = await root()
     const first = actions.replyToComment(parent.id, 'Agreed', 'bob')!
     const second = actions.replyToComment(first.id, 'Same', 'carol')!
     expect(second.parentId).toBe(parent.id)
     expect(actions.commentThread(parent).map((c) => c.from)).toEqual(['alice', 'bob', 'carol'])
   })
 
-  it('routes an @mention in a reply to the agent with the thread anchor', () => {
-    const parent = root()
+  it('routes an @mention in a reply to the agent with the thread anchor', async () => {
+    const parent = await root()
     const reply = actions.replyToComment(parent.id, `@${DEFAULT_ROLE_ID} make it 48px`, 'alice', 'alice')!
     expect(reply.forAgent).toBe(true)
     expect(reply.targetAgent).toBe(AGENT)
     expect(actions.takeAgentCommentsFor(CANVAS, AGENT, 'alice').map((c) => c.id)).toEqual([reply.id])
   })
 
-  it('reports whether a thread can take a reply before anything is metered', () => {
-    const parent = root()
+  it('reports whether a thread can take a reply before anything is metered', async () => {
+    const parent = await root()
     const reply = actions.replyToComment(parent.id, 'Agreed', 'bob')!
     expect(actions.openThread(reply.id)?.root.id).toBe(parent.id)
     actions.resolveComment(parent.id, 'alice')
@@ -99,24 +107,24 @@ describe('replying to a comment', () => {
     expect(actions.openThread('missing')).toBeUndefined()
   })
 
-  it('refuses replies on a resolved thread or with empty text', () => {
-    const parent = root()
+  it('refuses replies on a resolved thread or with empty text', async () => {
+    const parent = await root()
     expect(actions.replyToComment(parent.id, '   ', 'bob')).toBeUndefined()
     actions.resolveComment(parent.id, 'alice')
     expect(actions.replyToComment(parent.id, 'Late', 'bob')).toBeUndefined()
     expect(actions.replyToComment('missing', 'Hello', 'bob')).toBeUndefined()
   })
 
-  it('resolving the root closes every open reply so none stays queued for an agent', () => {
-    const parent = root()
+  it('resolving the root closes every open reply so none stays queued for an agent', async () => {
+    const parent = await root()
     const reply = actions.replyToComment(parent.id, `@${DEFAULT_ROLE_ID} bigger`, 'alice', 'alice')!
     actions.resolveComment(parent.id, 'alice')
     expect(actions.findComment(reply.id)?.resolvedAt).toBeDefined()
     expect(actions.takeAgentCommentsFor(CANVAS, AGENT, 'alice')).toEqual([])
   })
 
-  it('resolving a reply leaves the thread open', () => {
-    const parent = root()
+  it('resolving a reply leaves the thread open', async () => {
+    const parent = await root()
     const reply = actions.replyToComment(parent.id, `@${DEFAULT_ROLE_ID} bigger`, 'alice', 'alice')!
     actions.resolveComment(reply.id, AGENT)
     expect(actions.findComment(parent.id)?.resolvedAt).toBeUndefined()

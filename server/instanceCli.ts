@@ -6,7 +6,7 @@ import {
   revokeInvite,
   setModels,
   SettingRefused,
-} from './instanceSettings.ts'
+} from './instanceConfig.ts'
 
 /**
  * deploy/doop.sh's way into the instance settings from the server's command

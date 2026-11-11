@@ -1,6 +1,14 @@
 import { bool, cleanEnv, EnvMissingError, makeExactValidator, port, str } from 'envalid'
 import type { ReporterOptions } from 'envalid'
-import { DEFAULT_GEMINI_MODEL, DEFAULT_OPENROUTER_MODEL } from '../shared/modelMenu.ts'
+import { createHash } from 'node:crypto'
+import {
+  DEFAULT_DEEPSEEK_MODEL,
+  DEFAULT_GEMINI_MODEL,
+  DEFAULT_KIMI_CODE_MODEL,
+  DEFAULT_KIMI_MODEL,
+  DEFAULT_OPENROUTER_MODEL,
+} from '../shared/modelMenu.ts'
+import { FALLBACK_LOCALE, LOCALES } from '../shared/locales.ts'
 
 /**
  * Every environment variable the server reads, declared once with its type
@@ -48,6 +56,37 @@ const list = makeExactValidator<string[]>((input) =>
     .filter(Boolean),
 )
 
+export interface SecretKey {
+  id: string
+  key: Buffer
+}
+
+/** `id:base64,id:base64` — 32-byte AES keys, the first one active, the rest
+ *  kept only to open values sealed before a rotation (server/secretBox.ts). */
+const secretKeys = makeExactValidator<SecretKey[]>((input) => {
+  const keys = input
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [id = '', encoded = ''] = entry.split(':')
+      if (!/^[a-z0-9-]+$/i.test(id)) throw new TypeError(`Invalid key id (letters, digits, -): "${id}"`)
+      const key = Buffer.from(encoded, 'base64')
+      if (key.length !== 32) throw new TypeError(`Key "${id}" must be 32 bytes of base64 (openssl rand -base64 32)`)
+      return { id, key }
+    })
+  /* a set but empty-looking value (`,`) is a typo, not a request for plaintext */
+  if (keys.length === 0) throw new TypeError('At least one encryption key must be supplied')
+  if (new Set(keys.map((k) => k.id)).size !== keys.length) throw new TypeError('Key ids must be unique')
+  return keys
+})
+
+/* development and tests seal with a fixed key, so the encrypted path is the
+   one every local run exercises */
+const DEV_SECRET_KEYS: SecretKey[] = [
+  { id: 'dev', key: createHash('sha256').update('doop-dev-secrets-key-not-for-production').digest() },
+]
+
 const int = (minimum: number) =>
   makeExactValidator<number>((input) => {
     const n = Number(input)
@@ -66,6 +105,8 @@ const nonNegativeInt = int(0)
 const schema = {
   NODE_ENV: str({ choices: ['development', 'test', 'production'], default: 'development' }),
   PORT: port({ default: 4400 }),
+  /* the interface language for anyone who has not picked one in Settings */
+  DEFAULT_LOCALE: str({ choices: LOCALES, default: FALLBACK_LOCALE }),
   /* unset = embedded Postgres (PGlite) under ./data/pg */
   DATABASE_URL: str({ default: undefined }),
 
@@ -78,6 +119,8 @@ const schema = {
     devDefault: 'http://localhost:4300',
     desc: 'The public origin, e.g. https://doop.app; must be set in production',
   }),
+  /* unset in production = user credentials stored unencrypted (boot warns) */
+  SECRETS_ENCRYPTION_KEYS: secretKeys({ default: [], devDefault: DEV_SECRET_KEYS }),
   TRUSTED_ORIGINS: list({ default: [] }),
   SIGNUP_EMAIL_DOMAINS: list({ default: [] }),
   ADMIN_EMAILS: list({ default: [] }),
@@ -129,6 +172,9 @@ const schema = {
   DOOP_AGENT_OPENAI_EFFORT: str({ default: 'medium' }),
   DOOP_AGENT_OPENROUTER_MODEL: str({ default: DEFAULT_OPENROUTER_MODEL }),
   DOOP_AGENT_GEMINI_MODEL: str({ default: DEFAULT_GEMINI_MODEL }),
+  DOOP_AGENT_DEEPSEEK_MODEL: str({ default: DEFAULT_DEEPSEEK_MODEL }),
+  DOOP_AGENT_KIMI_MODEL: str({ default: DEFAULT_KIMI_MODEL }),
+  DOOP_AGENT_KIMI_CODE_MODEL: str({ default: DEFAULT_KIMI_CODE_MODEL }),
   /* JSON; parsed and shape-checked where it is used so a parse error never
      echoes the worker secrets it contains */
   DOOP_GEMINI_CLOUD_WORKERS: str({ default: undefined }),
@@ -140,12 +186,31 @@ const schema = {
   CHATGPT_AUTH_USER_AGENT: str({ default: 'doop/0.1 (+https://doop.design)' }),
   CHATGPT_DEVICE_URL: str({ default: undefined }),
   CHATGPT_RESPONSES_URL: str({ default: 'https://chatgpt.com/backend-api/codex/responses' }),
+  /* the Codex backend's model catalog; it answers for a Codex CLI version it
+     knows, so the pin moves with the CLI releases */
+  CHATGPT_MODELS_URL: str({ default: 'https://chatgpt.com/backend-api/codex/models' }),
+  CHATGPT_CODEX_CLIENT_VERSION: str({ default: '0.163.0' }),
   CHATGPT_ORIGINATOR: str({ default: 'codex_cli_rs' }),
   OPENAI_RESPONSES_URL: str({ default: 'https://api.openai.com/v1/responses' }),
+  OPENAI_MODELS_URL: str({ default: 'https://api.openai.com/v1/models' }),
   OPENROUTER_CHAT_URL: str({ default: 'https://openrouter.ai/api/v1/chat/completions' }),
   GEMINI_OPENAI_CHAT_URL: str({
     default: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
   }),
+  DEEPSEEK_CHAT_URL: str({ default: 'https://api.deepseek.com/chat/completions' }),
+  /* Moonshot's international platform; keys from platform.moonshot.cn need
+     https://api.moonshot.cn/v1/chat/completions */
+  KIMI_CHAT_URL: str({ default: 'https://api.moonshot.ai/v1/chat/completions' }),
+  /* Kimi Code, a membership's coding quota; China's is
+     https://api.kimi.com/coding/v1/chat/completions */
+  KIMI_CODE_CHAT_URL: str({ default: 'https://api.kimi.ai/coding/v1/chat/completions' }),
+  /* custom providers (Settings → Doop Agent → Custom provider): any OpenAI-
+     or Anthropic-compatible endpoint a person names. Off switches the feature
+     off and takes existing ones out of use. Their URLs are user input, so they
+     are reached only over public addresses unless PRIVATE_HOSTS is on, for a
+     self-hosted instance whose models run on its own network */
+  DOOP_CUSTOM_PROVIDERS: bool({ default: true }),
+  DOOP_CUSTOM_PROVIDER_PRIVATE_HOSTS: bool({ default: false }),
 
   /* ------------------------------------------------ image generation */
   OPENAI_API_KEY: str({ default: undefined }),
@@ -173,8 +238,11 @@ const schema = {
   GITHUB_APP_CLIENT_ID: str({ default: undefined }),
   GITHUB_APP_CLIENT_SECRET: str({ default: undefined }),
   GITHUB_APP_PRIVATE_KEY: str({ default: undefined }),
+  GITHUB_API_URL: origin({ default: 'https://api.github.com' }),
+  GITHUB_OAUTH_TOKEN_URL: str({ default: 'https://github.com/login/oauth/access_token' }),
   PEXELS_API_KEY: str({ default: undefined }),
   BRANDFETCH_CLIENT_ID: str({ default: undefined }),
+  ONEPAGELOVE_API_KEY: str({ default: undefined }),
   CONTEXT_DEV_API_KEY: str({ default: undefined }),
 
   /* ------------------------------------------------- object storage */
@@ -211,6 +279,13 @@ const schema = {
   SYNC_INGESTS_PER_MIN: perMinute({ default: 30 }),
   PREVIEW_RENDERS_PER_MIN: perMinute({ default: 12 }),
   DECK_PDFS_PER_MIN: perMinute({ default: 4 }),
+  /* image descriptions (server/imageDescriptions.ts): a day's budget per
+     canvas, and how many describe calls run at once */
+  DESCRIBE_PER_CANVAS_PER_DAY: nonNegativeInt({ default: 200 }),
+  DESCRIBE_CONCURRENCY: perMinute({ default: 2 }),
+  DESCRIBE_RETRY_MS: nonNegativeInt({ default: 30_000 }),
+  /* how long a canvas nobody uses keeps its frame HTML in memory (store.ts) */
+  CANVAS_IDLE_MS: nonNegativeInt({ default: 10 * 60_000 }),
   SYNC_PAGE_INTERVAL_MS: nonNegativeInt({ default: 30_000 }),
   SYNC_FREEZE_MS: nonNegativeInt({ default: 15 * 60_000 }),
 
@@ -276,6 +351,13 @@ export type Env = ReturnType<typeof parse>
 /* `let` so reloadEnv can swap the snapshot; ESM live bindings mean every
    importer sees the new one. Nothing outside this file assigns it. */
 export let env: Env = parse()
+
+/** Windows browser install roots: both Program Files directories and the current user's LocalAppData. */
+export function windowsBrowserDirectories(): string[] {
+  return [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(
+    (dir): dir is string => !!dir,
+  )
+}
 
 /** Re-read process.env. For tests that change a variable after import;
  *  the server itself parses once at boot. */

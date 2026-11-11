@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
   COMMUNITY_CATEGORIES,
-  COMMUNITY_CATEGORY_LABELS,
   type AccessRequestInfo,
   type Canvas,
   type CommunityCategory,
@@ -30,6 +29,7 @@ import { Note } from './ui/note'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Textarea } from './ui/textarea'
 import { ToggleChipGroup, ToggleChipItem } from './ui/toggle-chip'
+import { useT, type PlainMessageKey } from '@/lib/i18n'
 
 type ShareableCanvas = Pick<
   Canvas,
@@ -61,25 +61,46 @@ type SharePatch = Partial<
   >
 >
 
-const ROLE_LABEL: Record<MemberRole, string> = { view: 'Can view', comment: 'Can comment', edit: 'Can edit' }
-const ROLE_CHOICES: { value: MemberRole; label: string }[] = [
-  { value: 'view', label: ROLE_LABEL.view },
-  { value: 'comment', label: ROLE_LABEL.comment },
-  { value: 'edit', label: ROLE_LABEL.edit },
-]
+const ROLE_LABEL: Record<MemberRole, PlainMessageKey> = {
+  view: 'panels.shareRoleView',
+  comment: 'panels.shareRoleComment',
+  edit: 'panels.shareCanEdit',
+}
+const ROLE_ORDER: readonly MemberRole[] = ['view', 'comment', 'edit']
 
-const LINK_OPTIONS: { value: LinkAccess; label: string }[] = [
-  { value: 'none', label: 'No access' },
-  { value: 'view', label: 'Can view' },
-  { value: 'comment', label: 'Can comment' },
-  { value: 'edit', label: 'Can edit' },
-]
+/* What each share-link level grants, as the picker and the read-out say it. */
+const LINK_ACCESS_LABELS: Record<LinkAccess, PlainMessageKey> = {
+  none: 'panels.shareAccessNone',
+  view: 'panels.shareAccessView',
+  comment: 'panels.shareAccessComment',
+  edit: 'panels.shareAccessEdit',
+}
 
-const AUDIENCE_OPTIONS: { value: LinkAudience; label: string }[] = [
-  { value: 'signed-in', label: 'Anyone signed in to doop' },
-  { value: 'anyone', label: 'Anyone with the link, no sign-in' },
-  { value: 'password', label: 'Anyone with the password' },
-]
+const LINK_ACCESS_SUMMARY: Record<LinkAccess, PlainMessageKey> = {
+  none: 'panels.shareSummaryNone',
+  view: 'panels.shareSummaryView',
+  comment: 'panels.shareSummaryComment',
+  edit: 'panels.shareSummaryEdit',
+}
+
+const LINK_ACCESS_ORDER: readonly LinkAccess[] = ['none', 'view', 'comment', 'edit']
+
+const AUDIENCE_LABELS: Record<LinkAudience, PlainMessageKey> = {
+  'signed-in': 'panels.shareAudienceSignedIn',
+  anyone: 'panels.shareAudienceAnyone',
+  password: 'panels.shareAudiencePassword',
+}
+const AUDIENCE_ORDER: readonly LinkAudience[] = ['signed-in', 'anyone', 'password']
+
+/* the gallery shelves; the ids are what the server stores */
+const CATEGORY_LABELS: Record<CommunityCategory, PlainMessageKey> = {
+  website: 'panels.shareCategoryWebsite',
+  app: 'panels.shareCategoryApp',
+  dashboard: 'panels.shareCategoryDashboard',
+  mobile: 'panels.shareCategoryMobile',
+  marketing: 'panels.shareCategoryMarketing',
+  other: 'panels.shareCategoryOther',
+}
 
 /* a ring Select over a short fixed list: roles, link access, who can open it */
 function OptionSelect<T extends string>({
@@ -128,11 +149,12 @@ function RoleSelect({
   label: string
   className?: string
 }) {
+  const t = useT()
   return (
     <OptionSelect
       className={className ?? 'w-[132px] flex-none'}
       value={value}
-      options={ROLE_CHOICES}
+      options={ROLE_ORDER.map((role) => ({ value: role, label: t(ROLE_LABEL[role]) }))}
       disabled={disabled}
       label={label}
       onChange={onChange}
@@ -168,6 +190,7 @@ export function ShareModal({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [requests, setRequests] = useState<AccessRequestInfo[]>([])
+  const t = useT()
   /* bumped by the room when someone asks while this dialog is open */
   const requestTick = useStore((s) => s.accessRequestTick)
 
@@ -218,7 +241,7 @@ export function ShareModal({
     } catch (caught) {
       const walled = paywalledWorkspace(caught)
       if (walled) setUpgrade(walled)
-      else fail(caught, 'move failed')
+      else fail(caught, t('panels.shareMoveFailed'))
     } finally {
       setBusy(false)
     }
@@ -241,7 +264,7 @@ export function ShareModal({
       setRequests((current) => current.filter((r) => r.userId !== member.userId))
       setEmail('')
     } catch (caught) {
-      fail(caught, 'invite failed')
+      fail(caught, t('panels.shareInviteFailed'))
     }
     setBusy(false)
   }
@@ -255,7 +278,7 @@ export function ShareModal({
       setPeople((current) => current?.map((p) => (p.userId === userId ? { ...p, role } : p)) ?? null)
       onChange({ memberRoles: withRole(canvas.memberRoles, userId, role) })
     } catch (caught) {
-      fail(caught, 'role change failed')
+      fail(caught, t('panels.shareRoleChangeFailed'))
     } finally {
       setBusy(false)
     }
@@ -271,7 +294,7 @@ export function ShareModal({
       onChange({ memberIds: canvas.memberIds?.filter((id) => id !== userId) })
       if (userId === meId && !isOwner) navigate('/')
     } catch (caught) {
-      fail(caught, 'removal failed')
+      fail(caught, t('panels.shareRemoveFailed'))
     } finally {
       setBusy(false)
     }
@@ -297,7 +320,7 @@ export function ShareModal({
       }
       setRequests((current) => current.filter((r) => r.userId !== request.userId))
     } catch (caught) {
-      fail(caught, 'could not answer that request')
+      fail(caught, t('panels.shareAnswerFailed'))
     } finally {
       setBusy(false)
     }
@@ -320,7 +343,7 @@ export function ShareModal({
       })
       return true
     } catch (caught) {
-      fail(caught, 'access update failed')
+      fail(caught, t('panels.shareAccessFailed'))
       return false
     } finally {
       setBusy(false)
@@ -334,7 +357,7 @@ export function ShareModal({
       posthog.capture('canvas_link_shared')
       onCopied()
     } catch {
-      setError('Couldn’t copy the link. Copy the URL from your browser instead.')
+      setError(t('panels.shareCopyFailed'))
     }
   }
 
@@ -342,22 +365,18 @@ export function ShareModal({
     <Modal size="md" onClose={onClose}>
       <>
         <div className="flex items-start justify-between gap-3">
-          <ModalTitle className="min-w-0">Share “{canvas.name}”</ModalTitle>
-          <IconButton aria-label="Close sharing" onClick={onClose}>
+          <ModalTitle className="min-w-0">{t('panels.shareTitle', { name: canvas.name })}</ModalTitle>
+          <IconButton aria-label={t('panels.shareClose')} onClick={onClose}>
             <XIcon />
           </IconButton>
         </div>
 
         {requests.length > 0 && (
           <section
-            aria-label="Access requests"
+            aria-label={t('panels.shareRequestsAria')}
             className="mt-4 animate-[chip-in_0.25s_ease] rounded-card bg-brand/5 p-3 ring-1 ring-brand/40"
           >
-            <div className={caption}>
-              {requests.length === 1
-                ? '1 person is asking to get in'
-                : `${requests.length} people are asking to get in`}
-            </div>
+            <div className={caption}>{t('panels.shareRequests', { count: requests.length })}</div>
             <div className="flex flex-col gap-2.5">
               {requests.map((request) => (
                 <RequestRow
@@ -377,7 +396,7 @@ export function ShareModal({
               variant="well"
               className="flex-1"
               autoFocus
-              placeholder="Invite by email (doop account)"
+              placeholder={t('panels.shareInvitePlaceholder')}
               value={email}
               disabled={busy}
               onChange={(event) => setEmail(event.target.value)}
@@ -387,7 +406,7 @@ export function ShareModal({
               value={inviteRole}
               onChange={setInviteRole}
               disabled={busy}
-              label="Role for the invited person"
+              label={t('panels.shareInviteRoleAria')}
             />
             <Button
               variant="primary"
@@ -395,7 +414,7 @@ export function ShareModal({
               disabled={busy || people === null || !email.trim()}
               onClick={invite}
             >
-              Invite
+              {t('panels.shareInvite')}
             </Button>
           </div>
         )}
@@ -410,31 +429,35 @@ export function ShareModal({
             <PersonRow
               key={person.userId}
               className="px-[2px] py-1.5"
-              avatar={<Avatar name={person.name} size={28} />}
-              name={`${person.name}${person.userId === meId ? ' (you)' : ''}`}
+              avatar={<Avatar name={person.name} image={person.image} size={28} />}
+              name={person.userId === meId ? t('panels.shareYou', { name: person.name }) : person.name}
               detail={person.email}
               trailing={
                 person.owner ? (
-                  <span className="text-label text-ink-faint">Owner</span>
+                  <span className="text-label text-ink-faint">{t('panels.shareOwner')}</span>
                 ) : (
                   <>
                     {isOwner ? (
                       <RoleSelect
                         value={person.role === 'owner' ? 'edit' : person.role}
                         disabled={busy}
-                        label={`Role for ${person.name}`}
+                        label={t('panels.shareRoleFor', { name: person.name })}
                         onChange={(role) => changeRole(person.userId, role)}
                       />
                     ) : (
                       <span className="text-label text-ink-faint">
-                        {ROLE_LABEL[person.role === 'owner' ? 'edit' : person.role]}
+                        {t(ROLE_LABEL[person.role === 'owner' ? 'edit' : person.role])}
                       </span>
                     )}
                     {(isOwner || person.userId === meId) && (
                       <IconButton
                         variant="danger"
                         size="sm"
-                        aria-label={person.userId === meId ? 'Leave this canvas' : `Remove ${person.name}`}
+                        aria-label={
+                          person.userId === meId
+                            ? t('panels.shareLeave')
+                            : t('panels.shareRemove', { name: person.name })
+                        }
                         disabled={busy}
                         onClick={() => remove(person.userId)}
                       >
@@ -446,7 +469,7 @@ export function ShareModal({
               }
             />
           ))}
-          {people === null && <p className="text-label text-ink-faint">Loading…</p>}
+          {people === null && <p className="text-label text-ink-faint">{t('common.loading')}</p>}
           {canvas.workspaceId && (
             <PersonRow
               className="px-[2px] py-1.5"
@@ -455,13 +478,15 @@ export function ShareModal({
                   <BuildingIcon width={14} height={14} aria-hidden />
                 </span>
               }
-              name={`Everyone in ${workspace?.name ?? 'the workspace'}`}
+              name={
+                workspace ? t('panels.shareEveryoneIn', { name: workspace.name }) : t('panels.shareEveryoneInWorkspace')
+              }
               detail={
                 workspace
-                  ? `${workspace.memberCount} ${workspace.memberCount === 1 ? 'person' : 'people'}`
-                  : 'workspace members'
+                  ? t('panels.sharePeople', { count: workspace.memberCount })
+                  : t('panels.shareWorkspaceMembers')
               }
-              trailing={<span className="text-label text-ink-faint">Can edit</span>}
+              trailing={<span className="text-label text-ink-faint">{t('panels.shareCanEdit')}</span>}
             />
           )}
         </div>
@@ -472,21 +497,21 @@ export function ShareModal({
             choice sits with the access controls rather than in a menu */}
         {isOwner && workspaces.length > 0 && (
           <div className="mt-2.5 flex flex-col gap-2 border-t border-line-soft pt-3.5 sm:flex-row sm:items-center">
-            <span className="text-body font-medium text-ink">Workspace</span>
+            <span className="text-body font-medium text-ink">{t('panels.shareWorkspace')}</span>
             <Select
               value={canvas.workspaceId ?? PERSONAL_WORKSPACE}
               disabled={busy}
               onValueChange={(value) => void move(value === PERSONAL_WORKSPACE ? '' : value)}
             >
-              <SelectTrigger className="sm:ml-auto sm:w-[240px]" aria-label="Workspace this canvas lives in">
+              <SelectTrigger className="sm:ml-auto sm:w-[240px]" aria-label={t('panels.shareWorkspaceAria')}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={PERSONAL_WORKSPACE}>Personal — invite-only</SelectItem>
+                <SelectItem value={PERSONAL_WORKSPACE}>{t('panels.sharePersonal')}</SelectItem>
                 {workspaces.map((w) => (
                   <SelectItem key={w.id} value={w.id}>
                     {w.name}
-                    {w.active ? '' : ' (needs a plan)'}
+                    {w.active ? '' : ` ${t('panels.shareNeedsPlan')}`}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -508,7 +533,7 @@ export function ShareModal({
         {upgrade && (
           <UpgradeModal
             workspaceId={upgrade}
-            reason="Moving a canvas into a workspace needs a Team plan."
+            reason={t('panels.shareUpgradeReason')}
             onClose={() => setUpgrade(null)}
           />
         )}
@@ -534,6 +559,7 @@ function RequestRow({
   busy: boolean
   onAnswer: (role: MemberRole | null) => void
 }) {
+  const t = useT()
   const [role, setRole] = useState<MemberRole>('view')
   return (
     <div className="flex flex-col gap-2">
@@ -546,12 +572,17 @@ function RequestRow({
         </p>
       )}
       <div className="ml-[38px] flex flex-wrap items-center gap-2">
-        <RoleSelect value={role} onChange={setRole} disabled={busy} label={`Role to give ${request.name}`} />
+        <RoleSelect
+          value={role}
+          onChange={setRole}
+          disabled={busy}
+          label={t('panels.shareRoleToGive', { name: request.name })}
+        />
         <Button variant="primary" size="sm" disabled={busy} onClick={() => onAnswer(role)}>
-          Approve
+          {t('panels.shareApprove')}
         </Button>
         <Button size="sm" disabled={busy} onClick={() => onAnswer(null)}>
-          Decline
+          {t('panels.shareDecline')}
         </Button>
       </div>
     </div>
@@ -579,6 +610,7 @@ function LinkAccessSection({
   }) => Promise<boolean>
   copy: () => void
 }) {
+  const t = useT()
   const [password, setPassword] = useState('')
   const [editingPassword, setEditingPassword] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
@@ -596,7 +628,7 @@ function LinkAccessSection({
   }
 
   async function savePassword() {
-    if (password.length < 8) return setProblem('The password needs at least 8 characters.')
+    if (password.length < 8) return setProblem(t('panels.sharePasswordShort'))
     setProblem(null)
     if (await save({ linkPassword: password, linkAudience: 'password' })) {
       setPassword('')
@@ -605,29 +637,29 @@ function LinkAccessSection({
   }
 
   const summary = !open
-    ? 'Only you and the people above can open this canvas.'
+    ? t('panels.shareLinkClosed')
     : audience === 'anyone'
       ? access === 'edit'
-        ? 'Anyone with the link can open it. People who are not signed in can only comment, never edit.'
-        : 'Anyone with the link can open it without signing in.'
+        ? t('panels.shareLinkAnyoneEdit')
+        : t('panels.shareLinkAnyone')
       : audience === 'password'
-        ? 'Anyone with the link and the password can open it, signed in or not.'
-        : 'Anyone signed in to doop with the link can open it.'
+        ? t('panels.shareLinkPassword')
+        : t('panels.shareLinkSignedIn')
 
   return (
     <div className="mt-2.5 border-t border-line-soft pt-3.5">
-      <div className={caption}>Link access</div>
+      <div className={caption}>{t('panels.shareLinkAccess')}</div>
       {isOwner ? (
         <div className="flex flex-col gap-2.5">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <Label variant="plain" className="mb-0 sm:w-[96px]" htmlFor="link-access">
-              Anyone with the link
+              {t('panels.shareAnyoneWithLink')}
             </Label>
             <OptionSelect
               id="link-access"
               className="sm:ml-auto sm:w-[240px]"
               value={access}
-              options={LINK_OPTIONS}
+              options={LINK_ACCESS_ORDER.map((level) => ({ value: level, label: t(LINK_ACCESS_LABELS[level]) }))}
               disabled={busy}
               onChange={(next) => void save({ linkAccess: next })}
             />
@@ -635,13 +667,13 @@ function LinkAccessSection({
           {open && (
             <div className="flex animate-[chip-in_0.2s_ease] flex-col gap-2 sm:flex-row sm:items-center">
               <Label variant="plain" className="mb-0 sm:w-[96px]" htmlFor="link-audience">
-                Who can open it
+                {t('panels.shareWhoCanOpen')}
               </Label>
               <OptionSelect
                 id="link-audience"
                 className="sm:ml-auto sm:w-[240px]"
                 value={needsPassword && !hasPassword ? 'password' : audience}
-                options={AUDIENCE_OPTIONS}
+                options={AUDIENCE_ORDER.map((level) => ({ value: level, label: t(AUDIENCE_LABELS[level]) }))}
                 disabled={busy}
                 onChange={(next) => void setAudience(next)}
               />
@@ -657,15 +689,15 @@ function LinkAccessSection({
                       autoComplete="new-password"
                       variant="well"
                       className="flex-1"
-                      placeholder="Link password (8 characters or more)"
-                      aria-label="Link password"
+                      placeholder={t('panels.sharePasswordPlaceholder')}
+                      aria-label={t('panels.sharePasswordAria')}
                       value={password}
                       disabled={busy}
                       onChange={(event) => setPassword(event.target.value)}
                       onKeyDown={(event) => event.key === 'Enter' && void savePassword()}
                     />
                     <Button variant="primary" disabled={busy || !password} onClick={() => void savePassword()}>
-                      Save password
+                      {t('panels.shareSavePassword')}
                     </Button>
                     {editingPassword && (
                       <Button
@@ -676,28 +708,28 @@ function LinkAccessSection({
                           setProblem(null)
                         }}
                       >
-                        Cancel
+                        {t('panels.shareCancel')}
                       </Button>
                     )}
                   </div>
                   {problem && <Note tone="error">{problem}</Note>}
-                  <Note>Changing the password signs everyone who entered the old one out of this canvas.</Note>
+                  <Note>{t('panels.sharePasswordNote')}</Note>
                 </>
               ) : (
                 <div className="flex items-center gap-2">
                   <LockIcon width={14} height={14} className="flex-none text-ink-soft" aria-hidden />
-                  <span className="flex-1 text-body text-ink-soft">Password set</span>
+                  <span className="flex-1 text-body text-ink-soft">{t('panels.sharePasswordSet')}</span>
                   <Button variant="bare" size="sm" disabled={busy} onClick={() => setEditingPassword(true)}>
-                    Change
+                    {t('panels.shareChange')}
                   </Button>
                   <Button
                     variant="bare-danger"
                     size="sm"
                     disabled={busy}
-                    title="Removing the password also opens the link to signed-in people only"
+                    title={t('panels.shareRemovePasswordTitle')}
                     onClick={() => void save({ linkPassword: null })}
                   >
-                    Remove
+                    {t('panels.shareRemovePassword')}
                   </Button>
                 </div>
               )}
@@ -706,15 +738,11 @@ function LinkAccessSection({
           <p className="text-label text-ink-faint">{summary}</p>
         </div>
       ) : (
-        <p className="text-body text-ink-soft">
-          {open
-            ? `${LINK_OPTIONS.find((o) => o.value === access)?.label} for anyone with the link.`
-            : 'Invite-only canvas.'}
-        </p>
+        <p className="text-body text-ink-soft">{t(LINK_ACCESS_SUMMARY[access])}</p>
       )}
       <Button className="mt-3 justify-center gap-2" onClick={copy}>
         <CopyIcon className="size-3.5" />
-        Copy link
+        {t('panels.shareCopyLink')}
       </Button>
     </div>
   )
@@ -735,6 +763,7 @@ function DomainGrants({
   setError: (error: string | null) => void
   fail: (caught: unknown, fallback: string) => void
 }) {
+  const t = useT()
   const [grants, setGrants] = useState<DomainGrant[]>([])
   const [mailer, setMailer] = useState(true)
   const [domain, setDomain] = useState('')
@@ -765,7 +794,7 @@ function DomainGrants({
       setGrants((current) => [...current.filter((g) => g.domain !== grant.domain), grant])
       setDomain('')
     } catch (caught) {
-      fail(caught, 'could not save that domain')
+      fail(caught, t('panels.shareDomainSaveFailed'))
     } finally {
       setBusy(false)
     }
@@ -779,7 +808,7 @@ function DomainGrants({
       const saved = await api.setDomain(canvasId, grant.domain, next)
       setGrants((current) => current.map((g) => (g.domain === saved.domain ? saved : g)))
     } catch (caught) {
-      fail(caught, 'could not change that domain')
+      fail(caught, t('panels.shareDomainChangeFailed'))
     } finally {
       setBusy(false)
     }
@@ -793,7 +822,7 @@ function DomainGrants({
       await api.removeDomain(canvasId, grant.domain)
       setGrants((current) => current.filter((g) => g.domain !== grant.domain))
     } catch (caught) {
-      fail(caught, 'could not remove that domain')
+      fail(caught, t('panels.shareDomainRemoveFailed'))
     } finally {
       setBusy(false)
     }
@@ -801,7 +830,7 @@ function DomainGrants({
 
   return (
     <div className="mt-2.5 border-t border-line-soft pt-3.5">
-      <div className={caption}>Email domains</div>
+      <div className={caption}>{t('panels.shareDomains')}</div>
       {grants.map((grant) => (
         <div key={grant.domain} className="flex items-center gap-2.5 py-1">
           <span className="grid size-7 flex-none place-items-center rounded-full bg-paper-deep font-mono text-body text-ink-soft">
@@ -811,14 +840,14 @@ function DomainGrants({
           <RoleSelect
             value={grant.role}
             disabled={busy}
-            label={`Role for ${grant.domain}`}
+            label={t('panels.shareRoleFor', { name: grant.domain })}
             onChange={(r) => void update(grant, r)}
           />
           <IconButton
             variant="danger"
             size="sm"
-            title="Remove"
-            aria-label={`Remove ${grant.domain}`}
+            title={t('panels.shareRemoveTitle')}
+            aria-label={t('panels.shareRemove', { name: grant.domain })}
             disabled={busy}
             onClick={() => void drop(grant)}
           >
@@ -830,22 +859,20 @@ function DomainGrants({
         <Input
           variant="well"
           className="flex-1"
-          placeholder="Share with everyone at… acme.com"
-          aria-label="Email domain"
+          placeholder={t('panels.shareDomainPlaceholder')}
+          aria-label={t('panels.shareDomainAria')}
           value={domain}
           disabled={busy}
           onChange={(event) => setDomain(event.target.value)}
           onKeyDown={(event) => event.key === 'Enter' && void add()}
         />
-        <RoleSelect value={role} onChange={setRole} disabled={busy} label="Role for the domain" />
+        <RoleSelect value={role} onChange={setRole} disabled={busy} label={t('panels.shareRoleForDomain')} />
         <Button disabled={busy || !domain.trim()} onClick={() => void add()}>
-          Add
+          {t('panels.shareAdd')}
         </Button>
       </div>
       <p className="mt-1.5 text-label text-ink-faint">
-        {mailer
-          ? 'Only people who have verified their email address get access.'
-          : 'This server cannot send email, so no address is ever verified and domain sharing stays inactive.'}
+        {mailer ? t('panels.shareDomainsVerified') : t('panels.shareDomainsNoMailer')}
       </p>
     </div>
   )
@@ -871,6 +898,7 @@ function CommunityListing({
   const [description, setDescription] = useState(canvas.description ?? '')
   const [category, setCategory] = useState<CommunityCategory>(canvas.category ?? 'website')
   const dirty = published && (description.trim() !== (canvas.description ?? '') || category !== canvas.category)
+  const t = useT()
 
   async function save(next: boolean) {
     if (busy) return
@@ -887,7 +915,11 @@ function CommunityListing({
         onChange({ publishedAt: undefined, description: undefined, category: undefined })
       }
     } catch (caught) {
-      setError(caught instanceof ApiError ? String(caught.body.error ?? 'publish failed') : 'publish failed')
+      setError(
+        caught instanceof ApiError
+          ? String(caught.body.error ?? t('panels.sharePublishFailed'))
+          : t('panels.sharePublishFailed'),
+      )
     } finally {
       setBusy(false)
     }
@@ -897,40 +929,38 @@ function CommunityListing({
     <div className="mt-3.5 border-t border-line-soft pt-3.5">
       <label
         className="flex cursor-pointer items-center gap-2 text-body font-medium text-ink"
-        title="Anyone on doop can preview and copy a listed canvas. The canvas itself stays private."
+        title={t('panels.shareGalleryTitle')}
       >
         <Checkbox checked={published} disabled={busy} onChange={(event) => save(event.target.checked)} />
-        Show in the community gallery
+        {t('panels.shareGallery')}
       </label>
-      <p className="mt-1 pl-[26px] text-label leading-snug text-ink-faint">
-        People can preview it and copy it into their own account. Your canvas stays private.
-      </p>
+      <p className="mt-1 pl-[26px] text-label leading-snug text-ink-faint">{t('panels.shareGalleryBlurb')}</p>
       {published && (
         <div className="mt-3 flex flex-col gap-2.5 pl-[26px]">
           <Textarea
             rows={2}
             maxLength={280}
             variant="well"
-            placeholder="What is this design? One or two lines helps people find it."
+            placeholder={t('panels.shareDescriptionPlaceholder')}
             value={description}
             disabled={busy}
             onChange={(event) => setDescription(event.target.value)}
           />
           <ToggleChipGroup
-            aria-label="Gallery shelf"
+            aria-label={t('panels.shareShelf')}
             className="gap-1.5"
             value={category}
             onValueChange={(next) => setCategory(next as CommunityCategory)}
           >
             {COMMUNITY_CATEGORIES.map((value) => (
               <ToggleChipItem key={value} value={value} size="sm" disabled={busy}>
-                {COMMUNITY_CATEGORY_LABELS[value]}
+                {t(CATEGORY_LABELS[value])}
               </ToggleChipItem>
             ))}
           </ToggleChipGroup>
           {dirty && (
             <Button size="sm" className="self-start" disabled={busy} onClick={() => save(true)}>
-              Update listing
+              {t('panels.shareUpdateListing')}
             </Button>
           )}
         </div>

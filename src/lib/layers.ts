@@ -1,3 +1,6 @@
+import { COMPONENT_ATTR, INSTANCE_ATTR } from '../../shared/components'
+import { ELEMENT_ID_ATTR, newElementId } from '../../shared/elementId'
+
 /**
  * The Layers panel's view of a frame: the element tree of its HTML, parsed
  * on the parent side (the iframe is sandboxed, so the panel cannot walk the
@@ -20,12 +23,17 @@ export interface LayerNode {
   hidden: boolean
   /** carries `data-doop-locked`: the stage neither picks nor edits it */
   locked: boolean
+  /** a component's main, or an instance of one */
+  component?: 'main' | 'instance'
+  /** which component, for the row to show its name */
+  componentId?: string
   children: LayerNode[]
 }
 
 /** The attribute a locked layer carries in the frame's HTML. It travels with
  *  the markup, so every collaborator (and agent) sees the same lock. */
 export const LOCK_ATTR = 'data-doop-locked'
+export const NAME_ATTR = 'data-doop-name'
 
 /* markup that renders nothing of its own has no place in a layer list */
 const HIDDEN_TAGS = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'TITLE', 'NOSCRIPT', 'TEMPLATE', 'BR', 'WBR'])
@@ -140,6 +148,12 @@ function detailOf(el: Element): string {
 }
 
 function toNode(el: Element): LayerNode {
+  const node = defaultNode(el)
+  const name = el.getAttribute(NAME_ATTR)?.trim()
+  return name ? { ...node, label: name, detail: '' } : node
+}
+
+function defaultNode(el: Element): LayerNode {
   const tag = el.tagName.toLowerCase()
   const drawingName = el.hasAttribute('data-doop-drawing') ? el.getAttribute('data-name') : null
   const base = {
@@ -148,10 +162,15 @@ function toNode(el: Element): LayerNode {
     detail: drawingName ? '' : detailOf(el),
     hidden: el.hasAttribute(HIDDEN_ATTR),
     locked: el.hasAttribute(LOCK_ATTR),
+    ...(el.hasAttribute(COMPONENT_ATTR)
+      ? { component: 'main' as const, componentId: el.getAttribute(COMPONENT_ATTR) ?? '' }
+      : el.hasAttribute(INSTANCE_ATTR)
+        ? { component: 'instance' as const, componentId: el.getAttribute(INSTANCE_ATTR) ?? '' }
+        : {}),
   }
   if (el.namespaceURI === 'http://www.w3.org/2000/svg')
     return { ...base, label: drawingName ?? 'svg', kind: 'svg', children: [] }
-  if (IMAGE_TAGS.has(el.tagName)) return { ...base, label: tag, kind: 'image', children: [] }
+  if (IMAGE_TAGS.has(el.tagName)) return { ...base, label: drawingName ?? tag, kind: 'image', children: [] }
   const children = layerChildren(el)
   const text = ownText(el)
   if (children.length === 0 && text) {
@@ -163,7 +182,8 @@ function toNode(el: Element): LayerNode {
 function layerChildren(el: Element): LayerNode[] {
   const out: LayerNode[] = []
   for (const child of el.children) {
-    if (!HIDDEN_TAGS.has(child.tagName)) out.push(toNode(child))
+    /* an imported file's gradients and clips ride in a hidden defs host */
+    if (!HIDDEN_TAGS.has(child.tagName) && !child.hasAttribute('data-doop-defs')) out.push(toNode(child))
   }
   return out
 }
@@ -210,6 +230,55 @@ export function elementHtml(html: string, selector: string): string | null {
   return find(parse(html), selector)?.outerHTML ?? null
 }
 
+export function elementName(html: string, selector: string): string | null {
+  return find(parse(html), selector)?.getAttribute(NAME_ATTR) ?? null
+}
+
+/** Compare a queued rename's document while allowing earlier renames to
+ *  finish or roll back (a rename stamps the element's id too). Any other
+ *  change can invalidate positional paths. */
+export function htmlWithoutLayerNames(html: string): string {
+  const doc = parse(html)
+  for (const el of doc.querySelectorAll(`[${NAME_ATTR}]`)) el.removeAttribute(NAME_ATTR)
+  for (const el of doc.querySelectorAll(`[${ELEMENT_ID_ATTR}]`)) el.removeAttribute(ELEMENT_ID_ATTR)
+  return serialize(doc)
+}
+
+/** The `data-doop-id` the element at `selector` carries, or null. */
+export function elementIdAt(html: string, selector: string): string | null {
+  return find(parse(html), selector)?.getAttribute(ELEMENT_ID_ATTR) ?? null
+}
+
+/** An element id no element in `html` carries yet. */
+export function freshElementId(html: string): string {
+  let id = newElementId()
+  while (html.includes(`${ELEMENT_ID_ATTR}="${id}"`)) id = newElementId()
+  return id
+}
+
+/** The frame's HTML with the element's `data-doop-id` taken off again: a
+ *  stamp rolled back with the write that made it. */
+export function clearElementId(html: string, selector: string): string | null {
+  const doc = parse(html)
+  const el = find(doc, selector)
+  if (!el) return null
+  el.removeAttribute(ELEMENT_ID_ATTR)
+  return serialize(doc)
+}
+
+/** Store a layer caption without changing its text, alt text, id or styles.
+ *  `stamp` is the `data-doop-id` the element gets if it has none yet, so a
+ *  later undo or redo finds it by identity rather than by position. */
+export function setElementName(html: string, selector: string, name: string | null, stamp?: string): string | null {
+  const doc = parse(html)
+  const el = find(doc, selector)
+  if (!el) return null
+  if (name === null) el.removeAttribute(NAME_ATTR)
+  else el.setAttribute(NAME_ATTR, name)
+  if (stamp && !el.hasAttribute(ELEMENT_ID_ATTR)) el.setAttribute(ELEMENT_ID_ATTR, stamp)
+  return serialize(doc)
+}
+
 /** True when the element, or anything above it, carries the lock — a lock
  *  on a box covers everything inside it, as in Figma. `own` asks about the
  *  element's own attribute only (what a toggle flips). A selector that no
@@ -231,13 +300,72 @@ export function setElementLocked(html: string, selector: string, locked: boolean
   return serialize(doc)
 }
 
-/** The frame's HTML with the element removed, or null when the selector no longer resolves. */
-export function removeElement(html: string, selector: string): string | null {
+/* Every selector resolved against one document before anything changes: the
+   paths are positional, so removing or inserting one element would shift the
+   nth-of-type steps of the others. Null when any of them is gone. */
+function findAll(doc: Document, selectors: string[]): Element[] | null {
+  const found: Element[] = []
+  for (const selector of selectors) {
+    const el = find(doc, selector)
+    if (!el) return null
+    if (!found.includes(el)) found.push(el)
+  }
+  return found
+}
+
+/* the picked elements that are not inside another picked one — a box that
+   goes (or is copied) takes its children with it */
+function outermost(els: Element[]): Element[] {
+  return els.filter((el) => !els.some((other) => other !== el && other.contains(el)))
+}
+
+/** The elements in document order, outermost only. */
+function inDocumentOrder(els: Element[]): Element[] {
+  return outermost(els).sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+}
+
+/** What became of the element `selector` names in `before` in `after`, a
+ *  later save of the same frame: `kept` or `gone` when that can be shown,
+ *  `unsure` when it cannot. Its markup missing proves nothing (an edit to its
+ *  text, style or attributes changes that too), so the element is followed
+ *  by its `data-doop-id` when it has one. Without one, fewer elements of its
+ *  shape (its tag tree, which such an edit keeps) mean it went; the same
+ *  number or more could be either, since another edit may have added one. */
+export function elementFate(before: string, after: string, selector: string): 'kept' | 'gone' | 'unsure' {
+  const el = find(parse(before), selector)
+  if (!el) return 'unsure'
+  if (after.includes(el.outerHTML)) return 'kept'
+  const doc = parse(after)
+  const id = el.getAttribute(ELEMENT_ID_ATTR)
+  if (id)
+    return [...doc.querySelectorAll(`[${ELEMENT_ID_ATTR}]`)].some((e) => e.getAttribute(ELEMENT_ID_ATTR) === id)
+      ? 'kept'
+      : 'gone'
+  const shape = shapeOf(el)
+  const count = (d: Document) => [...d.getElementsByTagName(el.tagName)].filter((e) => shapeOf(e) === shape).length
+  return count(doc) < count(el.ownerDocument) ? 'gone' : 'unsure'
+}
+
+function shapeOf(el: Element): string {
+  return `${el.tagName}(${[...el.children].map(shapeOf).join(',')})`
+}
+
+/** The frame's HTML with every element removed, or null when any selector no longer resolves. */
+export function removeElements(html: string, selectors: string[]): string | null {
   const doc = parse(html)
-  const el = find(doc, selector)
-  if (!el) return null
-  el.remove()
+  const els = findAll(doc, selectors)
+  if (!els?.length) return null
+  for (const el of outermost(els)) el.remove()
   return serialize(doc)
+}
+
+/** The elements' markup in document order, outermost only, for the clipboard. */
+export function elementsHtml(html: string, selectors: string[]): string | null {
+  const els = findAll(parse(html), selectors)
+  if (!els?.length) return null
+  return inDocumentOrder(els)
+    .map((el) => el.outerHTML)
+    .join('')
 }
 
 /** The frame's HTML with the element's markup swapped for `outerHtml`. */
@@ -294,15 +422,45 @@ export function setElementHidden(html: string, selector: string, hidden: boolean
   return serialize(doc)
 }
 
-/** The frame's HTML with a copy of the element inserted right after it. */
-export function duplicateElement(html: string, selector: string): string | null {
+/** The frame's HTML with every element hidden or shown, null when any
+ *  selector no longer resolves. */
+export function setElementsHidden(html: string, selectors: string[], hidden: boolean): string | null {
+  let next = html
+  // Hiding marks attributes only, so the positional paths hold between steps.
+  for (const selector of selectors) {
+    const step = setElementHidden(next, selector, hidden)
+    if (step === null) return null
+    next = step
+  }
+  return next
+}
+
+/** The frame's HTML with a copy of each element inserted right after it,
+ *  and the copies' paths in document order; a picked element inside another
+ *  picked one is copied with its box. The copies share one id renaming, so
+ *  a label copied with its input points at the copied input. */
+export function duplicateElements(
+  html: string,
+  selectors: string[],
+  /** an attribute set on every copy's root, such as a carried-style scope */
+  mark?: { name: string; value: string },
+): { html: string; selectors: string[]; renamed: Record<string, string> } | null {
   const doc = parse(html)
-  const el = find(doc, selector)
-  if (!el) return null
-  const copy = el.cloneNode(true) as Element
-  renameIds(doc, copy)
-  el.after(copy)
-  return serialize(doc)
+  const els = findAll(doc, selectors)
+  if (!els?.length) return null
+  const originals = inDocumentOrder(els)
+  const copies = originals.map((el) => el.cloneNode(true) as Element)
+  const renamed = renameIds(doc, copies)
+  if (mark) for (const copy of copies) copy.setAttribute(mark.name, mark.value)
+  originals.forEach((el, i) => el.after(copies[i]!))
+  return { html: serialize(doc), selectors: copies.map(elementPath), renamed }
+}
+
+/** Rename, in `el` and its descendants, every id `doc` already uses, and
+ *  the references among them — for an element about to enter `doc` from
+ *  another document. Returns the renaming, old id to new. */
+export function uniqueIdsIn(doc: Document, el: Element): Record<string, string> {
+  return renameIds(doc, [el], true)
 }
 
 /** Where a moved element lands relative to its target: as its previous or
@@ -314,10 +472,92 @@ export interface DropTarget {
   place: DropPlace
 }
 
+/** Computed in the live document: match the slot's CSS order and remove
+ * transform translation without discarding its rotation or scale. */
+export interface FlowPlacement {
+  order: string
+  orderChanged?: boolean
+  transform?: string
+}
+
 export interface MovedElement {
   html: string
   /** the element's selector after the move — its path changes with its position */
   selector: string
+  /** ids the destination already used, by their new names */
+  renamed?: Record<string, string>
+}
+
+/** Insert a clipboard layer as a sibling, keeping ids and SVG references unique. */
+export function insertElement(html: string, selector: string | null, outerHtml: string): MovedElement | null {
+  const inserted = insertElements(html, selector, outerHtml)
+  const [only, ...more] = inserted?.selectors ?? []
+  return inserted && only && !more.length ? { html: inserted.html, selector: only } : null
+}
+
+/** Insert the clipboard's layers, in order, as siblings after `selector` (or
+ *  at the end of the body); null when the markup holds loose text, does not
+ *  survive a round trip, or the target is gone. */
+export function insertElements(
+  html: string,
+  selector: string | null,
+  outerHtml: string,
+): { html: string; selectors: string[]; renamed: Record<string, string> } | null {
+  const doc = parse(html)
+  const at = selector ? find(doc, selector) : null
+  if (selector && (!at || !doc.body.contains(at) || at === doc.body)) return null
+  // A row needs a tbody context, a cell needs a tr, and SVG children need
+  // their namespace. Parsing a standalone document discards those wrappers.
+  const source = (at?.parentElement ?? doc.body).cloneNode(false) as Element
+  source.innerHTML = outerHtml
+  if (!source.children.length) return null
+  if ([...source.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())) return null
+  const copies = [...source.children]
+  const renamed = renameIds(doc, copies)
+  let after = at
+  for (const copy of copies) {
+    if (after) after.after(copy)
+    else doc.body.append(copy)
+    after = copy
+  }
+  const next = serialize(doc)
+  const selectors = copies.map(elementPath)
+  const reparsed = parse(next)
+  if (copies.some((copy, i) => find(reparsed, selectors[i]!)?.outerHTML !== copy.outerHTML)) return null
+  return { html: next, selectors, renamed }
+}
+
+/** Put a layer from another frame next to, or into, the target: the markup
+ *  arrives as it left, keeping its own ids unless the destination already
+ *  uses one (then that id, and the references to it, take a fresh name).
+ *  Null when the target is gone, cannot hold the element, sits under a lock,
+ *  or the saved markup would not keep the move. */
+export function placeElement(html: string, target: DropTarget, outerHtml: string): MovedElement | null {
+  const doc = parse(html)
+  const at = find(doc, target.selector)
+  if (!at || !doc.body.contains(at)) return null
+  const parent = target.place === 'inside' ? at : at.parentElement
+  if (!parent || parent === doc.documentElement || parent.closest(`[${LOCK_ATTR}]`)) return null
+  if (target.place === 'inside' && !holdsChildren(at.tagName)) return null
+  // Parse in the slot's own context, as insertElements does, so rows, cells
+  // and SVG children keep their wrappers and namespace.
+  const source = parent.cloneNode(false) as Element
+  source.innerHTML = outerHtml
+  const [el, ...more] = [...source.children]
+  if (!el || more.length) return null
+  if ([...source.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())) return null
+  const renamed = renameIds(doc, [el], true)
+  if (target.place === 'inside') at.prepend(el)
+  else if (target.place === 'before') at.before(el)
+  else at.after(el)
+  const next = serialize(doc)
+  const selector = elementPath(el)
+  /* the saved markup is what everyone re-parses: a drop the parser would
+     restructure — a block into a <p> closes the paragraph and spills its
+     later siblings out — is no drop, so the whole body has to come back as
+     it stands */
+  if (parse(next).body.outerHTML !== doc.body.outerHTML) return null
+  return { html: next, selector, renamed }
 }
 
 /* the neighbouring layer the rail shows: markup that draws nothing is stepped over */
@@ -336,12 +576,32 @@ function alreadyAt(el: Element, at: Element, where: DropPlace): boolean {
   return el === (first && HIDDEN_TAGS.has(first.tagName) ? visibleSibling(first, 1) : first)
 }
 
-function move(doc: Document, el: Element, at: Element, where: DropPlace): MovedElement | null {
-  if (el === at || el.contains(at) || alreadyAt(el, at, where)) return null
+function move(doc: Document, el: Element, at: Element, where: DropPlace, flow?: FlowPlacement): MovedElement | null {
+  if (el === at || el.contains(at)) return null
+  if (alreadyAt(el, at, where) && !flow?.orderChanged && flow?.transform === undefined) return null
   if (where === 'inside' && !holdsChildren(at.tagName)) return null
+  const parent = where === 'inside' ? at : at.parentElement
+  if (!parent || parent.closest(`[${LOCK_ATTR}]`) || !doc.body.contains(parent)) return null
   if (where === 'inside') at.prepend(el)
   else if (where === 'before') at.before(el)
   else at.after(el)
+  if (flow) {
+    // Keep size, rotation and scale, but let DOM order determine layout. Relative
+    // positioning also preserves the containing block for positioned descendants.
+    const style = (el as HTMLElement | SVGElement).style
+    for (const [name, value] of Object.entries({
+      position: 'relative',
+      inset: 'auto',
+      'inset-block': 'auto',
+      'inset-inline': 'auto',
+      translate: 'none',
+      float: 'none',
+      order: flow.order,
+      'grid-area': 'auto',
+    }))
+      style.setProperty(name, value, 'important')
+    if (flow.transform !== undefined) style.setProperty('transform', flow.transform, 'important')
+  }
   const html = serialize(doc)
   const selector = elementPath(el)
   /* the saved markup is what everyone re-parses: a move the parser would
@@ -354,12 +614,17 @@ function move(doc: Document, el: Element, at: Element, where: DropPlace): MovedE
  *  Null when either selector no longer resolves, the target sits inside the
  *  element (a node cannot hold itself), the target cannot hold it (an
  *  <input>, a <select>), or the element is already there. */
-export function moveElement(html: string, selector: string, target: DropTarget): MovedElement | null {
+export function moveElement(
+  html: string,
+  selector: string,
+  target: DropTarget,
+  flow?: FlowPlacement,
+): MovedElement | null {
   const doc = parse(html)
   const el = find(doc, selector)
   const at = find(doc, target.selector)
   if (!el || !at) return null
-  return move(doc, el, at, target.place)
+  return move(doc, el, at, target.place, flow)
 }
 
 /** The frame's HTML with the element swapped past the layer above (-1) or
@@ -370,6 +635,58 @@ export function shiftElement(html: string, selector: string, dir: -1 | 1): Moved
   const sibling = el && visibleSibling(el, dir)
   if (!el || !sibling) return null
   return move(doc, el, sibling, dir === -1 ? 'before' : 'after')
+}
+
+/** Restack the elements among their siblings, as Figma does for a set:
+ *  forward and backward step each over the next or previous sibling outside
+ *  the set (so the set stays together and a member already at the end
+ *  stays), front and back put each at its parent's end, keeping their
+ *  order. Elements in several parents move within their own. Null when
+ *  nothing changed or a parent is locked. Returns the elements' selectors
+ *  after the move, in the order given. */
+export function reorderElements(
+  html: string,
+  selectors: string[],
+  move: 'forward' | 'backward' | 'front' | 'back',
+): { html: string; selectors: string[] } | null {
+  const doc = parse(html)
+  const els = selectors.map((sel) => find(doc, sel))
+  if (els.some((el) => !el)) return null
+  const set = new Set(els as Element[])
+  for (const el of set) if (!el.parentElement || el.parentElement.closest(`[${LOCK_ATTR}]`)) return null
+  /* document order; a step forward is applied from the last member back, so
+     a member never leaps over another */
+  const ordered = [...set].sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+  const toFront = move === 'forward' || move === 'front'
+  let changed = false
+  if (move === 'front' || move === 'back') {
+    /* each parent's members go to its edge as one group, keeping their
+       order; a group that already fills that edge stays */
+    const groups = new Map<Element, Element[]>()
+    for (const el of ordered) {
+      const parent = el.parentElement!
+      groups.set(parent, [...(groups.get(parent) ?? []), el])
+    }
+    for (const [parent, members] of groups) {
+      const visible = [...parent.children].filter((c) => !HIDDEN_TAGS.has(c.tagName))
+      const edge = toFront ? visible.slice(-members.length) : visible.slice(0, members.length)
+      if (edge.every((c) => set.has(c))) continue
+      if (toFront) parent.append(...members)
+      else parent.prepend(...members)
+      changed = true
+    }
+  } else {
+    if (toFront) ordered.reverse()
+    for (const el of ordered) {
+      const over = visibleSibling(el, toFront ? 1 : -1)
+      if (!over || set.has(over)) continue
+      if (toFront) over.after(el)
+      else over.before(el)
+      changed = true
+    }
+  }
+  if (!changed) return null
+  return { html: serialize(doc), selectors: (els as Element[]).map(elementPath) }
 }
 
 /* attributes whose value is an id, or a space-separated list of ids */
@@ -385,26 +702,44 @@ const ID_REF_ATTRS = new Set([
 /* SVG paint servers, clips, masks, filters and markers: url(#id), in any attribute or inline style */
 const URL_REF = /url\(\s*(['"]?)#([^'")\s]+)\1\s*\)/g
 
-/** Give every id inside `copy` a fresh name and point the copy's own
+/** Give every id inside `copies` a fresh name and point the copies' own
  *  references at the new names: label for, #fragment links, aria relations,
  *  SVG use/href and url(#…) paints. Ids must stay unique — a copied id makes
  *  selectors resolve to the original subtree — and a reference left on the
- *  old name would keep wiring the copy to the original. References to ids
- *  outside the copy are left alone. */
-function renameIds(doc: Document, copy: Element) {
+ *  old name would keep wiring the copy to the original. Copies made together
+ *  share one renaming, so references between them follow along; references
+ *  to ids outside the copies are left alone. `clashesOnly` renames only the
+ *  ids the document already holds, for markup that is moving rather than
+ *  copied; the ids it keeps are reserved first, so a renamed one cannot
+ *  land on a kept one. Returns the renaming, old id to new. */
+function renameIds(doc: Document, copies: Element[], clashesOnly = false): Record<string, string> {
+  /* a copy is a new element: the comments and links on the original stay
+     the original's (a layer moving in from another frame keeps its id) */
+  for (const copy of copies) {
+    for (const node of [copy, ...copy.querySelectorAll(`[${ELEMENT_ID_ATTR}]`)]) {
+      /* a layer moving in from a duplicated frame can bring an id this
+         document already holds: the element here keeps its comments */
+      const taken = doc.querySelector(`[${ELEMENT_ID_ATTR}="${CSS.escape(node.getAttribute(ELEMENT_ID_ATTR) ?? '')}"]`)
+      if (!clashesOnly || taken) node.removeAttribute(ELEMENT_ID_ATTR)
+    }
+  }
   const renamed = new Map<string, string>()
   const taken = new Set<string>()
-  const withId = [copy, ...copy.querySelectorAll('[id]')].filter((n) => n.id)
+  const withId = copies.flatMap((copy) => [copy, ...copy.querySelectorAll('[id]')]).filter((n) => n.id)
+  /* a layer moving in from another frame keeps its id while it is free here */
+  const kept = (node: Element) => clashesOnly && !doc.getElementById(node.id)
+  for (const node of withId) if (kept(node)) taken.add(node.id)
   for (const node of withId) {
+    if (kept(node)) continue
     let next = `${node.id}-copy`
     for (let n = 2; doc.getElementById(next) || taken.has(next); n++) next = `${node.id}-copy-${n}`
     renamed.set(node.id, next)
     taken.add(next)
     node.id = next
   }
-  if (renamed.size === 0) return
+  if (renamed.size === 0) return {}
   const rename = (id: string) => renamed.get(id) ?? id
-  for (const node of [copy, ...copy.querySelectorAll('*')]) {
+  for (const node of copies.flatMap((copy) => [copy, ...copy.querySelectorAll('*')])) {
     for (const { name, value } of [...node.attributes]) {
       let next = value
       if (name === 'href' || name === 'xlink:href') {
@@ -424,4 +759,245 @@ function renameIds(doc: Document, copy: Element) {
       if (css !== node.textContent) node.textContent = css
     }
   }
+  return Object.fromEntries(renamed)
+}
+
+/* ---- grouping: ⌘G, ⌥⌘G and ⇧⌘G as markup ---- */
+
+/* containers a wrapper may not go inside, nor be: their children are rows,
+   cells or options the parser keeps only directly under them */
+const UNWRAPPABLE_PARENTS = new Set([
+  'TABLE',
+  'THEAD',
+  'TBODY',
+  'TFOOT',
+  'TR',
+  'SELECT',
+  'OPTGROUP',
+  'DATALIST',
+  'UL',
+  'OL',
+])
+
+export interface GroupOptions {
+  /** the wrapper's layer name, as the Layers panel shows it */
+  name: string
+  /** inline styles for the wrapper (auto layout's flex), none for a plain group */
+  style?: string
+  /** inline styles each wrapped element takes on (auto layout drops their margins) */
+  childStyle?: Record<string, string>
+}
+
+/** The frame's HTML with the elements wrapped in one new `div`, placed where
+ *  the first of them was, and the wrapper's path. The elements must share a
+ *  parent (a group holds siblings); a wrapper in normal flow is static, so
+ *  absolutely positioned children keep the box they were placed in. Null when
+ *  they do not share one, sit in a table or list, or are locked. */
+export function groupElements(
+  html: string,
+  selectors: string[],
+  { name, style, childStyle }: GroupOptions,
+): { html: string; selector: string } | null {
+  const doc = parse(html)
+  const found = findAll(doc, selectors)
+  if (!found?.length) return null
+  const els = inDocumentOrder(found)
+  const parent = els[0]!.parentElement
+  if (!parent || els.some((el) => el.parentElement !== parent)) return null
+  if (UNWRAPPABLE_PARENTS.has(parent.tagName) || parent.closest(`[${LOCK_ATTR}]`)) return null
+  if (els.some((el) => el.hasAttribute(LOCK_ATTR))) return null
+  const svg = parent.namespaceURI === 'http://www.w3.org/2000/svg'
+  const wrapper = svg ? doc.createElementNS(parent.namespaceURI, 'g') : doc.createElement('div')
+  wrapper.setAttribute(NAME_ATTR, name)
+  if (style && !svg) wrapper.setAttribute('style', style)
+  els[0]!.before(wrapper)
+  for (const el of els) {
+    wrapper.append(el)
+    if (!childStyle || svg) continue
+    for (const [prop, value] of Object.entries(childStyle)) (el as HTMLElement).style.setProperty(prop, value)
+  }
+  const next = serialize(doc)
+  const selector = elementPath(wrapper)
+  if (find(parse(next), selector)?.outerHTML !== wrapper.outerHTML) return null
+  return { html: next, selector }
+}
+
+/** The frame's HTML with each element swapped for its children, and the
+ *  children's paths: the group goes, what it held stays where it was. Only
+ *  boxes holding elements unwrap (text would lose the box that styled it);
+ *  null when none of them can. */
+export function ungroupElements(html: string, selectors: string[]): { html: string; selectors: string[] } | null {
+  const doc = parse(html)
+  const found = findAll(doc, selectors)
+  if (!found?.length) return null
+  const groups = outermost(found).filter(
+    (el) =>
+      el !== doc.body &&
+      el.children.length > 0 &&
+      !ownText(el) &&
+      !IMAGE_TAGS.has(el.tagName) &&
+      !el.closest(`[${LOCK_ATTR}]`) &&
+      !el.hasAttribute('data-doop-drawing') &&
+      !(el.parentElement && UNWRAPPABLE_PARENTS.has(el.parentElement.tagName)),
+  )
+  if (!groups.length) return null
+  const freed: Element[] = []
+  for (const group of groups) {
+    const children = [...group.children]
+    group.replaceWith(...group.childNodes)
+    freed.push(...children)
+  }
+  const next = serialize(doc)
+  return { html: next, selectors: freed.map(elementPath) }
+}
+
+/* elements that hold no content of their own: a link goes around them, not inside */
+const LINK_WRAPPED = new Set(['IMG', 'PICTURE', 'VIDEO', 'CANVAS', 'IFRAME', 'INPUT', 'HR', 'BR', 'EMBED', 'OBJECT'])
+
+/** The link an element is, holds alone, or sits alone inside. */
+function linkOf(el: Element): Element | null {
+  if (el.tagName === 'A') return el
+  if (el.childNodes.length === 1 && el.firstElementChild?.tagName === 'A') return el.firstElementChild
+  const parent = el.parentElement
+  if (parent?.tagName === 'A' && parent.childNodes.length === 1) return parent
+  return null
+}
+
+/** The element's link target, or null when it has none. */
+export function elementLink(html: string, selector: string): string | null {
+  const el = find(parse(html), selector)
+  return el ? (linkOf(el)?.getAttribute('href') ?? null) : null
+}
+
+/** Link `el` to `href` (null unlinks) in its document; false when there is
+ *  nothing to unlink or the element cannot take a link. */
+/* what makes an element a link; everything else an inner link wears stays */
+const LINK_ONLY_ATTRS = [
+  'href',
+  'xlink:href',
+  'target',
+  'rel',
+  'download',
+  'hreflang',
+  'ping',
+  'referrerpolicy',
+  'type',
+]
+const SVG_NS = 'http://www.w3.org/2000/svg'
+
+/** A plain box in the link's place: a span (a `g` for a link inside SVG,
+ *  which an HTML span would be thrown out of on load), with its content and
+ *  every attribute but the ones that make it a link (class, style, id stay). */
+function demoteLink(doc: Document, link: Element): Element {
+  const box = link.namespaceURI === SVG_NS ? doc.createElementNS(SVG_NS, 'g') : doc.createElement('span')
+  for (const { name, value } of [...link.attributes]) {
+    if (!LINK_ONLY_ATTRS.includes(name)) box.setAttribute(name, value)
+  }
+  box.append(...link.childNodes)
+  link.replaceWith(box)
+  return box
+}
+
+function linkElement(doc: Document, el: Element, href: string | null, swaps: Map<Element, Element>): boolean {
+  const link = linkOf(el)
+  if (href === null) {
+    if (!link) return false
+    if (link === el) {
+      /* the link itself picked: keep the element, drop what made it a link */
+      el.removeAttribute('href')
+      el.removeAttribute('target')
+    } else link.replaceWith(...link.childNodes)
+    return true
+  }
+  if (link) {
+    link.setAttribute('href', href)
+    return true
+  }
+  /* already inside a link (a picked parent linked a moment ago): retarget
+     that one, since a link inside a link is split apart on load */
+  const around = el.parentElement?.closest('a')
+  if (around) {
+    around.setAttribute('href', href)
+    return true
+  }
+  const a = doc.createElement('a')
+  a.setAttribute('href', href)
+  if (LINK_WRAPPED.has(el.tagName) || el.namespaceURI === 'http://www.w3.org/2000/svg') {
+    if (el.parentElement?.namespaceURI === 'http://www.w3.org/2000/svg') return false
+    el.replaceWith(a)
+    a.append(el)
+  } else {
+    /* the links inside become plain spans under the one around them (a link
+       inside a link is split apart on load), keeping their looks and ids */
+    for (const inner of [...el.querySelectorAll('a')]) swaps.set(inner, demoteLink(doc, inner))
+    a.append(...el.childNodes)
+    el.append(a)
+  }
+  return true
+}
+
+/** The frame's HTML with each element linked to `href`, and every element's
+ *  path afterwards, in the order given: a link gets the new target, an image
+ *  (or any element with no content of its own, and SVG) is wrapped in one,
+ *  anything else has its content wrapped. Null `href` takes links off (the
+ *  link element, or the one link wrapping the element or its content, gives
+ *  way to its content). Every element is found before any changes, since
+ *  wrapping one shifts its siblings' positions. Null when an element no
+ *  longer resolves or none of them changed. */
+export function setElementsLink(
+  html: string,
+  selectors: string[],
+  href: string | null,
+): { html: string; selectors: string[] } | null {
+  const doc = parse(html)
+  const els = selectors.map((selector) => find(doc, selector))
+  if (els.some((el) => !el || el === doc.body)) return null
+  /* outermost first, so a picked child finds its picked parent's new link */
+  const order = [...els].sort((a, b) => (a!.compareDocumentPosition(b!) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+  /* inner links a wrap turned into spans: a picked one is followed there */
+  const swaps = new Map<Element, Element>()
+  const current = (el: Element) => swaps.get(el) ?? el
+  const changed = order.map((el) => linkElement(doc, current(el!), href, swaps))
+  if (!changed.includes(true)) return null
+  return { html: serialize(doc), selectors: els.map((el) => elementPath(current(el!))) }
+}
+
+/** One element's `setElementsLink`. */
+export function setElementLink(
+  html: string,
+  selector: string,
+  href: string | null,
+): { html: string; selector: string } | null {
+  const linked = setElementsLink(html, [selector], href)
+  return linked ? { html: linked.html, selector: linked.selectors[0]! } : null
+}
+
+/** The frame's HTML with the elements swapped for the clipboard's layers,
+ *  which land where the first of them was (paste to replace), and
+ *  the pasted layers' paths. Null when an element is gone or locked, or the
+ *  markup does not survive a round trip. */
+export function replaceElementsWith(
+  html: string,
+  selectors: string[],
+  outerHtml: string,
+): { html: string; selectors: string[]; renamed: Record<string, string> } | null {
+  const doc = parse(html)
+  const found = findAll(doc, selectors)
+  if (!found?.length) return null
+  const els = inDocumentOrder(found)
+  const first = els[0]!
+  if (els.some((el) => el === doc.body || el.closest(`[${LOCK_ATTR}]`))) return null
+  const source = (first.parentElement ?? doc.body).cloneNode(false) as Element
+  source.innerHTML = outerHtml
+  if (!source.children.length) return null
+  if ([...source.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())) return null
+  const copies = [...source.children]
+  const renamed = renameIds(doc, copies)
+  first.before(...copies)
+  for (const el of els) el.remove()
+  const next = serialize(doc)
+  const paths = copies.map(elementPath)
+  const reparsed = parse(next)
+  if (copies.some((copy, i) => find(reparsed, paths[i]!)?.outerHTML !== copy.outerHTML)) return null
+  return { html: next, selectors: paths, renamed }
 }

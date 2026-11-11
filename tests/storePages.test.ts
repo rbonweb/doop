@@ -1,13 +1,18 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import type { Canvas, Frame } from '../shared/types.ts'
 
-const rig = vi.hoisted(() => ({ savedFrames: [] as { id: string; pageId?: string; immediate?: boolean }[] }))
+const rig = vi.hoisted(() => ({
+  savedFrames: [] as { id: string; pageId?: string; immediate?: boolean }[],
+  /* runs while a page copy is being written, before it lands in memory */
+  duringCopy: null as (() => void) | null,
+}))
 vi.mock('../server/db/persist.ts', () => {
   const noop = () => undefined
   return {
     deleteCanvas: noop,
     deleteFrame: noop,
     deleteGuideline: noop,
+    deleteToken: noop,
     deleteMember: noop,
     deleteReference: noop,
     saveCanvas: noop,
@@ -15,12 +20,15 @@ vi.mock('../server/db/persist.ts', () => {
     saveFrame: (frame: Frame, immediate?: boolean) =>
       rig.savedFrames.push({ id: frame.id, pageId: frame.pageId, immediate }),
     saveGuideline: noop,
+    saveToken: noop,
+    savePageCopy: async () => rig.duringCopy?.(),
     saveMember: noop,
     saveReference: noop,
   }
 })
 import { store } from '../server/store.ts'
-import { pageFrames } from '../shared/pages.ts'
+import { canvasPages, pageFrames } from '../shared/pages.ts'
+import { MAX_GUIDES } from '../shared/guides.ts'
 
 const frame = (id: string, pageId?: string): Frame => ({
   id,
@@ -40,6 +48,7 @@ const frame = (id: string, pageId?: string): Frame => ({
 beforeEach(() => {
   for (const canvas of store.allCanvases()) store.deleteCanvas(canvas.id)
   rig.savedFrames = []
+  rig.duringCopy = null
 })
 
 it('rehomes a frame whose page no longer exists to the first page on boot', () => {
@@ -112,4 +121,93 @@ it('advances a frame version when multiple writes share the same timestamp', () 
   } finally {
     now.mockRestore()
   }
+})
+
+it('keeps a page copy within the guide limit when guides are added while it is written', async () => {
+  const canvas = store.createCanvas('Guide race', 'alice')
+  const [page] = canvasPages(canvas)
+  const guide = (id: string, pageId = 'elsewhere') => ({ id, pageId, axis: 'v' as const, at: 0 })
+  for (let i = 0; i < 10; i++) store.setGuide(canvas.id, guide(`copied${i}`, page!.id))
+  /* room for the copy's ten when it starts; a teammate fills most of it meanwhile */
+  for (let i = 0; i < MAX_GUIDES - 25; i++) store.setGuide(canvas.id, guide(`filler${i}`))
+  rig.duringCopy = () => {
+    for (let i = 0; i < 10; i++) store.setGuide(canvas.id, guide(`late${i}`))
+  }
+  const copy = await store.duplicatePage(canvas.id, page!.id, 'alice')
+  expect(copy!.guides).toHaveLength(5)
+  expect(store.getCanvas(canvas.id)!.guides).toHaveLength(MAX_GUIDES)
+})
+
+it('points a copied page’s prototype links and flow start at the copied frames', async () => {
+  const canvas = store.createCanvas('Prototype copy', 'alice')
+  const [page] = canvasPages(canvas)
+  store.setPages(canvas.id, [page!, { id: 'other-page', name: 'Other' }])
+  const other = store.createFrame(canvas.id, { name: 'Elsewhere', pageId: 'other-page' }, 'alice')!
+  const target = store.createFrame(canvas.id, { name: 'Target', pageId: page!.id }, 'alice')!
+  const multi = JSON.stringify([
+    { on: 'click', action: `overlay:${target.id}` },
+    { on: 'key:Escape', action: `navigate:${other.id}` },
+  ]).replaceAll('"', '&quot;')
+  store.createFrame(
+    canvas.id,
+    {
+      name: 'Start',
+      pageId: page!.id,
+      html: `<a data-doop-on="click" data-doop-action="navigate:${target.id}">Go</a><b data-doop-interactions="${multi}"></b>`,
+    },
+    'alice',
+  )
+  store.setFlowStart(canvas.id, page!.id, target.id)
+
+  const copy = (await store.duplicatePage(canvas.id, page!.id, 'alice'))!
+  const copiedTarget = copy.frames.find((f) => f.name === 'Target')!
+  const copiedStart = copy.frames.find((f) => f.name === 'Start')!
+  expect(copy.page.startFrameId).toBe(copiedTarget.id)
+  expect(copiedStart.html).toContain(`navigate:${copiedTarget.id}`)
+  expect(copiedStart.html).toContain(`overlay:${copiedTarget.id}`)
+  /* the link to a frame on another page was not part of the copy */
+  expect(copiedStart.html).toContain(`navigate:${other.id}`)
+  expect(copiedStart.html).not.toContain(target.id)
+})
+
+it('points a copied canvas’s prototype links and flow starts at the copied frames', async () => {
+  const canvas = store.createCanvas('Prototype canvas', 'alice')
+  const [page] = canvasPages(canvas)
+  const target = store.createFrame(canvas.id, { name: 'Target', pageId: page!.id }, 'alice')!
+  store.createFrame(
+    canvas.id,
+    { name: 'Start', pageId: page!.id, html: `<a data-doop-on="click" data-doop-action="overlay:${target.id}">Go</a>` },
+    'alice',
+  )
+  store.setFlowStart(canvas.id, page!.id, target.id)
+
+  const copy = (await store.duplicateCanvas(canvas.id, 'bob', 'bob'))!
+  const copiedTarget = copy.frames.find((f) => f.name === 'Target')!
+  expect(copy.frames.find((f) => f.name === 'Start')!.html).toContain(`overlay:${copiedTarget.id}`)
+  expect(canvasPages(copy)[0]!.startFrameId).toBe(copiedTarget.id)
+})
+
+it('keeps a page’s background across page-list saves and gives it to copies of the page and the canvas', async () => {
+  const canvas = store.createCanvas('Painted', 'alice')
+  const [page] = canvasPages(canvas)
+  expect(store.setPageBackground(canvas.id, 'missing', '#1e1e1e')).toBeUndefined()
+  expect(store.setPageBackground(canvas.id, page!.id, '#1e1e1e')).toEqual([{ ...page, background: '#1e1e1e' }])
+  /* a rename or reorder never touches the colour, whatever the client sends for it */
+  const saved = store.setPages(canvas.id, [
+    { id: page!.id, name: 'Renamed', background: '#ffffff' },
+    { id: 'second', name: 'Second', background: '#ff0000' },
+  ])
+  expect(saved!.pages).toEqual([
+    { id: page!.id, name: 'Renamed', background: '#1e1e1e' },
+    { id: 'second', name: 'Second' },
+  ])
+  const copy = await store.duplicatePage(canvas.id, page!.id, 'alice')
+  expect(copy!.page.background).toBe('#1e1e1e')
+  const twin = await store.duplicateCanvas(canvas.id, 'alice', 'alice')
+  expect(canvasPages(twin!).map((p) => p.background)).toEqual(['#1e1e1e', '#1e1e1e', undefined])
+  expect(store.setPageBackground(canvas.id, page!.id, null)).toEqual([
+    { id: page!.id, name: 'Renamed' },
+    { id: copy!.page.id, name: 'Renamed copy', background: '#1e1e1e' },
+    { id: 'second', name: 'Second' },
+  ])
 })

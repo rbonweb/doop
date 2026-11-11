@@ -1,4 +1,3 @@
-import type { CommentAnchor } from '../../shared/types'
 import { api, type PostedComment } from './api'
 import { getIdentity, hasChosenGuestName } from './identity'
 import { useStore } from './store'
@@ -24,14 +23,12 @@ function surface(comment: PostedComment): PostedComment {
 
 export async function postComment(
   frameId: string,
-  input: { selector: string; snippet: string; text: string; anchor?: CommentAnchor },
+  input: Omit<Parameters<typeof api.addComment>[1], 'mentions'>,
   mentions: string[],
 ): Promise<PostedComment> {
   if (useStore.getState().guest) {
     const name = await ensureGuestName()
-    /* the public route stores the pin by selector only */
-    const { anchor: _anchor, ...pin } = input
-    return surface(await api.guestComment(frameId, { ...pin, name }))
+    return surface(await api.guestComment(frameId, { ...input, name }))
   }
   return surface(await api.addComment(frameId, { ...input, mentions }))
 }

@@ -16,8 +16,8 @@ import {
   type PageNode,
 } from '../../shared/pages'
 import type { CanvasPageInfo } from '../../shared/types'
-import { useCanEdit, useIsGuest } from '../lib/role'
-import { useStore } from '../lib/store'
+import { useIsGuest } from '../lib/role'
+import { canEditOpenCanvas, useStore } from '../lib/store'
 import { downloadDeckPdf } from '../lib/deckExport'
 import { deckOf } from '../../shared/slides'
 import { savePages, duplicatePage, moveFramesToPage } from '../lib/pageEdits'
@@ -41,6 +41,7 @@ import {
   ContextMenuSubContent,
 } from './ui/context-menu'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
+import { useT } from '@/lib/i18n'
 
 /** The small grey sub-heading over a section of the Layers panel, shared with
  *  its "Layers" row: the two must read as one family (a browser test checks
@@ -92,7 +93,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   const selectedIds = useStore((s) => s.selectedIds)
   const marksByPage = useMarks((s) => s.pageMarks)
   /* below edit the tree only navigates: no add, rename, nest, move, reorder or delete (the server refuses them too) */
-  const mayEdit = useCanEdit()
+  const mayEdit = useStore((s) => canEditOpenCanvas(s))
   /* the deck PDF is a signed-in route, like every other read behind /api; a signed-out guest has no account for it */
   const guest = useIsGuest()
   const canvasId = canvas?.id
@@ -102,6 +103,11 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   const [busy, setBusy] = useState(false)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [name, setName] = useState('')
+  /* set once Enter, Esc or a blur has settled the rename, so the blur that
+     follows (the field unmounting, or being disabled while it saves) does
+     not settle it a second time */
+  const renameSettled = useRef(false)
+  const saveQueue = useRef<Promise<unknown>>(Promise.resolve())
   const [drag, setDrag] = useState<{ id: string; drop: Drop | null } | null>(null)
   const [fold, setFold] = useState(() => ({
     canvasId,
@@ -111,6 +117,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   const didDrag = useRef(false)
   const stopDrag = useRef<(() => void) | null>(null)
   useEffect(() => () => stopDrag.current?.(), [])
+  const t = useT()
   if (!canvas) return null
   const pages = canvasPages(canvas)
   const tree = pageTree(pages)
@@ -126,8 +133,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
     try {
       await moveFramesToPage(canvas, movableIds, pageId)
     } catch {
-      if (useStore.getState().canvas?.id === canvas.id)
-        useStore.getState().pushNotice('Could not move all selected frames to the page')
+      if (useStore.getState().canvas?.id === canvas.id) useStore.getState().pushNotice(t('panels.pagesMoveFailed'))
     } finally {
       setBusy(false)
     }
@@ -142,38 +148,72 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
     setFold({ canvasId: canvas.id, ids })
   }
 
-  async function save(next: CanvasPageInfo[], selectId?: string, rename?: string) {
-    if (!mayEdit || !canvas || busy) return
-    setBusy(true)
-    try {
-      await savePages(canvas, next, selectId)
-      if (useStore.getState().canvas?.id !== canvas.id) return
-      const created = rename ? next.find((page) => page.id === rename) : undefined
-      setRenaming(created?.id ?? null)
-      if (created) setName(created.name)
-    } catch (error) {
-      if (useStore.getState().canvas?.id !== canvas.id) return
-      useStore
-        .getState()
-        .pushNotice(
-          error instanceof ApiError && typeof error.body.error === 'string' ? error.body.error : 'Could not save pages',
-        )
-    } finally {
-      setBusy(false)
-    }
+  /** Page-list edits run one after another, each built from the pages as the
+   *  previous one left them: a rename committed by the press that starts a
+   *  drag must not race the reorder that drag drops. Resolves to whether the
+   *  edit saved. Below edit nothing saves (the server refuses it too). */
+  function save(edit: (pages: CanvasPageInfo[]) => CanvasPageInfo[] | null, selectId?: string) {
+    if (!mayEdit) return Promise.resolve(false)
+    const canvasId = canvas?.id
+    const task = saveQueue.current.then(async () => {
+      const current = useStore.getState().canvas
+      if (!current || current.id !== canvasId) return false
+      const next = edit(canvasPages(current))
+      if (!next) return false
+      setBusy(true)
+      try {
+        await savePages(current, next, selectId)
+        return true
+      } catch (error) {
+        if (useStore.getState().canvas?.id === canvasId) {
+          useStore
+            .getState()
+            .pushNotice(
+              error instanceof ApiError && typeof error.body.error === 'string'
+                ? error.body.error
+                : t('panels.pagesSaveFailed'),
+            )
+        }
+        return false
+      } finally {
+        setBusy(false)
+      }
+    })
+    saveQueue.current = task.then(() => undefined)
+    return task
   }
 
-  function addSubpage(parent: CanvasPageInfo) {
+  function startRename(page: CanvasPageInfo) {
+    renameSettled.current = false
+    setRenaming(page.id)
+    setName(page.name)
+  }
+
+  /** Enter or a click elsewhere keeps the typed name, as in Figma; an empty or
+   *  unchanged one just closes the field. A failed save leaves it open. */
+  async function commitRename(page: CanvasPageInfo) {
+    if (renameSettled.current) return
+    renameSettled.current = true
+    const next = name.trim()
+    if (!next || next === page.name) return setRenaming(null)
+    const saved = await save((current) => current.map((p) => (p.id === page.id ? { ...p, name: next } : p)))
+    if (saved) setRenaming(null)
+    else renameSettled.current = false
+  }
+
+  /** A new page lands in rename mode so it can be named at once. */
+  async function addSubpage(parent: CanvasPageInfo) {
     const page = { id: nanoid(10), name: `Page ${pages.length + 1}` }
     setCollapsed(parent.id, false)
-    void save(addPage(pages, page, parent.id), page.id, page.id)
+    if (await save((current) => addPage(current, page, parent.id), page.id)) startRename(page)
   }
 
   function nestPage(id: string, placement: Parameters<typeof movePage>[2]) {
-    const next = movePage(pages, id, placement)
-    if (!next || samePages(next, pages)) return
     if (placement.type === 'into') setCollapsed(placement.targetId, false)
-    void save(next)
+    void save((current) => {
+      const next = movePage(current, id, placement)
+      return !next || samePages(next, current) ? null : next
+    })
   }
 
   function dropFor(id: string, targetId: string, fraction: number): Drop | null {
@@ -235,8 +275,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
         if (event.pointerId !== pointerId) return
         cleanup()
         if (!moving || !drop) return
-        if (drop.placement.type === 'into') setCollapsed(drop.placement.targetId, false)
-        void save(drop.next)
+        nestPage(id, drop.placement)
       },
       { signal: controller.signal },
     )
@@ -284,23 +323,30 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
     e.preventDefault()
   }
 
-  async function duplicate(pageId: string) {
-    if (!mayEdit || !canvas || busy) return
-    setBusy(true)
-    try {
-      await duplicatePage(canvas, pageId)
-    } catch (error) {
-      if (useStore.getState().canvas?.id !== canvas.id) return
-      useStore
-        .getState()
-        .pushNotice(
-          error instanceof ApiError && typeof error.body.error === 'string'
-            ? error.body.error
-            : 'Could not duplicate the page',
-        )
-    } finally {
-      setBusy(false)
-    }
+  function duplicate(pageId: string) {
+    if (!mayEdit) return
+    const canvasId = canvas?.id
+    const task = saveQueue.current.then(async () => {
+      const current = useStore.getState().canvas
+      if (!current || current.id !== canvasId) return
+      setBusy(true)
+      try {
+        await duplicatePage(current, pageId)
+      } catch (error) {
+        if (useStore.getState().canvas?.id !== canvasId) return
+        useStore
+          .getState()
+          .pushNotice(
+            error instanceof ApiError && typeof error.body.error === 'string'
+              ? error.body.error
+              : t('panels.pagesDuplicateFailed'),
+          )
+      } finally {
+        setBusy(false)
+      }
+    })
+    saveQueue.current = task
+    return task
   }
 
   const addButton = (
@@ -308,11 +354,11 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
       variant="bare"
       size="icon-sm"
       className={sectionBtn}
-      aria-label="Add page"
+      aria-label={t('panels.pagesAdd')}
       disabled={busy}
       onClick={() => {
-        const page = { id: nanoid(10), name: `Page ${pages.length + 1}` }
-        void save([...pages, page], page.id)
+        const id = nanoid(10)
+        void save((current) => [...current, { id, name: `Page ${current.length + 1}` }], id)
       }}
     >
       <PlusIcon className="size-3.5" />
@@ -320,7 +366,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
   )
 
   const list = (
-    <div role="tree" aria-label="Pages" onKeyDown={onKeyDown}>
+    <div role="tree" aria-label={t('panels.pagesTitle')} onKeyDown={onKeyDown}>
       {rows.map(({ page, depth, childCount, collapsed }) => {
         const active = page.id === activePageId
         const holdsActive = collapsed && activeAncestors.has(page.id)
@@ -372,7 +418,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                       <button
                         type="button"
                         tabIndex={-1}
-                        aria-label={`${collapsed ? 'Expand' : 'Collapse'} ${page.name}`}
+                        aria-label={t(collapsed ? 'panels.pagesExpand' : 'panels.pagesCollapse', { name: page.name })}
                         aria-expanded={!collapsed}
                         className="flex size-4 items-center justify-center rounded-[4px] text-ink-faint hover:text-ink"
                         onClick={() => setCollapsed(page.id, !collapsed)}
@@ -400,20 +446,23 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                     className="min-w-0 flex-1"
                     onSubmit={(e) => {
                       e.preventDefault()
-                      if (name.trim()) void save(pages.map((p) => (p.id === page.id ? { ...p, name: name.trim() } : p)))
+                      void commitRename(page)
                     }}
                   >
                     <input
                       autoFocus
-                      aria-label="Page name"
+                      aria-label={t('panels.pagesName')}
                       maxLength={100}
                       disabled={busy}
                       onFocus={(e) => e.target.select()}
                       className="w-full rounded-[6px] bg-surface px-2 py-1 text-[12px] text-ink shadow-elevation-1-focus outline-none"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
+                      onBlur={() => void commitRename(page)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Escape') setRenaming(null)
+                        if (e.key !== 'Escape') return
+                        renameSettled.current = true
+                        setRenaming(null)
                       }}
                     />
                   </form>
@@ -439,8 +488,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                     }}
                     onDoubleClick={() => {
                       if (!mayEdit || busy || didDrag.current) return
-                      setRenaming(page.id)
-                      setName(page.name)
+                      startRename(page)
                     }}
                   >
                     {page.name}
@@ -450,7 +498,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                 {collapsed && renaming !== page.id && (
                   <span
                     className="shrink-0 font-mono text-[10px] tabular-nums text-ink-faint"
-                    title={`${pageDescendants(pages, page.id).length} hidden subpages`}
+                    title={t('panels.pagesHiddenSubpages', { count: pageDescendants(pages, page.id).length })}
                   >
                     {pageDescendants(pages, page.id).length}
                   </span>
@@ -462,40 +510,32 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                 if (renaming) e.preventDefault()
               }}
             >
-              <ContextMenuItem
-                disabled={busy}
-                onSelect={() => {
-                  setRenaming(page.id)
-                  setName(page.name)
-                }}
-              >
-                Rename
+              <ContextMenuItem disabled={busy} onSelect={() => startRename(page)}>
+                {t('panels.pagesRename')}
               </ContextMenuItem>
               <ContextMenuItem
                 disabled={busy || pages.length + subtreeSize > MAX_PAGES}
-                title={
-                  pages.length + subtreeSize > MAX_PAGES ? `A canvas holds at most ${MAX_PAGES} pages.` : undefined
-                }
+                title={pages.length + subtreeSize > MAX_PAGES ? t('panels.pagesLimit', { max: MAX_PAGES }) : undefined}
                 onSelect={() => void duplicate(page.id)}
               >
-                {subtreeSize > 1 ? 'Duplicate page and subpages' : 'Duplicate page'}
+                {subtreeSize > 1 ? t('panels.pagesDuplicateWithSubpages') : t('panels.pagesDuplicate')}
               </ContextMenuItem>
               <ContextMenuItem
                 disabled={busy || atMaxDepth}
-                title={atMaxDepth ? `Pages can only be nested ${MAX_PAGE_DEPTH} levels deep.` : undefined}
+                title={atMaxDepth ? t('panels.pagesTooDeepTitle', { max: MAX_PAGE_DEPTH }) : undefined}
                 onSelect={() => addSubpage(page)}
               >
-                New subpage
-                {atMaxDepth && <MenuHint>Too deep</MenuHint>}
+                {t('panels.pagesNewSubpage')}
+                {atMaxDepth && <MenuHint>{t('panels.pagesTooDeep')}</MenuHint>}
               </ContextMenuItem>
               {page.parentId !== undefined && (
                 <ContextMenuItem disabled={busy} onSelect={() => nestPage(page.id, { type: 'top' })}>
-                  Move to top level
+                  {t('panels.pagesMoveToTop')}
                 </ContextMenuItem>
               )}
               {moveTargets.length > 0 && (
                 <ContextMenuSub>
-                  <ContextMenuSubTrigger disabled={busy}>Move into…</ContextMenuSubTrigger>
+                  <ContextMenuSubTrigger disabled={busy}>{t('panels.pagesMoveInto')}</ContextMenuSubTrigger>
                   <ContextMenuSubContent>
                     {moveTargets.map((target) => (
                       <ContextMenuItem
@@ -516,8 +556,8 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                   <ContextMenuItem
                     onSelect={() => void downloadDeckPdf(canvasId!, page.id, page.name, slideCount(page.id))}
                   >
-                    Export deck as PDF
-                    <MenuHint>{slideCount(page.id)} slides</MenuHint>
+                    {t('panels.pagesExportDeck')}
+                    <MenuHint>{t('panels.pagesSlideCount', { count: slideCount(page.id) })}</MenuHint>
                   </ContextMenuItem>
                 </>
               )}
@@ -525,9 +565,9 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
               <ContextMenuItem
                 tone="danger"
                 disabled={busy || pages.length === 1}
-                onSelect={() => void save(removePage(pages, page.id))}
+                onSelect={() => void save((current) => (current.length > 1 ? removePage(current, page.id) : null))}
               >
-                Delete page
+                {t('panels.pagesDelete')}
               </ContextMenuItem>
             </ContextMenuContent>
           </ContextMenu>
@@ -540,7 +580,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
     <div className={cn('flex flex-none flex-col', fill && 'min-h-0 flex-1')}>
       <div className={cn('mt-1.5 flex h-6 flex-none items-center justify-between pr-2.5 pl-3.5', sectionHeading)}>
         <span data-slot="page-section-heading" className={sectionHeading}>
-          Pages
+          {t('panels.pagesTitle')}
         </span>
         {mayEdit && addButton}
       </div>
@@ -552,8 +592,8 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
            div too, before the native event reaches window */
         <div className="px-2 pb-2" onKeyDown={(e) => e.stopPropagation()}>
           <Select value="" disabled={busy || !movableIds.length} onValueChange={(id) => void moveSelection(id)}>
-            <SelectTrigger size="sm" className="w-full" aria-label="Move selection to page">
-              <SelectValue placeholder="Move selection to page…" />
+            <SelectTrigger size="sm" className="w-full" aria-label={t('panels.pagesMoveSelection')}>
+              <SelectValue placeholder={t('panels.pagesMoveSelectionPlaceholder')} />
             </SelectTrigger>
             <SelectContent>
               {pages

@@ -25,9 +25,11 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
     private var frames: [String: FrameLayer] = [:]
     private var labels: [String: CATextLayer] = [:]
     private var cursors: [String: CursorLayer] = [:]
+    private var workBadges: [String: FrameWorkBadge] = [:]
     private var zoom: CGFloat = 1
     private var offset = CGPoint(x: 40, y: 80)
     private var fitted = false
+    private var displayedPageID: String?
     private var fitCommand = 0
     private var drag: (id: String, origin: CGPoint, proposedOrigin: CGPoint)?
     private var pinchAnchor = CGPoint.zero
@@ -118,8 +120,8 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
         world.bounds = CGRect(origin: .zero, size: bounds.size)
         world.position = .zero
         chrome.frame = bounds
-        if !fitted, let canvas = model.canvas, !canvas.frames.isEmpty {
-            fit(canvas.frames)
+        if !fitted, !model.pageFrames.isEmpty {
+            fit(model.pageFrames)
             rerenderVisible()
         }
         applyTransform()
@@ -133,18 +135,38 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
 
     /// Reconcile layers with the model. Called by SwiftUI on every change.
     func sync() {
-        let current = model.canvas?.frames ?? []
+        let current = model.pageFrames
+        if displayedPageID != model.activePageID {
+            displayedPageID = model.activePageID
+            // A page change can arrive while dragging or while a render is queued.
+            // End the old interaction before fitting or hit-testing the new page.
+            drag = nil
+            snapGuides = []
+            gestureActive = false
+            for recognizer in gestureRecognizers ?? [] {
+                recognizer.isEnabled = false
+                recognizer.isEnabled = true
+            }
+            relayout?.cancel()
+            pendingWakes.removeAll()
+            fitted = false
+            zoom = 1
+            offset = CGPoint(x: 40, y: 80)
+            applyTransform()
+        }
         let ids = Set(current.map(\.id))
         for (id, frame) in frames where !ids.contains(id) {
             frame.cancel()
             frame.layer.removeFromSuperlayer()
             labels[id]?.removeFromSuperlayer()
             labels[id] = nil
+            workBadges[id]?.remove()
+            workBadges[id] = nil
             frames[id] = nil
         }
         // Fit before creating layers so the first bitmaps are requested at the
         // fitted density, not at 1:1 for every frame on the board.
-        if !fitted, !current.isEmpty, bounds.width > 0 { fit(current) }
+        if (!fitted || frames.isEmpty), !current.isEmpty, bounds.width > 0 { fit(current) }
         var added = false
         for frame in current {
             if let existing = frames[frame.id] {
@@ -223,11 +245,36 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
         }
         for frame in frames.values { frame.selected = frame.id == model.selectedID }
         syncCursors()
+        syncWorkBadges()
         drawChrome()
     }
 
+    /// One badge per frame on this page with an agent at work on it.
+    private func syncWorkBadges() {
+        // New chips appear where they belong, not faded or slid in by implicit actions.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        let workers = model.frameWorkers.filter { frames[$0.key] != nil && !$0.value.isEmpty }
+        for (id, badge) in workBadges where workers[id] == nil {
+            badge.remove()
+            workBadges[id] = nil
+        }
+        for (id, list) in workers {
+            let badge = workBadges[id] ?? {
+                let badge = FrameWorkBadge()
+                // Under the selection outline and cursors, over the titles.
+                chrome.insertSublayer(badge.ring, below: selectionOutline)
+                chrome.insertSublayer(badge.chips, below: selectionOutline)
+                workBadges[id] = badge
+                return badge
+            }()
+            badge.update(list)
+        }
+    }
+
     private func syncCursors() {
-        let people = model.presences.filter { $0.cursor != nil }
+        let people = model.pagePresences.filter { $0.cursor != nil }
         let ids = Set(people.map(\.clientId))
         for (id, cursor) in cursors where !ids.contains(id) {
             cursor.layer.removeFromSuperlayer()
@@ -337,10 +384,12 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
         applyTransform()
     }
 
-    /// Keep fitted designs clear of the right rail and bottom prompt.
+    /// Keep fitted designs clear of the right rail and bottom prompt, with room
+    /// at the top for a title and an agent chip row stacked above it.
     private var unobscuredViewport: CGRect {
-        CGRect(x: 24, y: 24, width: max(1, bounds.width - 100),
-               height: max(1, bounds.height - safeAreaInsets.bottom - 124))
+        let top = 24 + FrameWorkBadge.rowHeight
+        return CGRect(x: 24, y: top, width: max(1, bounds.width - 100),
+                      height: max(1, bounds.height - safeAreaInsets.bottom - model.composerHeight - 76 - top))
     }
 
     /// After a zoom change settles, re-render visible frames at the new density.
@@ -395,13 +444,16 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
             guard let frame = frames[id] else { continue }
             let origin = toScreen(frame.rect.origin)
             let width = frame.rect.width * zoom
+            // Agents at work take the right end of the title row.
+            let screenRect = CGRect(origin: origin, size: CGSize(width: width, height: frame.rect.height * zoom))
+            let chipsWidth = workBadges[id]?.layout(around: screenRect, titleRow: 20, minTitle: 44) ?? 0
             // Like Figma, titles disappear when a frame is too small to read.
-            label.isHidden = width < 44
+            label.isHidden = width - chipsWidth < 44
             guard !label.isHidden else { continue }
             let selected = id == model.selectedID
             label.string = frame.name
             label.foregroundColor = (selected ? UIColor.tintColor : UIColor.secondaryLabel).cgColor
-            label.frame = CGRect(x: origin.x, y: origin.y - 20, width: width, height: 16)
+            label.frame = CGRect(x: origin.x, y: origin.y - 20, width: width - chipsWidth, height: 16)
         }
         if let id = model.selectedID, let frame = frames[id] {
             let rect = CGRect(origin: toScreen(frame.rect.origin), size: CGSize(width: frame.rect.width * zoom, height: frame.rect.height * zoom)).insetBy(dx: -1.5, dy: -1.5)
@@ -428,7 +480,7 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
             guidePath.addLine(to: toScreen(end))
         }
         snapGuideLayer.path = snapGuides.isEmpty ? nil : guidePath.cgPath
-        for person in model.presences {
+        for person in model.pagePresences {
             guard let cursor = cursors[person.clientId], let point = person.cursor else { continue }
             let world = CGPoint(x: point.x, y: point.y)
             cursor.move(to: toScreen(world), world: world)
@@ -442,7 +494,7 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
         guard let drag, let frame = frames[drag.id] else { snapGuides = []; return }
         // Use the unsnapped finger position on every update so an existing snap
         // never accumulates into the next movement. Model order breaks ties.
-        let others = (model.canvas?.frames ?? []).compactMap { $0.id == drag.id ? nil : frames[$0.id]?.rect }
+        let others = model.pageFrames.compactMap { $0.id == drag.id ? nil : frames[$0.id]?.rect }
         let raw = CGRect(origin: drag.proposedOrigin, size: frame.rect.size)
         let snapped = FrameSnapping.move(raw, among: others, zoom: zoom)
         frame.move(to: snapped.rect.origin)
@@ -452,7 +504,7 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
     private func frame(at screenPoint: CGPoint) -> FrameLayer? {
         let point = toWorld(screenPoint)
         // Topmost frame wins: later frames are drawn above earlier ones.
-        return (model.canvas?.frames ?? []).reversed().lazy.compactMap { self.frames[$0.id] }.first { $0.rect.contains(point) }
+        return model.pageFrames.reversed().lazy.compactMap { self.frames[$0.id] }.first { $0.rect.contains(point) }
     }
 
     private func label(at screenPoint: CGPoint) -> String? {
@@ -509,7 +561,7 @@ final class CanvasView: UIView, UIGestureRecognizerDelegate {
             }
             model.select(frame.id)
         } else {
-            fit(model.canvas?.frames ?? [])
+            fit(model.pageFrames)
         }
         applyTransform()
         scheduleRelayout()
@@ -984,7 +1036,7 @@ private final class FrameLayer {
         }
         let htmlHash = html.hashValue
         BlitzDocument.queue.async {
-            let info = document.element(at: point).flatMap { document.info(for: $0) }
+            let info = document.pickableElement(at: point).flatMap { document.info(for: $0) }
             DispatchQueue.main.async { completion(info, htmlHash) }
         }
     }
@@ -1097,7 +1149,7 @@ private final class CursorLayer {
     }
 }
 
-private extension UIColor {
+extension UIColor {
     convenience init?(hex: String) {
         var value = hex.trimmingCharacters(in: .whitespaces)
         if value.hasPrefix("#") { value.removeFirst() }

@@ -7,6 +7,7 @@ import { navigate } from '../lib/navigate'
 import { useRailDrawer } from '../lib/railDrawer'
 import { timeAgo } from '../lib/time'
 import { openCanvasTab } from '../lib/desktop'
+import { useT } from '../lib/i18n'
 import { cn } from '@/lib/utils'
 import { AgentIcon } from './AgentIcon'
 import { AccountMenu } from './DashShell'
@@ -20,12 +21,15 @@ import {
   BlocksIcon,
   BuildingIcon,
   CirclePlusIcon,
+  CreditCardIcon,
   FolderPlusIcon,
+  GearIcon,
   GridIcon,
   LockIcon,
   PanelCollapseIcon,
   PanelExpandIcon,
   SearchIcon,
+  TextIcon,
   UserIcon,
   UsersIcon,
   WebIcon,
@@ -42,9 +46,13 @@ import {
  * also draws its own rail from.
  *
  * It owns the search palette, the connect-an-agent modal and its collapsed
- * state (remembered per browser). A page that needs its own group — a
- * workspace's panes, the admin indexes — passes it as children, and it
- * lands after Resources.
+ * state (remembered per browser). A page that needs its own group — the
+ * admin indexes — passes it as children, and it lands after Resources.
+ *
+ * The workspace in view opens under its row: its canvases, people and fonts,
+ * plus plan & billing and settings for its owner and admins. On the
+ * Workspace page those rows switch its pane in place (onWorkspacePane);
+ * anywhere else they go to /w/<id>?pane=….
  *
  * Below md the same rail slides in as a drawer over the page; the header's
  * brand row (DashBrand) opens it, and any row that leads somewhere closes it.
@@ -54,9 +62,26 @@ import {
 export type RailActive =
   'all' | 'mine' | 'shared' | 'automations' | 'integrations' | 'community' | `ws:${string}` | null
 
+/** the Workspace page's panes, in the order the rail lists them */
+export type WorkspacePane = 'members' | 'fonts' | 'billing' | 'general'
+
+const WORKSPACE_PANES: readonly WorkspacePane[] = ['members', 'fonts', 'billing', 'general']
+
+/** the panes a workspace role may open: billing and settings are for its owner and admins */
+export function workspacePanesFor(role: WorkspaceSummary['role'] | undefined): WorkspacePane[] {
+  return WORKSPACE_PANES.filter((p) => role !== 'member' || p === 'members' || p === 'fonts')
+}
+
 /** an agent that worked this recently is treated as still at the desk */
 const LIVE_WINDOW = 5 * 60 * 1000
 const RAIL_STORAGE_KEY = 'doop-rail'
+
+type RailLists = { canvases: CanvasMeta[]; workspaces: WorkspaceSummary[] }
+
+/* the lists the last rail showed: moving between pages remounts the rail, and
+   starting from these instead of empty keeps its rows from blinking out until
+   the next fetch answers */
+let lastLists: RailLists | null = null
 
 function readRailOpen(): boolean {
   try {
@@ -72,21 +97,29 @@ export function AppRail({
   workspaces,
   onScope,
   onCreateWorkspace,
+  workspacePane,
+  onWorkspacePane,
   searchShortcut = true,
   children,
 }: {
   active: RailActive
-  /** the lists the rail counts and reads agents from; fetched here when a page has none */
-  canvases?: CanvasMeta[]
-  workspaces?: WorkspaceSummary[]
+  /** the lists the rail reads agents and the search palette from: fetched here when a page passes none
+   *  (undefined); null while the page is still loading its own, which shows the last lists drawn */
+  canvases?: CanvasMeta[] | null
+  workspaces?: WorkspaceSummary[] | null
   /** Home filters in place; any other page goes home with the scope in the URL */
   onScope?: (scope: 'all' | 'mine' | 'shared' | `ws:${string}`) => void
   onCreateWorkspace?: () => void
+  /** the pane the Workspace page shows; unset elsewhere, where the workspace's canvases are in view */
+  workspacePane?: WorkspacePane
+  /** the Workspace page switches panes in place; any other page goes to it */
+  onWorkspacePane?: (pane: WorkspacePane) => void
   /** off on a page whose own search owns ⌘K (the community gallery) */
   searchShortcut?: boolean
   children?: ReactNode
 }) {
-  const [own, setOwn] = useState<{ canvases: CanvasMeta[]; workspaces: WorkspaceSummary[] } | null>(null)
+  const t = useT()
+  const [own, setOwn] = useState<RailLists | null>(() => lastLists)
   const needsOwn = canvases === undefined || workspaces === undefined
   useEffect(() => {
     if (!needsOwn) return
@@ -95,7 +128,12 @@ export function AppRail({
       .catch(console.error)
   }, [needsOwn])
   const list = useMemo(() => canvases ?? own?.canvases ?? [], [canvases, own])
-  const spaces = workspaces ?? own?.workspaces ?? []
+  const spaces = useMemo(() => workspaces ?? own?.workspaces ?? [], [workspaces, own])
+  /* only real lists are kept: a page still loading passes null, never an empty stand-in */
+  useEffect(() => {
+    if ((canvases ?? own?.canvases) && (workspaces ?? own?.workspaces))
+      lastLists = { canvases: list, workspaces: spaces }
+  }, [canvases, workspaces, own, list, spaces])
 
   const [open, setOpen] = useState(readRailOpen)
   const drawer = useRailDrawer((s) => s.open)
@@ -143,8 +181,12 @@ export function AppRail({
     return () => window.removeEventListener('keydown', onKey)
   }, [searchShortcut])
 
+  /* the fade belongs to the collapse toggle, not to arriving on a page */
+  const [toggled, setToggled] = useState(false)
+
   function setRail(next: boolean) {
     setOpen(next)
+    setToggled(true)
     try {
       localStorage.setItem(RAIL_STORAGE_KEY, next ? 'wide' : 'narrow')
     } catch {
@@ -170,6 +212,22 @@ export function AppRail({
     else navigate('/?workspace=new')
   }
 
+  function openPane(workspaceId: string, pane: WorkspacePane) {
+    setDrawer(false)
+    if (onWorkspacePane) onWorkspacePane(pane)
+    else navigate(`/w/${workspaceId}?pane=${pane}`)
+  }
+
+  /* the workspace in view, which opens its rows under its own */
+  const openWorkspace = active?.startsWith('ws:') ? active.slice(3) : null
+
+  const paneRows = {
+    members: { label: t('rail.workspacePeople'), icon: <UsersIcon size="rail" /> },
+    fonts: { label: t('rail.workspaceFonts'), icon: <TextIcon size="rail" /> },
+    billing: { label: t('rail.workspaceBilling'), icon: <CreditCardIcon size="rail" /> },
+    general: { label: t('rail.workspaceSettings'), icon: <GearIcon size="rail" /> },
+  } satisfies Record<WorkspacePane, { label: string; icon: ReactNode }>
+
   function openSearch() {
     setDrawer(false)
     setSearching(true)
@@ -183,12 +241,6 @@ export function AppRail({
   function openCanvas(c: CanvasMeta) {
     if (!openCanvasTab(c.id, c.name)) navigate(`/c/${c.id}`)
   }
-
-  const workspaceCounts = useMemo(() => {
-    const map = new Map<string, number>()
-    for (const c of list) if (c.workspaceId) map.set(c.workspaceId, (map.get(c.workspaceId) ?? 0) + 1)
-    return map
-  }, [list])
 
   /* every agent that has worked on these canvases, aggregated across them */
   const agents = useMemo(() => {
@@ -224,42 +276,67 @@ export function AppRail({
   const narrow = (
     <div
       key="narrow"
-      className="flex min-h-full w-full animate-[fade-in_0.25s_ease] flex-col items-center motion-reduce:animate-none"
+      data-icon-motion
+      className={cn(
+        'flex min-h-full w-full flex-col items-center',
+        toggled && 'animate-[fade-in_0.25s_ease] motion-reduce:animate-none',
+      )}
     >
       <DashSidebarBrand onHome={() => go('/')} />
-      <IconButton aria-label="Show sidebar" onClick={() => setRail(true)}>
+      <IconButton aria-label={t('rail.showSidebar')} onClick={() => setRail(true)}>
         <PanelExpandIcon width={15} height={15} />
       </IconButton>
-      <IconButton aria-label="Search canvases (⌘K)" onClick={openSearch}>
+      <IconButton aria-label={t('rail.searchCanvasesShortcut')} onClick={openSearch}>
         <SearchIcon width={15} height={15} />
       </IconButton>
       <Rule />
-      <IconButton aria-label="All canvases" on={active === 'all'} onClick={() => scope('all')}>
+      <IconButton aria-label={t('rail.allCanvases')} on={active === 'all'} onClick={() => scope('all')}>
         <GridIcon size="rail" />
       </IconButton>
-      <IconButton aria-label="Owned by me" on={active === 'mine'} onClick={() => scope('mine')}>
+      <IconButton aria-label={t('rail.ownedByMe')} on={active === 'mine'} onClick={() => scope('mine')}>
         <UserIcon size="rail" />
       </IconButton>
-      <IconButton aria-label="Shared with me" on={active === 'shared'} onClick={() => scope('shared')}>
+      <IconButton aria-label={t('rail.sharedWithMe')} on={active === 'shared'} onClick={() => scope('shared')}>
         <UsersIcon size="rail" />
       </IconButton>
       <Rule />
       {spaces.map((w) => (
-        <IconButton key={w.id} aria-label={w.name} on={active === `ws:${w.id}`} onClick={() => scope(`ws:${w.id}`)}>
-          <BuildingIcon size="rail" />
-        </IconButton>
+        <div key={w.id} className="contents">
+          <IconButton
+            aria-label={w.name}
+            on={active === `ws:${w.id}` && !workspacePane}
+            onClick={() => scope(`ws:${w.id}`)}
+          >
+            <BuildingIcon size="rail" />
+          </IconButton>
+          {openWorkspace === w.id &&
+            workspacePanesFor(w.role).map((p) => (
+              <IconButton
+                key={p}
+                aria-label={`${w.name}: ${paneRows[p].label}`}
+                on={workspacePane === p}
+                onClick={() => openPane(w.id, p)}
+              >
+                {paneRows[p].icon}
+              </IconButton>
+            ))}
+        </div>
       ))}
-      <IconButton aria-label="New workspace" onClick={createWorkspace}>
+      <IconButton aria-label={t('rail.newWorkspace')} onClick={createWorkspace}>
         <FolderPlusIcon size="rail" />
       </IconButton>
       <Rule />
-      <IconButton aria-label="Community" on={active === 'community'} onClick={() => go('/community')}>
+      <IconButton aria-label={t('rail.community')} on={active === 'community'} onClick={() => go('/community')}>
         <WebIcon size="rail" />
       </IconButton>
-      <IconButton aria-label="Automations" on={active === 'automations'} onClick={() => go('/automations')}>
+      <IconButton aria-label={t('rail.automations')} on={active === 'automations'} onClick={() => go('/automations')}>
         <WorkflowIcon size="rail" />
       </IconButton>
-      <IconButton aria-label="Integrations" on={active === 'integrations'} onClick={() => go('/integrations')}>
+      <IconButton
+        aria-label={t('rail.integrations')}
+        on={active === 'integrations'}
+        onClick={() => go('/integrations')}
+      >
         <BlocksIcon size="rail" />
       </IconButton>
       <Rule />
@@ -268,7 +345,7 @@ export function AppRail({
           <AgentIcon name={a.name} size={14} color={colorFor(a.name)} />
         </span>
       ))}
-      <IconButton aria-label="Connect an agent" onClick={connect}>
+      <IconButton aria-label={t('rail.connectAgent')} onClick={connect}>
         <CirclePlusIcon size="rail" />
       </IconButton>
       {children ? (
@@ -289,15 +366,22 @@ export function AppRail({
   /* the full rail; in the phone drawer the hide control closes the drawer
      instead of narrowing the rail */
   const wide = (inDrawer: boolean) => (
-    <div key="wide" className="flex min-h-full w-full animate-[fade-in_0.25s_ease] flex-col motion-reduce:animate-none">
+    <div
+      key="wide"
+      data-icon-motion
+      className={cn(
+        'flex min-h-full w-full flex-col',
+        toggled && 'animate-[fade-in_0.25s_ease] motion-reduce:animate-none',
+      )}
+    >
       <DashSidebarBrand onHome={() => go('/')}>
         <span className="ml-auto flex items-center gap-2.5 text-ink-soft">
-          <IconButton size="sm" aria-label="Search canvases (⌘K)" onClick={openSearch}>
+          <IconButton size="sm" aria-label={t('rail.searchCanvasesShortcut')} onClick={openSearch}>
             <SearchIcon width={15} height={15} />
           </IconButton>
           <IconButton
             size="sm"
-            aria-label="Hide sidebar"
+            aria-label={t('rail.hideSidebar')}
             onClick={() => (inDrawer ? setDrawer(false) : setRail(false))}
           >
             <PanelCollapseIcon width={15} height={15} />
@@ -312,7 +396,7 @@ export function AppRail({
           active={active === 'all'}
           onClick={() => scope('all')}
         >
-          All canvases
+          {t('rail.allCanvases')}
         </DashNavItem>
         <DashNavItem
           density="rail"
@@ -320,7 +404,7 @@ export function AppRail({
           active={active === 'mine'}
           onClick={() => scope('mine')}
         >
-          Owned by me
+          {t('rail.ownedByMe')}
         </DashNavItem>
         <DashNavItem
           density="rail"
@@ -328,38 +412,62 @@ export function AppRail({
           active={active === 'shared'}
           onClick={() => scope('shared')}
         >
-          Shared with me
+          {t('rail.sharedWithMe')}
         </DashNavItem>
       </nav>
 
-      <DashSectionLabel density="rail">Workspaces</DashSectionLabel>
+      <DashSectionLabel density="rail">{t('rail.workspaces')}</DashSectionLabel>
       <nav className="flex flex-col gap-0.5">
         {spaces.map((w) => (
-          <DashNavItem
-            key={w.id}
-            density="rail"
-            icon={<BuildingIcon size="rail" />}
-            count={
-              w.active ? (
-                <em className="not-italic">{workspaceCounts.get(w.id) ?? 0}</em>
-              ) : (
-                <span className="inline-flex items-center gap-1" title="No plan yet">
-                  <LockIcon width={12} height={12} aria-hidden />
-                </span>
-              )
-            }
-            active={active === `ws:${w.id}`}
-            onClick={() => scope(`ws:${w.id}`)}
-          >
-            {w.name}
-          </DashNavItem>
+          <div key={w.id} className="contents">
+            <DashNavItem
+              density="rail"
+              icon={<BuildingIcon size="rail" />}
+              count={
+                w.active ? undefined : (
+                  <span className="inline-flex items-center gap-1" title={t('rail.noPlanYet')}>
+                    <LockIcon width={12} height={12} aria-hidden />
+                  </span>
+                )
+              }
+              active={active === `ws:${w.id}` && openWorkspace !== w.id}
+              className={cn(openWorkspace === w.id && 'text-ink')}
+              aria-expanded={openWorkspace === w.id}
+              onClick={() => scope(`ws:${w.id}`)}
+            >
+              {w.name}
+            </DashNavItem>
+            {openWorkspace === w.id && (
+              <div role="group" aria-label={w.name} className="flex flex-col gap-0.5 pl-[18px]">
+                <DashNavItem
+                  density="rail"
+                  icon={<GridIcon size="rail" />}
+                  active={!workspacePane}
+                  onClick={() => scope(`ws:${w.id}`)}
+                >
+                  {t('rail.workspaceCanvases')}
+                </DashNavItem>
+                {workspacePanesFor(w.role).map((p) => (
+                  <DashNavItem
+                    key={p}
+                    density="rail"
+                    icon={paneRows[p].icon}
+                    active={workspacePane === p}
+                    onClick={() => openPane(w.id, p)}
+                  >
+                    {paneRows[p].label}
+                  </DashNavItem>
+                ))}
+              </div>
+            )}
+          </div>
         ))}
         <DashNavItem density="rail" icon={<FolderPlusIcon size="rail" />} onClick={createWorkspace}>
-          {spaces.length ? 'New workspace' : 'Create workspace'}
+          {spaces.length ? t('rail.newWorkspace') : t('rail.createWorkspace')}
         </DashNavItem>
       </nav>
 
-      <DashSectionLabel density="rail">Explore</DashSectionLabel>
+      <DashSectionLabel density="rail">{t('rail.explore')}</DashSectionLabel>
       <nav className="flex flex-col gap-0.5">
         <DashNavItem
           density="rail"
@@ -367,11 +475,11 @@ export function AppRail({
           active={active === 'community'}
           onClick={() => go('/community')}
         >
-          Community
+          {t('rail.community')}
         </DashNavItem>
       </nav>
 
-      <DashSectionLabel density="rail">Resources</DashSectionLabel>
+      <DashSectionLabel density="rail">{t('rail.resources')}</DashSectionLabel>
       <nav className="flex flex-col gap-0.5">
         <DashNavItem
           density="rail"
@@ -379,7 +487,7 @@ export function AppRail({
           active={active === 'automations'}
           onClick={() => go('/automations')}
         >
-          Automations
+          {t('rail.automations')}
         </DashNavItem>
         <DashNavItem
           density="rail"
@@ -387,7 +495,7 @@ export function AppRail({
           active={active === 'integrations'}
           onClick={() => go('/integrations')}
         >
-          Integrations
+          {t('rail.integrations')}
         </DashNavItem>
       </nav>
 
@@ -401,18 +509,18 @@ export function AppRail({
         {children}
       </div>
 
-      <DashSectionLabel density="rail">Agents</DashSectionLabel>
+      <DashSectionLabel density="rail">{t('rail.agents')}</DashSectionLabel>
       <div className="flex flex-col gap-0.5">
         {agents.map((a) => (
           <DashNavItem
             key={a.name}
             as="div"
             density="rail"
-            title={`${a.canvases} canvas${a.canvases === 1 ? '' : 'es'}`}
+            title={t('rail.agentCanvases', { count: a.canvases })}
             icon={<AgentIcon name={a.name} size={14} color={colorFor(a.name)} />}
             trailing={
               a.lastAt > 0 && now - a.lastAt < LIVE_WINDOW ? (
-                <Dot size="sm" className="bg-success" title="working right now" />
+                <Dot size="sm" className="bg-success" title={t('rail.workingNow')} />
               ) : (
                 <span className="text-caption text-ink-faint">{a.lastAt > 0 ? timeAgo(a.lastAt) : ''}</span>
               )
@@ -422,7 +530,7 @@ export function AppRail({
           </DashNavItem>
         ))}
         <DashNavItem density="rail" icon={<CirclePlusIcon size="rail" />} onClick={connect}>
-          Connect an agent
+          {t('rail.connectAgent')}
         </DashNavItem>
       </div>
 
@@ -453,7 +561,7 @@ export function AppRail({
           showCloseButton={false}
           className="w-[280px] max-w-[85vw] gap-0 overflow-y-auto bg-sub px-3 pb-3 pt-3.5 text-ink md:hidden"
         >
-          <SheetTitle className="sr-only">Navigation</SheetTitle>
+          <SheetTitle className="sr-only">{t('rail.navigation')}</SheetTitle>
           {wide(true)}
         </SheetContent>
       </Sheet>

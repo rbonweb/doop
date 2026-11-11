@@ -1,0 +1,67 @@
+/** The "Your account" pane of /settings: profile, notifications, password, deletion. */
+export const account = {
+  nameSaveFailed: 'That name could not be saved',
+  nameSaved: 'Saved — agents pick it up within a minute',
+  passwordChangeFailed: 'That password could not be changed',
+  passwordUpdated: 'Password updated — every other session was signed out',
+  notifySaveFailed: 'That could not be saved — try again',
+  verificationSendFailed: 'That email could not be sent',
+  verificationSent: 'Verification email sent',
+  photoSaveFailed: 'That photo could not be saved',
+  photoSaved: 'Photo updated',
+  photoRemoved: 'Photo removed — your initials are back',
+  photoTooLarge: 'Choose a photo under 2 MB',
+
+  profileTitle: 'Profile',
+  profileDescription:
+    'Your name is the identity shown on cursors, in the activity feed, and on everything you leave for an agent. Agents see the change within a minute.',
+  photoRow: 'Photo',
+  photoHint: 'Shown in place of your initials wherever your face appears. PNG, JPG, WebP or GIF, under 2 MB.',
+  uploadPhoto: 'Upload photo',
+  changePhoto: 'Change photo',
+  removePhoto: 'Remove',
+  uploadingPhoto: 'Uploading…',
+  choosePhotoAria: 'Choose a profile photo',
+  nameRow: 'Name',
+  saving: 'Saving…',
+  displayNameAria: 'Display name',
+  nameUnsaved: 'Changed — not saved yet',
+  emailRow: 'Email',
+  emailNotChangeable: 'Sign-in address — not changeable yet',
+  resendVerification: 'Resend verification',
+  verified: 'verified',
+  unverified: 'unverified',
+
+  notificationsTitle: 'Notifications',
+  notificationsDescription:
+    'Email about what happens on your canvases while you are not looking at them. Your own comments never trigger one.',
+  commentEmailsRow: 'Comment emails',
+  commentEmailsAria: 'Email me about new comments and replies',
+  commentEmailsLabel:
+    'New comments and replies on canvases you own, were invited to, or wrote in — bundled into one email per canvas every couple of minutes.',
+  emailNotConfigured: 'This doop has no email set up (SMTP_HOST), so nothing is sent either way.',
+
+  passwordTitle: 'Password',
+  passwordDescription: 'Changing it signs out every other browser and device — this one stays signed in.',
+  currentPassword: 'Current password',
+  newPassword: 'New password',
+  updatingPassword: 'Updating…',
+  updatePassword: 'Update password',
+  passwordMinLength: 'At least 8 characters',
+
+  deleteTitle: 'Delete account',
+  deleteDescription: 'Permanently deletes your account on this server. This action cannot be undone.',
+  deleteRow: 'Delete account',
+  deleteHint:
+    'Canvases only you can reach are deleted with it; canvases shared with others or living in a workspace stay with them.',
+  deleteButton: 'Delete account…',
+  deleteCheckFailed: 'Your account could not be checked — try again',
+  deleteDialogTitle: 'Delete your account?',
+  deleteDialogLede:
+    'Your account, your sign-ins and every canvas only you can reach are deleted for good. You leave your workspaces and shared canvases. This action cannot be undone.',
+  deletePasswordLabel: 'Enter your password to confirm',
+  deleteConfirm: 'Delete account',
+  deleting: 'Deleting…',
+  deleteFailed: 'Your account could not be deleted',
+  deleteNeedsFreshSession: 'Log out, sign in again, and then delete your account.',
+} as const

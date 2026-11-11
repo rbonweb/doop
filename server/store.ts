@@ -2,6 +2,7 @@ import { nanoid } from 'nanoid'
 import {
   canvasPages,
   copyPageName,
+  framePageId,
   normalizePageTree,
   pageDescendants,
   pageFrames,
@@ -10,15 +11,22 @@ import {
 import { DEFAULT_NOTE_COLOR, NOTE_DEFAULT_SIZE } from '../shared/notes.ts'
 import { defaultFrameSize } from '../shared/slides.ts'
 import * as persist from './db/persist.ts'
+import type { LinkAccess } from '../shared/canvasRole.ts'
+import { MAX_GUIDES } from '../shared/guides.ts'
+import { remapFrameTargets } from '../shared/prototype.ts'
+import type { ComponentDef } from '../shared/components.ts'
+import { byStack, frontOf, stackOf } from '../shared/frameStack.ts'
+import { htmlLoaded, setHtml, setHtmlMissHandler, unloadHtml, withHtml } from './frameHtml.ts'
+import type { DesignToken } from '../shared/designTokens.ts'
 import type {
   Canvas,
+  CanvasGuide,
   CanvasNote,
   CanvasPageInfo,
   CommunityCategory,
   DomainGrant,
   Frame,
   GuidelineDoc,
-  LinkAccess,
   LinkAudience,
   MemberRole,
   MemoryReference,
@@ -52,8 +60,14 @@ export class PageLimitError extends Error {
   }
 }
 
+export class GuideLimitError extends Error {
+  constructor() {
+    super(`A canvas holds at most ${MAX_GUIDES} guides.`)
+  }
+}
+
 /** A duplicated page: `page` is the copy of `source`; a page with sub-pages is copied whole, so `copiedPages` lists
- *  every new page (the copy first) and `frames` and `notes` are everything copied with them. */
+ *  every new page (the copy first) and `frames`, `notes` and `guides` are everything copied with them. */
 type PageCopy = {
   source: CanvasPageInfo
   page: CanvasPageInfo
@@ -61,6 +75,7 @@ type PageCopy = {
   copiedPages: CanvasPageInfo[]
   frames: Frame[]
   notes: CanvasNote[]
+  guides: CanvasGuide[]
 }
 
 const names = (pages: CanvasPageInfo[]) => pages.map((page) => page.name)
@@ -80,6 +95,13 @@ export type FrameMove = { frame: Frame; source: Canvas; target: Canvas; notes: C
  * In-memory canvas/frame state — the hot path for reads, reveals and
  * broadcasts. Every committed mutation is mirrored to the database via
  * the write-through helpers in db/persist.ts; boot hydrates from there.
+ *
+ * Every canvas and frame is in memory except frame HTML, which is most of
+ * the data: boot leaves it out and `load` reads one canvas's when something
+ * needs it (frameHtml.ts). Entry points (a REST route, the room join, an MCP
+ * tool, an agent run, a job) await `load`; everything past them reads the
+ * store synchronously as before. `evictIdle` drops the HTML of a canvas
+ * nobody has used for a while, never one that is held or in use.
  */
 class Store {
   canvases = new Map<string, Canvas>()
@@ -90,6 +112,22 @@ class Store {
   private linkPasswordHashes = new Map<string, string>() // canvasId -> hash
   /** the page copy in flight per canvas, so the next one waits for it */
   private pageCopies = new Map<string, Promise<unknown>>()
+  /** canvases whose frame HTML is in memory -> when they were last used */
+  private loaded = new Map<string, number>()
+  private loading = new Map<string, Promise<void>>()
+  /** canvases an agent run or job is working on, counted */
+  private holds = new Map<string, number>()
+  /** rooms, agents and streams the store cannot see (wired by index.ts) */
+  private inUse: (canvasId: string) => boolean = () => false
+
+  constructor() {
+    /* a missed load still fails, but the canvas is on its way for a retry */
+    setHtmlMissHandler((canvasId) => {
+      this.load(canvasId).catch((error: unknown) =>
+        console.error('[store] loading after a miss failed', canvasId, error),
+      )
+    })
+  }
 
   init(
     canvases: Canvas[],
@@ -106,10 +144,151 @@ class Store {
            once) rejoins the first page instead of vanishing from every page. */
         if (!f.pageId || !c.pages.some((page) => page.id === f.pageId)) {
           f.pageId = c.pages[0]!.id
-          persist.saveFrame(f, true)
+          if (htmlLoaded(f)) persist.saveFrame(f, true)
+          else persist.saveFramePage(f.id, f.pageId)
         }
         this.frameIndex.set(f.id, c.id)
       }
+      if (c.frames.every(htmlLoaded)) this.loaded.set(c.id, Date.now())
+      else this.loaded.delete(c.id)
+    }
+  }
+
+  /** The canvas with every frame's HTML in memory, read from the database
+   *  the first time and kept until `evictIdle`. Concurrent calls share one
+   *  read. Undefined for a canvas that does not exist. */
+  async load(canvasId: string): Promise<Canvas | undefined> {
+    if (!this.canvases.has(canvasId)) return undefined
+    if (this.loaded.has(canvasId)) {
+      this.loaded.set(canvasId, Date.now())
+      return this.canvases.get(canvasId)
+    }
+    let pending = this.loading.get(canvasId)
+    if (!pending) {
+      pending = this.fill(canvasId).finally(() => this.loading.delete(canvasId))
+      this.loading.set(canvasId, pending)
+    }
+    await pending
+    return this.canvases.get(canvasId)
+  }
+
+  /** The canvas of a frame, loaded; undefined when the frame is gone. */
+  async loadFrame(frameId: string): Promise<Frame | undefined> {
+    const canvasId = this.frameIndex.get(frameId)
+    if (canvasId) await this.load(canvasId)
+    return this.getFrame(frameId)
+  }
+
+  private async fill(canvasId: string) {
+    /* a canvas whose every frame was written since boot needs no read */
+    if (this.canvases.get(canvasId)?.frames.every(htmlLoaded)) {
+      this.loaded.set(canvasId, Date.now())
+      return
+    }
+    const rows = await persist.loadFrameHtml(canvasId)
+    const canvas = this.canvases.get(canvasId)
+    if (!canvas) return
+    const stored = new Map(rows.map((row) => [row.id, row.html]))
+    /* a frame written while the read was in flight already holds newer html */
+    for (const frame of canvas.frames) {
+      if (htmlLoaded(frame)) continue
+      const html = stored.get(frame.id)
+      if (html === undefined) console.error('[store] frame has no stored html', frame.id)
+      setHtml(frame, html ?? '')
+    }
+    this.loaded.set(canvasId, Date.now())
+  }
+
+  /** Keep a canvas loaded while an agent run or job works on it; call the
+   *  returned function when done. Load it first. */
+  hold(canvasId: string): () => void {
+    this.holds.set(canvasId, (this.holds.get(canvasId) ?? 0) + 1)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const count = (this.holds.get(canvasId) ?? 1) - 1
+      if (count > 0) this.holds.set(canvasId, count)
+      else this.holds.delete(canvasId)
+      if (this.loaded.has(canvasId)) this.loaded.set(canvasId, Date.now())
+    }
+  }
+
+  /** Load, hold for the length of `work`, release. */
+  async withCanvas<T>(canvasId: string, work: (canvas: Canvas | undefined) => Promise<T>): Promise<T> {
+    const canvas = await this.load(canvasId)
+    const release = this.hold(canvasId)
+    try {
+      return await work(canvas)
+    } finally {
+      release()
+    }
+  }
+
+  setInUse(check: (canvasId: string) => boolean) {
+    this.inUse = check
+  }
+
+  isLoaded(canvasId: string): boolean {
+    return this.loaded.has(canvasId)
+  }
+
+  /** Drop the frame HTML of canvases unused for `idleMs`: never one that is
+   *  held, in use (a room, an agent, a stream) or waiting on a frame write.
+   *  Returns how many were dropped. */
+  evictIdle(idleMs: number, now = Date.now()): number {
+    let evicted = 0
+    for (const [canvasId, usedAt] of this.loaded) {
+      if (now - usedAt < idleMs) continue
+      /* in use counts as used: the idle wait starts when the last one leaves */
+      if (this.holds.has(canvasId) || this.inUse(canvasId)) {
+        this.loaded.set(canvasId, now)
+        continue
+      }
+      const canvas = this.canvases.get(canvasId)
+      const unsaved = canvas?.frames.filter((frame) => persist.frameWritePending(frame.id)) ?? []
+      if (unsaved.length) {
+        /* idle with unsaved frames means a write failed: try it again */
+        for (const frame of unsaved) persist.retryFrameWrite(frame)
+        continue
+      }
+      for (const frame of canvas?.frames ?? []) unloadHtml(frame)
+      this.loaded.delete(canvasId)
+      evicted++
+    }
+    return evicted
+  }
+
+  /** A standalone copy of a frame with its HTML, for a render: from memory
+   *  when its canvas is loaded, else read from the database, so one
+   *  thumbnail never pulls a whole canvas into memory. A copy, so a canvas
+   *  dropped while the render waits for a slot cannot take the html away. */
+  async renderableFrame(frameId: string): Promise<Frame | undefined> {
+    const frame = this.getFrame(frameId)
+    if (!frame) return undefined
+    if (htmlLoaded(frame)) return withHtml(frame, frame.html)
+    const html = await persist.loadOneFrameHtml(frameId)
+    const current = this.getFrame(frameId)
+    if (!current) return undefined
+    return withHtml(current, htmlLoaded(current) ? current.html : (html ?? ''))
+  }
+
+  /** The renderable copy of `frame`, for a render that was handed the
+   *  frame's metadata. A frame the store no longer holds renders as given
+   *  when it carries its html; otherwise this rejects. */
+  async renderSource(frame: Frame): Promise<Frame> {
+    const source = await this.renderableFrame(frame.id)
+    if (source) return source
+    if (htmlLoaded(frame)) return frame
+    throw new Error(`frame ${frame.id} no longer exists`)
+  }
+
+  stats() {
+    return {
+      canvases: this.canvases.size,
+      loaded: this.loaded.size,
+      loading: this.loading.size,
+      held: this.holds.size,
     }
   }
 
@@ -189,6 +368,7 @@ class Store {
     const canvas: Canvas = { id: nanoid(10), name, ownerId, createdAt: now, updatedAt: now, frames: [] }
     if (workspaceId) canvas.workspaceId = workspaceId
     this.canvases.set(canvas.id, canvas)
+    this.loaded.set(canvas.id, now)
     canvas.pages = canvasPages(canvas)
     persist.saveCanvas(canvas)
     return canvas
@@ -206,16 +386,20 @@ class Store {
     by: string,
     options: { name?: string; dropDemo?: boolean; workspaceId?: string } = {},
   ): Promise<Canvas | undefined> {
-    const source = this.canvases.get(id)
+    const source = await this.load(id)
     if (!source) return undefined
     const now = Date.now()
     const canvasId = nanoid(10)
     const sourceFrames = options.dropDemo ? source.frames.filter((frame) => !frame.demo) : source.frames
     const frameIds = new Map(sourceFrames.map((frame) => [frame.id, nanoid(10)]))
-    /* slide / speakerNotes ride along with the spread; who edited the source last does not */
+    /* the copies share one createdAt, so each keeps its place in the stack; slide / speakerNotes ride along with the
+       spread, who edited the source last does not */
     const frames = sourceFrames.map(({ updatedByUserId: _user, updatedByKind: _kind, ...frame }) => ({
       ...frame,
       id: frameIds.get(frame.id)!,
+      html: remapFrameTargets(frame.html, frameIds),
+      approval: null,
+      z: stackOf(frame),
       canvasId,
       createdAt: now,
       updatedAt: now,
@@ -235,6 +419,7 @@ class Store {
         updatedBy: by,
       }))
     const guidelines = source.guidelines?.map((doc) => ({ ...doc, updatedAt: now, updatedBy: by }))
+    const tokens = source.tokens?.map((token) => ({ ...token, updatedAt: now, updatedBy: by }))
     const references = source.references?.map((ref) => ({
       ...ref,
       id: nanoid(10),
@@ -249,14 +434,32 @@ class Store {
       createdAt: now,
       updatedAt: now,
       frames,
-      pages: canvasPages(source).map((page) => ({ ...page })),
+      pages: canvasPages(source).map(({ startFrameId, ...page }) => {
+        const start = startFrameId && frameIds.get(startFrameId)
+        return start ? { ...page, startFrameId: start } : page
+      }),
+      ...(source.guides?.length ? { guides: source.guides.map((guide) => ({ ...guide })) } : {}),
       ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
       ...(guidelines?.length ? { guidelines } : {}),
+      /* same ids: the markers in the copied frames keep pointing at them */
+      ...(source.components?.length
+        ? {
+            components: source.components.map((def) => ({
+              ...def,
+              mainFrameId: def.mainFrameId ? (frameIds.get(def.mainFrameId) ?? null) : null,
+              updatedAt: now,
+              updatedBy: by,
+            })),
+          }
+        : {}),
+      ...(tokens?.length ? { tokens } : {}),
+      ...(source.tokenThemes?.length ? { tokenThemes: [...source.tokenThemes] } : {}),
       ...(references?.length ? { references } : {}),
       ...(notes?.length ? { notes } : {}),
     }
     await persist.saveCanvasCopy(canvas)
     this.canvases.set(canvas.id, canvas)
+    this.loaded.set(canvas.id, Date.now())
     for (const frame of frames) this.frameIndex.set(frame.id, canvas.id)
     return canvas
   }
@@ -282,7 +485,7 @@ class Store {
   }
 
   private async copyPage(canvasId: string, pageId: string, by: string): Promise<PageCopy | undefined> {
-    const canvas = this.canvases.get(canvasId)
+    const canvas = await this.load(canvasId)
     if (!canvas) return undefined
     const pages = canvasPages(canvas)
     const source = pages.find((page) => page.id === pageId)
@@ -292,32 +495,36 @@ class Store {
     if (pages.length + subtree.length > MAX_PAGES) throw new PageLimitError()
     const now = Date.now()
     const pageIds = new Map(subtree.map((page) => [page.id, nanoid(10)]))
-    const copies: CanvasPageInfo[] = subtree.map((page) => {
-      const { parentId, ...rest } = page
-      const id = pageIds.get(page.id)!
-      if (page.id === source.id) {
-        const root: CanvasPageInfo = { ...rest, id, name: copyPageName(source.name, names(pages)) }
-        return parentId === undefined ? root : { ...root, parentId }
+    const sourceFrames = subtree.flatMap((sourcePage) => pageFrames(canvas, sourcePage.id))
+    const frameIds = new Map(sourceFrames.map((frame) => [frame.id, nanoid(10)]))
+    const copies: CanvasPageInfo[] = subtree.map((sourcePage) => {
+      const { parentId, startFrameId, ...rest } = sourcePage
+      const id = pageIds.get(sourcePage.id)!
+      /* a flow start follows the copy of its frame; the page colour rides along in the spread */
+      const start = startFrameId && frameIds.get(startFrameId)
+      const copy: CanvasPageInfo = {
+        ...rest,
+        id,
+        ...(sourcePage.id === source.id ? { name: copyPageName(source.name, names(pages)) } : {}),
+        ...(start ? { startFrameId: start } : {}),
       }
-      return { ...rest, id, parentId: pageIds.get(parentId!)! }
+      if (sourcePage.id !== source.id) return { ...copy, parentId: pageIds.get(parentId!)! }
+      return parentId === undefined ? copy : { ...copy, parentId }
     })
     const page = copies[0]!
-    const frameIds = new Map<string, string>()
-    const frames: Frame[] = subtree.flatMap((sourcePage) =>
-      pageFrames(canvas, sourcePage.id).map(({ updatedByUserId: _user, updatedByKind: _kind, ...frame }) => {
-        const id = nanoid(10)
-        frameIds.set(frame.id, id)
-        return {
-          ...frame,
-          id,
-          pageId: pageIds.get(sourcePage.id)!,
-          createdAt: now,
-          updatedAt: now,
-          contentUpdatedAt: now,
-          updatedBy: by,
-        }
-      }),
-    )
+    /* links within the copied pages follow the copy; links to other pages stay */
+    const frames: Frame[] = sourceFrames.map(({ updatedByUserId: _user, updatedByKind: _kind, ...frame }) => ({
+      ...frame,
+      id: frameIds.get(frame.id)!,
+      html: remapFrameTargets(frame.html, frameIds),
+      pageId: pageIds.get(framePageId(canvas, frame))!,
+      approval: null,
+      z: stackOf(frame),
+      createdAt: now,
+      updatedAt: now,
+      contentUpdatedAt: now,
+      updatedBy: by,
+    }))
     /* a note on a frame goes with the frame, a free note with its page */
     const notes: CanvasNote[] = (canvas.notes ?? []).flatMap((note) => {
       const frameId = note.frameId ? frameIds.get(note.frameId) : undefined
@@ -336,9 +543,18 @@ class Store {
         },
       ]
     })
+    const guides: CanvasGuide[] = (canvas.guides ?? [])
+      .filter((guide) => pageIds.has(guide.pageId))
+      .map((guide) => ({ ...guide, id: nanoid(10), pageId: pageIds.get(guide.pageId)! }))
+    /* the copy's guides count against the canvas like any other */
+    if ((canvas.guides?.length ?? 0) + guides.length > MAX_GUIDES) throw new GuideLimitError()
     const next = [...pages]
     next.splice(pages.indexOf(subtree[subtree.length - 1]!) + 1, 0, ...copies)
-    await persist.savePageCopy({ ...canvas, pages: next, updatedAt: now }, frames, notes)
+    await persist.savePageCopy(
+      { ...canvas, pages: next, guides: [...(canvas.guides ?? []), ...guides], updatedAt: now },
+      frames,
+      notes,
+    )
     if (this.canvases.get(canvasId) !== canvas) return undefined
     /* a page save may have landed during the write: slot the copy after the
        source's subtree wherever it is now (or last, if the source is gone),
@@ -351,14 +567,27 @@ class Store {
     const at = lastOfSource ? live.indexOf(lastOfSource) + 1 : live.length
     canvas.pages = normalizePageTree([...live.slice(0, at), ...copies, ...live.slice(at)])
     canvas.frames.push(...frames)
+    canvas.frames.sort(byStack)
     if (notes.length) (canvas.notes ??= []).push(...notes)
     for (const frame of frames) this.frameIndex.set(frame.id, canvasId)
+    /* guides placed while the copy was being written stay alongside; the
+       copy keeps only as many of its own as the limit still has room for */
+    const copied = guides.length > 0
+    const room = Math.max(0, MAX_GUIDES - (canvas.guides?.length ?? 0))
+    if (guides.length > room) guides.splice(room)
+    if (guides.length) canvas.guides = [...(canvas.guides ?? []), ...guides]
     canvas.updatedAt = Math.max(canvas.updatedAt, now)
-    if (!samePages(canvas.pages, next)) persist.saveCanvas(canvas)
-    return { source, page, pages: canvas.pages, copiedPages: copies, frames, notes }
+    if (!samePages(canvas.pages, next) || copied) persist.saveCanvas(canvas)
+    return { source, page, pages: canvas.pages, copiedPages: copies, frames, notes, guides }
   }
 
-  setPages(canvasId: string, pages: import('../shared/types.ts').CanvasPageInfo[]) {
+  /** Replace the page list. Returns the saved pages (flow starts kept) and
+   *  the guides that went with deleted pages, so peers can drop them;
+   *  undefined when the canvas is gone. */
+  setPages(
+    canvasId: string,
+    pages: import('../shared/types.ts').CanvasPageInfo[],
+  ): { pages: import('../shared/types.ts').CanvasPageInfo[]; dropped: CanvasGuide[] } | undefined {
     const canvas = this.canvases.get(canvasId)
     if (!canvas) return undefined
     const firstId = canvasPages(canvas)[0]!.id
@@ -368,11 +597,80 @@ class Store {
         persist.saveFrame(frame, true)
       }
     }
-    const normalized = normalizePageTree(pages)
-    canvas.pages = normalized
+    /* a page-list save renames, reorders, adds or deletes pages — it never
+       moves a flow start or recolours a page, which only setFlowStart and
+       setPageBackground change */
+    const current = canvasPages(canvas)
+    const merged = normalizePageTree(pages).map(({ startFrameId: _start, background: _background, ...page }) => {
+      const kept = current.find((p) => p.id === page.id)
+      return {
+        ...page,
+        ...(kept?.startFrameId ? { startFrameId: kept.startFrameId } : {}),
+        ...(kept?.background ? { background: kept.background } : {}),
+      }
+    })
+    canvas.pages = merged
+    /* a deleted page takes its guides with it */
+    const kept = (guide: CanvasGuide) => merged.some((page) => page.id === guide.pageId)
+    const dropped = (canvas.guides ?? []).filter((guide) => !kept(guide))
+    if (dropped.length) canvas.guides = canvas.guides!.filter(kept)
     canvas.updatedAt = Date.now()
     persist.saveCanvas(canvas)
-    return normalized
+    return { pages: merged, dropped }
+  }
+
+  /** Set (frameId) or clear (null) the frame a page's prototype starts on. */
+  setFlowStart(canvasId: string, pageId: string, frameId: string | null) {
+    const canvas = this.canvases.get(canvasId)
+    if (!canvas) return undefined
+    const pages = canvasPages(canvas)
+    if (!pages.some((p) => p.id === pageId)) return undefined
+    canvas.pages = pages.map((page) => {
+      if (page.id !== pageId) return page
+      const { startFrameId: _previous, ...rest } = page
+      return frameId ? { ...rest, startFrameId: frameId } : rest
+    })
+    canvas.updatedAt = Date.now()
+    persist.saveCanvas(canvas)
+    return canvas.pages
+  }
+
+  /** Set (a `#rrggbb`) or clear (null) a page's own canvas colour. */
+  setPageBackground(canvasId: string, pageId: string, background: string | null) {
+    const canvas = this.canvases.get(canvasId)
+    if (!canvas) return undefined
+    const pages = canvasPages(canvas)
+    if (!pages.some((p) => p.id === pageId)) return undefined
+    canvas.pages = pages.map((page) => {
+      if (page.id !== pageId) return page
+      const { background: _previous, ...rest } = page
+      return background ? { ...rest, background } : rest
+    })
+    canvas.updatedAt = Date.now()
+    persist.saveCanvas(canvas)
+    return canvas.pages
+  }
+
+  /** Add a ruler guide, or move one that exists. Undefined when the canvas
+   *  is gone; throws GuideLimitError on a canvas already holding the most. */
+  setGuide(canvasId: string, guide: CanvasGuide): CanvasGuide | undefined {
+    const canvas = this.canvases.get(canvasId)
+    if (!canvas) return undefined
+    const guides = canvas.guides ?? []
+    const exists = guides.some((g) => g.id === guide.id)
+    if (!exists && guides.length >= MAX_GUIDES) throw new GuideLimitError()
+    canvas.guides = exists ? guides.map((g) => (g.id === guide.id ? guide : g)) : [...guides, guide]
+    persist.saveCanvas(canvas)
+    return guide
+  }
+
+  /** Remove a ruler guide; false when there was no such guide. */
+  deleteGuide(canvasId: string, guideId: string): boolean {
+    const canvas = this.canvases.get(canvasId)
+    if (!canvas?.guides?.some((g) => g.id === guideId)) return false
+    canvas.guides = canvas.guides.filter((g) => g.id !== guideId)
+    persist.saveCanvas(canvas)
+    return true
   }
 
   getCanvas(id: string) {
@@ -387,6 +685,7 @@ class Store {
     this.canvases.delete(id)
     this.domainGrants.delete(id)
     this.linkPasswordHashes.delete(id)
+    this.loaded.delete(id)
     persist.deleteCanvas(id)
     return c
   }
@@ -600,6 +899,30 @@ class Store {
     return c
   }
 
+  getComponents(canvasId: string): ComponentDef[] {
+    return this.canvases.get(canvasId)?.components ?? []
+  }
+
+  /** Add or replace by id, and mirror it to the database. */
+  saveComponent(canvasId: string, def: ComponentDef) {
+    const c = this.canvases.get(canvasId)
+    if (!c) return
+    const list = (c.components ??= [])
+    const at = list.findIndex((existing) => existing.id === def.id)
+    if (at === -1) list.push(def)
+    else list[at] = def
+    persist.saveComponent(canvasId, def)
+  }
+
+  deleteComponent(canvasId: string, id: string): boolean {
+    const c = this.canvases.get(canvasId)
+    const at = c?.components?.findIndex((def) => def.id === id) ?? -1
+    if (!c?.components || at === -1) return false
+    c.components.splice(at, 1)
+    persist.deleteComponent(canvasId, id)
+    return true
+  }
+
   getGuidelines(canvasId: string): GuidelineDoc[] {
     return this.canvases.get(canvasId)?.guidelines ?? []
   }
@@ -672,6 +995,128 @@ class Store {
     return true
   }
 
+  getTokens(canvasId: string): DesignToken[] {
+    return this.canvases.get(canvasId)?.tokens ?? []
+  }
+
+  /** Upsert tokens by name: a new one lands at the end of its canvas's
+   *  order, an existing one keeps its place unless the patch moves it. */
+  setTokens(
+    canvasId: string,
+    inputs: (Pick<DesignToken, 'name' | 'type' | 'value'> & {
+      themes?: Record<string, string>
+      description?: string
+      order?: number
+    })[],
+    by: string,
+  ): DesignToken[] | undefined {
+    const c = this.canvases.get(canvasId)
+    if (!c) return undefined
+    const tokens = (c.tokens ??= [])
+    const now = Date.now()
+    const written: DesignToken[] = []
+    for (const input of inputs) {
+      let token = tokens.find((t) => t.name === input.name)
+      if (token) {
+        token.type = input.type
+        token.value = input.value
+        token.themes = input.themes && Object.keys(input.themes).length ? input.themes : undefined
+        token.description = input.description || undefined
+        if (input.order !== undefined) token.order = input.order
+        token.updatedAt = now
+        token.updatedBy = by
+      } else {
+        const last = tokens.reduce((max, t) => Math.max(max, t.order), 0)
+        token = {
+          name: input.name,
+          type: input.type,
+          value: input.value,
+          ...(input.themes && Object.keys(input.themes).length ? { themes: input.themes } : {}),
+          ...(input.description ? { description: input.description } : {}),
+          order: input.order ?? last + 1,
+          updatedAt: now,
+          updatedBy: by,
+        }
+        tokens.push(token)
+      }
+      persist.saveToken(canvasId, token)
+      written.push(token)
+    }
+    tokens.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
+    c.updatedAt = now
+    persist.saveCanvas(c)
+    return written
+  }
+
+  /** Rename a token in place: its order and description ride along. */
+  renameToken(canvasId: string, name: string, newName: string, by: string): DesignToken | undefined {
+    const c = this.canvases.get(canvasId)
+    const token = c?.tokens?.find((t) => t.name === name)
+    if (!c || !token) return undefined
+    persist.deleteToken(canvasId, name)
+    token.name = newName
+    token.updatedAt = Date.now()
+    token.updatedBy = by
+    persist.saveToken(canvasId, token)
+    c.updatedAt = token.updatedAt
+    persist.saveCanvas(c)
+    return token
+  }
+
+  getTokenThemes(canvasId: string): string[] {
+    return this.canvases.get(canvasId)?.tokenThemes ?? []
+  }
+
+  /** Replace the theme list; tokens drop the values of themes that left. */
+  setTokenThemes(canvasId: string, themes: string[], by: string): string[] | undefined {
+    const c = this.canvases.get(canvasId)
+    if (!c) return undefined
+    c.tokenThemes = themes.length ? [...themes] : undefined
+    const now = Date.now()
+    for (const token of c.tokens ?? []) {
+      if (!token.themes) continue
+      const kept = Object.fromEntries(Object.entries(token.themes).filter(([theme]) => themes.includes(theme)))
+      if (Object.keys(kept).length === Object.keys(token.themes).length) continue
+      token.themes = Object.keys(kept).length ? kept : undefined
+      token.updatedAt = now
+      token.updatedBy = by
+      persist.saveToken(canvasId, token)
+    }
+    c.updatedAt = now
+    persist.saveCanvas(c)
+    return themes
+  }
+
+  /** Rename a theme: the list entry and every token's value under it. */
+  renameTokenTheme(canvasId: string, from: string, to: string, by: string): boolean {
+    const c = this.canvases.get(canvasId)
+    if (!c || !c.tokenThemes?.includes(from)) return false
+    c.tokenThemes = c.tokenThemes.map((theme) => (theme === from ? to : theme))
+    const now = Date.now()
+    for (const token of c.tokens ?? []) {
+      if (!token.themes || !(from in token.themes)) continue
+      const { [from]: moved, ...rest } = token.themes
+      token.themes = { ...rest, ...(moved === undefined ? {} : { [to]: moved }) }
+      token.updatedAt = now
+      token.updatedBy = by
+      persist.saveToken(canvasId, token)
+    }
+    c.updatedAt = now
+    persist.saveCanvas(c)
+    return true
+  }
+
+  deleteToken(canvasId: string, name: string): boolean {
+    const c = this.canvases.get(canvasId)
+    const idx = c?.tokens?.findIndex((t) => t.name === name) ?? -1
+    if (!c || idx === -1) return false
+    c.tokens!.splice(idx, 1)
+    c.updatedAt = Date.now()
+    persist.deleteToken(canvasId, name)
+    persist.saveCanvas(c)
+    return true
+  }
+
   getReferences(canvasId: string): MemoryReference[] {
     return this.canvases.get(canvasId)?.references ?? []
   }
@@ -725,6 +1170,10 @@ class Store {
       speakerNotes?: string
       hidden?: boolean
       locked?: boolean
+      /** where it stacks (undo brings a deleted frame back to its place);
+       *  in front of everything on the page when unset */
+      z?: number
+      rotation?: number
     },
     by: string,
     editor: EditorInfo = {},
@@ -733,8 +1182,9 @@ class Store {
     if (!c) return undefined
     const pageId = input.pageId ?? canvasPages(c)[0]!.id
     if (!canvasPages(c).some((page) => page.id === pageId)) return undefined
+    const frames = pageFrames(c, pageId)
     const now = Date.now()
-    const { x, y } = placeNewFrame(pageFrames(c, pageId), input.x, input.y)
+    const { x, y } = placeNewFrame(frames, input.x, input.y)
     const frame: Frame = {
       id: nanoid(10),
       canvasId,
@@ -749,6 +1199,7 @@ class Store {
       updatedAt: now,
       contentUpdatedAt: now,
       updatedBy: by,
+      z: input.z ?? frontOf(frames) ?? now,
     }
     if (editor.userId) frame.updatedByUserId = editor.userId
     if (editor.kind) frame.updatedByKind = editor.kind
@@ -757,7 +1208,9 @@ class Store {
     if (input.speakerNotes) frame.speakerNotes = input.speakerNotes
     if (input.hidden) frame.hidden = true
     if (input.locked) frame.locked = true
+    if (input.rotation) frame.rotation = input.rotation
     c.frames.push(frame)
+    c.frames.sort(byStack)
     c.updatedAt = now
     this.frameIndex.set(frame.id, canvasId)
     persist.saveFrame(frame, true)
@@ -770,11 +1223,28 @@ class Store {
     patch: Partial<
       Pick<
         Frame,
-        'name' | 'pageId' | 'x' | 'y' | 'width' | 'height' | 'html' | 'slide' | 'speakerNotes' | 'hidden' | 'locked'
+        | 'name'
+        | 'pageId'
+        | 'x'
+        | 'y'
+        | 'width'
+        | 'height'
+        | 'html'
+        | 'slide'
+        | 'speakerNotes'
+        | 'hidden'
+        | 'locked'
+        | 'z'
+        | 'rotation'
+        | 'approval'
       >
     >,
     by: string,
-    editor: EditorInfo = {},
+    opts: EditorInfo & {
+      /** the html change only marks elements up (a `data-doop-id` stamp):
+       *  nothing a reviewer signed off on moved, so sign-off and the review marks stand */
+      annotation?: boolean
+    } = {},
   ): Frame | undefined {
     const frame = this.getFrame(frameId)
     if (!frame) return undefined
@@ -783,27 +1253,42 @@ class Store {
       !canvasPages(this.canvases.get(frame.canvasId)!).some((p) => p.id === patch.pageId)
     )
       return undefined
+    /* sign-off holds until the html or the size changes; an annotation (id stamp) changes neither for a reviewer */
+    const approvalChanged =
+      !opts.annotation &&
+      (['html', 'width', 'height'] as const).some((key) => patch[key] !== undefined && patch[key] !== frame[key])
     /* a design change is html or the name; a move, resize or page move touches updatedAt only. The review marks follow
-       the design stamp, so shuffling frames around never reads as someone having changed them. */
+       the design stamp, so shuffling frames around never reads as someone having changed them, and an annotation
+       never counts. */
     const designChanged =
-      (patch.html !== undefined && patch.html !== frame.html) || (patch.name !== undefined && patch.name !== frame.name)
+      !opts.annotation &&
+      ((patch.html !== undefined && patch.html !== frame.html) ||
+        (patch.name !== undefined && patch.name !== frame.name))
     /* a frame from before the stamp existed keeps the time it last changed as its design time, frozen before this bump */
     if (!designChanged) frame.contentUpdatedAt ??= frame.updatedAt
+    const c = this.canvases.get(frame.canvasId)!
+    /* a frame moved to another page lands in front there, as Figma does */
+    if (patch.pageId !== undefined && patch.pageId !== frame.pageId && patch.z === undefined)
+      patch = { ...patch, z: frontOf(pageFrames(c, patch.pageId)) ?? frame.z }
     Object.assign(frame, patch)
+    if (patch.z !== undefined) c.frames.sort(byStack)
+    // All writers (including streams, sync and restores) invalidate sign-off.
+    if (approvalChanged && frame.approval?.status === 'ready_for_dev') {
+      frame.approval = { ...frame.approval, status: 'needs_review' }
+    }
     // Also serves as the optimistic-save version, including writes in the same millisecond.
     frame.updatedAt = Math.max(Date.now(), frame.updatedAt + 1)
     if (designChanged) {
       frame.contentUpdatedAt = frame.updatedAt
       frame.updatedBy = by
       /* attribution describes the latest design edit, so a stale account id never outlives its name */
-      if (editor.userId) frame.updatedByUserId = editor.userId
+      if (opts.userId) frame.updatedByUserId = opts.userId
       else delete frame.updatedByUserId
-      if (editor.kind) frame.updatedByKind = editor.kind
+      if (opts.kind) frame.updatedByKind = opts.kind
       else delete frame.updatedByKind
     }
     if (frame.slide === false) delete frame.slide
     if (!frame.speakerNotes) delete frame.speakerNotes
-    const c = this.canvases.get(frame.canvasId)!
     c.updatedAt = frame.updatedAt
     persist.saveFrame(frame) // debounced: streaming appends land as one write per burst
     persist.saveCanvas(c)
@@ -863,7 +1348,14 @@ class Store {
     })
     if (notes.length) (target.notes ??= []).push(...notes)
 
-    Object.assign(frame, { canvasId: targetCanvasId, pageId, x, y })
+    /* it lands in front on its new page, and no flow on the old canvas starts on a frame that left */
+    const z = frontOf(pageFrames(target, pageId)) ?? frame.z
+    if (source.pages?.some((page) => page.startFrameId === frameId)) {
+      source.pages = source.pages.map(({ startFrameId, ...page }) =>
+        startFrameId === frameId ? page : { ...page, startFrameId },
+      )
+    }
+    Object.assign(frame, { canvasId: targetCanvasId, pageId, x, y, z })
     /* the monotonic stamp updateFrame uses, so a save racing the move cannot share its version */
     frame.updatedAt = Math.max(now, frame.updatedAt + 1)
     /* a move is not a design change: contentUpdatedAt (what the review marks follow) stays as it was */
@@ -874,6 +1366,7 @@ class Store {
     if (editor.kind) frame.updatedByKind = editor.kind
     else delete frame.updatedByKind
     target.frames.push(frame)
+    target.frames.sort(byStack)
     this.frameIndex.set(frameId, targetCanvasId)
 
     source.updatedAt = frame.updatedAt

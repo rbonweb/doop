@@ -99,3 +99,37 @@ export function arrowBetween(from: Placed, to: Placed, slot = 0, slots = 1): Arr
   }
   return { path: path(start, end), start, end }
 }
+
+/** Start tags (attributes may hold `>` inside quotes), with comments and script or style bodies matched first so they are left alone. */
+const START_TAG =
+  /<!--[\s\S]*?-->|<(script|style)(?=[\s/>])[\s\S]*?<\/\1\s*>|<([a-z][\w:-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/gi
+const PROTOTYPE_ATTRIBUTE = /\sdata-doop-(?:on|action|interactions)\b/i
+const ONE_GOTO = /\sdata-goto\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>=`]+))/i
+
+/**
+ * Prototype players know `data-doop-on` / `data-doop-action`; the fork's older `data-goto="<frame id or name>"` links
+ * mean the same as a click that navigates. This gives every element that carries a `data-goto` resolving to another frame
+ * (and no interaction of its own) that click interaction, so existing prototypes keep working in the player. Anything that
+ * does not resolve, points at its own frame or already has an interaction is left as written.
+ */
+export function withGotoInteractions(
+  html: string,
+  canvas: Pick<Canvas, 'id' | 'pages' | 'frames'> | null | undefined,
+  selfId?: string,
+): string {
+  if (!canvas || !html.includes('data-goto')) return html
+  return html.replace(
+    START_TAG,
+    (whole, rawTag: string | undefined, tag: string | undefined, attrs: string | undefined) => {
+      if (rawTag || !tag || attrs === undefined || PROTOTYPE_ATTRIBUTE.test(attrs)) return whole
+      const match = ONE_GOTO.exec(attrs)
+      const value = (match?.[1] ?? match?.[2] ?? match?.[3] ?? '').trim()
+      if (!value) return whole
+      const to = resolveGoto(canvas, value)
+      if (!to || to.id === selfId || !/^[\w-]{1,64}$/.test(to.id)) return whole
+      const selfClosing = /\/\s*$/.test(attrs)
+      const kept = selfClosing ? attrs.replace(/\s*\/\s*$/, '') : attrs
+      return `<${tag}${kept} data-doop-on="click" data-doop-action="navigate:${to.id}"${selfClosing ? ' /' : ''}>`
+    },
+  )
+}

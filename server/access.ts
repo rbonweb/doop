@@ -1,5 +1,5 @@
 import { ROLE_RANK, roleAtLeast } from '../shared/types.ts'
-import type { Canvas, CanvasRole, Frame, MemberRole } from '../shared/types.ts'
+import type { Canvas, CanvasRole, ClientMessage, Frame, MemberRole } from '../shared/types.ts'
 import { store } from './store.ts'
 import { hasRole, isWorkspaceMember } from './workspaces.ts'
 
@@ -8,7 +8,9 @@ import { hasRole, isWorkspaceMember } from './workspaces.ts'
  * answers "what may this person do here": the roles are
  * `owner > edit > comment > view`, or null for no access at all. Every
  * canvas-scoped surface (REST, the WS join and its messages, MCP tools) gates
- * through it, via `canView` / `canComment` / `canEdit`.
+ * through it, via `canView` / `canComment` / `canEdit`. Upstream's names
+ * (`canAccessCanvas`, `canCommentCanvas`, `canEditCanvas`, `guestCanvasRole`)
+ * are thin aliases over the same resolver.
  *
  * Order of evaluation:
  *  1. a banned account gets nothing;
@@ -129,6 +131,12 @@ export function hasDurableCanvasAccess(who: Who, canvas: Canvas, min: CanvasRole
   return roleAtLeast(role, min)
 }
 
+/** Upstream's names for the same gates. */
+export const canCommentCanvas = canComment
+
+/** Upstream's name for the signed-out visitor's role. */
+export const guestCanvasRole = guestRole
+
 /** Who may delete a canvas, or move it out of its workspace: its owner,
  *  and the owner/admins of the workspace it lives in — the org keeps
  *  control of the work done in its space. */
@@ -149,4 +157,18 @@ export function canEditCanvas(who: Who, canvas: Canvas, ctx?: AccessContext): bo
 export function canEditFrame(who: Who, frame: Frame, ctx?: AccessContext): boolean {
   const canvas = store.getCanvas(frame.canvasId)
   return !!canvas && canEdit(who, canvas, ctx)
+}
+
+/** The role an inbound room (WebSocket) message needs: cursors and viewports
+ *  for anyone who can read, anything that marks or moves a frame for editors
+ *  only. Unknown messages need edit, so a new type is closed until placed. */
+export function roomMessageNeeds(msg: ClientMessage): CanvasRole {
+  switch (msg.type) {
+    case 'join':
+    case 'cursor':
+    case 'viewport':
+      return 'view'
+    default:
+      return 'edit'
+  }
 }

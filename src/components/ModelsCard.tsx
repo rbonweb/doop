@@ -25,7 +25,7 @@ const FIELDS: { key: Key; label: string; hint: string }[] = [
 
 /**
  * The models the server's own Anthropic key runs on, changed without a
- * restart (server/instanceSettings.ts). Test makes one small call with the
+ * restart (server/instanceConfig.ts). Test makes one small call with the
  * name as typed, so a typo shows up here rather than in a failed run.
  * Users' own connected accounts pick their models in Settings instead.
  */

@@ -6,6 +6,21 @@ lists every file in this folder.
 
 ## Active
 
+- [image-descriptions.md](image-descriptions.md) - Model-written descriptions of uploaded images,
+  stored once per asset, billed to the uploader, eligible owner or server behind an
+  Agents setting, and surfaced to MCP and resident agents as `images` per frame.
+- [components.md](components.md) - Reusable components: mains, materialized instances, `<doop-use>`,
+  props, enum variants, slots, overrides and three-way merge, propagation and sign-off, libraries,
+  the MCP and resident tools, and the editor UI.
+- [design-tokens.md](design-tokens.md) - Design tokens and themes: Paper's eleven token types as
+  CSS custom properties per canvas, the managed `<style data-doop-tokens>` block every frame
+  carries, propagation as annotation writes, modes via `data-doop-mode`, REST + MCP + the
+  styleguide export, and the Layers panel's Tokens tab.
+- [prototyping.md](prototyping.md) - Clickable prototypes: interaction data attributes in frame
+  HTML (triggers, actions, transitions, canonical form), per-page flow start, the prototype player
+  and `/c/<id>/proto`, the editor's Prototype mode and connectors, and the MCP tools.
+- [frame-approval.md](frame-approval.md) - Human sign-off for development, revision checks,
+  automatic review invalidation, and approval metadata for MCP and resident agents.
 - [frame-versions.md](frame-versions.md) - Per-frame design history: burst-based snapshots of the
   HTML a redesign, stream or restore replaced, the `frame_versions` table, REST + MCP restore, and
   the history modal.
@@ -22,6 +37,9 @@ lists every file in this folder.
 - [comment-notifications.md](comment-notifications.md) - Email for comments and replies people
   were not in the room to see: the canvas event bus, recipient rules, 2-minute coalescing, the
   per-user opt-out, and the `?frame=&comment=` deep link.
+- [share-link-roles.md](share-link-roles.md) - View-only, comment-only and edit share links:
+  `canvasRole` and the read/comment/edit gates across REST, the WebSocket room and MCP, and the
+  editor's read-only mode.
 - [workspaces-billing.md](workspaces-billing.md) - Shared workspaces (org-level canvas access with
   roles) and the per-seat Team plan on Stripe: data model, entitlement rules, API, webhook flow.
 - [sharing-roles.md](sharing-roles.md) - View, comment and edit roles on a canvas: the `canvasRole` resolver, per-surface enforcement (REST, WebSocket, MCP, resident agents), domain grants, access requests, people @mentions, and the anonymous and password-protected share links.

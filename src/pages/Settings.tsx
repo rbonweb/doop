@@ -1,19 +1,30 @@
 import { useState } from 'react'
 import { navigate } from '../App'
+import { useT, type PlainMessageKey } from '../lib/i18n'
 import { ModelAccountPanel } from '../components/ModelAccount'
 import { ImageModelCard } from '../components/ImageModelCard'
+import { ImageDescriptionsCard } from '../components/ImageDescriptionsCard'
 import { useAllowance } from '../components/TeamAllowance'
-import { ACCOUNT_KIND_LABELS } from '../../shared/modelMenu'
 import { AccountSettings } from '../components/AccountSettings'
 import { AppearanceSettings } from '../components/AppearanceSettings'
+import { GeneralSettings } from '../components/GeneralSettings'
 import { AgentKeys } from '../components/AgentKeys'
 import { Webhooks } from '../components/Webhooks'
+import { FontLibrary } from '../components/FontLibrary'
 import { AccountMenu } from '../components/DashShell'
 import { railLayout } from '../components/AppRail'
-import { BellIcon, ChevronLeftIcon, KeyIcon, MoonIcon, SparkIcon, UserIcon } from '../components/ui/icons'
+import {
+  BellIcon,
+  ChevronLeftIcon,
+  KeyIcon,
+  MoonIcon,
+  GearIcon,
+  SparkIcon,
+  TextIcon,
+  UserIcon,
+} from '../components/ui/icons'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Button } from '../components/ui/button'
-import { CardDescription, CardHeader, CardTitle, SettingsCard } from '../components/ui/card'
 import { Progress } from '../components/ui/progress'
 import {
   DashContent,
@@ -28,21 +39,17 @@ import {
   DashTitle,
 } from '../components/ui/dash'
 
-type Pane = 'agent' | 'keys' | 'webhooks' | 'account' | 'appearance'
+type Pane = 'general' | 'agent' | 'fonts' | 'keys' | 'webhooks' | 'account' | 'appearance'
 
 /* the heading over each pane, and the line under it */
-const panes: Record<Pane, { title: string; blurb: string }> = {
-  agent: { title: 'Doop Agent', blurb: 'Which model account the agent runs on, for every canvas you work on.' },
-  keys: { title: 'Agent keys', blurb: 'Bearer credentials that let headless agents design as you.' },
-  webhooks: {
-    title: 'Webhooks',
-    blurb: 'HTTP calls to your systems when something happens on a canvas you can open.',
-  },
-  account: { title: 'Your account', blurb: 'Who you are on every canvas — and how you get back into this one.' },
-  appearance: {
-    title: 'Appearance',
-    blurb: 'How Doop looks in this browser: light, dark, or whatever your system is.',
-  },
+const panes: Record<Pane, { title: PlainMessageKey; blurb: PlainMessageKey }> = {
+  general: { title: 'settings.generalTitle', blurb: 'settings.generalBlurb' },
+  agent: { title: 'settings.agentTitle', blurb: 'settings.agentBlurb' },
+  fonts: { title: 'settings.fontsTitle', blurb: 'settings.fontsBlurb' },
+  keys: { title: 'settings.keysTitle', blurb: 'settings.keysBlurb' },
+  webhooks: { title: 'settings.webhooksTitle', blurb: 'settings.webhooksBlurb' },
+  account: { title: 'settings.accountTitle', blurb: 'settings.accountBlurb' },
+  appearance: { title: 'settings.appearanceTitle', blurb: 'settings.appearanceBlurb' },
 }
 
 function isPane(value: string | null): value is Pane {
@@ -68,6 +75,7 @@ export function Settings() {
   /* the sub-nav switches panes rather than scrolling to an anchor — on a page
      this short an anchor jump looks like nothing happened */
   const [pane, setPane] = useState<Pane>(initialPane)
+  const t = useT()
   const { allowance, refresh } = useAllowance()
   const left = allowance ? Math.max(0, allowance.limit - allowance.used) : null
   /* arriving from a canvas (the free-tier wall) should not cost you your
@@ -75,18 +83,18 @@ export function Settings() {
   const from = new URLSearchParams(location.search).get('from')
   const back = from && /^\/c\/[A-Za-z0-9_-]+$/.test(from) ? from : '/'
 
+  /* with a connection of their own the table below says what runs; the
+     line only counts free tasks, or names the operator's pilot */
   const meter = allowance
     ? allowance.byoModel
       ? allowance.byoKind === 'gemini-cloud'
-        ? 'Gemini cloud pilot selected — connection managed by your operator.'
-        : allowance.byoKind === 'claude-local'
-          ? 'Claude CLI selected — runs on your connected desktop.'
-          : `Running on your ${allowance.byoKind === 'chatgpt' || !allowance.byoKind ? 'ChatGPT subscription' : `${ACCOUNT_KIND_LABELS[allowance.byoKind]} key`}.`
+        ? t('settings.meterGeminiCloud')
+        : null
       : allowance.limit <= 0
-        ? 'No free tasks on this server — connect an account to use the Doop Agent.'
+        ? t('settings.meterNoFreeTasks')
         : left === 0
-          ? 'Your free tasks are used up.'
-          : `${left} of ${allowance.limit} free task${allowance.limit === 1 ? '' : 's'} left.`
+          ? t('settings.meterUsedUp')
+          : t('settings.meterLeft', { left: left ?? 0, count: allowance.limit })
     : null
 
   return (
@@ -96,18 +104,34 @@ export function Settings() {
         <DashSidebarBrand />
         <nav className="flex flex-col gap-0.5">
           <DashNavItem density="rail" icon={<ChevronLeftIcon size="rail" />} onClick={() => navigate(back)}>
-            {back === '/' ? 'Back to canvases' : 'Back to canvas'}
+            {back === '/' ? t('settings.backToCanvases') : t('settings.backToCanvas')}
           </DashNavItem>
         </nav>
-        <DashSectionLabel density="rail">Settings</DashSectionLabel>
+        <DashSectionLabel density="rail">{t('settings.sectionLabel')}</DashSectionLabel>
         <nav className="flex flex-col gap-0.5">
+          <DashNavItem
+            density="rail"
+            icon={<GearIcon size="rail" />}
+            active={pane === 'general'}
+            onClick={() => setPane('general')}
+          >
+            {t('settings.generalTitle')}
+          </DashNavItem>
           <DashNavItem
             density="rail"
             icon={<SparkIcon size="rail" />}
             active={pane === 'agent'}
             onClick={() => setPane('agent')}
           >
-            Doop Agent
+            {t('settings.agentTitle')}
+          </DashNavItem>
+          <DashNavItem
+            density="rail"
+            icon={<TextIcon size="rail" />}
+            active={pane === 'fonts'}
+            onClick={() => setPane('fonts')}
+          >
+            {t('settings.fontsTitle')}
           </DashNavItem>
           <DashNavItem
             density="rail"
@@ -115,7 +139,7 @@ export function Settings() {
             active={pane === 'keys'}
             onClick={() => setPane('keys')}
           >
-            Agent keys
+            {t('settings.keysTitle')}
           </DashNavItem>
           <DashNavItem
             density="rail"
@@ -123,7 +147,7 @@ export function Settings() {
             active={pane === 'webhooks'}
             onClick={() => setPane('webhooks')}
           >
-            Webhooks
+            {t('settings.webhooksTitle')}
           </DashNavItem>
           <DashNavItem
             density="rail"
@@ -131,7 +155,7 @@ export function Settings() {
             active={pane === 'account'}
             onClick={() => setPane('account')}
           >
-            Your account
+            {t('settings.accountTitle')}
           </DashNavItem>
           <DashNavItem
             density="rail"
@@ -139,7 +163,7 @@ export function Settings() {
             active={pane === 'appearance'}
             onClick={() => setPane('appearance')}
           >
-            Appearance
+            {t('settings.appearanceTitle')}
           </DashNavItem>
         </nav>
         <div className="mt-auto flex items-center gap-2.5 px-1 pt-4">
@@ -150,7 +174,7 @@ export function Settings() {
       <DashMain className="[background:var(--paper)]">
         <DashHeader variant="bare" className="md:hidden">
           <Button variant="ghost" size="bar" onClick={() => navigate(back)}>
-            <ChevronLeftIcon size="rail" /> {back === '/' ? 'Canvases' : 'Canvas'}
+            <ChevronLeftIcon size="rail" /> {back === '/' ? t('settings.canvases') : t('settings.canvas')}
           </Button>
           <span className="flex-1" />
           <AccountMenu />
@@ -159,58 +183,64 @@ export function Settings() {
         <DashContent className="pt-2 md:pt-7">
           <div className="flex items-start gap-4 md:items-end">
             <div>
-              <DashTitle>{panes[pane].title}</DashTitle>
-              <DashSubtitle>{panes[pane].blurb}</DashSubtitle>
+              <DashTitle>{t(panes[pane].title)}</DashTitle>
+              <DashSubtitle>{t(panes[pane].blurb)}</DashSubtitle>
             </div>
           </div>
 
           <Tabs value={pane} onValueChange={(next) => setPane(next as Pane)} className="mt-4 flex md:hidden">
-            <TabsList variant="card">
+            <TabsList
+              variant="card"
+              className="grid h-auto grid-cols-2 group-data-horizontal/tabs:h-auto sm:grid-cols-3 [&>*]:h-8"
+            >
+              <TabsTrigger value="general">
+                <GearIcon size="rail" /> {t('settings.generalTitle')}
+              </TabsTrigger>
               <TabsTrigger value="agent">
-                <SparkIcon size="rail" /> Doop Agent
+                <SparkIcon size="rail" /> {t('settings.agentTitle')}
+              </TabsTrigger>
+              <TabsTrigger value="fonts">
+                <TextIcon size="rail" /> {t('settings.fontsTitle')}
               </TabsTrigger>
               <TabsTrigger value="keys">
-                <KeyIcon size="rail" /> Agent keys
+                <KeyIcon size="rail" /> {t('settings.keysTitle')}
               </TabsTrigger>
               <TabsTrigger value="webhooks">
-                <BellIcon size="rail" /> Webhooks
+                <BellIcon size="rail" /> {t('settings.webhooksTitle')}
               </TabsTrigger>
               <TabsTrigger value="account">
-                <UserIcon size="rail" /> Account
+                <UserIcon size="rail" /> {t('settings.accountTab')}
               </TabsTrigger>
               <TabsTrigger value="appearance">
-                <MoonIcon size="rail" /> Appearance
+                <MoonIcon size="rail" /> {t('settings.appearanceTitle')}
               </TabsTrigger>
             </TabsList>
           </Tabs>
 
-          {pane === 'agent' ? (
+          {pane === 'general' ? (
+            <GeneralSettings />
+          ) : pane === 'agent' ? (
             <>
-              <SettingsCard>
-                <CardHeader>
-                  <CardTitle>Doop Agent</CardTitle>
-                  <CardDescription>
-                    Choose how the Doop Agent runs on your canvases: a connected model account or Claude CLI on your
-                    desktop. Your provider’s usage limits and charges apply.
-                  </CardDescription>
-                  {meter && (
-                    <div className="mt-[11px] flex flex-col items-start gap-[7px] text-caption text-ink-faint sm:flex-row sm:items-center sm:gap-2.5">
-                      {allowance && allowance.limit > 0 && !allowance.byoModel && (
-                        <Progress
-                          className="w-[min(100%,240px)] sm:w-[180px]"
-                          value={left ?? 0}
-                          max={allowance.limit}
-                          aria-label="Free Doop Agent tasks left"
-                        />
-                      )}
-                      <span>{meter}</span>
-                    </div>
+              {/* the free-task count, while no connection of the person's own carries the agent */}
+              {meter && (
+                <div className="mt-4 flex max-w-[1000px] flex-col items-start gap-[7px] text-caption text-ink-faint sm:flex-row sm:items-center sm:gap-2.5">
+                  {allowance && allowance.limit > 0 && !allowance.byoModel && (
+                    <Progress
+                      className="w-[min(100%,240px)] sm:w-[180px]"
+                      value={left ?? 0}
+                      max={allowance.limit}
+                      aria-label={t('settings.freeTasksLeftLabel')}
+                    />
                   )}
-                </CardHeader>
-                <ModelAccountPanel onChange={refresh} />
-              </SettingsCard>
+                  <span>{meter}</span>
+                </div>
+              )}
+              <ModelAccountPanel onChange={refresh} />
               <ImageModelCard />
+              <ImageDescriptionsCard />
             </>
+          ) : pane === 'fonts' ? (
+            <FontLibrary />
           ) : pane === 'keys' ? (
             <AgentKeys />
           ) : pane === 'webhooks' ? (

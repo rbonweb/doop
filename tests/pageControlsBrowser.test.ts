@@ -1,41 +1,38 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { createServer, type ViteDevServer } from 'vite'
-import type { Browser, Page } from 'puppeteer-core'
-import { findBrowserPath, getBrowser } from '../server/screenshot'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import type { Page } from 'puppeteer-core'
+import { findBrowserPath } from '../server/screenshot'
+import { pagePerTest, serveBuilt, type BuiltServer } from './browser'
 import { freePort, startServer, type Server } from './harness'
 
 describe.skipIf(!findBrowserPath())('page list controls and keyboard history', () => {
-  let vite: ViteDevServer
+  let web: BuiltServer
   let server: Server
-  let browser: Browser
+  const pages = pagePerTest()
   let page: Page
+  let origin: string
+  /* every test signs up as someone new, so each works on a canvas of its own */
+  let accounts = 0
   beforeAll(async () => {
-    /* vite needs the server's port for its proxy and the server needs vite's
+    /* the web server needs the backend's port for its proxy and the backend needs its
        origin as BETTER_AUTH_URL, so the port is picked before either starts */
     const port = await freePort()
-    vite = await createServer({
-      logLevel: 'error',
-      server: {
-        port: 0,
-        proxy: {
-          '/api': { target: `http://localhost:${port}` },
-          '/ws': { target: `ws://localhost:${port}`, ws: true },
-        },
-      },
+    web = await serveBuilt({
+      '/api': { target: `http://localhost:${port}` },
+      '/ws': { target: `ws://localhost:${port}`, ws: true },
     })
-    await vite.listen()
-    const origin = vite.resolvedUrls!.local[0]!.replace(/\/$/, '')
+    origin = web.origin
     server = await startServer({ PORT: String(port), BETTER_AUTH_URL: origin })
-    browser = await getBrowser()
-    page = await browser.newPage()
+  }, 60_000)
+  beforeEach(async () => {
+    page = await pages.open()
     page.setDefaultTimeout(10_000)
     await page.setViewport({ width: 1400, height: 900 })
     await page.goto(origin)
-    const canvasId = await page.evaluate(async () => {
+    const canvasId = await page.evaluate(async (email) => {
       const signup = await fetch('/api/auth/sign-up/email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: 'Pages Tester', email: 'page-controls@test.dev', password: 'password12345' }),
+        body: JSON.stringify({ name: 'Pages Tester', email, password: 'password12345' }),
       })
       if (!signup.ok) throw new Error(await signup.text())
       const canvas = await (
@@ -46,7 +43,7 @@ describe.skipIf(!findBrowserPath())('page list controls and keyboard history', (
         })
       ).json()
       return canvas.id
-    })
+    }, `page-controls-${++accounts}@test.dev`)
     await page.goto(`${origin}/c/${canvasId}`)
     /* the Layers heading paints before the canvas's pages arrive; the first
        assertion counts page rows, so wait for the list itself */
@@ -54,9 +51,7 @@ describe.skipIf(!findBrowserPath())('page list controls and keyboard history', (
     await page.waitForSelector('[data-page-id]')
   }, 60_000)
   afterAll(async () => {
-    await page?.close()
-    await browser?.close()
-    await vite?.close()
+    await web?.close()
     server?.stop()
   })
 
@@ -178,8 +173,8 @@ describe.skipIf(!findBrowserPath())('page list controls and keyboard history', (
   }, 20_000)
 
   it('moves a selected frame through the page picker and undoes the move', async () => {
-    /* runs on whatever single page the previous test left (or the fresh
-       canvas's own), so it reads the destination's name instead of assuming it */
+    /* the page names are the server's to choose, so the destination's is read
+       rather than assumed */
     const pageCount = (await page.$$('[data-page-id]')).length
     await page.click('button[aria-label="Add page"]')
     await page.waitForFunction((n) => document.querySelectorAll('[data-page-id]').length === n + 1, {}, pageCount)
@@ -232,5 +227,39 @@ describe.skipIf(!findBrowserPath())('page list controls and keyboard history', (
       destination,
     )
     await page.waitForSelector('iframe[data-doop-frame]')
+  }, 20_000)
+
+  it('claims Backspace on the canvas: deletes the selection, never leaves the page', async () => {
+    await page.keyboard.press('Escape')
+    const before = (await page.$$('iframe[data-doop-frame]')).length
+    const url = page.url()
+    await page.evaluate(() => {
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Backspace') (window as unknown as { prevented: boolean[] }).prevented.push(e.defaultPrevented)
+      })
+      ;(window as unknown as { prevented: boolean[] }).prevented = []
+    })
+    /* nothing selected: the key does nothing, and the browser never sees an
+       unhandled Backspace (some engines take one as "back") */
+    await page.keyboard.press('Backspace')
+    expect(await page.$$('iframe[data-doop-frame]')).toHaveLength(before)
+    expect(page.url()).toBe(url)
+    expect(await page.evaluate(() => (window as unknown as { prevented: boolean[] }).prevented)).toEqual([true])
+    /* a selected frame goes */
+    await page.click('button[aria-label="New frame"]')
+    /* the room's broadcast can paint the frame before the create response
+       selects it; a canvas with one page has no page picker to wait on */
+    await page.waitForSelector('[role="treeitem"][aria-selected="true"]')
+    /* frame documents mount progressively, so the new frame's iframe follows its row */
+    await page.waitForFunction((n) => document.querySelectorAll('iframe[data-doop-frame]').length === n, {}, before + 1)
+    const deleted = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'DELETE' && /^\/api\/frames\//.test(new URL(response.url()).pathname),
+    )
+    await page.keyboard.press('Backspace')
+    expect((await deleted).ok()).toBe(true)
+    await page.waitForFunction((n) => document.querySelectorAll('iframe[data-doop-frame]').length === n, {}, before)
+    expect(page.url()).toBe(url)
+    expect(await page.evaluate(() => (window as unknown as { prevented: boolean[] }).prevented)).toEqual([true, true])
   }, 20_000)
 })

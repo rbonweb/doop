@@ -9,9 +9,28 @@ import {
   uniqueIndex,
   primaryKey,
   jsonb,
+  customType,
 } from 'drizzle-orm/pg-core'
-import type { CanvasPageInfo, CommentAnchor } from '../../shared/types.ts'
-import type { Schedule, Step } from '../../shared/automations.ts'
+import { open, seal } from '../secretBox.ts'
+import type { CanvasGuide, CanvasPageInfo, CommentAnchor, FrameApproval } from '../../shared/types.ts'
+import type { AutomationRunState, AutomationTrigger, Schedule, Step } from '../../shared/automations.ts'
+import type {
+  ComponentCode,
+  ComponentDef,
+  ComponentProp,
+  ComponentSlot,
+  ComponentSnapshot,
+} from '../../shared/components.ts'
+
+/** A credential kept on a user's behalf: sealed on write and opened on read
+ *  (server/secretBox.ts), so call sites see plaintext and the row does not.
+ *  Never filter on one: every write seals with a fresh IV, so equal secrets
+ *  store as different strings. */
+const sealedText = customType<{ data: string; driverData: string }>({
+  dataType: () => 'text',
+  toDriver: (value) => seal(value),
+  fromDriver: (value) => open(value),
+})
 
 /** ActivityKit tokens are delivery secrets: never return them through read APIs. */
 export const liveActivities = pgTable('live_activities', {
@@ -47,6 +66,10 @@ export const liveActivityStarters = pgTable('live_activity_starters', {
 
 export const canvases = pgTable('canvases', {
   pages: jsonb('pages').$type<CanvasPageInfo[]>(),
+  /** ruler guides of every page; null = none */
+  guides: jsonb('guides').$type<CanvasGuide[]>(),
+  /** design token themes (light, dark, …) in display order; null = none */
+  tokenThemes: jsonb('token_themes').$type<string[]>(),
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   ownerId: text('owner_id'),
@@ -213,6 +236,11 @@ export const frames = pgTable(
     hidden: boolean('hidden'),
     /** Figma-style lock; null = unlocked */
     locked: boolean('locked'),
+    /** stacking order on the page (shared/frameStack.ts); null = by created_at */
+    z: doublePrecision('z'),
+    /** degrees clockwise about the centre (shared/frameRotation.ts); null = 0 */
+    rotation: doublePrecision('rotation'),
+    approval: jsonb('approval').$type<FrameApproval>(),
   },
   (t) => [index('frames_canvas_idx').on(t.canvasId)],
 )
@@ -342,7 +370,7 @@ export const githubConnections = pgTable(
     /** "owner/name" */
     repo: text('repo').notNull(),
     branch: text('branch').notNull(),
-    token: text('token'),
+    token: sealedText('token'),
     installationId: text('installation_id'),
     /** live deployment of this repo; enables the capture lane */
     deployUrl: text('deploy_url'),
@@ -384,6 +412,8 @@ export const tasks = pgTable(
     scope: text('scope'),
     /** comma-joined ids of the frames edited while the task was open, most recent last */
     frameIds: text('frame_ids'),
+    /** JSON RunnerPick: the connection and model the composer picked for a card */
+    runner: text('runner'),
   },
   (t) => [index('tasks_canvas_idx').on(t.canvasId)],
 )
@@ -405,6 +435,8 @@ export const feedback = pgTable(
     completedAt: bigint('completed_at', { mode: 'number' }),
     failedAt: bigint('failed_at', { mode: 'number' }),
     failureReason: text('failure_reason'),
+    /** JSON RunnerPick of the task it answers, kept from when it was left */
+    runner: text('runner'),
   },
   (t) => [index('feedback_canvas_idx').on(t.canvasId)],
 )
@@ -414,10 +446,15 @@ export const comments = pgTable(
   {
     id: text('id').primaryKey(),
     canvasId: text('canvas_id').notNull(),
-    /* element comment: the frame + selector + snippet; canvas comment: no
-       frame, a page and a world point instead (selector/snippet empty) */
+    /* element comment: the frame + the element's data-doop-id + snippet;
+       frame comment: the frame and a design point; canvas comment: no frame,
+       a page and a world point instead. `selector` is the positional CSS path
+       comments were anchored by before element ids: read once at boot to
+       stamp the element and fill `element_id`, never written again. */
     frameId: text('frame_id'),
-    selector: text('selector').notNull(),
+    elementId: text('element_id'),
+    elementOrigin: jsonb('element_origin').$type<{ x: number; y: number }>(),
+    selector: text('selector'),
     snippet: text('snippet').notNull(),
     pageId: text('page_id'),
     x: doublePrecision('x'),
@@ -462,6 +499,17 @@ export const assets = pgTable(
     createdAt: bigint('created_at', { mode: 'number' }).notNull(),
     /** bumped each time a stylesheet is replaced in place (server/assets.ts replaceAsset); earlier bytes stay under `<id>-v<n>.<ext>` */
     version: integer('version').notNull().default(1),
+    /** what the picture shows, written once by a small vision model
+     *  (server/imageDescriptions.ts) so agents reading the canvas know;
+     *  null until described, and for good after three failed attempts */
+    description: text('description'),
+    describedAt: bigint('described_at', { mode: 'number' }),
+    /** the model label that wrote it */
+    describedBy: text('described_by'),
+    describeAttempts: integer('describe_attempts').notNull().default(0),
+    /** Fixed before the first attempt; null payer means server credentials. */
+    describePayerId: text('describe_payer_id'),
+    describeProvider: text('describe_provider'),
   },
   (t) => [index('assets_canvas_idx').on(t.canvasId)],
 )
@@ -477,6 +525,33 @@ export const assetRefs = pgTable(
     frameId: text('frame_id').notNull(),
   },
   (t) => [primaryKey({ columns: [t.assetId, t.frameId] }), index('asset_refs_frame_idx').on(t.frameId)],
+)
+
+/** Font libraries (shared/fonts.ts): one row per uploaded font file. A row
+ *  with a workspace_id is that workspace's; one without is owner_id's own,
+ *  used on their personal canvases. The bytes are an ordinary /a/ asset, so
+ *  deleting a row leaves every frame that already loads it rendering. */
+export const fonts = pgTable(
+  'fonts',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id'),
+    ownerId: text('owner_id'),
+    family: text('family').notNull(),
+    /** a CSS font-weight: '400', or '100 900' for a variable font */
+    weight: text('weight').notNull(),
+    /** 'normal' | 'italic' */
+    style: text('style').notNull(),
+    /** the @font-face format(): 'woff2' | 'woff' | 'truetype' | 'opentype' */
+    format: text('format').notNull(),
+    assetId: text('asset_id').notNull(),
+    ext: text('ext').notNull(),
+    fileName: text('file_name').notNull(),
+    size: integer('size').notNull(),
+    uploadedBy: text('uploaded_by').notNull(),
+    createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [index('fonts_workspace_idx').on(t.workspaceId), index('fonts_owner_idx').on(t.ownerId)],
 )
 
 /** Named design docs per canvas (brand rules, style recipes) — markdown
@@ -496,6 +571,35 @@ export const guidelines = pgTable(
     y: doublePrecision('y'),
   },
   (t) => [primaryKey({ columns: [t.canvasId, t.name] })],
+)
+
+/** Reusable designs. Keyed per canvas: a copied canvas keeps its ids, so the
+ *  instance markers in its copied frames still point at the right rows. Mirrored
+ *  in memory like guidelines. `history` holds recent revisions inline because
+ *  merging a stale save needs them synchronously. */
+export const components = pgTable(
+  'components',
+  {
+    canvasId: text('canvas_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    description: text('description').notNull(),
+    template: text('template').notNull(),
+    css: text('css').notNull(),
+    rawCss: text('raw_css').notNull(),
+    head: jsonb('head').$type<string[]>().notNull(),
+    props: jsonb('props').$type<ComponentProp[]>().notNull(),
+    slots: jsonb('slots').$type<ComponentSlot[]>().notNull(),
+    rev: integer('rev').notNull(),
+    mainFrameId: text('main_frame_id'),
+    code: jsonb('code').$type<ComponentCode>(),
+    source: jsonb('source').$type<NonNullable<ComponentDef['source']>>(),
+    history: jsonb('history').$type<ComponentSnapshot[]>().notNull(),
+    createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+    updatedBy: text('updated_by').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.canvasId, t.id] })],
 )
 
 /** Append-only history of guideline docs: one snapshot per save, an empty
@@ -563,6 +667,29 @@ export const canvasNotes = pgTable(
     updatedBy: text('updated_by').notNull(),
   },
   (t) => [index('canvas_notes_canvas_idx').on(t.canvasId)],
+)
+
+/** Design tokens (shared/designTokens.ts): a canvas's named design values,
+ *  each a CSS custom property frames use as `var(--name)`. Small and read on
+ *  every frame write; hydrated with the canvas. */
+export const designTokens = pgTable(
+  'design_tokens',
+  {
+    canvasId: text('canvas_id').notNull(),
+    /** the CSS custom property name, `--color-primary` */
+    name: text('name').notNull(),
+    /** one of TOKEN_TYPES */
+    type: text('type').notNull(),
+    value: text('value').notNull(),
+    /** the value under each of the canvas's token themes that overrides `value` */
+    themes: jsonb('themes').$type<Record<string, string>>(),
+    description: text('description'),
+    /** display order within the canvas */
+    order: doublePrecision('order').notNull(),
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+    updatedBy: text('updated_by').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.canvasId, t.name] })],
 )
 
 /** Frames pinned to Memory as style exemplars: the HTML is a snapshot taken
@@ -649,23 +776,49 @@ export const residentUsage = pgTable('resident_usage', {
  *  auth.openai.com, refreshed here) or a plain OpenAI API key — `kind` says
  *  which, and the token columns are empty for the key path. Secrets: these
  *  rows are as sensitive as a password, and never leave the server. */
-export const modelAccounts = pgTable('model_accounts', {
+/** A person's model accounts, one per provider kind: several can be connected
+ *  at once, each switched on or off, and `agent_defaults` names the one work
+ *  without a pick runs on. */
+export const modelAccounts = pgTable(
+  'model_accounts',
+  {
+    userId: text('user_id').notNull(),
+    /** 'chatgpt' (subscription, OAuth) | 'openai-key' | 'anthropic-key' | 'openrouter-key' | 'gemini-key' | 'deepseek-key' | 'kimi-key' | 'kimi-code' | 'custom:<id>' */
+    kind: text('kind').notNull(),
+    /** off keeps the credential but takes the account out of the composer and the default */
+    enabled: boolean('enabled').notNull().default(true),
+    /** chatgpt: the ChatGPT account the tokens are scoped to */
+    accountId: text('account_id'),
+    /** display only — whose subscription this is, and which plan */
+    email: text('email'),
+    plan: text('plan'),
+    accessToken: sealedText('access_token'),
+    refreshToken: sealedText('refresh_token'),
+    /** epoch ms the access token expires; refreshed ahead of this */
+    expiresAt: bigint('expires_at', { mode: 'number' }),
+    apiKey: sealedText('api_key'),
+    /** the model tier this user picked; null = the server default */
+    model: text('model'),
+    /** OpenAI reasoning effort this user picked; null = the server default */
+    reasoningEffort: text('reasoning_effort'),
+    /** a custom provider (kind `custom:<id>`): its name, API type, base URL,
+     *  models and options (shared/customProvider.ts); null on every other kind */
+    custom: jsonb('custom'),
+    /** a custom provider's extra request headers, as JSON; they can carry a
+     *  credential, so they are sealed like the key */
+    customHeaders: sealedText('custom_headers'),
+    connectedAt: bigint('connected_at', { mode: 'number' }).notNull(),
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.kind] })],
+)
+
+/** Which connection work without a pick (comments, @mentions, automations)
+ *  runs on: an account kind or 'claude-local'. A provider that is no longer
+ *  connected or switched on is skipped, and the fallback order applies. */
+export const agentDefaults = pgTable('agent_defaults', {
   userId: text('user_id').primaryKey(),
-  /** 'chatgpt' (subscription, OAuth) | 'openai-key' (pay-as-you-go API key) */
-  kind: text('kind').notNull(),
-  /** chatgpt: the ChatGPT account the tokens are scoped to */
-  accountId: text('account_id'),
-  /** display only — whose subscription this is, and which plan */
-  email: text('email'),
-  plan: text('plan'),
-  accessToken: text('access_token'),
-  refreshToken: text('refresh_token'),
-  /** epoch ms the access token expires; refreshed ahead of this */
-  expiresAt: bigint('expires_at', { mode: 'number' }),
-  apiKey: text('api_key'),
-  /** the model tier this user picked; null = the server default */
-  model: text('model'),
-  connectedAt: bigint('connected_at', { mode: 'number' }).notNull(),
+  provider: text('provider').notNull(),
   updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
 })
 
@@ -703,7 +856,7 @@ export const integrations = pgTable(
     userId: text('user_id').notNull(),
     /** 'meta' */
     provider: text('provider').notNull(),
-    accessToken: text('access_token').notNull(),
+    accessToken: sealedText('access_token').notNull(),
     /** epoch ms the token expires; null = the provider said it doesn't */
     expiresAt: bigint('expires_at', { mode: 'number' }),
     /** the provider-side identity the token belongs to — display only */
@@ -728,6 +881,8 @@ export const automations = pgTable(
     name: text('name').notNull(),
     enabled: boolean('enabled').notNull().default(true),
     schedule: jsonb('schedule').$type<Schedule>().notNull(),
+    trigger: jsonb('trigger').$type<AutomationTrigger>().notNull().default({ type: 'schedule' }),
+    approvalSince: bigint('approval_since', { mode: 'number' }).notNull().default(0),
     steps: jsonb('steps').$type<Step[]>().notNull(),
     /** when the scheduler fires it next; null while disabled or incomplete */
     nextRunAt: bigint('next_run_at', { mode: 'number' }),
@@ -752,8 +907,21 @@ export const automationRuns = pgTable(
     canvasId: text('canvas_id'),
     /** 'reconnect' when the fix is re-authorising an integration */
     failure: text('failure'),
+    state: jsonb('state').$type<AutomationRunState>(),
+    leaseUntil: bigint('lease_until', { mode: 'number' }).notNull().default(0),
   },
   (t) => [index('automation_runs_automation_idx').on(t.automationId)],
+)
+
+/** Approval receipts outlive the run log so pruning cannot dispatch a design twice. */
+export const automationApprovals = pgTable(
+  'automation_approvals',
+  {
+    automationId: text('automation_id').notNull(),
+    frameId: text('frame_id').notNull(),
+    approvedAt: bigint('approved_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [uniqueIndex('automation_approvals_event_idx').on(t.automationId, t.frameId, t.approvedAt)],
 )
 
 /** Local execution preference; Claude credentials never leave the desktop. */
@@ -761,6 +929,8 @@ export const localAgentPreferences = pgTable('local_agent_preferences', {
   userId: text('user_id').primaryKey(),
   enabled: boolean('enabled').notNull().default(false),
   model: text('model').notNull().default('default'),
+  /** `claude --effort`; null = the CLI's own setting */
+  effort: text('effort'),
 })
 
 /** Per-user notification switches. No row means everything is on: comment
@@ -769,6 +939,15 @@ export const localAgentPreferences = pgTable('local_agent_preferences', {
 export const notificationPrefs = pgTable('notification_prefs', {
   userId: text('user_id').primaryKey(),
   commentEmails: boolean('comment_emails').notNull().default(true),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+})
+
+/** Whether, and on whose model, images uploaded to a user's canvases get a
+ *  description for agents (shared/imageDescriptions.ts). No row = `account`:
+ *  the owner's connected model account, else the server tier. */
+export const imageDescriptionPrefs = pgTable('image_description_prefs', {
+  userId: text('user_id').primaryKey(),
+  mode: text('mode').notNull().default('account'),
   updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
 })
 
@@ -782,7 +961,7 @@ export const webhooks = pgTable(
     id: text('id').primaryKey(),
     userId: text('user_id').notNull(),
     url: text('url').notNull(),
-    secret: text('secret').notNull(),
+    secret: sealedText('secret').notNull(),
     /** subscribed event names (shared/webhooks.ts WEBHOOK_EVENTS) */
     events: jsonb('events').$type<string[]>().notNull(),
     enabled: boolean('enabled').notNull().default(true),
@@ -811,8 +990,8 @@ export const linearInstallations = pgTable('linear_installations', {
   userId: text('user_id').notNull().unique(),
   appUserId: text('app_user_id').notNull(),
   name: text('name').notNull(),
-  accessToken: text('access_token').notNull(),
-  refreshToken: text('refresh_token').notNull(),
+  accessToken: sealedText('access_token').notNull(),
+  refreshToken: sealedText('refresh_token').notNull(),
   expiresAt: bigint('expires_at', { mode: 'number' }).notNull(),
   connectedAt: bigint('connected_at', { mode: 'number' }).notNull(),
 })
@@ -856,7 +1035,7 @@ export const slackInstallations = pgTable('slack_installations', {
   userId: text('user_id').notNull().unique(),
   botUserId: text('bot_user_id').notNull(),
   name: text('name').notNull(),
-  botToken: text('bot_token').notNull(),
+  botToken: sealedText('bot_token').notNull(),
   connectedAt: bigint('connected_at', { mode: 'number' }).notNull(),
 })
 
@@ -903,3 +1082,36 @@ export const slackSessions = pgTable(
     index('slack_sessions_thread_idx').on(t.teamId, t.channelId, t.threadTs),
   ],
 )
+
+/** Agents' own reports about Doop: problems (report_issue, kind 'issue') and
+ *  ideas or praise (share_feedback, kind 'feedback'). Read by instance admins,
+ *  not shown on any canvas. */
+export const agentFeedback = pgTable(
+  'agent_feedback',
+  {
+    id: text('id').primaryKey(),
+    at: bigint('at', { mode: 'number' }).notNull(),
+    kind: text('kind').notNull(),
+    source: text('source').notNull(),
+    category: text('category').notNull(),
+    message: text('message').notNull(),
+    tool: text('tool'),
+    agentName: text('agent_name'),
+    client: text('client'),
+    canvasId: text('canvas_id'),
+    userId: text('user_id'),
+  },
+  (t) => [index('agent_feedback_at_idx').on(t.at)],
+)
+
+/** The instance's sign-in policy (shared/instanceSettings.ts): one row, id
+ *  'instance', written by admins in Admin → Sign-in and read into memory at
+ *  boot. Absent row = the defaults. */
+export const instanceSettings = pgTable('instance_settings', {
+  id: text('id').primaryKey(),
+  emailPasswordSignup: boolean('email_password_signup').notNull().default(true),
+  ssoAutoRedirect: boolean('sso_auto_redirect').notNull().default(false),
+  defaultWorkspaceId: text('default_workspace_id'),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  updatedBy: text('updated_by'),
+})

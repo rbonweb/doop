@@ -30,4 +30,5 @@ it('persists legacy membership before reordering, including after reopening the 
     await db.close()
     rmSync(dir, { recursive: true, force: true })
   }
+  /* two on-disk PGlite boots take ~5s on their own, the default limit; 60s keeps a loaded CI runner from timing out */
 }, 60_000)

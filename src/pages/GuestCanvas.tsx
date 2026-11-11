@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, type PublicGate } from '../lib/api'
 import { AuthPage } from './AuthPage'
 import { CanvasPage } from './CanvasPage'
+import { PrototypePage } from './PrototypePage'
 import { PresenterWindow } from '../components/PresenterView'
 import { PasswordGate } from '../components/AccessScreens'
 import { AuthScreen } from '../components/ui/screen'
@@ -13,7 +14,18 @@ import { AuthScreen } from '../components/ui/screen'
  * the sign-in form, exactly as for a private canvas. Missing and private
  * canvases look the same on purpose.
  */
-export function GuestCanvas({ canvasId }: { canvasId: string }) {
+export function GuestCanvas({
+  canvasId,
+  prototype = false,
+  onSignUp,
+  onSignIn,
+}: {
+  canvasId: string
+  /** /c/<id>/proto: the prototype player, behind the same gate */
+  prototype?: boolean
+  onSignUp?: () => void
+  onSignIn?: () => void
+}) {
   const [mode, setMode] = useState<PublicGate['mode'] | null>(null)
   const [signIn, setSignIn] = useState(() => new URLSearchParams(location.search).has('signin'))
   const [attempt, setAttempt] = useState(0)
@@ -38,5 +50,6 @@ export function GuestCanvas({ canvasId }: { canvasId: string }) {
   }
   /* the presenter's own window (opened from a presentation) is open to guests as well, once the gate has let them in */
   if (new URLSearchParams(location.search).has('presenter')) return <PresenterWindow canvasId={canvasId} />
-  return <CanvasPage canvasId={canvasId} guestEntry />
+  if (prototype) return <PrototypePage canvasId={canvasId} guest />
+  return <CanvasPage canvasId={canvasId} guestEntry onSignUp={onSignUp} onSignIn={onSignIn} />
 }
