@@ -151,3 +151,20 @@ it('leaves a canvas unloaded when the resident agent is woken with no work on it
   await new Promise((resolve) => setTimeout(resolve, 50))
   expect(store.isLoaded(canvasId)).toBe(false)
 })
+
+it('finds the frames that link an asset in an unloaded canvas, without loading it', async () => {
+  const { framesReferencingAsset } = await import('../server/assets.ts')
+  const { canvasId, firstId, secondId } = await bootedCanvas('Asset refs')
+  const link = '<link rel="stylesheet" href="/a/sheet01.css">'
+  await store.load(canvasId)
+  store.updateFrame(firstId, { html: `<html><head>${link}</head></html>` }, 'owner')
+  await persist.saveFrameNow(store.getFrame(firstId)!)
+  /* a frame edited a moment ago is found by the scan before its refs row is written */
+  store.updateFrame(secondId, { html: `<html><head>${link}</head></html>` }, 'owner')
+  expect((await framesReferencingAsset('sheet01')).sort()).toEqual([firstId, secondId].sort())
+  await persist.saveFrameNow(store.getFrame(secondId)!)
+  store.evictIdle(HOUR / 2, Date.now() + HOUR)
+  expect(store.isLoaded(canvasId)).toBe(false)
+  expect((await framesReferencingAsset('sheet01')).sort()).toEqual([firstId, secondId].sort())
+  expect(store.isLoaded(canvasId)).toBe(false)
+})
