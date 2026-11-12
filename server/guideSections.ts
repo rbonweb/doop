@@ -40,11 +40,12 @@ export function slugify(title: string): string {
     .replace(/^-+|-+$/g, '')
 }
 
-/** The section whose slug equals slugify(wanted), else whose title equals wanted ignoring case, else the first whose title starts with wanted ignoring case; undefined when none. */
+/** The section whose slug equals slugify(wanted), else whose title equals wanted ignoring case, else the first whose title starts with wanted ignoring case; undefined when none or when wanted is blank. */
 export function findGuideSection(markdown: string, wanted: string): GuideSection | undefined {
+  const wantedTitle = wanted.trim().toLowerCase()
+  if (wantedTitle === '') return undefined
   const sections = guideSections(markdown)
   const wantedSlug = slugify(wanted)
-  const wantedTitle = wanted.trim().toLowerCase()
   const bySlug = sections.find((section) => section.slug === wantedSlug)
   if (bySlug) return bySlug
   const byTitle = sections.find((section) => section.title.toLowerCase() === wantedTitle)
