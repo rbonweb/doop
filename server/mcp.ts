@@ -31,6 +31,7 @@ import {
 import { webFontFamilies } from '../shared/webFonts.ts'
 import { CANVAS_FIELDS, HOSTED_FONTS_NOTE, pageOf, pickCanvasFields, pickFrameFields } from './canvasListing.ts'
 import * as actions from './actions.ts'
+import { describeNoteDeletion, noteDeletion } from './recentDeletions.ts'
 import * as persist from './db/persist.ts'
 import { canComment, canvasRole, canView, type AccessUser } from './access.ts'
 import { roleAllows, type CanvasRole } from '../shared/canvasRole.ts'
@@ -2893,8 +2894,11 @@ export function buildMcpServer(
     },
     async ({ note_id, text: markdown, agent_name, ...rest }) => {
       const found = store.findNote(note_id)
-      if (!found || !canvasFor(found.canvasId, 'edit'))
+      if (!found || !canvasFor(found.canvasId, 'edit')) {
+        const gone = noteDeletion(note_id)
+        if (gone && canvasFor(gone.canvasId, 'view')) return err(describeNoteDeletion(note_id, gone))
         return (found && tooLow(found.canvasId, 'edit')) ?? err(`no note with id ${note_id} accessible to this account`)
+      }
       const patch = Object.fromEntries(Object.entries({ markdown, ...rest }).filter(([, v]) => v !== undefined))
       if (!Object.keys(patch).length) return err('nothing to update')
       const actor = actorFrom(agent_name)
@@ -2914,8 +2918,11 @@ export function buildMcpServer(
     },
     async ({ note_id, agent_name }) => {
       const found = store.findNote(note_id)
-      if (!found || !canvasFor(found.canvasId, 'edit'))
+      if (!found || !canvasFor(found.canvasId, 'edit')) {
+        const gone = noteDeletion(note_id)
+        if (gone && canvasFor(gone.canvasId, 'view')) return err(describeNoteDeletion(note_id, gone))
         return (found && tooLow(found.canvasId, 'edit')) ?? err(`no note with id ${note_id} accessible to this account`)
+      }
       const result = actions.deleteNote(note_id, actorFrom(agent_name))
       if (!result.ok) return err(result.error)
       return text({ ok: true })
