@@ -6,6 +6,8 @@ import {
   claimOf,
   claimWarning,
   claimsOn,
+  dropClaims,
+  MAX_CLAIM_NOTE,
   holderKey,
   onClaimsChange,
   releaseFrames,
@@ -129,5 +131,23 @@ describe('frameClaims', () => {
     onClaimsChange(good)
     expect(() => claimFrames([frame('f1')], A, 5, 'one')).not.toThrow()
     expect(good).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops claims on deleted frames whoever holds them, notifying once per canvas', () => {
+    claimFrames([frame('f1'), frame('f2'), frame('f3', 'c2')], A, 10, 'x')
+    const seen: string[] = []
+    onClaimsChange((canvasId) => seen.push(canvasId))
+    dropClaims(['f1', 'f2', 'f3', 'unknown'])
+    expect(claimOf('f1')).toBeUndefined()
+    expect(claimOf('f2')).toBeUndefined()
+    expect(claimOf('f3')).toBeUndefined()
+    expect(seen.sort()).toEqual(['c1', 'c2'])
+    dropClaims(['f1'])
+    expect(seen).toHaveLength(2)
+  })
+
+  it('truncates a long note', () => {
+    claimFrames([frame('f1')], A, 10, 'n'.repeat(MAX_CLAIM_NOTE + 50))
+    expect(claimOf('f1')?.note).toHaveLength(MAX_CLAIM_NOTE)
   })
 })

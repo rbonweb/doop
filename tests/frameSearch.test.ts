@@ -4,6 +4,8 @@ import {
   findInHtml,
   findInText,
   imageSources,
+  RegexTimeoutError,
+  regexBudget,
   replaceInHtml,
   replaceInText,
   snippetAround,
@@ -182,5 +184,65 @@ describe('deep documents', () => {
     expect(findInText(deep, query('needle'))).toHaveLength(1)
     expect(replaceInText(deep, query('needle'), 'found').count).toBe(1)
     expect(textNodes(deep)).toHaveLength(1)
+  })
+})
+
+describe('catastrophic patterns', () => {
+  const adversarial = `${'a'.repeat(30)}!`
+  const html = `<p>${adversarial}</p>`
+
+  it.each(['(a|a)+$', '(\\w+\\s?)+$', '(a+|b)+$'])(
+    'stops %s within a second, in text and in source scope',
+    (pattern) => {
+      const compiled = compileQuery(pattern, { regex: true })
+      if (!compiled.ok) throw new Error(compiled.error)
+      for (const run of [
+        () => findInText(html, compiled.re, 3, regexBudget()),
+        () => findInHtml(html, compiled.re, 3, regexBudget()),
+        () => replaceInText(html, compiled.re, 'x', { budget: regexBudget() }),
+        () => replaceInHtml(html, compiled.re, 'x', { budget: regexBudget() }),
+      ]) {
+        const startedAt = performance.now()
+        expect(run).toThrow(RegexTimeoutError)
+        expect(performance.now() - startedAt).toBeLessThan(1000)
+      }
+    },
+  )
+
+  it('keeps matching ordinary regexes after a timeout, $1 included', () => {
+    const slow = compileQuery('(a|a)+$', { regex: true })
+    if (!slow.ok) throw new Error(slow.error)
+    expect(() => findInText(html, slow.re, 3, regexBudget())).toThrow(RegexTimeoutError)
+    const ordinary = compileQuery('(\\w+)@(\\w+)', { regex: true })
+    if (!ordinary.ok) throw new Error(ordinary.error)
+    const result = replaceInText('<p>me@home</p>', ordinary.re, '$2:$1', { budget: regexBudget() })
+    expect(result).toMatchObject({ html: '<p>home:me</p>', count: 1 })
+    expect(replaceInHtml('<p>me@home</p>', ordinary.re, '$2:$1', { budget: regexBudget() }).html).toBe('<p>home:me</p>')
+  })
+
+  it('shares one budget across frames, so a spent budget refuses the next call', () => {
+    const budget = regexBudget(1)
+    budget.remainingMs = 0
+    const ordinary = compileQuery('a', { regex: true })
+    if (!ordinary.ok) throw new Error(ordinary.error)
+    expect(() => findInHtml(html, ordinary.re, 3, budget)).toThrow(RegexTimeoutError)
+  })
+
+  it('marks plain finds literal and regex finds not', () => {
+    expect(compileQuery('a.b')).toMatchObject({ ok: true, literal: true })
+    expect(compileQuery('a.b', { regex: true })).toMatchObject({ ok: true, literal: false })
+  })
+})
+
+describe('literal replacements', () => {
+  it('insert $&, $$ and $1 as written in literal mode', () => {
+    expect(replaceInText('<p>cost</p>', query('cost'), '$&$&-$$-$1', { literal: true }).html).toBe(
+      '<p>$&amp;$&amp;-$$-$1</p>',
+    )
+    expect(replaceInHtml('<p>cost</p>', query('cost'), '$&$$', { literal: true }).html).toBe('<p>$&$$</p>')
+  })
+
+  it('still expands them in regex mode', () => {
+    expect(replaceInText('<p>cost</p>', query('c(o)st', { regex: true }), '$&-$1-$$').html).toBe('<p>cost-o-$</p>')
   })
 })

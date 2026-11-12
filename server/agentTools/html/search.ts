@@ -10,14 +10,52 @@ import {
   findInText,
   imageSources,
   replaceInHtml,
+  regexBudget,
+  RegexTimeoutError,
   replaceInText,
   snippetAround,
   type Hit,
 } from '../../frameSearch.ts'
+import { dropClaims } from '../../frameClaims.ts'
+import { versionConflict, type ExpectedVersion } from '../../frameVersion.ts'
 import { noPageMessage } from '../../pageTools.ts'
 import { store } from '../../store.ts'
 import { withClaimWarning, type AgentToolContext } from '../context.ts'
 import type { ResidentAgentTool } from '../resident.ts'
+
+/** frame id -> the `updatedAt` the caller last read; a batch write refuses the whole call when any has moved on. */
+type ExpectedVersions = Record<string, ExpectedVersion>
+
+const expectedVersionsSchema = z
+  .record(z.string(), z.union([z.string(), z.number()]))
+  .optional()
+  .describe(
+    'Frame id -> the updatedAt from your last read of that frame. If any listed frame changed since, the whole call is refused and nothing is written.',
+  )
+
+/** One refusal naming every listed frame whose version moved on, or undefined when all match (or none were given). */
+function versionConflicts(canvas: Canvas, expected: ExpectedVersions | undefined): string | undefined {
+  if (!expected) return undefined
+  const conflicts: string[] = []
+  for (const [frameId, version] of Object.entries(expected)) {
+    const frame = canvas.frames.find((candidate) => candidate.id === frameId)
+    const conflict = frame ? versionConflict(frame, version) : undefined
+    if (conflict) conflicts.push(conflict)
+  }
+  return conflicts.length > 0
+    ? `${conflicts.length} frame(s) changed since your read; nothing was written.\n${conflicts.join('\n')}`
+    : undefined
+}
+
+/** The values of an untrusted `expected_versions` object that are strings or numbers. */
+function parseExpectedVersions(raw: unknown): ExpectedVersions | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const out: ExpectedVersions = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value === 'string' || typeof value === 'number') out[key] = value
+  }
+  return out
+}
 
 /** One criterion of `find_frames`; every given criterion must match the same frame. */
 interface FindInput {
@@ -126,7 +164,20 @@ interface DeleteFramesResult {
   missing: string[]
 }
 
-function deleteFrames(canvas: Canvas, frameIds: string[], dryRun: boolean, actor: Actor) {
+interface DeleteOutcome {
+  payload:
+    | DeleteFramesResult
+    | { wouldDelete: { frameId: string; name: string }[]; locked: DeleteFramesResult['locked']; missing: string[] }
+  deletedIds: string[]
+}
+
+function deleteFrames(
+  canvas: Canvas,
+  frameIds: string[],
+  dryRun: boolean,
+  actor: Actor,
+  expectedVersions?: ExpectedVersions,
+): { error: string } | DeleteOutcome {
   const seen = new Set<string>()
   const missing: string[] = []
   const locked: { frameId: string; name: string }[] = []
@@ -149,11 +200,15 @@ function deleteFrames(canvas: Canvas, frameIds: string[], dryRun: boolean, actor
       deletedIds: [] as string[],
     }
   }
+  /* the check and the deletes share this synchronous tick, so no write can land between them */
+  const refused = versionConflicts(canvas, expectedVersions)
+  if (refused) return { error: refused }
   const deleted: { frameId: string; name: string }[] = []
   for (const target of targets) {
     const frame = actions.deleteFrame(target.id, actor)
     if (frame) deleted.push({ frameId: frame.id, name: frame.name })
   }
+  dropClaims(deleted.map((entry) => entry.frameId))
   return {
     payload: { deleted, locked, missing } satisfies DeleteFramesResult,
     deletedIds: deleted.map((f) => f.frameId),
@@ -169,6 +224,7 @@ interface ReplaceInput {
   frame_ids?: string[]
   page_id?: string
   dry_run?: boolean
+  expected_versions?: ExpectedVersions
 }
 
 interface ReplaceFrame {
@@ -212,44 +268,58 @@ function replaceFrames(
     }
   }
   const dryRun = input.dry_run === true
+  if (!dryRun) {
+    const refused = versionConflicts(canvas, input.expected_versions)
+    if (refused) return { error: refused }
+  }
+  /* matching runs first, for every frame, under a time budget: a pattern that is too slow refuses the call before anything is written */
+  const budget = query.literal ? undefined : regexBudget()
   const locked: ReplaceFrame[] = []
-  const changed: ReplaceFrame[] = []
   const previews: (ReplaceFrame & { snippets: string[] })[] = []
+  const writes: { frame: Frame; html: string; count: number }[] = []
   let totalReplacements = 0
+  const options = { literal: query.literal, budget }
   for (const frame of selected) {
-    const compact = compactFrameHtml(frame)
-    const hits =
-      input.scope === 'text' ? findInText(compact, query.re, MAX_MATCHES) : findInHtml(compact, query.re, MAX_MATCHES)
-    if (frame.locked) {
-      const result =
+    try {
+      const compact = compactFrameHtml(frame)
+      const hits =
         input.scope === 'text'
-          ? replaceInText(compact, query.re, input.replace)
-          : { count: replaceInHtml(compact, query.re, input.replace).count, lockedSkipped: 0 }
-      const count = result.count + result.lockedSkipped
-      if (count > 0) locked.push({ frameId: frame.id, name: frame.name, count })
-      continue
-    }
-    let result: { html: string; count: number; lockedSkipped: number }
-    if (input.scope === 'text') {
-      result = replaceInText(compact, query.re, input.replace)
-    } else {
-      const replaced = replaceInHtml(compact, query.re, input.replace)
-      result = { html: replaced.html, count: replaced.count, lockedSkipped: 0 }
-    }
-    if (result.count === 0) continue
-    if (dryRun) {
-      previews.push({
-        frameId: frame.id,
-        name: frame.name,
-        count: result.count,
-        snippets: hits.map((hit) => hit.snippet),
-      })
+          ? findInText(compact, query.re, MAX_MATCHES, budget)
+          : findInHtml(compact, query.re, MAX_MATCHES, budget)
+      let result: { html: string; count: number; lockedSkipped: number }
+      if (input.scope === 'text') {
+        result = replaceInText(compact, query.re, input.replace, options)
+      } else {
+        const replaced = replaceInHtml(compact, query.re, input.replace, options)
+        result = { html: replaced.html, count: replaced.count, lockedSkipped: 0 }
+      }
+      if (frame.locked) {
+        const count = result.count + result.lockedSkipped
+        if (count > 0) locked.push({ frameId: frame.id, name: frame.name, count })
+        continue
+      }
+      if (result.count === 0) continue
+      if (dryRun) {
+        previews.push({
+          frameId: frame.id,
+          name: frame.name,
+          count: result.count,
+          snippets: hits.map((hit) => hit.snippet),
+        })
+      } else {
+        writes.push({ frame, html: result.html, count: result.count })
+      }
       totalReplacements += result.count
-      continue
+    } catch (error) {
+      if (error instanceof RegexTimeoutError) return { error: slowPatternMessage(frame) }
+      throw error
     }
-    actions.updateFrame(frame.id, { html: result.html }, actor, { replace: true })
-    changed.push({ frameId: frame.id, name: frame.name, count: result.count })
-    totalReplacements += result.count
+  }
+  /* no await since the version check above: the writes below land on exactly the versions that were checked */
+  const changed: ReplaceFrame[] = []
+  for (const write of writes) {
+    actions.updateFrame(write.frame.id, { html: write.html }, actor, { replace: true })
+    changed.push({ frameId: write.frame.id, name: write.frame.name, count: write.count })
   }
   return {
     payload: dryRun
@@ -257,6 +327,10 @@ function replaceFrames(
       : { dryRun: false, changed, locked, totalReplacements },
     changedIds: changed.map((frame) => frame.frameId),
   }
+}
+
+function slowPatternMessage(frame: Frame): string {
+  return `the pattern is too slow on frame ${frame.id} ("${frame.name}") and was stopped; nothing was written. Simplify the regex (no nested repeats like (a+)+) or search plain text instead.`
 }
 
 const findSchema = {
@@ -282,6 +356,7 @@ const replaceSchema = {
     .describe('Only these frames; exclusive with page_id'),
   page_id: z.string().optional().describe('Only frames on this page; exclusive with frame_ids'),
   dry_run: z.boolean().optional().describe('Report what would change without writing; run it first'),
+  expected_versions: expectedVersionsSchema,
 }
 
 function pageError(ctx: AgentToolContext, canvas: Canvas, pageId: string | undefined) {
@@ -327,6 +402,7 @@ export function registerSearchTools(server: McpServer, ctx: AgentToolContext): v
         canvas_id: z.string(),
         frame_ids: z.array(z.string()).min(1).max(MAX_FRAMES).describe('Frame ids on this canvas'),
         dry_run: z.boolean().optional().describe('Report what would be deleted without deleting'),
+        expected_versions: expectedVersionsSchema,
         agent_name: ctx.agentName,
       },
     },
@@ -334,17 +410,20 @@ export function registerSearchTools(server: McpServer, ctx: AgentToolContext): v
       canvas_id,
       frame_ids,
       dry_run,
+      expected_versions,
       agent_name,
     }: {
       canvas_id: string
       frame_ids: string[]
       dry_run?: boolean
+      expected_versions?: ExpectedVersions
       agent_name: string
     }) => {
       const canvas = ctx.canvasFor(canvas_id, 'edit')
       if (!canvas) return ctx.noCanvas(canvas_id, 'edit')
       const actor = ctx.actorFrom(agent_name)
-      const result = deleteFrames(canvas, frame_ids, dry_run === true, actor)
+      const result = deleteFrames(canvas, frame_ids, dry_run === true, actor, expected_versions)
+      if ('error' in result) return ctx.err(result.error)
       return withClaimWarning(ctx.text(result.payload), result.deletedIds, actor)
     }) as unknown as ToolCallback,
   )
@@ -442,6 +521,11 @@ const deleteFramesTool: ResidentAgentTool = {
       properties: {
         frame_ids: { type: 'array', items: { type: 'string' }, description: 'Frame ids on this canvas' },
         dry_run: { type: 'boolean', description: 'Report what would be deleted without deleting' },
+        expected_versions: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          description: 'Frame id -> updatedAt from your last read; if any changed, nothing is deleted',
+        },
       },
       required: ['frame_ids'],
     },
@@ -453,7 +537,14 @@ const deleteFramesTool: ResidentAgentTool = {
     const ids = input.frame_ids.filter((id): id is string => typeof id === 'string')
     if (ids.length === 0) return { ok: false, error: 'frame_ids must hold at least one frame id' }
     if (ids.length > MAX_FRAMES) return { ok: false, error: `at most ${MAX_FRAMES} frames per call` }
-    const result = deleteFrames(canvas, ids, input.dry_run === true, ctx.actor)
+    const result = deleteFrames(
+      canvas,
+      ids,
+      input.dry_run === true,
+      ctx.actor,
+      parseExpectedVersions(input.expected_versions),
+    )
+    if ('error' in result) return { ok: false, error: result.error }
     for (const id of result.deletedIds) {
       ctx.runState.mutatedFrames.delete(id)
       ctx.runState.verificationFrames.delete(id)
@@ -483,6 +574,9 @@ function residentReplaceInput(raw: Record<string, unknown>): ReplaceInput | stri
     ...(frameIds ? { frame_ids: frameIds } : {}),
     ...(typeof raw.page_id === 'string' ? { page_id: raw.page_id } : {}),
     ...(typeof raw.dry_run === 'boolean' ? { dry_run: raw.dry_run } : {}),
+    ...(parseExpectedVersions(raw.expected_versions)
+      ? { expected_versions: parseExpectedVersions(raw.expected_versions) }
+      : {}),
   }
 }
 
@@ -506,6 +600,11 @@ const replaceInFramesTool: ResidentAgentTool = {
         frame_ids: { type: 'array', items: { type: 'string' }, description: 'Only these frames' },
         page_id: { type: 'string', description: 'Only frames on this page' },
         dry_run: { type: 'boolean', description: 'Report what would change without writing' },
+        expected_versions: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          description: 'Frame id -> updatedAt from your last read; if any changed, nothing is written',
+        },
       },
       required: ['find', 'replace', 'scope'],
     },
