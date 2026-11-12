@@ -28,7 +28,8 @@ import {
   tokensMarkdown,
   tokensTailwind,
 } from '../shared/designTokens.ts'
-import { webFontFamilies, webFontsBrief } from '../shared/webFonts.ts'
+import { webFontFamilies } from '../shared/webFonts.ts'
+import { CANVAS_FIELDS, HOSTED_FONTS_NOTE, pageOf, pickCanvasFields, pickFrameFields } from './canvasListing.ts'
 import * as actions from './actions.ts'
 import * as persist from './db/persist.ts'
 import { canComment, canvasRole, canView, type AccessUser } from './access.ts'
@@ -702,7 +703,7 @@ export function buildMcpServer(
       title: 'Get a canvas and its frames',
       _meta: previewToolMeta('Reading the canvas…', 'Canvas loaded'),
       description:
-        'Get a canvas: its name, its pages (id, name, parent_id when nested under another page, prototype start frame, background; parents are listed before their subpages), every frame with its pageId, position, size, approvalStatus and human approval attribution (not the HTML — use get_frame for that), and every sticky note (id, page_id, frame_id when attached, position, size and a text excerpt). Pass page_id to list only one page’s frames and notes; filter approval_status to ready_for_dev to find screens approved for implementation. Use this to see the current layout before adding or editing frames. Pass your agent_name so the result can tell you when human feedback is waiting (claim it with get_feedback).',
+        'Get a canvas: its name, its pages (id, name, parent_id when nested under another page, prototype start frame, background; parents are listed before their subpages), every frame with its pageId, position, size, approvalStatus and human approval attribution (not the HTML — use get_frame for that), and every sticky note (id, page_id, frame_id when attached, position, size and a text excerpt). Pass page_id to list only one page’s frames and notes; filter approval_status to ready_for_dev to find screens approved for implementation. Use this to see the current layout before adding or editing frames. Pass your agent_name so the result can tell you when human feedback is waiting (claim it with get_feedback). On a large canvas pass fields (e.g. ["pages","frames"]), frame_fields and limit to keep the answer small.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         canvas_id: z.string(),
@@ -712,9 +713,30 @@ export function buildMcpServer(
           .optional()
           .describe("Only this page's frames and notes (a page id from a previous get_canvas)"),
         approval_status: z.enum(['draft', 'ready_for_dev', 'needs_review']).optional(),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe('At most this many frames (in canvas order); pass the returned nextCursor to get the next ones'),
+        cursor: z.string().max(20).optional(),
+        fields: z
+          .array(z.enum(CANVAS_FIELDS))
+          .min(1)
+          .optional()
+          .describe('Only these parts of the canvas (id and name always come back)'),
+        frame_fields: z
+          .array(z.string().max(40))
+          .min(1)
+          .max(30)
+          .optional()
+          .describe(
+            'Only these keys of each frame, e.g. ["name","x","y","width","height","pageId"] (id always comes back)',
+          ),
       },
     },
-    async ({ canvas_id, agent_name, page_id, approval_status }) => {
+    async ({ canvas_id, agent_name, page_id, approval_status, limit, cursor, fields, frame_fields }) => {
       const c = canvasFor(canvas_id, 'view')
       if (!c) return noCanvas(canvas_id)
       if (page_id && !canvasPages(c).some((page) => page.id === page_id)) return noPage(c, page_id)
@@ -729,6 +751,9 @@ export function buildMcpServer(
           onPage(framePageId(c, f)) &&
           (!approval_status || (f.approval?.status ?? 'draft') === approval_status),
       )
+      const page = limit === undefined && cursor === undefined ? undefined : pageOf(shown, limit, cursor)
+      if (page && 'error' in page) return err(page.error)
+      const listed = page ? page.items : shown
       const docs = store.getGuidelines(canvas_id)
       const refs = store.getReferences(canvas_id)
       const library = fontsForCanvas(c)
@@ -737,7 +762,7 @@ export function buildMcpServer(
       /* design-synced canvases carry a flow map: real user navigation between
          the synced screens — context a redesign must respect */
       const flow = describeSyncFlow(await getSyncFlow(c), c.frames)
-      const images = await imagesForFrames(shown.map((f) => f.id))
+      const images = await imagesForFrames(listed.map((f) => f.id))
       const notes = [
         ...(images.size ? [IMAGES_NOTE] : []),
         ...(flow.length
@@ -751,7 +776,7 @@ export function buildMcpServer(
             ]
           : []),
         ...(library.length ? [libraryBrief(library)] : []),
-        webFontsBrief(),
+        HOSTED_FONTS_NOTE,
         ...(tokens.length ? [tokensBrief(tokens, tokenThemes)] : []),
         ...(refs.length
           ? [
@@ -764,42 +789,50 @@ export function buildMcpServer(
             ]
           : []),
       ]
+      const payload = pickCanvasFields(
+        {
+          id: c.id,
+          name: c.name,
+          pages: canvasPages(c).map(pageSummary),
+          frames: listed.map((f) =>
+            pickFrameFields(frameSummary({ ...f, pageId: framePageId(c, f) }, images.get(f.id)), frame_fields),
+          ),
+          notes: (c.notes ?? [])
+            .filter((n) => onPage(notePageId(c, n)))
+            .map((n) => noteSummary({ ...n, pageId: notePageId(c, n) })),
+          guidelines: docs.map((d) => ({
+            name: d.name,
+            title: actions.guidelineTitle(d),
+            summary: actions.guidelineSummary(d),
+            bytes: d.markdown.length,
+          })),
+          references: refs.map((r) => ({
+            id: r.id,
+            title: r.title,
+            size: `${Math.round(r.width)}x${Math.round(r.height)}`,
+            htmlBytes: r.html.length,
+            pinnedBy: r.pinnedBy,
+          })),
+          ...(c.components?.length ? { components: c.components.map((def) => catalogEntry(c, def)) } : {}),
+          ...(library.length ? { fonts: describeLibrary(library) } : {}),
+          webFonts: webFontFamilies(),
+          ...(tokens.length ? { tokens: describeTokens(tokens) } : {}),
+          ...(tokenThemes.length ? { tokenThemes } : {}),
+          ...(flow.length ? { flow } : {}),
+          ...(notes.length ? { note: notes.join(' ') } : {}),
+          ...(page ? { total: page.total, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) } : {}),
+        },
+        fields,
+      )
+      /* where the page sits in the whole list stays visible even when fields trims the rest */
+      if (page) {
+        payload.total = page.total
+        if (page.nextCursor) payload.nextCursor = page.nextCursor
+      }
       return withPreview(
-        withFeedbackNotice(
-          text({
-            id: c.id,
-            name: c.name,
-            pages: canvasPages(c).map(pageSummary),
-            frames: shown.map((f) => frameSummary({ ...f, pageId: framePageId(c, f) }, images.get(f.id))),
-            notes: (c.notes ?? [])
-              .filter((n) => onPage(notePageId(c, n)))
-              .map((n) => noteSummary({ ...n, pageId: notePageId(c, n) })),
-            guidelines: docs.map((d) => ({
-              name: d.name,
-              title: actions.guidelineTitle(d),
-              summary: actions.guidelineSummary(d),
-              bytes: d.markdown.length,
-            })),
-            references: refs.map((r) => ({
-              id: r.id,
-              title: r.title,
-              size: `${Math.round(r.width)}x${Math.round(r.height)}`,
-              htmlBytes: r.html.length,
-              pinnedBy: r.pinnedBy,
-            })),
-            ...(c.components?.length ? { components: c.components.map((def) => catalogEntry(c, def)) } : {}),
-            ...(library.length ? { fonts: describeLibrary(library) } : {}),
-            webFonts: webFontFamilies(),
-            ...(tokens.length ? { tokens: describeTokens(tokens) } : {}),
-            ...(tokenThemes.length ? { tokenThemes } : {}),
-            ...(flow.length ? { flow } : {}),
-            ...(notes.length ? { note: notes.join(' ') } : {}),
-          }),
-          canvas_id,
-          agent_name ? actorFrom(agent_name) : undefined,
-        ),
+        withFeedbackNotice(text(payload), canvas_id, agent_name ? actorFrom(agent_name) : undefined),
         canvas_id,
-        shown,
+        listed,
       )
     },
   )
