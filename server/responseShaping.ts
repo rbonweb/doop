@@ -114,6 +114,17 @@ function summaryLine(tool: string, payload: Record<string, unknown>): string {
   return `${head}${counts ? `: ${counts}` : ''}. Full data in structuredContent.`
 }
 
+/** Tools that are not read-only (a label target may stamp an element id as an annotation) but answer like reads: their JSON text is shaped for structured clients all the same, and the payload is attached as `structuredContent` here since they build none of their own. */
+const SHAPED_LIKE_READS = new Set(['measure_frame', 'lint_frame', 'compare_frames'])
+
+/** The result with its first JSON text block also as `structuredContent`; unchanged when it has none or the call failed. */
+function withPayload(result: ToolResult): ToolResult {
+  if (result.structuredContent !== undefined || result.isError) return result
+  const first = result.content?.find(isTextBlock)
+  const payload = first && isTextBlock(first) ? parseObject(first.text) : undefined
+  return payload ? { ...result, structuredContent: payload } : result
+}
+
 /** Replaces the JSON payload text block of a read with one line; the other blocks stay. */
 function summariseRead(tool: string, result: ToolResult): ToolResult {
   const content = result.content
@@ -129,7 +140,7 @@ function summariseRead(tool: string, result: ToolResult): ToolResult {
 }
 
 /**
- * Every tool registered on `server` from here on has its result shaped for the client that called it: the review reminder goes out once per frame per session (`sessionKey`), and a read-only tool's JSON text becomes one line for clients that read `structuredContent` (`STRUCTURED_CONTENT_CLIENTS`). Any other or unknown client keeps the full text.
+ * Every tool registered on `server` from here on has its result shaped for the client that called it: the review reminder goes out once per frame per session (`sessionKey`), and a read-only tool's JSON text (or that of `SHAPED_LIKE_READS`) becomes one line for clients that read `structuredContent` (`STRUCTURED_CONTENT_CLIENTS`). Any other or unknown client keeps the full text.
  * `clientName` is asked only when a read with `structuredContent` is about to be summarised.
  */
 export function shapeResponses(
@@ -147,9 +158,12 @@ export function shapeResponses(
       let result = raw as ToolResult
       const args = params.length > 1 ? params[0] : undefined
       if (opts.sessionKey) result = thinReminders(result, args, opts.sessionKey)
-      if (readOnly && result.structuredContent !== undefined && !batchScope.getStore()) {
+      const likeRead = SHAPED_LIKE_READS.has(name)
+      if ((likeRead || (readOnly && result.structuredContent !== undefined)) && !batchScope.getStore()) {
         const client = (await opts.clientName())?.toLowerCase()
-        if (client && STRUCTURED_CONTENT_CLIENTS.has(client)) result = summariseRead(name, result)
+        if (client && STRUCTURED_CONTENT_CLIENTS.has(client)) {
+          result = summariseRead(name, likeRead ? withPayload(result) : result)
+        }
       }
       return result
     }) as unknown as Callback)
