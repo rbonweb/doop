@@ -347,7 +347,7 @@ ${FRAME_STYLES}
 - To add a page, call create_canvas_page (name, optional parent_id; add_canvas_page is its deprecated alias): it appends without the full list, so it never conflicts with other agents adding pages at the same time.
 - set_canvas_pages (rename, reorder, nest, delete) takes the complete list plus the expectedPages you read from get_canvas, so re-read get_canvas first and send parent_id back unchanged for pages you are not moving. If someone changed the pages meanwhile, the error lists the current pages: re-apply your change to that list and retry.
 - move_frame moves a frame to another canvas you can edit, keeping its id, version history, attached notes and comment threads (update_frame pageId moves it between pages of the same canvas).
-- get_canvas takes an optional page_id to list one page's frames and notes, which keeps the result small on a large canvas. get_frame with include_html: false returns a frame's metadata without its markup.
+- get_canvas takes an optional page_id to list one page's frames and notes, which keeps the result small on a large canvas. Everything else in that answer stays on the page too: claims name only that page's frames and the sync flow lists only navigation between that page's frames. get_frame with include_html: false returns a frame's metadata without its markup.
 
 ## GitHub-imported frames — the repo is the source of truth
 

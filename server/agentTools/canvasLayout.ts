@@ -52,6 +52,12 @@ const arrangeShape = {
     .object({ x: z.number(), y: z.number() })
     .optional()
     .describe('Top-left of the first row (default: the top-left of the frames being arranged)'),
+  dry_run: z
+    .boolean()
+    .optional()
+    .describe(
+      'Plan only: list each move as planned (frame_id, from, to) and write nothing, so the layout can be checked first',
+    ),
 }
 const arrangeInput = z.object(arrangeShape)
 type ArrangeInput = z.infer<typeof arrangeInput>
@@ -116,7 +122,13 @@ function arrangeFrames(canvas: Canvas, input: ArrangeInput, actor: Actor): Outco
     return {
       ok: true,
       changed: false,
-      data: { ok: true, moved: [], unchanged: 0, skipped_locked: skippedLocked, unmatched: [] },
+      data: {
+        ok: true,
+        ...(input.dry_run ? { dry_run: true, planned: [] } : { moved: [] }),
+        unchanged: 0,
+        skipped_locked: skippedLocked,
+        unmatched: [],
+      },
     }
   }
   const boxes: NamedBox[] = frames.map((f) => ({
@@ -137,6 +149,7 @@ function arrangeFrames(canvas: Canvas, input: ArrangeInput, actor: Actor): Outco
   const { placed, unmatched } = arrangeRows(boxes, rules, { gap: input.gap ?? DEFAULT_GAP, origin })
 
   const moved: { id: string; name: string; x: number; y: number }[] = []
+  const planned: { frame_id: string; name: string; from: { x: number; y: number }; to: { x: number; y: number } }[] = []
   let unchanged = 0
   for (const frame of frames) {
     const spot = placed.get(frame.id)
@@ -147,8 +160,19 @@ function arrangeFrames(canvas: Canvas, input: ArrangeInput, actor: Actor): Outco
       unchanged += 1
       continue
     }
+    if (input.dry_run) {
+      planned.push({ frame_id: frame.id, name: frame.name, from: { x: frame.x, y: frame.y }, to: { x, y } })
+      continue
+    }
     const updated = actions.updateFrame(frame.id, { x, y }, actor)
     if (updated) moved.push({ id: frame.id, name: updated.name, x: updated.x, y: updated.y })
+  }
+  if (input.dry_run) {
+    return {
+      ok: true,
+      changed: false,
+      data: { ok: true, dry_run: true, planned, unchanged, skipped_locked: skippedLocked, unmatched },
+    }
   }
   return {
     ok: true,
@@ -205,7 +229,7 @@ function checkLayout(canvas: Canvas, input: CheckInput): Outcome {
 }
 
 const ARRANGE_DESCRIPTION =
-  'Lay frames out in tidy rows on one page, in a single call, instead of moving them one by one with update_frame. By default desktops (900 px and wider) go in the first row and everything narrower in the second, left to right by their current x, 300 px apart, from the top-left of the frames being arranged. Pass frame_ids (all on one page) or page_id (every frame of the page except demo content), and rows to group differently: each row has min_width, max_width, name (a substring) and order (x, name, given); a frame joins the first row it matches and frames no row matches stay put and are listed in unmatched. Locked frames never move (skipped_locked); a rotated frame is arranged by its unrotated box; sticky notes attached to a moved frame go with it; frames already in place are not written.'
+  'Lay frames out in tidy rows on one page, in a single call, instead of moving them one by one with update_frame. By default desktops (900 px and wider) go in the first row and everything narrower in the second, left to right by their current x, 300 px apart, from the top-left of the frames being arranged. Pass frame_ids (all on one page) or page_id (every frame of the page except demo content), and rows to group differently: each row has min_width, max_width, name (a substring) and order (x, name, given); a frame joins the first row it matches and frames no row matches stay put and are listed in unmatched. Locked frames never move (skipped_locked); a rotated frame is arranged by its unrotated box; sticky notes attached to a moved frame go with it; frames already in place are not written. Pass dry_run: true to get the planned moves (frame_id, from, to) without writing anything.'
 
 const CHECK_DESCRIPTION =
   'Read-only layout check for one page: lists pairs of frames and sticky notes that overlap, or that face each other closer than min_gap (default 40 px), so you can fix them before handing the page back. A note and the frame it is attached to are never reported; hidden and demo frames are left out. Fix with arrange_frames or update_frame.'
@@ -275,6 +299,7 @@ const arrangeDefinition: Anthropic.Tool = {
       rows: { type: 'array', items: rowSchema, minItems: 1, maxItems: 10 },
       gap: { type: 'number', minimum: 0, maximum: 5000 },
       origin: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } }, required: ['x', 'y'] },
+      dry_run: { type: 'boolean', description: 'Plan only: list the planned moves and write nothing' },
     },
   },
 }

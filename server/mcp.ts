@@ -778,14 +778,26 @@ export function buildMcpServer(
       const tokenThemes = store.getTokenThemes(canvas_id)
       /* design-synced canvases carry a flow map: real user navigation between
          the synced screens — context a redesign must respect */
-      const flow = describeSyncFlow(await getSyncFlow(c), c.frames)
+      const syncFlow = await getSyncFlow(c)
+      /* on one page, only the navigation between frames of that page, so no other page's frame is named */
+      const pageIds = new Set(c.frames.filter((f) => onPage(framePageId(c, f))).map((f) => f.id))
+      const onThisPage = (link: { fromFrameId: string; toFrameId: string }) =>
+        !page_id || (pageIds.has(link.fromFrameId) && pageIds.has(link.toFrameId))
+      const flow = describeSyncFlow(
+        { links: syncFlow.links.filter(onThisPage), edges: syncFlow.edges.filter(onThisPage) },
+        c.frames,
+      )
       const images = await imagesForFrames(listed.map((f) => f.id))
-      const claims = claimsOn(canvas_id).map((claim) => ({
-        frameId: claim.frameId,
-        holder: claim.holder,
-        note: claim.note,
-        expiresAt: new Date(claim.expiresAt).toISOString(),
-      }))
+      /* claims follow the frames listed, so a page_id (or a limit) never names a frame that is not in the answer */
+      const listedIds = new Set(listed.map((f) => f.id))
+      const claims = claimsOn(canvas_id)
+        .filter((claim) => listedIds.has(claim.frameId))
+        .map((claim) => ({
+          frameId: claim.frameId,
+          holder: claim.holder,
+          note: claim.note,
+          expiresAt: new Date(claim.expiresAt).toISOString(),
+        }))
       const notes = [
         ...(images.size ? [IMAGES_NOTE] : []),
         ...(flow.length
