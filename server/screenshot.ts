@@ -4,7 +4,9 @@ import path from 'node:path'
 import type Sharp from 'sharp'
 import puppeteer, { type Browser, type Page } from 'puppeteer-core'
 import type { Frame } from '../shared/types.ts'
+import type { CaptureRequest, CaptureResult, Clip } from './renderTypes.ts'
 import { guardPublicPageRequests } from './publicUrl.ts'
+import { cachedRenderResponse } from './renderFetchCache.ts'
 
 /**
  * Render a frame's HTML in headless Chrome so agents can *see* their work.
@@ -139,6 +141,7 @@ export async function loadFramePage(
   try {
     const assetOrigin = new URL(env.BETTER_AUTH_URL).origin
     await guardPublicPageRequests(page, {
+      cached: cachedRenderResponse,
       allowUrl: (url) =>
         (url.origin === assetOrigin && url.pathname.startsWith('/a/')) ||
         /* webfonts referenced by imported frames (imports request the
@@ -437,7 +440,7 @@ interface CaptureArea {
   width: number
   height: number
   scale: number
-  type: 'png' | 'jpeg'
+  type: 'png' | 'jpeg' | 'webp'
   quality: number
 }
 
@@ -476,7 +479,12 @@ async function loadSharp(): Promise<typeof Sharp> {
 }
 
 /* Strips are lossless PNG, so a JPEG is encoded once, from the stitched pixels, exactly as a single capture would be. The viewport keeps the frame's full height, so vh units and fixed elements lay out as they do on the canvas. */
-async function captureInStrips(page: Page, area: CaptureArea): Promise<Buffer> {
+async function captureInStrips(
+  page: Page,
+  area: CaptureArea,
+  /* where the captured region starts in the frame, in design px */
+  origin: { x: number; y: number } = { x: 0, y: 0 },
+): Promise<Buffer> {
   const outWidth = Math.round(area.width * area.scale)
   const outHeight = Math.round(area.height * area.scale)
   const strips: Buffer[] = []
@@ -486,7 +494,7 @@ async function captureInStrips(page: Page, area: CaptureArea): Promise<Buffer> {
     const shot = await page.screenshot({
       type: 'png',
       optimizeForSpeed: true,
-      clip: { x: 0, y: top / area.scale, width: area.width, height: rows / area.scale },
+      clip: { x: origin.x, y: origin.y + top / area.scale, width: area.width, height: rows / area.scale },
     })
     strips.push(await exactSize(Buffer.from(shot), outWidth, rows))
   }
@@ -496,6 +504,7 @@ async function captureInStrips(page: Page, area: CaptureArea): Promise<Buffer> {
     .extract({ left: 0, top: 0, width: outWidth, height: outHeight })
     .flatten({ background: '#ffffff' })
   /* optimised Huffman tables need every coefficient of the image in memory at once (about 1 GB for a 2x export of a 20000 px frame); without them the JPEG streams too */
+  if (area.type === 'webp') return stitched.webp({ quality: area.quality, effort: 2 }).toBuffer()
   return area.type === 'jpeg'
     ? stitched.jpeg({ quality: area.quality, optimiseCoding: false }).toBuffer()
     : stitched.png().toBuffer()
@@ -507,4 +516,48 @@ async function exactSize(png: Buffer, width: number, height: number): Promise<Bu
   const meta = await sharp(png).metadata()
   if (meta.width === width && meta.height === height) return png
   return sharp(png).resize(width, height, { fit: 'fill' }).png().toBuffer()
+}
+
+/* a region inside the frame, in whole design px: floor the origin, ceil the size, cut at the frame's edges */
+function clampRegion(region: Clip, width: number, height: number): Clip {
+  const left = Math.max(0, Math.floor(region.x))
+  const top = Math.max(0, Math.floor(region.y))
+  const right = Math.min(width, Math.ceil(region.x + region.width))
+  const bottom = Math.min(height, Math.ceil(region.y + region.height))
+  if (!(right > left) || !(bottom > top)) throw new RangeError('region is outside the frame')
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+/** One capture of a frame, or of a region of it: png, jpg or webp at a scale, taken after an optional `prepare` step (which may pick the region). A region taller than one strip is captured in strips and stitched. */
+export async function captureFrame(frame: Frame, req: CaptureRequest): Promise<CaptureResult> {
+  const width = Math.max(1, Math.round(frame.width))
+  const height = Math.max(1, Math.round(frame.height))
+  const { scale } = req
+  const loaded = await loadFramePage(frame, { width, height, deviceScaleFactor: scale })
+  const { page } = loaded
+  try {
+    const prepared = req.prepare ? await req.prepare(page) : undefined
+    const wanted = prepared ?? req.clip ?? { x: 0, y: 0, width, height }
+    const region = clampRegion(wanted, width, height)
+    const type = req.format === 'jpg' ? 'jpeg' : req.format
+    const quality = req.quality ?? (type === 'webp' ? 80 : 90)
+    let buf: Buffer
+    if (region.height * scale > MAX_STRIP_DEVICE_PX) {
+      buf = await captureInStrips(
+        page,
+        { width: region.width, height: region.height, scale, type, quality },
+        { x: region.x, y: region.y },
+      )
+    } else {
+      buf = Buffer.from(await page.screenshot({ type, ...(type === 'png' ? {} : { quality }), clip: region }))
+    }
+    return {
+      buf,
+      clip: region,
+      width: Math.round(region.width * scale),
+      height: Math.round(region.height * scale),
+    }
+  } finally {
+    await loaded.close()
+  }
 }

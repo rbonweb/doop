@@ -15,6 +15,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { Request, Response } from 'express'
 import { fromNodeHeaders } from 'better-auth/node'
 import { z } from 'zod'
+import { assetSourceSchema, assetTagsSchema } from './assetSourceSchema.ts'
 import { store } from './store.ts'
 import { addPage, fromToolPage, noPageMessage, savePages, toToolPage, updateFrameMeta } from './pageTools.ts'
 import { fontsForCanvas } from './fonts.ts'
@@ -41,7 +42,10 @@ import * as workspaces from './workspaces.ts'
 import { auth, getAccessProfile, getUserName, isBanned } from './auth.ts'
 import { capture, captureThrottled } from './analytics.ts'
 import { renderFrame } from './screenshot.ts'
-import { imagesForFrames } from './assets.ts'
+import { frameScreenshot } from './frameShots.ts'
+import { frameTargetSchema, regionSchema, TargetError } from './renderTargets.ts'
+import { pageActionsSchema } from './pageActions.ts'
+import { imagesForFrames, imageDetailsForFrame } from './assets.ts'
 import type { FrameImage } from '../shared/imageDescriptions.ts'
 import {
   MAX_PDF_FRAMES,
@@ -53,6 +57,7 @@ import {
   takePdfExportSlot,
 } from './pdfExport.ts'
 import { primeImage } from './previews.ts'
+import { normalizeRenderParams, renderUrlQuery } from './renderParams.ts'
 import {
   DEFAULT_EXPORT_SCALE,
   MAX_EXPORT_SCALE,
@@ -1810,6 +1815,7 @@ export function buildMcpServer(
       arrive(f.canvasId, agent_name)
       const canvas = store.getCanvas(f.canvasId)
       const images = (await imagesForFrames([f.id])).get(f.id)
+      const imageAssets = await imageDetailsForFrame(f.id)
       const instances = f.html.includes(INSTANCE_ATTR) ? instancesIn(f) : []
       return withFeedbackNotice(
         text({
@@ -1818,6 +1824,14 @@ export function buildMcpServer(
           ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}),
           ...(include_html === false ? {} : { html: expand_components ? f.html : compactFrameHtml(f) }),
           ...(instances.length ? { instances } : {}),
+          ...(imageAssets.length
+            ? {
+                image_assets: imageAssets.map(({ src, ...rest }) => ({
+                  ...rest,
+                  url: `${env.BETTER_AUTH_URL}${src}`,
+                })),
+              }
+            : {}),
         }),
         f.canvasId,
         agent_name ? actorFrom(agent_name) : undefined,
@@ -1867,12 +1881,17 @@ export function buildMcpServer(
     {
       title: 'Export frame as image or PDF',
       description:
-        "Export the frame's CURRENT design. PNG/JPG return public URLs for publishing it elsewhere (CMS media library, social post, og:image; the URL re-renders when the frame changes) at `scale` (default 2x; 1, 3 or 4 for other sizes). PDF returns the file itself (an embedded application/pdf resource): vector, text selectable, one page per frame sized to the frame; pass frame_ids to put several frames of the same canvas into one multi-page PDF (pages in the order given: frame_id first, then frame_ids as listed).",
+        "Export the frame's CURRENT design. PNG/JPG/WebP return public URLs for publishing it elsewhere (CMS media library, social post, og:image): `image_url` is pinned to this version of the frame (cache it forever), `live_url` always shows the current design. Rendered at `scale` (default 2x; 1, 3 or 4 for other sizes). PDF returns the file itself (an embedded application/pdf resource): vector, text selectable, one page per frame sized to the frame; pass frame_ids to put several frames of the same canvas into one multi-page PDF (pages in the order given: frame_id first, then frame_ids as listed).",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
-        format: z.enum(['png', 'jpg', 'pdf']).optional().describe('default png'),
-        quality: z.number().min(1).max(100).optional().describe('jpg only, default 90'),
+        format: z.enum(['png', 'jpg', 'webp', 'pdf']).optional().describe('default png'),
+        quality: z
+          .number()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe('jpg and webp only, default 90 for jpg and 80 for webp'),
         scale: z
           .number()
           .min(MIN_EXPORT_SCALE)
@@ -1894,17 +1913,20 @@ export function buildMcpServer(
       const f = frameFor(frame_id, 'view')
       if (!f) return noFrame(frame_id)
       if (format === 'pdf') return exportPdf(f, frame_ids ?? [])
-      const ext = format === 'jpg' ? 'jpg' : 'png'
-      const q = ext === 'jpg' ? `&quality=${quality ?? 90}` : ''
+      const imageFormat = format === 'jpg' || format === 'webp' ? format : 'png'
       const density = fitExportScale(f, parseExportScale(scale ?? DEFAULT_EXPORT_SCALE) ?? DEFAULT_EXPORT_SCALE)
-      const pixels = exportPixelSize(f, density)
+      const params = normalizeRenderParams(f, { format: imageFormat, scale: density, quality })
+      const pixels = exportPixelSize(f, params.scale)
+      const base = `${env.BETTER_AUTH_URL}/i/${frame_id}.${imageFormat}`
+      const pinned = `${base}?${renderUrlQuery(params, f.updatedAt)}`
       return text({
-        image_url: `${env.BETTER_AUTH_URL}/i/${frame_id}.${ext}?scale=${density}${q}`,
-        download_url: `${env.BETTER_AUTH_URL}/i/${frame_id}.${ext}?scale=${density}${q}&download`,
-        scale: density,
+        image_url: pinned,
+        download_url: `${pinned}&download`,
+        live_url: `${base}?${renderUrlQuery(params)}`,
+        scale: params.scale,
         width: pixels.width,
         height: pixels.height,
-        note: 'Public URL, no auth needed. To publish: fetch the URL and upload the bytes to the target platform (e.g. WordPress POST /wp/v2/media), or hotlink it directly — it always shows the current design.',
+        note: 'Public URLs, no auth needed. image_url is pinned to this version of the frame (cache it forever); live_url always shows the current design. To publish: fetch the URL and upload the bytes to the target platform (e.g. WordPress POST /wp/v2/media), or hotlink one directly.',
       })
     },
   )
@@ -1914,7 +1936,7 @@ export function buildMcpServer(
     {
       title: 'Upload an image or stylesheet asset',
       description:
-        'Upload an image (png/jpg/webp/gif/svg) or a CSS stylesheet (.css), max 5 MB, and get back a permanent public URL to reference in frame HTML: <img src> or a CSS background for an image, <link rel="stylesheet" href> in the <head> for a stylesheet — use this instead of inlining data: URIs, and upload a shared theme stylesheet once instead of pasting the same large <style> block into every frame. Pick ONE input by where the file lives: (1) remote — pass source_url and the server fetches it; (2) LOCAL FILE — pass local_file=true to receive a one-time upload URL and a ready-to-run curl command, run it in your shell, and the curl response JSON contains the permanent url. (3) data — base64, LAST RESORT for tiny files (under ~100 KB) when you cannot run shell commands; larger base64 payloads are slow and corrupt easily.',
+        'Upload an image (png/jpg/webp/gif/svg) or a CSS stylesheet (.css), max 5 MB, and get back a permanent public URL to reference in frame HTML: <img src> or a CSS background for an image, <link rel="stylesheet" href> in the <head> for a stylesheet — use this instead of inlining data: URIs, and upload a shared theme stylesheet once instead of pasting the same large <style> block into every frame. Pick ONE input by where the file lives: (1) remote — pass source_url and the server fetches it; (2) LOCAL FILE — pass local_file=true to receive a one-time upload URL and a ready-to-run curl command, run it in your shell, and the curl response JSON contains the permanent url. (3) data — base64, LAST RESORT for tiny files (under ~100 KB) when you cannot run shell commands; larger base64 payloads are slow and corrupt easily. Optional source and tags record where a file came from and make it findable with list_assets.',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       inputSchema: {
         source_url: z.string().optional().describe('Public http(s) URL to fetch the file from (remote files)'),
@@ -1933,10 +1955,16 @@ export function buildMcpServer(
           .describe(
             'URL of a stylesheet (/a/<id>.css) uploaded earlier to replace in place: the URL stays the same, every frame linking it picks up the new file, and the old file stays at <url>?v=<n>. Stylesheets only.',
           ),
+        source: assetSourceSchema
+          .optional()
+          .describe(
+            'Where the file came from (provenance): { kind: frame|store|url, ... }; source_url defaults to { kind: "url" }',
+          ),
+        tags: assetTagsSchema.optional().describe('Tags to find the asset again with list_assets'),
         agent_name: agentName,
       },
     },
-    async ({ data, source_url, local_file, canvas_id, replace_url, agent_name }) => {
+    async ({ data, source_url, local_file, canvas_id, replace_url, source, tags, agent_name }) => {
       const provided = [data, source_url, local_file].filter(Boolean).length
       if (provided !== 1)
         return err(
@@ -1958,6 +1986,7 @@ export function buildMcpServer(
           ownerId,
           uploadedBy: agent_name,
           ...(replaceId ? { replaceAssetId: replaceId } : {}),
+          ...(replaceId ? {} : { ...(source ? { source } : {}), ...(tags ? { tags } : {}) }),
         })
         const upload_url = `${env.BETTER_AUTH_URL}/u/${token}`
         return withFeedback(
@@ -2003,9 +2032,16 @@ export function buildMcpServer(
             actorFrom(agent_name),
           )
         }
+        const origin = source ?? (source_url ? { kind: 'url' as const, url: source_url } : undefined)
         const asset = await assets.createAsset(
           buf,
-          { canvasId: canvas_id, ownerId, uploadedBy: agent_name },
+          {
+            canvasId: canvas_id,
+            ownerId,
+            uploadedBy: agent_name,
+            ...(origin ? { source: origin } : {}),
+            ...(tags ? { tags } : {}),
+          },
           { stylesheets: true },
         )
         const url = `${env.BETTER_AUTH_URL}/a/${asset.id}.${asset.ext}`
@@ -2541,7 +2577,7 @@ export function buildMcpServer(
       title: 'Screenshot a frame',
       _meta: previewToolMeta('Rendering the frame…', 'Frame rendered'),
       description:
-        'Render a frame and return a PNG screenshot of it — this is how you SEE your design. Always review your work with this after creating or updating a frame, then fix what looks wrong (spacing, overflow, contrast, alignment) and check again. Iterate until it actually looks good, not just until the HTML seems right.',
+        'Render a frame and return a PNG screenshot of it — this is how you SEE your design. Always review your work with this after creating or updating a frame, then fix what looks wrong (spacing, overflow, contrast, alignment) and check again. Iterate until it actually looks good, not just until the HTML seems right. Pass target or region to render one section of the frame at full size instead of the whole page downscaled; pass actions to click, hover, type or wait in the page before the capture, so interactive states show.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
@@ -2549,10 +2585,14 @@ export function buildMcpServer(
           .union([z.literal(1), z.literal(2)])
           .optional()
           .describe('Device scale factor: 1 (default) or 2 for a retina-resolution image'),
+        target: frameTargetSchema.optional(),
+        region: regionSchema.optional(),
+        format: z.enum(['png', 'webp']).optional().describe('png (default) or webp'),
+        actions: pageActionsSchema.optional(),
         agent_name: agentName.optional(),
       },
     },
-    async ({ frame_id, scale, agent_name }) => {
+    async ({ frame_id, scale, format, target, region, actions, agent_name }) => {
       const live = frameFor(frame_id, 'view')
       if (!live) return noFrame(frame_id)
       arrive(live.canvasId, agent_name)
@@ -2560,6 +2600,34 @@ export function buildMcpServer(
          this older image with its newer updatedAt, or the cache would serve
          it as current for the next five minutes */
       const f = { ...live }
+      if (target !== undefined || region !== undefined || format !== undefined || actions !== undefined) {
+        try {
+          const shot = await frameScreenshot(f, { target, region, format, actions, scale: scale ?? 1 })
+          const outcome = shot.actions
+            ? `, actions: ${shot.actions.ok ? `${shot.actions.done}/${actions?.length ?? shot.actions.done} ok` : (shot.actions.error ?? 'failed')}`
+            : ''
+          return withPreview(
+            withFeedbackNotice(
+              {
+                content: [
+                  { type: 'image' as const, data: shot.buf.toString('base64'), mimeType: shot.mime },
+                  {
+                    type: 'text' as const,
+                    text: `Screenshot of “${f.name}” (${shot.clip.x},${shot.clip.y} ${shot.clip.width}×${shot.clip.height}, ${shot.mime === 'image/webp' ? 'webp' : 'png'}, html ${f.html.length} bytes${outcome})`,
+                  },
+                ],
+              },
+              f.canvasId,
+              agent_name ? actorFrom(agent_name) : undefined,
+            ),
+            f.canvasId,
+            [f],
+          )
+        } catch (e) {
+          if (e instanceof TargetError || e instanceof RangeError) return err(e.message)
+          return err(`screenshot failed: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
       try {
         const png = await renderFrame(f, scale ?? 1)
         /* the ChatGPT card loads this exact image next — serve it from cache */
