@@ -123,14 +123,24 @@ describe.skipIf(!findBrowserPath())('runPageActions', { timeout: 30_000 }, () =>
   })
 
   it('keeps one budget across all steps', async () => {
-    await withPage(fixture, async (p) => {
+    const delayed = `<!doctype html><body><script>setTimeout(() => {
+      const el = document.createElement('div')
+      el.id = 'late'
+      el.textContent = 'here'
+      document.body.append(el)
+    }, 300)</script></body>`
+    await withPage(delayed, async (p) => {
       const started = Date.now()
-      const outcome = await runPageActions(p, [{ wait_for: '#no1' }, { wait_for: '#no2' }, { wait_for: '#no3' }], 400)
+      const outcome = await runPageActions(
+        p,
+        [{ wait_for: '#late' }, { wait_for: '#missing' }, { wait_for: '#never' }],
+        500,
+      )
       const elapsed = Date.now() - started
-      expect(outcome).toMatchObject({ ok: false, done: 0 })
-      expect(outcome.error).toContain('step 1')
-      expect(elapsed).toBeGreaterThanOrEqual(300)
-      expect(elapsed).toBeLessThan(2000)
+      expect(outcome).toMatchObject({ ok: false, done: 1 })
+      expect(outcome.error).toContain('step 2')
+      expect(elapsed).toBeGreaterThanOrEqual(450)
+      expect(elapsed).toBeLessThan(1500)
       expect(ACTIONS_BUDGET_MS).toBe(5000)
     })
   })

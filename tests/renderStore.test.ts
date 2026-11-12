@@ -91,6 +91,19 @@ describe('stored renders', () => {
     expect(await storage.listObjects('render/')).toHaveLength(1)
     expect(await renderStore.getStoredRender('keep-me', 1, 'h1', 'png')).not.toBeNull()
   })
+
+  it('lists by the frame prefix and spares a frame whose id extends the purged one', async () => {
+    await renderStore.putStoredRender('abc', 1, 'h1', 'png', Buffer.from('a'))
+    await renderStore.putStoredRender('abc_x', 1, 'h1', 'png', Buffer.from('b'))
+    await renderStore.putStoredRender('zzz', 1, 'h1', 'png', Buffer.from('c'))
+    const list = vi.spyOn(storage, 'listObjects')
+    expect(await renderStore.purgeFrameRenders('abc')).toBe(1)
+    expect(list).toHaveBeenCalledWith('render/abc_')
+    list.mockRestore()
+    expect(await renderStore.getStoredRender('abc', 1, 'h1', 'png')).toBeNull()
+    expect(await renderStore.getStoredRender('abc_x', 1, 'h1', 'png')).not.toBeNull()
+    expect(await renderStore.getStoredRender('zzz', 1, 'h1', 'png')).not.toBeNull()
+  })
 })
 
 describe('sweepRenders', () => {
@@ -137,6 +150,23 @@ describe('sweepRenders', () => {
 describe('listObjects', () => {
   it('returns [] when the render directory does not exist', async () => {
     expect(await storage.listObjects('render/')).toEqual([])
+  })
+
+  it('keeps only names that start with the part after render/', async () => {
+    await put('abc', 1, 'h1', 'a')
+    await put('abc_x', 1, 'h1', 'b')
+    await put('other', 1, 'h1', 'c')
+    expect((await storage.listObjects('render/abc_')).map((o) => o.key).sort()).toEqual([
+      'render/abc_1_h1.png',
+      'render/abc_x_1_h1.png',
+    ])
+    expect(await storage.listObjects('render/')).toHaveLength(3)
+  })
+
+  it('rejects a prefix that is not render/ plus safe characters', async () => {
+    for (const bad of ['render/../x', 'render/a/b', 'render/a b', 'render/a.b', 'other/']) {
+      await expect(storage.listObjects(bad as `render/${string}`)).rejects.toThrow('malformed list prefix')
+    }
   })
 
   it('lists size and modification time', async () => {

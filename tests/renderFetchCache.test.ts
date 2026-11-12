@@ -13,7 +13,6 @@ import {
   GOOGLE_CSS_TTL_MS,
   MAX_CACHE_BYTES,
   MAX_ENTRY_BYTES,
-  UNPINNED_CSS_TTL_MS,
   cachedRenderResponse,
   clearRenderFetchCache,
   renderFetchCacheStats,
@@ -82,34 +81,28 @@ describe('/a/ assets', () => {
       found('text/css', 'css', Buffer.from(`rev${version ?? 'latest'}`), version ?? 3),
     )
     const pinned = await cachedRenderResponse(appUrl('/a/sheet.css?v=2'), 'GET')
-    const latest = await cachedRenderResponse(appUrl('/a/sheet.css'), 'GET')
+    const other = await cachedRenderResponse(appUrl('/a/sheet.css?v=3'), 'GET')
     expect(pinned?.body.toString()).toBe('rev2')
-    expect(latest?.body.toString()).toBe('revlatest')
+    expect(other?.body.toString()).toBe('rev3')
     expect(mocks.getAsset).toHaveBeenCalledWith('sheet', 2)
+    expect(mocks.getAsset).toHaveBeenCalledWith('sheet', 3)
     expect(pinned?.headers['Cache-Control']).toContain('immutable')
-    expect(latest?.headers['Cache-Control']).toBe('no-cache')
     expect(renderFetchCacheStats().entries).toBe(2)
   })
 
-  it('keeps a pinned stylesheet forever and an unpinned one for 5 seconds', async () => {
+  it('does not cache an unpinned stylesheet and keeps a pinned one forever', async () => {
     vi.useFakeTimers()
     mocks.getAsset.mockImplementation(async (_id: string, version?: number) =>
       found('text/css', 'css', Buffer.from('body{}'), version ?? 1),
     )
+    expect(await cachedRenderResponse(appUrl('/a/sheet.css'), 'GET')).toBeUndefined()
+    expect(await cachedRenderResponse(appUrl('/a/sheet.css?v=abc'), 'GET')).toBeUndefined()
+    expect(mocks.getAsset).not.toHaveBeenCalled()
+    expect(renderFetchCacheStats().entries).toBe(0)
     await cachedRenderResponse(appUrl('/a/sheet.css?v=1'), 'GET')
-    await cachedRenderResponse(appUrl('/a/sheet.css'), 'GET')
-    expect(mocks.getAsset).toHaveBeenCalledTimes(2)
-    vi.advanceTimersByTime(UNPINNED_CSS_TTL_MS - 1)
-    await cachedRenderResponse(appUrl('/a/sheet.css?v=1'), 'GET')
-    await cachedRenderResponse(appUrl('/a/sheet.css'), 'GET')
-    expect(mocks.getAsset).toHaveBeenCalledTimes(2)
-    vi.advanceTimersByTime(2)
-    await cachedRenderResponse(appUrl('/a/sheet.css?v=1'), 'GET')
-    await cachedRenderResponse(appUrl('/a/sheet.css'), 'GET')
-    expect(mocks.getAsset).toHaveBeenCalledTimes(3)
     vi.advanceTimersByTime(365 * 24 * 60 * 60 * 1000)
     await cachedRenderResponse(appUrl('/a/sheet.css?v=1'), 'GET')
-    expect(mocks.getAsset).toHaveBeenCalledTimes(3)
+    expect(mocks.getAsset).toHaveBeenCalledTimes(1)
   })
 
   it('does not handle other paths on the app origin or other methods', async () => {
