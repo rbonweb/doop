@@ -12,6 +12,7 @@ import type {
   DesignDecision,
   ElementComment,
   Frame,
+  FrameClaimView,
   GuidelineDoc,
   MemoryProposal,
   MemoryReference,
@@ -21,6 +22,7 @@ import type {
 } from '../../shared/types'
 import { roleAllows, type CanvasRole } from '../../shared/canvasRole'
 import type { SnapGuide } from './snap'
+import { liveClaims } from './frameClaims'
 import { isDrawingTool, type Tool } from './tools'
 import { fitViewport, zoomAroundCenter } from './fit'
 import { setOutlines } from './frameBridge'
@@ -51,6 +53,8 @@ export type ComposerSend =
 interface State {
   canvas: Canvas | null
   presences: Record<string, Presence>
+  /** advisory claims on frames, keyed by frame id (the room sends the whole list; expired ones are dropped) */
+  claims: Record<string, FrameClaimView>
   cursors: Record<string, { x: number; y: number }>
   /** peers' cameras, keyed by clientId. Kept out of `presences` on purpose:
    *  a camera moves many times a second, and a new presences map re-renders
@@ -236,6 +240,7 @@ interface State {
   clearPulse(rootId: string): void
   setGuestNameRequest(request: State['guestNameRequest']): void
   setPresences(list: Presence[]): void
+  setClaims(list: FrameClaimView[]): void
   upsertPresence(p: Presence): void
   removePresence(clientId: string): void
   setCursor(clientId: string, x: number, y: number): void
@@ -418,6 +423,7 @@ export const useStore = create<State>((set, get) => ({
   canvas: null,
   activePageId: null,
   presences: {},
+  claims: {},
   cursors: {},
   peerViewports: {},
   activity: [],
@@ -593,6 +599,7 @@ export const useStore = create<State>((set, get) => ({
       return { pulses }
     }),
   setGuestNameRequest: (guestNameRequest) => set({ guestNameRequest }),
+  setClaims: (list) => set({ claims: liveClaims(list, Date.now()) }),
   setPresences: (list) =>
     set((s) => ({
       presences: Object.fromEntries(list.map((p) => [p.clientId, p])),

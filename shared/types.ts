@@ -691,6 +691,15 @@ export type ClientMessage =
   | { type: 'editing'; frameId: string | null }
   | { type: 'frame:drag'; frameId: string; x: number; y: number; width: number; height: number; rotation?: number }
 
+/** An advisory claim on a frame as the room shows it: who is working on it and until when. */
+export interface FrameClaimView {
+  frameId: string
+  holder: string
+  note: string
+  /** ISO time the claim lapses */
+  expiresAt: string
+}
+
 export type ServerMessage =
   | {
       type: 'init'
@@ -741,6 +750,8 @@ export type ServerMessage =
   | { type: 'frame:updated'; frame: Frame; actor: Actor }
   | { type: 'frame:deleted'; frameId: string; actor: Actor }
   | { type: 'frame:streaming'; frameId: string; active: boolean; actor: Actor }
+  /** the advisory claims on this canvas's frames, whole list on every change and on join */
+  | { type: 'frame:claims'; canvasId: string; claims: FrameClaimView[] }
   | { type: 'canvas:renamed'; name: string; actor: Actor }
   | { type: 'canvas:pages'; pages: CanvasPageInfo[]; actor: Actor }
   /** a sticky note was created or changed (position, size, text, colour) */
