@@ -25,6 +25,7 @@ import {
   shiftAttachedNotes,
 } from '../shared/notes.ts'
 import { decodeEscapedHtml, looksEscapedHtml, repairEscapedHtml } from './escapedHtml.ts'
+import { rememberDeletedNote } from './recentDeletions.ts'
 import { fontsForCanvas } from './fonts.ts'
 import { withFontFaces } from '../shared/fonts.ts'
 import { withWebFontLinks } from '../shared/webFonts.ts'
@@ -2313,8 +2314,20 @@ export function deleteFrame(frameId: string, actor: Actor): Frame | undefined {
      so their auto “Designing…” tasks end with it */
   finishStream(frameId, false)
   finishReveal(frameId)
+  const doomed = store.getFrame(frameId)
+  const doomedCanvas = doomed ? store.getCanvas(doomed.canvasId) : undefined
+  const doomedNotes = doomed ? (doomedCanvas?.notes ?? []).filter((n) => n.frameId === frameId) : []
   const frame = store.deleteFrame(frameId)
   if (!frame) return undefined
+  for (const note of doomedNotes)
+    rememberDeletedNote(note.id, {
+      cause: 'frame',
+      canvasId: frame.canvasId,
+      frameId: frame.id,
+      frameName: frame.name,
+      by: actor.name,
+      at: Date.now(),
+    })
   unsavedStamps.delete(frameId)
   bursts.delete(frameId)
   thumbs.purge(frameId)
@@ -2519,6 +2532,7 @@ export function deleteNote(noteId: string, actor: Actor): NoteResult {
   if (!found) return noteFail('note not found', 404)
   const note = store.deleteNote(found.canvasId, noteId)
   if (!note) return noteFail('note not found', 404)
+  rememberDeletedNote(noteId, { cause: 'note', canvasId: found.canvasId, by: actor.name, at: Date.now() })
   broadcast(found.canvasId, { type: 'note:delete', id: noteId, actor })
   logActivity(found.canvasId, actor, 'removed a sticky note', note.frameId)
   touch(found.canvasId, actor, null)
