@@ -1158,6 +1158,8 @@ class Store {
   createFrame(
     canvasId: string,
     input: {
+      /** a frame id chosen by the caller (duplicate_frames links copies to each other before they exist); minted when unset */
+      id?: string
       name: string
       pageId?: string
       x?: number
@@ -1186,7 +1188,7 @@ class Store {
     const now = Date.now()
     const { x, y } = placeNewFrame(frames, input.x, input.y)
     const frame: Frame = {
-      id: nanoid(10),
+      id: input.id ?? nanoid(10),
       canvasId,
       pageId,
       name: input.name,

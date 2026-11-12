@@ -11,6 +11,7 @@ import { DEFAULT_ROLE_ID, mentionedRole, normalizePipeline, roleByAgentName, rol
 import { canvasPages, framePageId, normalizePageTree } from '../shared/pages.ts'
 import { FRAME_COMMENT_SELECTOR, isCanvasComment, type CommentAnchorInput } from '../shared/comments.ts'
 import { isElementId } from '../shared/elementId.ts'
+import { remapFrameTargets } from '../shared/prototype.ts'
 import { parseRunnerPick, runnerKey, type RunnerPick } from '../shared/agentRunner.ts'
 import { hasElementId, stampElementByQuote, stampElementId, stampLegacyCommentElement } from './elementIds.ts'
 import {
@@ -25,6 +26,7 @@ import {
   shiftAttachedNotes,
 } from '../shared/notes.ts'
 import { decodeEscapedHtml, looksEscapedHtml, repairEscapedHtml } from './escapedHtml.ts'
+import { rememberDeletedNote } from './recentDeletions.ts'
 import { fontsForCanvas } from './fonts.ts'
 import { withFontFaces } from '../shared/fonts.ts'
 import { withWebFontLinks } from '../shared/webFonts.ts'
@@ -2158,6 +2160,79 @@ export function createFrame(
   return frame
 }
 
+/** One copy `duplicateFrames` makes: the source frame, its name, page and place. */
+export interface FrameDuplicate {
+  sourceId: string
+  name: string
+  pageId: string
+  x: number
+  y: number
+}
+
+/** Copies of frames on one canvas, each the source's HTML byte for byte: size, slide flag, speaker notes, hidden, locked and rotation ride along, approval, comments, versions and notes do not. Links between frames copied in the same call point at the copies. A source holding a component main goes through the write path like any new frame, so the canvas never has two mains of one component (`rewritten`). The caller has checked that every source and page exists on the canvas; a copy that cannot be made is left out. Peers get each frame at once (no reveal: a copy is not being designed), one activity line and one touch cover the call. */
+export function duplicateFrames(
+  canvasId: string,
+  items: readonly FrameDuplicate[],
+  actor: Actor,
+): { source: Frame; frame: Frame; rewritten: boolean }[] {
+  const ids = new Map<string, string>()
+  const planned = items.flatMap((item) => {
+    const source = store.getFrame(item.sourceId)
+    if (!source || source.canvasId !== canvasId) return []
+    const id = nanoid(10)
+    if (!ids.has(item.sourceId)) ids.set(item.sourceId, id)
+    return [{ item, source, id }]
+  })
+  const made: { source: Frame; frame: Frame; rewritten: boolean }[] = []
+  for (const { item, source, id } of planned) {
+    let html = remapFrameTargets(source.html, ids)
+    let rewritten = false
+    if (html.includes(`${COMPONENT_ATTR}="`)) {
+      /* no id yet: a main marker arriving in a new frame is a copy of that main */
+      html = prepareWrite(canvasId, '', html, '', actor.name).html
+      takeComponentIssues('')
+      rewritten = html !== remapFrameTargets(source.html, ids)
+    }
+    const frame = store.createFrame(
+      canvasId,
+      {
+        id,
+        name: item.name,
+        pageId: item.pageId,
+        x: item.x,
+        y: item.y,
+        width: source.width,
+        height: source.height,
+        html,
+        slide: source.slide,
+        speakerNotes: source.speakerNotes,
+        hidden: source.hidden,
+        locked: source.locked,
+        rotation: source.rotation,
+      },
+      actor.name,
+      editorOf(actor),
+    )
+    if (!frame) continue
+    bursts.set(frame.id, { actor, lastAt: frame.createdAt })
+    broadcast(canvasId, { type: 'frame:created', frame, actor })
+    emitCanvasEvent(canvasId, { type: 'frame.created', frame, actor })
+    made.push({ source, frame, rewritten })
+  }
+  const first = made[0]
+  if (!first) return made
+  logActivity(
+    canvasId,
+    actor,
+    made.length === 1
+      ? `duplicated “${first.source.name}” as “${first.frame.name}”`
+      : `duplicated ${made.length} frames`,
+    made.length === 1 ? first.frame.id : undefined,
+  )
+  touch(canvasId, actor, made.length === 1 ? first.frame.id : undefined)
+  return made
+}
+
 /** `replace` marks a deliberate whole-document write (set_frame_html): it
  *  always opens a history burst, even when the new document keeps most of
  *  the old one's wrapper — only the reveal-or-morph choice stays similarity
@@ -2313,8 +2388,20 @@ export function deleteFrame(frameId: string, actor: Actor): Frame | undefined {
      so their auto “Designing…” tasks end with it */
   finishStream(frameId, false)
   finishReveal(frameId)
+  const doomed = store.getFrame(frameId)
+  const doomedCanvas = doomed ? store.getCanvas(doomed.canvasId) : undefined
+  const doomedNotes = doomed ? (doomedCanvas?.notes ?? []).filter((n) => n.frameId === frameId) : []
   const frame = store.deleteFrame(frameId)
   if (!frame) return undefined
+  for (const note of doomedNotes)
+    rememberDeletedNote(note.id, {
+      cause: 'frame',
+      canvasId: frame.canvasId,
+      frameId: frame.id,
+      frameName: frame.name,
+      by: actor.name,
+      at: Date.now(),
+    })
   unsavedStamps.delete(frameId)
   bursts.delete(frameId)
   thumbs.purge(frameId)
@@ -2519,6 +2606,7 @@ export function deleteNote(noteId: string, actor: Actor): NoteResult {
   if (!found) return noteFail('note not found', 404)
   const note = store.deleteNote(found.canvasId, noteId)
   if (!note) return noteFail('note not found', 404)
+  rememberDeletedNote(noteId, { cause: 'note', canvasId: found.canvasId, by: actor.name, at: Date.now() })
   broadcast(found.canvasId, { type: 'note:delete', id: noteId, actor })
   logActivity(found.canvasId, actor, 'removed a sticky note', note.frameId)
   touch(found.canvasId, actor, null)
