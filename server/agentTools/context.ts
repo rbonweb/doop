@@ -6,7 +6,11 @@ import { claimWarning } from '../frameClaims.ts'
 import { versionConflict, type ExpectedVersion } from '../frameVersion.ts'
 
 /** The content a tool answers with: text blocks, images, resources. */
-export type AgentToolContent = { content: { type: 'text' | 'image'; [k: string]: unknown }[] }
+export type AgentToolContentBlock =
+  | { type: 'text'; text: string; [k: string]: unknown }
+  | { type: 'image'; data: string; mimeType: string; [k: string]: unknown }
+
+export type AgentToolContent = { content: AgentToolContentBlock[] }
 
 /** A tool's answer as the MCP SDK takes it. */
 export type AgentToolResult = AgentToolContent & { isError?: boolean }
