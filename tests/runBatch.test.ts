@@ -53,8 +53,8 @@ function seed(): Canvas {
   return canvas
 }
 
-async function connect(userId: string) {
-  const server = buildMcpServer('Someone', userId)
+async function connect(userId: string, clientName?: string) {
+  const server = buildMcpServer('Someone', userId, undefined, clientName ? async () => clientName : undefined)
   const client = new Client({ name: 'batch-test', version: '1.0.0' })
   const [a, b] = InMemoryTransport.createLinkedPair()
   await server.connect(b)
@@ -93,6 +93,24 @@ afterEach(() => {
 })
 
 describe('run_batch', () => {
+  it('keeps the full JSON of a read for a client that gets one-line summaries when called alone', async () => {
+    const { client, close } = await connect(OWNER, 'claude-code')
+    try {
+      const alone = await direct(client, 'get_canvas', base)
+      expect(() => JSON.parse(alone.text.split('\n')[0] ?? '')).toThrow()
+      const { summary, texts } = await batch(client, [{ tool: 'get_canvas', args: base }])
+      expect(summary.ok).toBe(true)
+      const payload = JSON.parse(texts[texts.indexOf('--- op 0 get_canvas ---') + 1] ?? '') as {
+        id: string
+        frames: unknown[]
+      }
+      expect(payload.id).toBe(CANVAS_ID)
+      expect(payload.frames).toHaveLength(1)
+    } finally {
+      await close()
+    }
+  })
+
   it('runs get_canvas, create_frame and update_frame in order', async () => {
     const { client, close } = await connect(OWNER)
     try {
