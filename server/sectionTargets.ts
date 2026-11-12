@@ -80,21 +80,39 @@ interface TagLocation extends OffsetLocation {
   attrs?: Record<string, OffsetLocation>
 }
 
+/** The part of a parse5 node `sourceEnd` reads, in the shape of either tree adapter. */
+interface SourceNode {
+  sourceCodeLocation?: TagLocation | null
+  children?: SourceNode[]
+  childNodes?: SourceNode[]
+}
+
 /** Where an element's source really ends. parse5 closes an element with no end tag of its own (a
  *  `<footer>` left open when `</body>` arrives, or at the end of the file) at the end of the
  *  document, which would swallow `</body></html>` and whatever follows; its content ends where
- *  its last child does. */
-function sourceEnd(el: Element): number {
-  let current: AnyNode = el
-  for (;;) {
-    const location = current.sourceCodeLocation as TagLocation | null | undefined
-    if (!location) return 0
-    if (location.endTag) return location.endOffset
-    const children: ChildNode[] = 'children' in current ? current.children : []
-    const last = [...children].reverse().find((child) => child.sourceCodeLocation)
-    if (!last) return location.startTag ? Math.min(location.endOffset, location.startTag.endOffset) : location.endOffset
-    current = last
+ *  the last thing parsed inside it does. That is found over the whole subtree, since the last
+ *  child can be an implied element with no location of its own (a `<tbody>`). */
+export function sourceEnd(root: object): number {
+  const top = root as SourceNode
+  const own = top.sourceCodeLocation
+  if (!own) return 0
+  if (own.endTag) return own.endOffset
+  let end = own.startTag ? own.startTag.endOffset : own.endOffset
+  const stack: SourceNode[] = [...(top.children ?? top.childNodes ?? [])]
+  for (let next = stack.pop(); next; next = stack.pop()) {
+    const location = next.sourceCodeLocation
+    const kids = next.children ?? next.childNodes ?? []
+    for (const kid of kids) stack.push(kid)
+    if (!location) continue
+    /* an element left open has the document's end as its own; its start tag is what it really wrote */
+    const real = location.endTag
+      ? location.endTag.endOffset
+      : location.startTag
+        ? location.startTag.endOffset
+        : location.endOffset
+    if (real > end) end = real
   }
+  return end
 }
 
 function isElement(node: AnyNode): node is Element {

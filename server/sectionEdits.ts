@@ -1,5 +1,6 @@
 import { parse, parseFragment } from 'parse5'
 import type { DefaultTreeAdapterTypes } from 'parse5'
+import { sourceEnd } from './sectionTargets.ts'
 import type { SourceRange } from './sectionTargets.ts'
 
 export interface EditableElement {
@@ -599,22 +600,6 @@ export function applyEdits(html: string, edits: Edit[]): { ok: true; html: strin
     result = result.slice(0, edit.start) + edit.text + result.slice(edit.end)
   }
   return { ok: true, html: result }
-}
-
-/** Where an element's source really ends. parse5 closes an element that has no end tag of its own
- *  (a `<footer>` left open when `</body>` arrives, or at the end of the file) at the end of the
- *  document, so its span would swallow `</body></html>` and whatever follows; its content ends
- *  where its last child does. */
-export function sourceEnd(node: TreeNode): number {
-  let current = node
-  for (;;) {
-    const location = current.sourceCodeLocation
-    if (!location) return 0
-    if (location.endTag) return location.endOffset
-    const last = [...(current.childNodes ?? [])].reverse().find((child) => child.sourceCodeLocation)
-    if (!last) return location.startTag ? Math.min(location.endOffset, location.startTag.endOffset) : location.endOffset
-    current = last
-  }
 }
 
 export function frameOutline(html: string): Outline {

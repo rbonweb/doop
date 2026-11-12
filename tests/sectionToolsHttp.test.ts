@@ -332,6 +332,19 @@ describe('true section sizes and element ids in the outline', () => {
     expect(instance.bytes).toBeGreaterThan(30_000)
     expect(instance.compactBytes).toBeLessThan(300)
     expect(instance.element_id).toMatch(/^[a-z0-9]{6}$/)
+    /* the instance root already wears its instance id as data-doop-id: the outline reuses it, never stamps another */
+    const stored = jsonOf(await call('get_frame', { frame_id: withInstance.id, expand_components: true }))
+      .html as string
+    expect(stored.split(`data-doop-id="${instance.element_id}"`)).toHaveLength(2)
+    expect(await frameHtml(withInstance.id)).toContain(`id="${instance.element_id}"`)
+    await call('patch_frame', {
+      frame_id: withInstance.id,
+      ops: [{ op: 'set_attr', target: { element_id: outline.sections[0]!.element_id }, name: 'data-x', value: '1' }],
+      expected_version: outline.version,
+    })
+    const again = await outlineOf(agent, withInstance.id)
+    expect(again.sections[1]!.element_id).toBe(instance.element_id)
+    const replaceVersion = again.version
 
     const before = (
       jsonOf(await call('get_frame', { frame_id: withInstance.id, expand_components: true })).html as string
@@ -342,11 +355,17 @@ describe('true section sizes and element ids in the outline', () => {
         frame_id: withInstance.id,
         target: { selector: 'doop-use' },
         html: replacement,
-        expected_version: outline.version,
+        expected_version: replaceVersion,
       }),
     )
-    const replaced = result.replaced as { bytesBefore: number; frameBytesBefore: number; frameBytesAfter: number }
+    const replaced = result.replaced as {
+      bytesBefore: number
+      storedBytesBefore: number
+      frameBytesBefore: number
+      frameBytesAfter: number
+    }
     expect(replaced.bytesBefore).toBe(instance.compactBytes)
+    expect(replaced.storedBytesBefore).toBe(instance.bytes)
     expect(replaced.frameBytesBefore).toBe(before)
     expect(replaced.frameBytesBefore - replaced.frameBytesAfter).toBeGreaterThan(30_000 - 300)
   })

@@ -1,5 +1,6 @@
 import { isTag, type Element } from 'domhandler'
 import { describe, expect, it } from 'vitest'
+import { applyEdits, editsForOp, frameOutline } from '../server/sectionEdits.ts'
 import type { FrameDocument } from '../server/sectionTargets.ts'
 import {
   describeTarget,
@@ -293,4 +294,47 @@ describe('source spans of a large element', () => {
       expect(match.end - match.start).toBeGreaterThan(30_000)
     }
   })
+})
+
+describe('source spans of elements left open', () => {
+  const tail = '</body></html>'
+  const cases: Record<string, { html: string; tag: string; last: string }> = {
+    'a table with rows': {
+      html: `<section>x</section><table><tr><td>hello world long</td></tr><tr><td>more</td></tr>${tail}`,
+      tag: 'table',
+      last: '<td>more</td></tr>',
+    },
+    'a table with a caption': {
+      html: `<section>x</section><table><caption>cap</caption><tr><td>a</td></tr>${tail}`,
+      tag: 'table',
+      last: '<td>a</td></tr>',
+    },
+    'a select with open options': {
+      html: `<section>x</section><select><option>one<option>two${tail}`,
+      tag: 'select',
+      last: 'two',
+    },
+  }
+
+  for (const [name, { html, tag, last }] of Object.entries(cases)) {
+    it(`ends ${name} at its last content, in the target and in the outline`, () => {
+      const end = html.indexOf(last) + last.length
+      const start = html.indexOf(`<${tag}`)
+      const result = resolveTarget(html, { selector: tag })
+      if (!result.ok) throw new Error(result.error)
+      expect({ start: result.matches[0]!.start, end: result.matches[0]!.end }).toEqual({ start, end })
+      const row = frameOutline(html).sections.find((section) => section.tag === tag)
+      expect(row?.bytes).toBe(end - start)
+    })
+
+    it(`replaces ${name} without leaving a residue`, () => {
+      const result = resolveTarget(html, { selector: tag })
+      if (!result.ok) throw new Error(result.error)
+      const edits = editsForOp(html, result.matches[0]!, { op: 'replace', html: '<p>new</p>' }, 'body')
+      if (!edits.ok) throw new Error(edits.error)
+      const applied = applyEdits(html, edits.edits)
+      if (!applied.ok) throw new Error(applied.error)
+      expect(applied.html).toBe(`<section>x</section><p>new</p>${tail}`)
+    })
+  }
 })
