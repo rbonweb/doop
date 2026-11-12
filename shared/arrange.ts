@@ -176,9 +176,11 @@ export function tidyUp(boxes: readonly Box[], fallbackGap = 40): Spot[] {
 
 /** How far apart two boxes are: 0 when they touch or their projections overlap on both axes without area, the larger of the horizontal and vertical separations otherwise, and a negative number (minus the smaller side of their intersection) when they overlap with area. */
 export function gapBetween(a: Box, b: Box): number {
+  const ox = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)
+  const oy = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
+  if (ox > 0 && oy > 0) return -Math.min(ox, oy)
   const horizontal = Math.max(b.x - (a.x + a.width), a.x - (b.x + b.width))
   const vertical = Math.max(b.y - (a.y + a.height), a.y - (b.y + b.height))
-  if (horizontal < 0 && vertical < 0) return -Math.min(-horizontal, -vertical)
   return Math.max(horizontal, vertical, 0)
 }
 
