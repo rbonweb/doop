@@ -106,6 +106,7 @@ import {
   getAsset,
   reconcileAssetRefs,
   beginTicketUpload,
+  ticketAssetMeta,
   endTicketUpload,
   createAsset,
   MAX_ASSET_BYTES,
@@ -760,17 +761,7 @@ app.put('/u/:token', async (req, res) => {
       })
     }
     /* tickets come only from upload_asset, which takes theme stylesheets as well as images */
-    const asset = await createAsset(
-      Buffer.concat(chunks),
-      {
-        canvasId: ticket.canvasId,
-        ownerId: ticket.ownerId,
-        uploadedBy: ticket.uploadedBy,
-        ...(ticket.source ? { source: ticket.source } : {}),
-        ...(ticket.tags ? { tags: ticket.tags } : {}),
-      },
-      { stylesheets: true },
-    )
+    const asset = await createAsset(Buffer.concat(chunks), ticketAssetMeta(ticket), { stylesheets: true })
     success = true
     const url = `${env.BETTER_AUTH_URL}/a/${asset.id}.${asset.ext}`
     res.json({

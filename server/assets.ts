@@ -206,6 +206,11 @@ export function beginTicketUpload(token: string): Omit<UploadTicket, 'inFlight'>
   return t
 }
 
+/** The asset fields a ticket carries to the PUT that lands its bytes, provenance included. */
+export function ticketAssetMeta(t: Omit<UploadTicket, 'inFlight'>) {
+  return { canvasId: t.canvasId, ownerId: t.ownerId, uploadedBy: t.uploadedBy, source: t.source, tags: t.tags }
+}
+
 /** Success consumes the ticket; failure releases it for a retry until TTL. */
 export function endTicketUpload(token: string, success: boolean): void {
   if (success) tickets.delete(token)
