@@ -39,6 +39,9 @@ import * as workspaces from './workspaces.ts'
 import { auth, getAccessProfile, getUserName, isBanned } from './auth.ts'
 import { capture, captureThrottled } from './analytics.ts'
 import { renderFrame } from './screenshot.ts'
+import { frameScreenshot } from './frameShots.ts'
+import { frameTargetSchema, regionSchema, TargetError } from './renderTargets.ts'
+import { pageActionsSchema } from './pageActions.ts'
 import { imagesForFrames } from './assets.ts'
 import type { FrameImage } from '../shared/imageDescriptions.ts'
 import {
@@ -2486,7 +2489,7 @@ export function buildMcpServer(
       title: 'Screenshot a frame',
       _meta: previewToolMeta('Rendering the frame…', 'Frame rendered'),
       description:
-        'Render a frame and return a PNG screenshot of it — this is how you SEE your design. Always review your work with this after creating or updating a frame, then fix what looks wrong (spacing, overflow, contrast, alignment) and check again. Iterate until it actually looks good, not just until the HTML seems right.',
+        'Render a frame and return a PNG screenshot of it — this is how you SEE your design. Always review your work with this after creating or updating a frame, then fix what looks wrong (spacing, overflow, contrast, alignment) and check again. Iterate until it actually looks good, not just until the HTML seems right. Pass target or region to render one section of the frame at full size instead of the whole page downscaled; pass actions to click, hover, type or wait in the page before the capture, so interactive states show.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
@@ -2494,10 +2497,14 @@ export function buildMcpServer(
           .union([z.literal(1), z.literal(2)])
           .optional()
           .describe('Device scale factor: 1 (default) or 2 for a retina-resolution image'),
+        target: frameTargetSchema.optional(),
+        region: regionSchema.optional(),
+        format: z.enum(['png', 'webp']).optional().describe('png (default) or webp'),
+        actions: pageActionsSchema.optional(),
         agent_name: agentName.optional(),
       },
     },
-    async ({ frame_id, scale, agent_name }) => {
+    async ({ frame_id, scale, format, target, region, actions, agent_name }) => {
       const live = frameFor(frame_id, 'view')
       if (!live) return noFrame(frame_id)
       arrive(live.canvasId, agent_name)
@@ -2505,6 +2512,34 @@ export function buildMcpServer(
          this older image with its newer updatedAt, or the cache would serve
          it as current for the next five minutes */
       const f = { ...live }
+      if (target !== undefined || region !== undefined || format !== undefined || actions !== undefined) {
+        try {
+          const shot = await frameScreenshot(f, { target, region, format, actions, scale: scale ?? 1 })
+          const outcome = shot.actions
+            ? `, actions: ${shot.actions.ok ? `${shot.actions.done}/${actions?.length ?? shot.actions.done} ok` : (shot.actions.error ?? 'failed')}`
+            : ''
+          return withPreview(
+            withFeedbackNotice(
+              {
+                content: [
+                  { type: 'image' as const, data: shot.buf.toString('base64'), mimeType: shot.mime },
+                  {
+                    type: 'text' as const,
+                    text: `Screenshot of “${f.name}” (${shot.clip.x},${shot.clip.y} ${shot.clip.width}×${shot.clip.height}, ${shot.mime === 'image/webp' ? 'webp' : 'png'}, html ${f.html.length} bytes${outcome})`,
+                  },
+                ],
+              },
+              f.canvasId,
+              agent_name ? actorFrom(agent_name) : undefined,
+            ),
+            f.canvasId,
+            [f],
+          )
+        } catch (e) {
+          if (e instanceof TargetError || e instanceof RangeError) return err(e.message)
+          return err(`screenshot failed: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
       try {
         const png = await renderFrame(f, scale ?? 1)
         /* the ChatGPT card loads this exact image next — serve it from cache */
