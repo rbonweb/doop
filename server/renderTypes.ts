@@ -30,7 +30,7 @@ export interface RenderParams {
   crop?: RenderCrop
 }
 
-/** One element of a frame, as every render tool names it. `element_id` is a `data-doop-id`, `label` a `data-doop-label` (else a top-level section whose first heading reads it), `selector` any CSS selector. */
+/** One element of a frame, as every render tool names it. `element_id` is a `data-doop-id`, `label` a section label as `get_frame` mode "outline" prints it, or a `data-doop-label` (resolved on the server by `targetResolution.ts`), `selector` any CSS selector. */
 export type FrameTarget = { element_id: string } | { label: string } | { selector: string }
 
 /** What `captureFrame` takes. `clip` and `prepare` are exclusive ways to pick the region; neither means the whole frame. */

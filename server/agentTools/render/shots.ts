@@ -25,6 +25,8 @@ interface CompareOptions {
   layout: 'row' | 'grid'
   format: 'png' | 'webp'
   scale: number
+  /** the name an element id is stamped under for one frame's label target; undefined where the caller may not edit */
+  stampAs?: (frame: Frame) => string | undefined
 }
 
 const itemSchema = z
@@ -89,6 +91,7 @@ async function compareShots(
       region: item.region,
       format: opts.format,
       scale: opts.scale,
+      stampAs: opts.stampAs?.(frames[index]!),
     }),
   )
   const labels = items.map((item, index) => item.label ?? defaultLabel(frames[index]!, item))
@@ -112,8 +115,8 @@ async function compareShots(
   }
 }
 
-function optionsOf(input: z.infer<typeof compareSchema>): CompareOptions {
-  return { layout: input.layout ?? 'row', format: input.format ?? 'webp', scale: input.scale ?? 1 }
+function optionsOf(input: z.infer<typeof compareSchema>, stampAs?: CompareOptions['stampAs']): CompareOptions {
+  return { layout: input.layout ?? 'row', format: input.format ?? 'webp', scale: input.scale ?? 1, stampAs }
 }
 
 function shotError(e: unknown, lead: string): string {
@@ -158,7 +161,13 @@ export function registerShotTools(server: McpServer, ctx: AgentToolContext): voi
       const canvasId = frames[0]!.canvasId
       ctx.arrive(canvasId, agent_name)
       try {
-        const shot = await compareShots(frames, items, optionsOf({ items, layout, format, scale }))
+        const shot = await compareShots(
+          frames,
+          items,
+          optionsOf({ items, layout, format, scale }, (frame) =>
+            ctx.frameFor(frame.id, 'edit') ? ctx.actorFrom(agent_name).name : undefined,
+          ),
+        )
         const result = {
           content: [
             { type: 'image' as const, data: shot.buf.toString('base64'), mimeType: shot.mime },
@@ -199,7 +208,11 @@ export const shotResidentTools: ResidentAgentTool[] = [
         }
         frames.push(frame)
       }
-      return compareShots(frames, items, optionsOf(parsed.data))
+      return compareShots(
+        frames,
+        items,
+        optionsOf(parsed.data, () => ctx.actor.name),
+      )
         .then((shot) => ({
           ok: true as const,
           content: [

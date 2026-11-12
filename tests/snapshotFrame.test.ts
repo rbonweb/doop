@@ -22,7 +22,7 @@ vi.mock('../server/storage.ts', () => ({
   getObject: async (key: string) => held.objects.get(key) ?? null,
 }))
 vi.mock('../server/store.ts', () => ({
-  store: { renderSource: async (frame: Frame) => frame },
+  store: { renderSource: async (frame: Frame) => frame, getFrame: () => undefined },
 }))
 
 const { snapshotFrame } = await import('../server/snapshots.ts')
@@ -108,6 +108,20 @@ describe.skipIf(!findBrowserPath())('snapshotFrame', { timeout: 60_000 }, () => 
     expect([out.width, out.height]).toEqual([400, 1200])
     expect(out.source.region).toEqual({ x: 0, y: 0, w: 400, h: 1200 })
     expect(out.source.element).toBeUndefined()
+  })
+
+  it('snapshots the section an outline label names and refuses a label that names nothing', async () => {
+    const frame = {
+      ...bandedFrame(),
+      html: '<!doctype html><html><head><style>*{margin:0}</style></head><body><section data-doop-id="el-pricing" style="height:100px;background:#ccc"><h2>Pricing</h2></section><section style="height:100px;background:#999"><h2>FAQ</h2></section></body></html>',
+    }
+    const out = await snapshotFrame({ frame, target: { label: 'faq' }, agentName: 'Snapshot Agent' })
+    expect(out.source.region).toEqual({ x: 0, y: 100, w: 400, h: 100 })
+    const byId = await snapshotFrame({ frame, target: { label: 'Pricing' }, agentName: 'Snapshot Agent' })
+    expect(byId.source.element).toBe('el-pricing')
+    await expect(snapshotFrame({ frame, target: { label: 'Missing' }, agentName: 'Snapshot Agent' })).rejects.toThrow(
+      'no element matches label "Missing"',
+    )
   })
 
   it('refuses a region and a target together', async () => {

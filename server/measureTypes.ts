@@ -68,6 +68,8 @@ export interface MeasureOptions {
   width?: number
   /** the sections to measure; default every top-level section */
   targets?: FrameTarget[]
+  /** the name an element id is stamped under when a label resolves to an element without one; absent for a read-only caller */
+  stampAs?: string
   /** CSS selectors whose matches get a line count (for lint's max_text_lines) */
   lineQueries?: string[]
 }

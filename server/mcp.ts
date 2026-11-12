@@ -2640,7 +2640,14 @@ export function buildMcpServer(
       const f = { ...live }
       if (target !== undefined || region !== undefined || format !== undefined || actions !== undefined) {
         try {
-          const shot = await frameScreenshot(f, { target, region, format, actions, scale: scale ?? 1 })
+          const shot = await frameScreenshot(f, {
+            target,
+            region,
+            format,
+            actions,
+            scale: scale ?? 1,
+            stampAs: frameFor(frame_id, 'edit') ? actorFrom(agent_name).name : undefined,
+          })
           const outcome = shot.actions
             ? `, actions: ${shot.actions.ok ? `${shot.actions.done}/${actions?.length ?? shot.actions.done} ok` : (shot.actions.error ?? 'failed')}`
             : ''
