@@ -71,6 +71,11 @@ describe('guideSections', () => {
     expect(findGuideSection(FIXTURE, 'nope')).toBeUndefined()
   })
 
+  it('returns undefined for a blank section instead of prefix-matching the first', () => {
+    expect(findGuideSection(FIXTURE, '')).toBeUndefined()
+    expect(findGuideSection(FIXTURE, '   ')).toBeUndefined()
+  })
+
   it('lists every section with its slug, title and size', () => {
     const index = guideIndex(FIXTURE)
     expect(index.split('\n')).toEqual([
@@ -149,6 +154,20 @@ describe('get_guide sections over MCP', () => {
       expect(result.isError).toBe(true)
       expect(textOf(result)).toContain('no guide section "no-such-section"')
       expect(textOf(result)).toContain(guideSections(DOOP_GUIDE)[0]!.slug)
+    } finally {
+      await client.close()
+    }
+  })
+
+  it('refuses a blank section instead of returning the first one', async () => {
+    const client = await guideClient()
+    try {
+      const result = await client.callTool({
+        name: 'get_guide',
+        arguments: { topic: 'doop-instructions', section: '   ' },
+      })
+      expect(result.isError).toBe(true)
+      expect(textOf(result)).toContain('no guide section "   "')
     } finally {
       await client.close()
     }
