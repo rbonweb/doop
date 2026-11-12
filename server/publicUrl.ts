@@ -3,6 +3,7 @@ import net from 'node:net'
 import type { LookupFunction } from 'node:net'
 import type { Page } from 'puppeteer-core'
 import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici'
+import type { CachedResponse } from './renderFetchCache.ts'
 
 export interface PublicAddress {
   address: string
@@ -236,6 +237,8 @@ export async function guardPublicPageRequests(
   options: {
     allowUrl?: (url: URL) => boolean
     fetchUrl?: typeof fetchPinnedPublicUrl
+    /** answers a request from a cache before anything else runs; `undefined` carries on as usual */
+    cached?: (url: URL, method: string) => Promise<CachedResponse | undefined>
   } = {},
 ): Promise<void> {
   const fetchUrl = options.fetchUrl ?? fetchPinnedPublicUrl
@@ -255,6 +258,16 @@ export async function guardPublicPageRequests(
       }
       try {
         const requested = new URL(raw)
+        const hit = await options.cached?.(requested, request.method())
+        if (hit) {
+          await request.respond({
+            status: hit.status,
+            headers: hit.headers,
+            contentType: hit.contentType,
+            body: hit.body,
+          })
+          return
+        }
         if (options.allowUrl?.(requested)) {
           await request.continue()
           return
