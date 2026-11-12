@@ -369,4 +369,33 @@ describe('true section sizes and element ids in the outline', () => {
     expect(replaced.frameBytesBefore).toBe(before)
     expect(replaced.frameBytesBefore - replaced.frameBytesAfter).toBeGreaterThan(30_000 - 300)
   })
+
+  it('keeps the id and size of a lone instance whose root wraps one chain, and writes nothing', async () => {
+    await call('create_component', {
+      canvas_id: canvas.id,
+      name: 'Wrapped title',
+      description: 'A title in two wrappers',
+      html: '<div class="outer"><div class="inner"><h3>Title</h3></div></div>',
+      css: '',
+    })
+    const lone = await (
+      await owner.post(`/api/canvases/${canvas.id}/frames`, {
+        name: 'Lone instance',
+        html: '<!doctype html><html><body><doop-use component="Wrapped title"></doop-use></body></html>',
+      })
+    ).json()
+    const expanded = async () =>
+      jsonOf(await call('get_frame', { frame_id: lone.id, expand_components: true })).html as string
+    const before = await expanded()
+    const versionBefore = await currentVersionOf(lone.id)
+    const outline = await outlineOf(agent, lone.id)
+    const compact = await frameHtml(lone.id)
+    const id = /<doop-use[^>]* id="([a-z0-9]+)"/.exec(compact)?.[1]
+    expect(id).toBeDefined()
+    expect(outline.sections).toHaveLength(1)
+    expect(outline.sections[0]).toMatchObject({ tag: 'doop-use', element_id: id })
+    expect(outline.sections[0]!.bytes).toBeGreaterThan(outline.sections[0]!.compactBytes!)
+    expect(await expanded()).toBe(before)
+    expect(await currentVersionOf(lone.id)).toBe(versionBefore)
+  })
 })

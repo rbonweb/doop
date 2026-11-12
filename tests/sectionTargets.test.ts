@@ -338,3 +338,31 @@ describe('source spans of elements left open', () => {
     })
   }
 })
+
+describe('source spans that end at the closing tags of body and html', () => {
+  it('leaves whitespace after </body> and </html> out of an element left open', () => {
+    const html = '<p>a<p id=t>b\n</body>\n</html>\n'
+    const result = resolveTarget(html, { selector: '#t' })
+    if (!result.ok) throw new Error(result.error)
+    const match = result.matches[0]!
+    expect(match.end).toBeLessThanOrEqual(html.indexOf('</body>'))
+    expect(html.slice(match.start, match.end)).toMatch(/^<p id=t>b\s*$/)
+    const edits = editsForOp(html, match, { op: 'replace', html: '<p>new</p>' }, 'body')
+    if (!edits.ok) throw new Error(edits.error)
+    const applied = applyEdits(html, edits.edits)
+    if (!applied.ok) throw new Error(applied.error)
+    expect(applied.html).toBe('<p>a<p>new</p></body>\n</html>\n')
+    const row = frameOutline(html).sections.find((section) => section.path.endsWith('p:nth-of-type(2)'))
+    expect(row?.bytes).toBe(match.end - match.start)
+  })
+
+  it('reads an open template as part of the element, in the outline and in the target', () => {
+    const html = '<section>a</section><div id=t><template><p>x<p>y'
+    const result = resolveTarget(html, { selector: '#t' })
+    if (!result.ok) throw new Error(result.error)
+    const match = result.matches[0]!
+    expect(match.end).toBe(html.length)
+    const row = frameOutline(html).sections.find((section) => section.tag === 'div')
+    expect(row?.bytes).toBe(match.end - match.start)
+  })
+})

@@ -39,6 +39,8 @@ export interface OutlineSection {
   bytes: number
   text: string
   path: string
+  /** a `<doop-use>` section's `id`: the instance id its stored root wears as data-doop-id */
+  useId?: string
 }
 
 export interface Outline {
@@ -629,11 +631,15 @@ export function frameOutline(html: string): Outline {
     const elementId = attrValue(section, 'data-doop-id')
     const entry: OutlineSection = {
       tag,
-      bytes: location ? sourceEnd(section) - location.startOffset : 0,
+      bytes: location ? sourceEnd(section, html) - location.startOffset : 0,
       text: visibleText(section).slice(0, 120),
       path: pathOf(section),
     }
     if (elementId) entry.elementId = elementId
+    if (tag === 'doop-use') {
+      const useId = attrValue(section, 'id')
+      if (useId) entry.useId = useId
+    }
     if (label) entry.label = label
     return entry
   })
