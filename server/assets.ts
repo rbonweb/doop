@@ -1,11 +1,11 @@
 import { parse, type DefaultTreeAdapterTypes as Tree } from 'parse5'
 import { nanoid } from 'nanoid'
-import { and, asc, eq, gt, inArray } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, notInArray, notLike, or, sql } from 'drizzle-orm'
 import { db } from './db/index.ts'
 import * as t from './db/schema.ts'
 import * as storage from './storage.ts'
 import type { FrameImage } from '../shared/imageDescriptions.ts'
-import type { AssetSource, AssetTags } from '../shared/assetSource.ts'
+import { normalizeAssetTags, type AssetSource, type AssetTags } from '../shared/assetSource.ts'
 import { emitCanvasEvent } from './events.ts'
 import { htmlLoaded } from './frameHtml.ts'
 import { store } from './store.ts'
@@ -171,6 +171,9 @@ interface UploadTicket {
   /** set when the upload replaces this stylesheet in place instead of creating an asset */
   replaceAssetId?: string
   uploadedBy: string
+  /** provenance carried from the tool call to the PUT that lands the bytes */
+  source?: AssetSource
+  tags?: AssetTags
   expiresAt: number
   inFlight: boolean
 }
@@ -181,6 +184,8 @@ export function createUploadTicket(meta: {
   ownerId?: string
   uploadedBy: string
   replaceAssetId?: string
+  source?: AssetSource
+  tags?: AssetTags
 }): {
   token: string
   expiresAt: number
@@ -243,7 +248,7 @@ export async function createAsset(
     throw new Error(`file is ${(buf.length / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB`)
   const mime = sniffMime(buf, accept)
   if (!mime) throw new Error(accept.stylesheets ? WITH_CSS_ERROR : IMAGES_ONLY_ERROR)
-  return storeAsset(buf, { mime, ext: MIME_EXT[mime] }, meta)
+  return storeAsset(buf, { mime, ext: MIME_EXT[mime] }, { ...meta, tags: normalizeAssetTags(meta.tags) })
 }
 
 /** Store bytes whose type the caller has already established (images and stylesheets via createAsset, fonts via server/fonts.ts) under a fresh /a/ id. */
@@ -338,6 +343,135 @@ export async function imagesForFrames(frameIds: string[]): Promise<Map<string, F
     images.set(row.frameId, list)
   }
   return images
+}
+
+/** One image an agent can pick out of a canvas: its URL, size and the provenance that says where it came from. */
+export interface FrameImageDetail {
+  asset_id: string
+  src: string
+  mime: string
+  bytes: number
+  description: string | null
+  source: AssetSource | null
+  tags: string[]
+}
+
+/** Every raster or svg image a frame references, with provenance, oldest first. An enrichment: errors are logged and answer an empty list, so a frame read never fails because of it. */
+export async function imageDetailsForFrame(frameId: string): Promise<FrameImageDetail[]> {
+  try {
+    const rows = await db
+      .select({
+        assetId: t.assets.id,
+        ext: t.assets.ext,
+        mime: t.assets.mime,
+        size: t.assets.size,
+        description: t.assets.description,
+        source: t.assets.source,
+        tags: t.assets.tags,
+      })
+      .from(t.assetRefs)
+      .innerJoin(t.assets, eq(t.assetRefs.assetId, t.assets.id))
+      .where(eq(t.assetRefs.frameId, frameId))
+      .orderBy(asc(t.assets.createdAt))
+    return rows
+      .filter((row) => isDescribableImage(row.mime) || row.mime === 'image/svg+xml')
+      .map((row) => ({
+        asset_id: row.assetId,
+        src: `/a/${row.assetId}.${row.ext}`,
+        mime: row.mime,
+        bytes: row.size,
+        description: row.description,
+        source: row.source ?? null,
+        tags: row.tags ?? [],
+      }))
+  } catch (err) {
+    /* an enrichment: a canvas read must never fail because of it */
+    console.error('[assets] could not read frame image details', err)
+    return []
+  }
+}
+
+export interface AssetListing extends FrameImageDetail {
+  canvas_id: string | null
+  created_at: number
+  uploaded_by: string
+  frame_ids: string[]
+}
+
+/** The mime types server/fontFile.ts stores; a font never belongs in a picture listing. */
+const FONT_MIMES = ['font/woff2', 'font/woff', 'font/ttf', 'font/otf']
+
+const LIST_DEFAULT_LIMIT = 100
+const LIST_MAX_LIMIT = 500
+
+/** Assets an agent can use on a canvas: those uploaded for it, plus any asset one of its frames references (a picture reused from another canvas). Newest first, with the frames that reference each. Filters narrow by tag, provenance kind and one frame; stylesheets are listed, fonts are not. */
+export async function listCanvasAssets(
+  canvasId: string,
+  frameIds: string[],
+  filter: { tag?: string; source_kind?: AssetSource['kind']; frame_id?: string; limit?: number },
+): Promise<AssetListing[]> {
+  if (filter.frame_id !== undefined && !frameIds.includes(filter.frame_id)) return []
+  const limit = Math.min(Math.max(filter.limit ?? LIST_DEFAULT_LIMIT, 1), LIST_MAX_LIMIT)
+  const conditions = [
+    or(
+      eq(t.assets.canvasId, canvasId),
+      frameIds.length ? inArray(t.assets.id, referencedAssetIds(frameIds)) : undefined,
+    ),
+  ]
+  if (filter.frame_id !== undefined) conditions.push(inArray(t.assets.id, referencedAssetIds([filter.frame_id])))
+  const tag = normalizeAssetTags(filter.tag === undefined ? undefined : [filter.tag])?.[0]
+  if (tag) conditions.push(sql`${tag} = ANY(${t.assets.tags})`)
+  if (filter.source_kind) conditions.push(sql`${t.assets.source}->>'kind' = ${filter.source_kind}`)
+  conditions.push(notLike(t.assets.mime, 'font/%'), notInArray(t.assets.mime, FONT_MIMES))
+  const rows = await db
+    .select({
+      assetId: t.assets.id,
+      canvasId: t.assets.canvasId,
+      ext: t.assets.ext,
+      mime: t.assets.mime,
+      size: t.assets.size,
+      description: t.assets.description,
+      source: t.assets.source,
+      tags: t.assets.tags,
+      createdAt: t.assets.createdAt,
+      uploadedBy: t.assets.uploadedBy,
+    })
+    .from(t.assets)
+    .where(and(...conditions.filter((c) => c !== undefined)))
+    .orderBy(desc(t.assets.createdAt), desc(t.assets.id))
+    .limit(limit)
+  if (rows.length === 0) return []
+  const ids = rows.map((row) => row.assetId)
+  const refs = await db
+    .select({ assetId: t.assetRefs.assetId, frameId: t.assetRefs.frameId })
+    .from(t.assetRefs)
+    .where(and(inArray(t.assetRefs.assetId, ids), inArray(t.assetRefs.frameId, frameIds)))
+  const byAsset = new Map<string, Set<string>>()
+  for (const ref of refs) {
+    const set = byAsset.get(ref.assetId) ?? new Set<string>()
+    set.add(ref.frameId)
+    byAsset.set(ref.assetId, set)
+  }
+  return rows.map((row) => {
+    const referenced = byAsset.get(row.assetId)
+    return {
+      asset_id: row.assetId,
+      src: `/a/${row.assetId}.${row.ext}`,
+      mime: row.mime,
+      bytes: row.size,
+      description: row.description,
+      source: row.source ?? null,
+      tags: row.tags ?? [],
+      canvas_id: row.canvasId,
+      created_at: row.createdAt,
+      uploaded_by: row.uploadedBy,
+      frame_ids: frameIds.filter((id) => referenced?.has(id)),
+    }
+  })
+}
+
+function referencedAssetIds(frameIds: string[]) {
+  return db.select({ id: t.assetRefs.assetId }).from(t.assetRefs).where(inArray(t.assetRefs.frameId, frameIds))
 }
 
 /** Where a revision's bytes live: version 1 is the original upload at `<id>.<ext>`, later versions get a key of their own, so no key ever changes content once it is served. */
