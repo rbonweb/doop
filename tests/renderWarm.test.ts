@@ -18,7 +18,7 @@ vi.mock('../server/db/persist.ts', () => ({
 
 const { store } = await import('../server/store.ts')
 const { getRender } = await import('../server/previews.ts')
-const { renderExt, renderParamsHash } = await import('../server/renderParams.ts')
+const { parseRenderQuery, renderExt, renderParamsHash } = await import('../server/renderParams.ts')
 const { getStoredRender } = await import('../server/renderStore.ts')
 const { startRenderWarm, stopRenderWarm, warmParams, renderWarmStats } = await import('../server/renderWarm.ts')
 
@@ -49,6 +49,13 @@ beforeEach(() => {
 afterEach(() => stopRenderWarm())
 
 describe('render warm-up after a save', () => {
+  it('warms the params a real /i/ query for the default 2x png parses to', () => {
+    const size = { width: 600, height: 400 }
+    const query = parseRenderQuery(size, 'png', { scale: '2' })
+    expect(query).not.toHaveProperty('error')
+    expect(renderParamsHash(query as ReturnType<typeof warmParams>)).toBe(renderParamsHash(warmParams(size)))
+  })
+
   it('stores the default render so the first /i/ request is a hit with no new render', async () => {
     const { frame } = newFrame()
     await vi.waitFor(async () => expect(await stored(frame.id, frame.updatedAt)).not.toBeNull())

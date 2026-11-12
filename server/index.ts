@@ -3452,7 +3452,7 @@ server.listen(PORT, () => {
   /* persisted renders of a frame's old versions are removed in the background */
   startRenderSweep((id) => store.getFrame(id)?.updatedAt)
   /* a saved frame is rendered once it has been quiet for a moment, so its first /i/ request is a stored hit; never started in tests */
-  startRenderWarm({ isBusy: actions.isFrameStreaming })
+  if (env.DOOP_RENDER_WARM) startRenderWarm({ isBusy: actions.isFrameStreaming })
   /* frame HTML is loaded per canvas; a canvas nobody has used for
      CANVAS_IDLE_MS gives it back, unless a room, agent or stream is on it.
      Started here, once the room state it asks about exists. */

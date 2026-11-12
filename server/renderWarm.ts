@@ -51,6 +51,8 @@ const queue = new Map<string, number>()
 let active = 0
 /** completed warm renders, for tests and logs */
 let warmed = 0
+/** frames dropped from a full queue */
+let dropped = 0
 
 /** The params a warm render uses for a frame: the default png at the default export scale. */
 export function warmParams(frame: Pick<Frame, 'width' | 'height'>): RenderParams {
@@ -126,6 +128,8 @@ function enqueue(frameId: string): void {
     const oldest = queue.keys().next().value
     if (oldest === undefined) break
     queue.delete(oldest)
+    dropped++
+    console.warn(`[render-warm] queue full (${state.queueMax}), dropped ${oldest}`)
   }
   pump()
 }
@@ -168,6 +172,6 @@ async function warmOne(state: Running, frameId: string, version: number): Promis
 }
 
 /** Test and log helpers: what is waiting and running. */
-export function renderWarmStats(): { armed: number; queued: number; active: number; warmed: number } {
-  return { armed: timers.size, queued: queue.size, active, warmed }
+export function renderWarmStats(): { armed: number; queued: number; active: number; warmed: number; dropped: number } {
+  return { armed: timers.size, queued: queue.size, active, warmed, dropped }
 }

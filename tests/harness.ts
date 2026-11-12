@@ -96,6 +96,8 @@ async function boot(env: Record<string, string>, reuseDir: string | undefined, t
              and the lifecycle-email workflows act on those */
           POSTHOG_KEY: '',
           VITE_POSTHOG_KEY: '',
+          /* a test server never renders in the background; a test about the warm-up passes true */
+          DOOP_RENDER_WARM: 'false',
           ...env,
         },
         stdio: ['ignore', 'pipe', 'ignore'],
