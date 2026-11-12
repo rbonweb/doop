@@ -276,6 +276,7 @@ const schema = {
   MCP_SEARCHES_PER_MIN: perMinute({ default: 12 }),
   MCP_GENERATIONS_PER_MIN: perMinute({ default: 6 }),
   MCP_IMPORTS_PER_MIN: perMinute({ default: 5 }),
+  MCP_RENDERS_PER_MIN: perMinute({ default: 60 }),
   SYNC_INGESTS_PER_MIN: perMinute({ default: 30 }),
   PREVIEW_RENDERS_PER_MIN: perMinute({ default: 12 }),
   DECK_PDFS_PER_MIN: perMinute({ default: 4 }),
