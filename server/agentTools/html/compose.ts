@@ -61,7 +61,12 @@ function composeSections(request: ComposeRequest, frameOf: (id: string) => Frame
     const match = resolved.matches[0]!
     sources.push({ frameId: frame.id, frameName: frame.name, html, start: match.start, end: match.end })
   }
-  return { ok: true, result: composeDocument(sources, { title: request.name }) }
+  try {
+    return { ok: true, result: composeDocument(sources, { title: request.name }) }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return { ok: false, error: `the sections could not be composed (${reason}); nothing was written` }
+  }
 }
 
 /** The ctx helpers type their content blocks loosely; the SDK wants its own CallToolResult shape. */
