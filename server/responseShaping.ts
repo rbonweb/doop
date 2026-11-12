@@ -1,8 +1,12 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { REVIEW_NUDGE } from './reviewNudge.ts'
 
 /** Clients that read `structuredContent` and show it in place of the text blocks, so the JSON text is dead weight for them. Lower-case. */
 export const STRUCTURED_CONTENT_CLIENTS: ReadonlySet<string> = new Set(['claude-code'])
+
+/** Set while `run_batch` runs an op: a batch result carries no `structuredContent`, so an op's one-line read summary would lose its data. */
+export const batchScope = new AsyncLocalStorage<true>()
 
 const MAX_SESSIONS = 2_000
 const MAX_FRAMES_PER_SESSION = 500
@@ -143,7 +147,7 @@ export function shapeResponses(
       let result = raw as ToolResult
       const args = params.length > 1 ? params[0] : undefined
       if (opts.sessionKey) result = thinReminders(result, args, opts.sessionKey)
-      if (readOnly && result.structuredContent !== undefined) {
+      if (readOnly && result.structuredContent !== undefined && !batchScope.getStore()) {
         const client = (await opts.clientName())?.toLowerCase()
         if (client && STRUCTURED_CONTENT_CLIENTS.has(client)) result = summariseRead(name, result)
       }

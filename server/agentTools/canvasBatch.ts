@@ -8,6 +8,7 @@ import { ErrorCode, McpError, type CallToolResult } from '@modelcontextprotocol/
 import { z, type ZodRawShape } from 'zod'
 import type { AgentToolContext, AgentToolResult } from './context.ts'
 import type { ResidentAgentTool } from './resident.ts'
+import { batchScope } from '../responseShaping.ts'
 import { registeredTool } from '../toolLoads.ts'
 
 const TOOL_NAME = 'run_batch'
@@ -58,7 +59,9 @@ async function runOp(
   if (!handler) return { ...base, status: 'error', error: `Tool ${op.tool} not found` } as OpOutcome
   try {
     const args = await parseArgs(op.tool, handler.inputSchema, op.args ?? {})
-    const result = (await (handler.inputSchema ? handler.run(args, extra) : handler.run(extra))) as AgentToolResult
+    const result = (await batchScope.run(true, () =>
+      handler.inputSchema ? handler.run(args, extra) : handler.run(extra),
+    )) as AgentToolResult
     const content = Array.isArray(result?.content) ? result.content : []
     if (result?.isError) return { ...base, status: 'error', error: firstText(content), content } as OpOutcome
     return { ...base, status: 'ok', content } as OpOutcome
@@ -98,7 +101,7 @@ export function register(server: McpServer, ctx: AgentToolContext): void {
       const outcomes: OpOutcome[] = []
       let failed = false
       for (const [index, op] of ops.entries()) {
-        if (failed && stop) {
+        if ((failed && stop) || extra.signal?.aborted) {
           outcomes.push({ index, tool: op.tool, status: 'skipped' })
           continue
         }
