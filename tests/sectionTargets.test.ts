@@ -94,6 +94,34 @@ describe('source ranges', () => {
     expect(img.inner.start).toBe(img.startTag.end)
     expect(html.slice(img.start, img.end)).toBe('<img src=/x/y>')
   })
+
+  it('covers implicitly closed elements up to their end offset', () => {
+    const list = '<ul><li>a<li>b</ul>'
+    const items = resolveTarget(list, { selector: 'li' }, { all: true })
+    expect(items.ok).toBe(true)
+    if (!items.ok) return
+    const firstItem = items.matches[0]!
+    expect(list.slice(firstItem.start, firstItem.end)).toBe('<li>a')
+    expect(list.slice(firstItem.inner.start, firstItem.inner.end)).toBe('a')
+    expect(firstItem.endTag).toBeUndefined()
+
+    const paragraphs = '<div><p>x<p>y</div>'
+    const paras = resolveTarget(paragraphs, { selector: 'p' }, { all: true })
+    expect(paras.ok).toBe(true)
+    if (!paras.ok) return
+    const firstPara = paras.matches[0]!
+    expect(paragraphs.slice(firstPara.start, firstPara.end)).toBe('<p>x')
+    expect(paragraphs.slice(firstPara.inner.start, firstPara.inner.end)).toBe('x')
+    expect(firstPara.endTag).toBeUndefined()
+
+    const cells = '<table><tr><td>a<td>b</table>'
+    const tds = resolveTarget(cells, { selector: 'td' }, { all: true })
+    expect(tds.ok).toBe(true)
+    if (!tds.ok) return
+    const firstCell = tds.matches[0]!
+    expect(cells.slice(firstCell.start, firstCell.end)).toBe('<td>a')
+    expect(firstCell.endTag).toBeUndefined()
+  })
 })
 
 describe('labels', () => {
@@ -216,5 +244,31 @@ describe('text, implied elements and deep nesting', () => {
     expect(match.tagName).toBe('p')
     expect(match.text).toBe('Deep')
     expect(toResolved(doc, findElement(doc, 'div'))).toBeDefined()
+  })
+
+  it('resolves a heading label on 20,000 nested divs in linear time', () => {
+    const depth = 20000
+    const html = `<!doctype html>${'<div>'.repeat(depth)}<h2>Deep</h2>${'</div>'.repeat(depth)}`
+    const doc = parseFrameDocument(html)
+    const started = Date.now()
+    const result = resolveTarget(doc, { label: 'Deep' })
+    const elapsed = Date.now() - started
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.matches[0]!.tagName).toBe('div')
+    expect(elapsed).toBeLessThan(500)
+  })
+
+  it('builds every path for 20,000 siblings in linear time', () => {
+    const html = `<!doctype html>${'<p>a</p>'.repeat(20000)}`
+    const doc = parseFrameDocument(html)
+    const started = Date.now()
+    const result = resolveTarget(doc, { selector: 'p' }, { all: true })
+    const elapsed = Date.now() - started
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.matches).toHaveLength(20000)
+    expect(result.matches[19999]!.path).toBe('body > p:nth-of-type(20000)')
+    expect(elapsed).toBeLessThan(1000)
   })
 })
