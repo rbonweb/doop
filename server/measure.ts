@@ -12,6 +12,15 @@ interface PageTarget {
 interface PageInput {
   targets: PageTarget[]
   lineQueries: string[]
+  exclude: string[]
+}
+
+/** An `exclude` selector the browser refused to parse; the message names it. */
+export class InvalidSelectorError extends Error {
+  constructor(readonly selector: string) {
+    super(`invalid exclude selector: ${selector}`)
+    this.name = 'InvalidSelectorError'
+  }
 }
 
 /** What the one in-page pass returns: everything but the viewport width, which the caller knows. */
@@ -19,8 +28,11 @@ interface PageMeasurement {
   height: number
   sections: FrameMeasurement['sections']
   colors: string[]
+  color_sources: Record<string, string>
   text: string
   queries: FrameMeasurement['queries']
+  /** the first `exclude` selector the page could not parse, in which case nothing else is measured */
+  invalid_exclude?: string
 }
 
 function attrSelector(name: string, value: string): string {
@@ -59,6 +71,38 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
         }
 
         const SKIPPED = new Set(['script', 'style', 'link', 'meta', 'noscript', 'template'])
+
+        /* ---- exclusion and colour sources: kept apart from target resolution ---- */
+
+        const invalidExclude = input.exclude.find((selector) => {
+          try {
+            document.querySelector(selector)
+            return false
+          } catch {
+            return true
+          }
+        })
+        if (invalidExclude !== undefined) {
+          return {
+            height: 0,
+            sections: [],
+            colors: [],
+            color_sources: {},
+            text: '',
+            queries: [],
+            invalid_exclude: invalidExclude,
+          }
+        }
+
+        const excludeSelector = input.exclude.join(',')
+
+        /** inside (or is) an element the caller excluded */
+        const isExcluded = (el: Element): boolean => excludeSelector !== '' && el.closest(excludeSelector) !== null
+
+        /** inside an image, video, canvas or svg: what it draws is not a stylesheet colour (the element's own box still counts) */
+        const isMediaContent = (el: Element): boolean => el.parentElement?.closest('img, video, canvas, svg') != null
+
+        const colorSources = new Map<string, string>()
 
         /* ---- colour maths (WCAG 2.x, inlined: server/colorMath.ts is for Node) ---- */
 
@@ -236,10 +280,12 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
 
         const palette = (section: Element): string[] => {
           const seen = new Set<string>()
-          const add = (value: string): void => {
+          const add = (value: string, el: Element): void => {
             const color = parseColor(value)
             if (!color || color.a <= 0) return
-            seen.add(rgbHex(color))
+            const hex = rgbHex(color)
+            seen.add(hex)
+            if (!colorSources.has(hex)) colorSources.set(hex, el.getAttribute('data-doop-id') ?? pathSelector(el))
           }
           const borders = [
             ['borderTopWidth', 'borderTopColor'],
@@ -248,11 +294,12 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
             ['borderLeftWidth', 'borderLeftColor'],
           ] as const
           for (const el of [section, ...Array.from(section.querySelectorAll('*'))]) {
+            if (isExcluded(el) || isMediaContent(el)) continue
             const style = getComputedStyle(el)
-            if (hasOwnText(el)) add(style.color)
-            add(style.backgroundColor)
+            if (hasOwnText(el)) add(style.color, el)
+            add(style.backgroundColor, el)
             for (const [width, color] of borders) {
-              if ((Number.parseFloat(style[width]) || 0) > 0) add(style[color])
+              if ((Number.parseFloat(style[width]) || 0) > 0) add(style[color], el)
             }
           }
           return [...seen]
@@ -266,7 +313,7 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
           if (isVisible(el) && hasOwnText(el)) texts.push(textBlock(el))
           for (const child of Array.from(el.querySelectorAll('*'))) {
             if (texts.length >= 60) break
-            if (!hasOwnText(child) || !isVisible(child)) continue
+            if (!hasOwnText(child) || !isVisible(child) || isExcluded(child)) continue
             texts.push(textBlock(child))
           }
           const label = el.getAttribute('data-doop-label')
@@ -339,7 +386,9 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
           return found
         }
 
-        const measuredSections = chosen().map(measureSection)
+        const measuredSections = chosen()
+          .filter((el) => !isExcluded(el))
+          .map(measureSection)
         const colors = [...new Set(measuredSections.flatMap((section) => section.colors))]
         const queries = input.lineQueries.map((selector) => {
           let matches: Element[] = []
@@ -358,22 +407,45 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
           }
         })
 
+        /* innerText with the excluded subtrees taken out of layout for the read, then put back */
+        const bodyText = (): string => {
+          const hidden =
+            excludeSelector === ''
+              ? []
+              : Array.from(document.querySelectorAll(excludeSelector)).filter(
+                  (el): el is HTMLElement | SVGElement => el instanceof HTMLElement || el instanceof SVGElement,
+                )
+          const saved = hidden.map((el) => [
+            el.style.getPropertyValue('display'),
+            el.style.getPropertyPriority('display'),
+          ])
+          for (const el of hidden) el.style.setProperty('display', 'none', 'important')
+          const text = (document.body?.innerText ?? '').slice(0, 200_000)
+          hidden.forEach((el, index) =>
+            el.style.setProperty('display', saved[index]?.[0] ?? '', saved[index]?.[1] ?? ''),
+          )
+          return text
+        }
+
         return {
           height: document.documentElement.scrollHeight,
           sections: measuredSections,
           colors,
-          text: (document.body?.innerText ?? '').slice(0, 200_000),
+          color_sources: Object.fromEntries(colorSources),
+          text: bodyText(),
           queries,
         }
       },
-      { targets: pageTargets(opts?.targets), lineQueries: opts?.lineQueries ?? [] },
+      { targets: pageTargets(opts?.targets), lineQueries: opts?.lineQueries ?? [], exclude: opts?.exclude ?? [] },
     )
+    if (measured.invalid_exclude !== undefined) throw new InvalidSelectorError(measured.invalid_exclude)
 
     return {
       width,
       height: measured.height,
       sections: measured.sections,
       colors: measured.colors,
+      ...(opts?.colorSources ? { color_sources: measured.color_sources } : {}),
       text: measured.text,
       queries: measured.queries,
     }
