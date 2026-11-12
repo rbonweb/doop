@@ -137,7 +137,47 @@ describe('find_frames', () => {
   })
 })
 
+async function frameVersionOf(frameId: string): Promise<string> {
+  const frame = await created('get_frame', { frame_id: frameId, include_html: false })
+  return frame.updatedAt as string
+}
+
 describe('delete_frames', () => {
+  it('refuses the whole call when any listed frame changed since the read, and writes nothing', async () => {
+    const { canvasId, heroId, pricingId } = await seed()
+    const heroVersion = await frameVersionOf(heroId)
+    const stale = await frameVersionOf(pricingId)
+    await created('update_frame', { frame_id: pricingId, name: 'Pricing v2' })
+
+    const refused = await call('delete_frames', {
+      canvas_id: canvasId,
+      frame_ids: [heroId, pricingId],
+      expected_versions: { [heroId]: heroVersion, [pricingId]: stale },
+    })
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toContain(pricingId)
+    expect(textOf(refused)).toContain('changed since')
+    expect(await frameHtml(heroId)).toContain('Welcome to Acme')
+    expect(await frameHtml(pricingId)).toContain('Pricing')
+
+    const fresh = await frameVersionOf(pricingId)
+    const done = await created('delete_frames', {
+      canvas_id: canvasId,
+      frame_ids: [heroId, pricingId],
+      expected_versions: { [heroId]: heroVersion, [pricingId]: fresh },
+    })
+    expect((done.deleted as unknown[]).length).toBe(2)
+  })
+
+  it('drops the claim on a deleted frame', async () => {
+    const { canvasId, heroId } = await seed()
+    await created('claim_frames', { canvas_id: canvasId, frame_ids: [heroId], note: 'building', minutes: 5 })
+    expect(JSON.stringify((await created('get_canvas', { canvas_id: canvasId })).claims)).toContain(heroId)
+    await created('delete_frames', { canvas_id: canvasId, frame_ids: [heroId] })
+    const canvas = await created('get_canvas', { canvas_id: canvasId })
+    expect(JSON.stringify(canvas.claims ?? [])).not.toContain(heroId)
+  })
+
   it('reports a dry run, then deletes while locked and missing frames survive', async () => {
     const { canvasId, heroId, lockedId } = await seed()
 
@@ -234,5 +274,73 @@ describe('replace_in_frames', () => {
     expect(nested.isError).toBe(true)
     expect(textOf(nested)).toContain('catastrophically')
     expect(await frameHtml(heroId)).toContain('Buy now')
+  })
+
+  it('refuses the whole call when a listed frame changed since the read, and writes nothing', async () => {
+    const { canvasId, heroId, pricingId } = await seed()
+    const heroVersion = await frameVersionOf(heroId)
+    const stale = await frameVersionOf(pricingId)
+    await created('update_frame', { frame_id: pricingId, name: 'Pricing v2' })
+    const before = await versionCount(heroId)
+
+    const refused = await call('replace_in_frames', {
+      canvas_id: canvasId,
+      find: 'Buy now',
+      replace: 'Get started',
+      scope: 'text',
+      expected_versions: { [heroId]: heroVersion, [pricingId]: stale },
+    })
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toContain(pricingId)
+    expect(await frameHtml(heroId)).toContain('Buy now')
+    expect(await versionCount(heroId)).toBe(before)
+
+    const fresh = await frameVersionOf(pricingId)
+    const done = await created('replace_in_frames', {
+      canvas_id: canvasId,
+      find: 'Buy now',
+      replace: 'Get started',
+      scope: 'text',
+      expected_versions: { [heroId]: heroVersion, [pricingId]: fresh },
+    })
+    expect(done.totalReplacements).toBe(2)
+  })
+
+  it('stops a catastrophic regex with a timeout error naming the frame, and writes nothing', async () => {
+    const { canvasId, heroId } = await seed()
+    const slow = await created('create_frame', {
+      canvas_id: canvasId,
+      name: 'Slow',
+      html: `<html><body><p>${'a'.repeat(30)}!</p></body></html>`,
+    })
+    const slowId = (slow.frame as { id: string }).id
+
+    for (const pattern of ['Buy|(a|a)+$', 'Buy|(\\w+\\s?)+$', 'Buy|(a+|b)+$']) {
+      const startedAt = performance.now()
+      const result = await call('replace_in_frames', {
+        canvas_id: canvasId,
+        find: pattern,
+        replace: 'x',
+        regex: true,
+        scope: 'text',
+      })
+      expect(performance.now() - startedAt).toBeLessThan(2000)
+      expect(result.isError).toBe(true)
+      expect(textOf(result)).toContain(slowId)
+      expect(textOf(result)).toContain('too slow')
+      expect(await frameHtml(heroId)).toContain('Buy now')
+    }
+  })
+
+  it('inserts a plain replacement as written, with $ and & intact', async () => {
+    const { canvasId, heroId } = await seed()
+    await created('replace_in_frames', {
+      canvas_id: canvasId,
+      find: 'Buy now',
+      replace: 'Save $&$$5',
+      scope: 'text',
+      frame_ids: [heroId],
+    })
+    expect(await frameHtml(heroId)).toContain('Save $&amp;$$5')
   })
 })

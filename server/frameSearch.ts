@@ -1,3 +1,4 @@
+import { createContext, Script } from 'node:vm'
 import { parse, type DefaultTreeAdapterTypes as Tree } from 'parse5'
 
 /**
@@ -20,7 +21,57 @@ export interface Hit {
   locked?: boolean
 }
 
-export type Query = { ok: true; re: RegExp } | { ok: false; error: string }
+/** `literal` queries are escaped strings, which cannot backtrack; only regex-mode queries need a time budget. */
+export type Query = { ok: true; re: RegExp; literal: boolean } | { ok: false; error: string }
+
+/** The time one call may spend in regex matching: each frame gets at most `PER_FRAME_MS`, the whole call `totalMs`. */
+export interface RegexBudget {
+  remainingMs: number
+}
+
+export const REGEX_FRAME_MS = 200
+export const REGEX_CALL_MS = 2000
+
+export class RegexTimeoutError extends Error {
+  constructor() {
+    super('regex took too long')
+    this.name = 'RegexTimeoutError'
+  }
+}
+
+export function regexBudget(totalMs = REGEX_CALL_MS): RegexBudget {
+  return { remainingMs: totalMs }
+}
+
+/* V8 checks for an interrupt while a regexp backtracks, so a `vm` timeout stops a catastrophic pattern even though `fn` is plain host code */
+const guardContext: { work?: () => unknown } = createContext({})
+const guardScript = new Script('work()')
+
+/** Runs `fn` (pure matching work) under the budget; without a budget it runs directly. Throws `RegexTimeoutError`. */
+export function boundedRun<T>(budget: RegexBudget | undefined, fn: () => T): T {
+  if (!budget) return fn()
+  const limit = Math.min(REGEX_FRAME_MS, budget.remainingMs)
+  if (limit < 1) throw new RegexTimeoutError()
+  const startedAt = performance.now()
+  guardContext.work = fn
+  try {
+    return guardScript.runInContext(guardContext, { timeout: Math.ceil(limit) }) as T
+  } catch (error) {
+    /* the error comes from the vm's realm, so `instanceof Error` is false for it */
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT'
+    ) {
+      throw new RegexTimeoutError()
+    }
+    throw error
+  } finally {
+    guardContext.work = undefined
+    budget.remainingMs -= performance.now() - startedAt
+  }
+}
 
 const MAX_FIND = 500
 const DEFAULT_LIMIT = 50
@@ -36,10 +87,10 @@ export function compileQuery(find: string, opts: { regex?: boolean; caseSensitiv
   if (find.length === 0) return { ok: false, error: 'find is empty' }
   if (find.length > MAX_FIND) return { ok: false, error: `find is longer than ${MAX_FIND} characters` }
   const flags = opts.caseSensitive ? 'g' : 'gi'
-  if (!opts.regex) return { ok: true, re: new RegExp(find.replace(REGEX_SPECIALS, '\\$&'), flags) }
+  if (!opts.regex) return { ok: true, re: new RegExp(find.replace(REGEX_SPECIALS, '\\$&'), flags), literal: true }
   if (NESTED_QUANTIFIER.test(find)) return { ok: false, error: 'pattern can backtrack catastrophically' }
   try {
-    return { ok: true, re: new RegExp(find, flags) }
+    return { ok: true, re: new RegExp(find, flags), literal: false }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }
@@ -145,29 +196,34 @@ function countMatches(query: RegExp, source: string): number {
 }
 
 /** Matches inside each text node's decoded text: a match never spans nodes. */
-export function findInText(html: string, query: RegExp, limit = DEFAULT_LIMIT): Hit[] {
+export function findInText(html: string, query: RegExp, limit = DEFAULT_LIMIT, budget?: RegexBudget): Hit[] {
   const hits: Hit[] = []
   if (limit <= 0) return hits
-  for (const node of textNodes(html)) {
-    for (const match of matchesOf(query, node.text)) {
-      if (hits.length >= limit) return hits
-      const hit: Hit = { start: node.start, end: node.end, snippet: snippetAround(node.text, match.start, match.end) }
-      if (node.locked) hit.locked = true
-      hits.push(hit)
+  const nodes = textNodes(html)
+  return boundedRun(budget, () => {
+    for (const node of nodes) {
+      for (const match of matchesOf(query, node.text)) {
+        if (hits.length >= limit) return hits
+        const hit: Hit = { start: node.start, end: node.end, snippet: snippetAround(node.text, match.start, match.end) }
+        if (node.locked) hit.locked = true
+        hits.push(hit)
+      }
     }
-  }
-  return hits
+    return hits
+  })
 }
 
 /** Matches over the raw source, so markup and skipped containers are searchable too. */
-export function findInHtml(html: string, query: RegExp, limit = DEFAULT_LIMIT): Hit[] {
+export function findInHtml(html: string, query: RegExp, limit = DEFAULT_LIMIT, budget?: RegexBudget): Hit[] {
   const hits: Hit[] = []
   if (limit <= 0) return hits
-  for (const match of matchesOf(query, html)) {
-    hits.push({ start: match.start, end: match.end, snippet: snippetAround(html, match.start, match.end) })
-    if (hits.length >= limit) break
-  }
-  return hits
+  return boundedRun(budget, () => {
+    for (const match of matchesOf(query, html)) {
+      hits.push({ start: match.start, end: match.end, snippet: snippetAround(html, match.start, match.end) })
+      if (hits.length >= limit) break
+    }
+    return hits
+  })
 }
 
 function srcsetUrls(value: string): string[] {
@@ -230,37 +286,59 @@ function escapeText(text: string): string {
     .replace(/\u00a0/g, '&nbsp;')
 }
 
+export interface ReplaceOptions {
+  /** A plain-string query: the replacement is inserted as written, so `$&` and `$$` mean themselves. */
+  literal?: boolean
+  budget?: RegexBudget
+}
+
+/** Regex mode keeps `$1`-style references; literal mode hands `String.replace` a function so nothing expands. */
+function substitute(source: string, query: RegExp, replacement: string, literal: boolean | undefined): string {
+  return literal ? source.replace(query, () => replacement) : source.replace(query, replacement)
+}
+
 /** Replaces inside decoded text, re-encoding only the nodes that matched; locked nodes are left alone. */
 export function replaceInText(
   html: string,
   query: RegExp,
   replacement: string,
+  options: ReplaceOptions = {},
 ): { html: string; count: number; lockedSkipped: number } {
-  let out = ''
-  let cursor = 0
-  let count = 0
-  let lockedSkipped = 0
-  for (const node of textNodes(html)) {
-    const matches = countMatches(query, node.text)
-    if (matches === 0) continue
-    if (node.locked) {
-      lockedSkipped += matches
-      continue
+  const nodes = textNodes(html)
+  return boundedRun(options.budget, () => {
+    let out = ''
+    let cursor = 0
+    let count = 0
+    let lockedSkipped = 0
+    for (const node of nodes) {
+      const matches = countMatches(query, node.text)
+      if (matches === 0) continue
+      if (node.locked) {
+        lockedSkipped += matches
+        continue
+      }
+      query.lastIndex = 0
+      out += html.slice(cursor, node.start) + escapeText(substitute(node.text, query, replacement, options.literal))
+      cursor = node.end
+      count += matches
     }
-    query.lastIndex = 0
-    out += html.slice(cursor, node.start) + escapeText(node.text.replace(query, replacement))
-    cursor = node.end
-    count += matches
-  }
-  out += html.slice(cursor)
-  return { html: out, count, lockedSkipped }
+    out += html.slice(cursor)
+    return { html: out, count, lockedSkipped }
+  })
 }
 
-/** Replaces over the raw source, `$1`-style references included. */
-export function replaceInHtml(html: string, query: RegExp, replacement: string): { html: string; count: number } {
-  const count = countMatches(query, html)
-  query.lastIndex = 0
-  return { html: html.replace(query, replacement), count }
+/** Replaces over the raw source, `$1`-style references included in regex mode. */
+export function replaceInHtml(
+  html: string,
+  query: RegExp,
+  replacement: string,
+  options: ReplaceOptions = {},
+): { html: string; count: number } {
+  return boundedRun(options.budget, () => {
+    const count = countMatches(query, html)
+    query.lastIndex = 0
+    return { html: substitute(html, query, replacement, options.literal), count }
+  })
 }
 
 /** Up to `radius` characters of context each side, whitespace collapsed, `…` where the source was cut. */

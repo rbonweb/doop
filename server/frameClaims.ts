@@ -3,6 +3,9 @@ import type { Actor, Frame } from '../shared/types.ts'
 /** Longest a single advisory claim may last. */
 export const MAX_CLAIM_MINUTES = 60
 
+/** Longest claim note kept; the note is echoed verbatim into other agents' tool results. */
+export const MAX_CLAIM_NOTE = 200
+
 export interface FrameClaim {
   frameId: string
   canvasId: string
@@ -108,7 +111,7 @@ export function claimFrames(
       canvasId: frame.canvasId,
       holder: actor.name,
       holderKey: key,
-      note,
+      note: note.slice(0, MAX_CLAIM_NOTE),
       claimedAt: now,
       expiresAt,
     }
@@ -146,6 +149,18 @@ export function releaseFrames(frameIds: string[] | undefined, actor: Actor): str
 
   for (const canvasId of touched) notify(canvasId)
   return released
+}
+
+/** Forgets every claim on these frames whoever holds it (the frames are gone), notifying each canvas once. */
+export function dropClaims(frameIds: string[]): void {
+  const touched = new Set<string>()
+  for (const frameId of frameIds) {
+    const claim = claims.get(frameId)
+    if (!claim) continue
+    dropClaim(claim)
+    touched.add(claim.canvasId)
+  }
+  for (const canvasId of touched) notify(canvasId)
 }
 
 export function claimOf(frameId: string, now = Date.now()): FrameClaim | undefined {
