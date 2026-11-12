@@ -57,6 +57,8 @@ export interface FrameMeasurement {
   sections: MeasuredSection[]
   /** every colour in the document, distinct */
   colors: string[]
+  /** only when asked (`MeasureOptions.colorSources`): for each colour, the `data-doop-id` of the first element it appears on, else a positional selector */
+  color_sources?: Record<string, string>
   /** document.body.innerText, at most 200 000 characters */
   text: string
   /** answers for `MeasureOptions.lineQueries`: every element each selector matches, with its line count */
@@ -70,6 +72,10 @@ export interface MeasureOptions {
   targets?: FrameTarget[]
   /** CSS selectors whose matches get a line count (for lint's max_text_lines) */
   lineQueries?: string[]
+  /** CSS selectors: matches and everything inside them contribute no colour, text block or body text; an invalid one throws `InvalidSelectorError` */
+  exclude?: string[]
+  /** also report where each colour is used (`FrameMeasurement.color_sources`) */
+  colorSources?: boolean
 }
 
 export interface LintRules {

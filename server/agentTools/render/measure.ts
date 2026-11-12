@@ -4,7 +4,7 @@ import { z } from 'zod'
 import type { Frame } from '../../../shared/types.ts'
 import { env } from '../../env.ts'
 import { lintMeasurement } from '../../lint.ts'
-import { measureFrame } from '../../measure.ts'
+import { InvalidSelectorError, measureFrame } from '../../measure.ts'
 import type { FrameMeasurement, LintResult, LintRules } from '../../measureTypes.ts'
 import { frameTargetSchema } from '../../renderTargets.ts'
 import type { FrameTarget } from '../../renderTypes.ts'
@@ -55,7 +55,7 @@ const MEASURE_DESCRIPTION =
   'Measure the rendered frame at a width: each section’s box and height, every text block’s line count, overflow and clipping, the colours in use and each text’s WCAG contrast. Read-only; use it to check fit and readability without cutting screenshots up.'
 
 const LINT_DESCRIPTION =
-  'Check a rendered frame against rules — section height, heading and text line counts, palette, banned words, overflow, contrast — and list the element ids that offend.'
+  'Check a rendered frame against rules — section height, heading and text line counts, palette, banned words, overflow, contrast — and list the element ids that offend. allowed_colors also accepts tints, shades and alpha versions of an allowed colour; exclude skips CSS-selector subtrees (screenshots, third-party widgets) for colour, contrast and banned-word rules.'
 
 /* The context hands results back with a content type wider than the SDK's CallToolResult; the seam's built-in tools infer the narrow shape, an area file has to say so. */
 function asToolResult(result: AgentToolResult): CallToolResult {
@@ -72,6 +72,14 @@ const measureShape = (ctx: AgentToolContext) => ({
     .describe('The sections to measure; defaults to every top-level section'),
   agent_name: ctx.agentName.optional(),
 })
+
+const EXCLUDE_DESCRIPTION =
+  'CSS selectors: matching elements and everything inside them are skipped by the colour, contrast and banned-word rules (for example a store screenshot mock-up). An invalid selector is refused by name'
+
+/** The tool error for a measurement the page refused, or undefined when the failure is not the caller's. */
+function selectorRefusal(error: unknown): string | undefined {
+  return error instanceof InvalidSelectorError ? error.message : undefined
+}
 
 /** measure_frame and lint_frame (item 5). */
 export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): void {
@@ -107,19 +115,29 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
         rules: lintRulesSchema.describe(
           'At least one rule: section height, heading/text lines, palette, words, overflow, contrast',
         ),
+        exclude: z.array(z.string().min(1).max(500)).max(50).optional().describe(EXCLUDE_DESCRIPTION),
       },
     },
-    async ({ frame_id, rules, width, targets, agent_name }) => {
+    async ({ frame_id, rules, exclude, width, targets, agent_name }) => {
       const frame = ctx.frameFor(frame_id, 'view')
       if (!frame) return asToolResult(ctx.noFrame(frame_id))
       if (!ctx.takeSlot('render', limitKey(ctx, agent_name ?? 'agent'), env.MCP_RENDERS_PER_MIN))
         return asToolResult(ctx.err('render rate limit — wait a minute'))
       ctx.arrive(frame.canvasId, agent_name)
-      const measurement = await measureFrame(await store.renderSource(frame), {
-        width,
-        targets,
-        lineQueries: rules.max_text_lines?.map((rule) => rule.selector),
-      })
+      let measurement: FrameMeasurement
+      try {
+        measurement = await measureFrame(await store.renderSource(frame), {
+          width,
+          targets,
+          lineQueries: rules.max_text_lines?.map((rule) => rule.selector),
+          exclude,
+          colorSources: true,
+        })
+      } catch (error) {
+        const refusal = selectorRefusal(error)
+        if (refusal) return asToolResult(ctx.err(refusal))
+        throw error
+      }
       const report = lintMeasurement(measurement, rules)
       const passed = report.results.filter((result) => result.pass).length
       const answer = {
@@ -159,6 +177,12 @@ function residentWidth(input: Record<string, unknown>): number | undefined {
   const width = input.width
   return typeof width === 'number' && Number.isFinite(width)
     ? Math.min(4000, Math.max(1, Math.round(width)))
+    : undefined
+}
+
+function residentExclude(input: Record<string, unknown>): string[] | undefined {
+  return Array.isArray(input.exclude)
+    ? input.exclude.filter((entry): entry is string => typeof entry === 'string')
     : undefined
 }
 
@@ -213,6 +237,7 @@ export const measureResidentTools: ResidentAgentTool[] = [
           type: 'object',
           description: 'At least one rule: section height, heading/text lines, palette, words, overflow, contrast',
         },
+        exclude: { type: 'array', items: { type: 'string' }, description: EXCLUDE_DESCRIPTION },
       }),
     },
     async run(input, ctx) {
@@ -223,11 +248,20 @@ export const measureResidentTools: ResidentAgentTool[] = [
         return fail('give at least one rule')
       if (!residentMayRender(ctx.actor.name)) return fail('render rate limit — wait a minute')
       const lintRules = rules as LintRules
-      const measurement = await measureFrame(await store.renderSource(frame), {
-        width: residentWidth(input),
-        targets: residentTargets(input),
-        lineQueries: lintRules.max_text_lines?.map((rule) => rule.selector),
-      })
+      let measurement: FrameMeasurement
+      try {
+        measurement = await measureFrame(await store.renderSource(frame), {
+          width: residentWidth(input),
+          targets: residentTargets(input),
+          lineQueries: lintRules.max_text_lines?.map((rule) => rule.selector),
+          exclude: residentExclude(input),
+          colorSources: true,
+        })
+      } catch (error) {
+        const refusal = selectorRefusal(error)
+        if (refusal) return fail(refusal)
+        throw error
+      }
       const report = lintMeasurement(measurement, lintRules)
       const passed = report.results.filter((result: LintResult) => result.pass).length
       return ok({

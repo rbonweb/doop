@@ -207,6 +207,25 @@ describe('allowed_colors', () => {
     expect(result?.details).toEqual(['unreadable colour brand-teal'])
   })
 
+  it('accepts tints, shades and alpha versions of an allowed colour', () => {
+    const m = measurement({ colors: ['#0177d3', '#e6f1fb', '#80bbe9', '#014a84', '#0177d380', '#ffffff', '#000000'] })
+    const result = lintMeasurement(m, rules({ allowed_colors: ['#0177d3'] })).results[0]
+    expect(result).toMatchObject({ pass: true, offenders: [] })
+  })
+
+  it('names the first element a flagged colour appears on', () => {
+    const m = measurement({
+      colors: ['#ff0000', '#00ff00'],
+      color_sources: { '#ff0000': 'cta-button', '#00ff00': 'body > :nth-child(2)' },
+      sections: [section({ element_id: '#cta', colors: ['#ff0000'] })],
+    })
+    const result = lintMeasurement(m, rules({ allowed_colors: ['#111111'] })).results[0]
+    expect(result?.details).toEqual([
+      '#ff0000 is not in the palette (used in #cta; first on cta-button)',
+      '#00ff00 is not in the palette (first on body > :nth-child(2))',
+    ])
+  })
+
   it('lists a duplicate offender once', () => {
     const m = measurement({ colors: ['#111111', '#ff0000', '#ff0000'] })
     const result = lintMeasurement(m, rules({ allowed_colors: ['#111111'] })).results[0]

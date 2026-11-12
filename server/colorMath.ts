@@ -118,3 +118,45 @@ export function contrastRatio(fg: Rgba, bg: Rgba): number {
   const low = Math.min(one, two)
   return Math.round(((high + 0.05) / (low + 0.05)) * 100) / 100
 }
+
+/** How far (per channel, 0-255) a colour may sit from the line between an allowed colour and white or black and still count as its tint or shade. */
+export const TINT_TOLERANCE = 3
+
+const WHITE: Rgba = { r: 255, g: 255, b: 255, a: 1 }
+const BLACK: Rgba = { r: 0, g: 0, b: 0, a: 1 }
+
+const sameRgb = (one: Rgba, two: Rgba) => one.r === two.r && one.g === two.g && one.b === two.b
+
+/** True when `color` lies on the segment from `base` to `end`, each channel within `TINT_TOLERANCE` of its nearest point. */
+function onLine(color: Rgba, base: Rgba, end: Rgba): boolean {
+  const dr = end.r - base.r
+  const dg = end.g - base.g
+  const db = end.b - base.b
+  const length = dr * dr + dg * dg + db * db
+  if (length === 0) return false
+  const t = clamp(((color.r - base.r) * dr + (color.g - base.g) * dg + (color.b - base.b) * db) / length, 0, 1)
+  return (
+    Math.abs(base.r + t * dr - color.r) <= TINT_TOLERANCE &&
+    Math.abs(base.g + t * dg - color.g) <= TINT_TOLERANCE &&
+    Math.abs(base.b + t * db - color.b) <= TINT_TOLERANCE
+  )
+}
+
+/**
+ * Whether `color` belongs to a palette. It does when it is transparent, pure white or pure black, when it is an allowed colour with any alpha,
+ * or when it is a tint or shade of one: on the line from the allowed colour to white or to black (alpha composited over white first), see `TINT_TOLERANCE`.
+ * An allowed pure white or pure black has no tints or shades of its own (its line would be the whole grey axis), so it admits only itself.
+ */
+export function isAllowedColor(color: Rgba, allowed: Rgba[]): boolean {
+  if (color.a <= 0) return true
+  const flat = color.a < 1 ? composite(color, WHITE) : color
+  const candidates = color.a < 1 ? [color, flat] : [color]
+  for (const candidate of candidates) {
+    if (sameRgb(candidate, WHITE) || sameRgb(candidate, BLACK)) return true
+  }
+  return allowed.some((base) => {
+    if (sameRgb(color, base)) return true
+    if (sameRgb(base, WHITE) || sameRgb(base, BLACK)) return false
+    return candidates.some((candidate) => onLine(candidate, base, WHITE) || onLine(candidate, base, BLACK))
+  })
+}
