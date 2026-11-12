@@ -14,7 +14,13 @@ import { FRAME_COMMENT_SELECTOR, isCanvasComment, type CommentAnchorInput } from
 import { isElementId } from '../shared/elementId.ts'
 import { remapFrameTargets } from '../shared/prototype.ts'
 import { parseRunnerPick, runnerKey, type RunnerPick } from '../shared/agentRunner.ts'
-import { hasElementId, stampElementByQuote, stampElementId, stampLegacyCommentElement } from './elementIds.ts'
+import {
+  hasElementId,
+  stampElementByQuote,
+  stampElementId,
+  stampElementIds,
+  stampLegacyCommentElement,
+} from './elementIds.ts'
 import {
   attachedNotePlacement,
   clampNoteHeight,
@@ -663,26 +669,57 @@ async function stampFrameElement(
   by: string,
   stamp: (html: string) => { html: string; id: string } | undefined,
 ): Promise<{ id: string; frame: Frame } | undefined> {
+  const stamped = await stampFrameElements(frameId, by, (html) => {
+    const one = stamp(html)
+    return one ? { html: one.html, ids: [one.id] } : undefined
+  })
+  const id = stamped?.ids[0]
+  return stamped && id ? { id, frame: stamped.frame } : undefined
+}
+
+/** `ensureElementId` for several positional selectors at once: one parse, one annotation write (no
+ *  version, sign-off kept, no activity line) however many elements were missing an id, and none at
+ *  all when every one already has it. `ids` follows `selectors`, undefined where one did not resolve.
+ *  Undefined when the frame is gone, is being streamed into, or the stamps could not be written. */
+export async function ensureElementIds(
+  frameId: string,
+  selectors: string[],
+  by: string,
+): Promise<{ ids: Array<string | undefined>; frame: Frame } | undefined> {
+  return stampFrameElements(frameId, by, (html) =>
+    stampElementIds(
+      html,
+      selectors.map((selector) => selector.slice(0, MAX_ELEMENT_SELECTOR_CHARS)),
+    ),
+  )
+}
+
+async function stampFrameElements(
+  frameId: string,
+  by: string,
+  stamp: (html: string) => { html: string; ids: Array<string | undefined> } | undefined,
+): Promise<{ ids: Array<string | undefined>; frame: Frame } | undefined> {
   const frame = store.getFrame(frameId)
   if (!frame || isFrameStreaming(frameId)) return undefined
   const stamped = stamp(frame.html)
   if (!stamped) return undefined
+  const ids = stamped.ids.filter((id): id is string => id !== undefined)
   if (stamped.html === frame.html) {
-    if (!(await stampSaved(frameId, stamped.id))) return undefined
+    for (const id of ids) if (!(await stampSaved(frameId, id))) return undefined
     /* the frame may have been deleted while the write was awaited */
     const current = store.getFrame(frameId)
-    return current ? { id: stamped.id, frame: current } : undefined
+    return current ? { ids: stamped.ids, frame: current } : undefined
   }
   const next = store.updateFrame(frameId, { html: stamped.html }, by, { annotation: true })
   if (!next) return undefined
   const pending = unsavedStamps.get(frameId) ?? { ids: new Set<string>() }
-  pending.ids.add(stamped.id)
+  for (const id of ids) pending.ids.add(id)
   unsavedStamps.set(frameId, pending)
-  if (!(await stampSaved(frameId, stamped.id))) return undefined
+  for (const id of ids) if (!(await stampSaved(frameId, id))) return undefined
   /* deleted meanwhile: an update now would put it back on every screen */
   if (!store.getFrame(frameId)) return undefined
   broadcast(next.canvasId, { type: 'frame:updated', frame: next, actor: resolveActor({ name: by, kind: 'user' }) })
-  return { id: stamped.id, frame: next }
+  return { ids: stamped.ids, frame: next }
 }
 
 /** An anchor inside a frame, as a client sent it. An element is kept by the

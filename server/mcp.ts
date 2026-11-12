@@ -1846,20 +1846,23 @@ export function buildMcpServer(
       const imageAssets = await imageDetailsForFrame(f.id)
       const outline = mode === 'outline'
       const instances = !outline && f.html.includes(INSTANCE_ATTR) ? instancesIn(f) : []
+      /* before the summary: reading the outline may stamp ids, which moves the frame's version */
+      const outlineView = outline
+        ? await frameOutlineFor(f, {
+            measure,
+            /* only an editor's read stamps ids; a viewer's writes nothing and gets selectors instead */
+            stamp: frameFor(frame_id, 'edit') ? { by: actorFrom(agent_name).name } : undefined,
+            mayRender: () => takeSlot('render', ownerId ?? agent_name ?? 'agent', env.MCP_RENDERS_PER_MIN),
+          })
+        : undefined
+      const current = store.getFrame(f.id) ?? f
       return withFeedbackNotice(
         text({
           canvasId: f.canvasId,
-          ...frameSummary({ ...f, pageId: canvas ? framePageId(canvas, f) : f.pageId }, images),
+          ...frameSummary({ ...current, pageId: canvas ? framePageId(canvas, current) : current.pageId }, images),
           ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}),
           ...(include_html === false || outline ? {} : { html: expand_components ? f.html : compactFrameHtml(f) }),
-          ...(outline
-            ? {
-                outline: await frameOutlineFor(f, {
-                  measure,
-                  mayRender: () => takeSlot('render', ownerId ?? agent_name ?? 'agent', env.MCP_RENDERS_PER_MIN),
-                }),
-              }
-            : {}),
+          ...(outlineView ? { outline: outlineView } : {}),
           ...(instances.length ? { instances } : {}),
           ...(imageAssets.length
             ? {

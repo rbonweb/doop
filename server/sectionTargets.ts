@@ -80,6 +80,77 @@ interface TagLocation extends OffsetLocation {
   attrs?: Record<string, OffsetLocation>
 }
 
+/** The part of a parse5 node `sourceEnd` reads, in the shape of either tree adapter. */
+interface SourceNode {
+  sourceCodeLocation?: TagLocation | null
+  children?: SourceNode[]
+  childNodes?: SourceNode[]
+  /** a parse5 template's content, outside its child nodes */
+  content?: SourceNode
+  parent?: SourceNode | null
+  parentNode?: SourceNode | null
+  name?: string
+  tagName?: string
+}
+
+function childrenOf(node: SourceNode): SourceNode[] {
+  return [...(node.children ?? node.childNodes ?? []), ...(node.content?.childNodes ?? [])]
+}
+
+/** Where `</body></html>` start at the very end of a document, whitespace between and after them allowed: an implied `<body>` has no location, so its end tag is only found in the text. */
+function trailingClosersStart(html: string): number {
+  let cut = html.trimEnd().length
+  for (const name of ['html', 'body']) {
+    const window = Math.max(0, cut - 64)
+    const match = new RegExp(`</${name}\\s*>$`, 'i').exec(html.slice(window, cut))
+    if (!match) continue
+    cut = window + match.index
+    if (name === 'html') cut = html.slice(0, cut).trimEnd().length
+  }
+  return cut
+}
+
+/** Where the enclosing body's or html's end tag starts: anything parsed from there on is whitespace or text the parser filed under an open element, not part of it. */
+function closingTagStart(node: SourceNode): number {
+  let limit = Infinity
+  for (let up = node.parent ?? node.parentNode; up; up = up.parent ?? up.parentNode) {
+    const tag = (up.name ?? up.tagName)?.toLowerCase()
+    const endTag = up.sourceCodeLocation?.endTag
+    if ((tag === 'body' || tag === 'html') && endTag) limit = Math.min(limit, endTag.startOffset)
+  }
+  return limit
+}
+
+/** Where an element's source really ends. parse5 closes an element with no end tag of its own (a
+ *  `<footer>` left open when `</body>` arrives, or at the end of the file) at the end of the
+ *  document, which would swallow `</body></html>` and whatever follows; its content ends where
+ *  the last thing parsed inside it does. That is found over the whole subtree, since the last
+ *  child can be an implied element with no location of its own (a `<tbody>`). */
+export function sourceEnd(root: object, html?: string): number {
+  const top = root as SourceNode
+  const own = top.sourceCodeLocation
+  if (!own) return 0
+  if (own.endTag) return own.endOffset
+  let end = own.startTag ? own.startTag.endOffset : own.endOffset
+  const limit = Math.min(closingTagStart(top), html === undefined ? Infinity : trailingClosersStart(html))
+  const stack: SourceNode[] = childrenOf(top)
+  for (let next = stack.pop(); next; next = stack.pop()) {
+    const location = next.sourceCodeLocation
+    if (location && location.startOffset >= limit) continue
+    for (const kid of childrenOf(next)) stack.push(kid)
+    if (!location) continue
+    /* an element left open has the document's end as its own; its start tag is what it really wrote */
+    const real = location.endTag
+      ? location.endTag.endOffset
+      : location.startTag
+        ? location.startTag.endOffset
+        : location.endOffset
+    /* a text node the parser kept appending to past `</body>` is cut where the closer starts */
+    if (Math.min(real, limit) > end) end = Math.min(real, limit)
+  }
+  return end
+}
+
 function isElement(node: AnyNode): node is Element {
   return node.type === 'tag' || node.type === 'script' || node.type === 'style'
 }
@@ -256,7 +327,7 @@ export function toResolved(fd: FrameDocument, el: Element, index: PathIndex = ne
   const startTag = loc?.startTag
   if (!loc || !startTag) return undefined
   const endTag = loc.endTag
-  const end = loc.endOffset
+  const end = sourceEnd(el, fd.html)
   const attrs: ResolvedTarget['attrs'] = {}
   for (const [name, range] of Object.entries(loc.attrs ?? {})) {
     const key = name.toLowerCase()

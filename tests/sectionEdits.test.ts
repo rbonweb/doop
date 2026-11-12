@@ -330,6 +330,26 @@ describe('frameOutline', () => {
     expect(outline.truncated).toBe(5)
   })
 
+  it('counts a 30 KB footer in full, however its end is written', () => {
+    const filler = 'x'.repeat(30_000)
+    const pages = {
+      closed: `<html><body><header>h</header><footer><p>${filler}</p></footer></body></html>`,
+      'implied p end': `<html><body><header>h</header><footer><p>${filler}</footer></body></html>`,
+      'no footer end tag': `<html><body><header>h</header><footer><p>${filler}</body></html>`,
+      'closed by the end of the file': `<html><body><header>h</header><footer><div>${filler}`,
+      'no html or body': `<header>h</header><footer><p>${filler}</footer>`,
+    }
+    for (const [name, html] of Object.entries(pages)) {
+      const footer = frameOutline(html).sections.find((section) => section.tag === 'footer')
+      const start = html.indexOf('<footer')
+      const closing = html.indexOf('</footer>')
+      const end =
+        closing === -1 ? (html.indexOf('</body>') === -1 ? html.length : html.indexOf('</body>')) : closing + 9
+      expect(footer?.bytes, name).toBe(end - start)
+      expect(footer?.bytes, name).toBeGreaterThan(30_000)
+    }
+  })
+
   it('keeps a large page outline under 3 KB', () => {
     const filler = 'Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor. '
     const sections = Array.from({ length: 12 }, (_, index) => {

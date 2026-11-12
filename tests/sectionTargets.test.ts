@@ -1,5 +1,6 @@
 import { isTag, type Element } from 'domhandler'
 import { describe, expect, it } from 'vitest'
+import { applyEdits, editsForOp, frameOutline } from '../server/sectionEdits.ts'
 import type { FrameDocument } from '../server/sectionTargets.ts'
 import {
   describeTarget,
@@ -270,5 +271,98 @@ describe('text, implied elements and deep nesting', () => {
     expect(result.matches).toHaveLength(20000)
     expect(result.matches[19999]!.path).toBe('body > p:nth-of-type(20000)')
     expect(elapsed).toBeLessThan(1000)
+  })
+})
+
+describe('source spans of a large element', () => {
+  it('spans a 30 KB footer from its start tag to its end, with and without an end tag', () => {
+    const filler = 'x'.repeat(30_000)
+    const closed = `<html><body><header>h</header><footer><p>${filler}</p></footer></body></html>`
+    const open = `<html><body><header>h</header><footer><p>${filler}`
+    const openInBody = `${open}</body></html>`
+    for (const html of [closed, open, openInBody]) {
+      const result = resolveTarget(html, { selector: 'footer' })
+      if (!result.ok) throw new Error(result.error)
+      const match = result.matches[0]!
+      const start = html.indexOf('<footer')
+      const end = html.includes('</footer>')
+        ? html.indexOf('</footer>') + 9
+        : html.indexOf('</body>') === -1
+          ? html.length
+          : html.indexOf('</body>')
+      expect({ start: match.start, end: match.end }).toEqual({ start, end })
+      expect(match.end - match.start).toBeGreaterThan(30_000)
+    }
+  })
+})
+
+describe('source spans of elements left open', () => {
+  const tail = '</body></html>'
+  const cases: Record<string, { html: string; tag: string; last: string }> = {
+    'a table with rows': {
+      html: `<section>x</section><table><tr><td>hello world long</td></tr><tr><td>more</td></tr>${tail}`,
+      tag: 'table',
+      last: '<td>more</td></tr>',
+    },
+    'a table with a caption': {
+      html: `<section>x</section><table><caption>cap</caption><tr><td>a</td></tr>${tail}`,
+      tag: 'table',
+      last: '<td>a</td></tr>',
+    },
+    'a select with open options': {
+      html: `<section>x</section><select><option>one<option>two${tail}`,
+      tag: 'select',
+      last: 'two',
+    },
+  }
+
+  for (const [name, { html, tag, last }] of Object.entries(cases)) {
+    it(`ends ${name} at its last content, in the target and in the outline`, () => {
+      const end = html.indexOf(last) + last.length
+      const start = html.indexOf(`<${tag}`)
+      const result = resolveTarget(html, { selector: tag })
+      if (!result.ok) throw new Error(result.error)
+      expect({ start: result.matches[0]!.start, end: result.matches[0]!.end }).toEqual({ start, end })
+      const row = frameOutline(html).sections.find((section) => section.tag === tag)
+      expect(row?.bytes).toBe(end - start)
+    })
+
+    it(`replaces ${name} without leaving a residue`, () => {
+      const result = resolveTarget(html, { selector: tag })
+      if (!result.ok) throw new Error(result.error)
+      const edits = editsForOp(html, result.matches[0]!, { op: 'replace', html: '<p>new</p>' }, 'body')
+      if (!edits.ok) throw new Error(edits.error)
+      const applied = applyEdits(html, edits.edits)
+      if (!applied.ok) throw new Error(applied.error)
+      expect(applied.html).toBe(`<section>x</section><p>new</p>${tail}`)
+    })
+  }
+})
+
+describe('source spans that end at the closing tags of body and html', () => {
+  it('leaves whitespace after </body> and </html> out of an element left open', () => {
+    const html = '<p>a<p id=t>b\n</body>\n</html>\n'
+    const result = resolveTarget(html, { selector: '#t' })
+    if (!result.ok) throw new Error(result.error)
+    const match = result.matches[0]!
+    expect(match.end).toBeLessThanOrEqual(html.indexOf('</body>'))
+    expect(html.slice(match.start, match.end)).toMatch(/^<p id=t>b\s*$/)
+    const edits = editsForOp(html, match, { op: 'replace', html: '<p>new</p>' }, 'body')
+    if (!edits.ok) throw new Error(edits.error)
+    const applied = applyEdits(html, edits.edits)
+    if (!applied.ok) throw new Error(applied.error)
+    expect(applied.html).toBe('<p>a<p>new</p></body>\n</html>\n')
+    const row = frameOutline(html).sections.find((section) => section.path.endsWith('p:nth-of-type(2)'))
+    expect(row?.bytes).toBe(match.end - match.start)
+  })
+
+  it('reads an open template as part of the element, in the outline and in the target', () => {
+    const html = '<section>a</section><div id=t><template><p>x<p>y'
+    const result = resolveTarget(html, { selector: '#t' })
+    if (!result.ok) throw new Error(result.error)
+    const match = result.matches[0]!
+    expect(match.end).toBe(html.length)
+    const row = frameOutline(html).sections.find((section) => section.tag === 'div')
+    expect(row?.bytes).toBe(match.end - match.start)
   })
 })
