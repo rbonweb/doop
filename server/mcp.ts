@@ -15,6 +15,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { Request, Response } from 'express'
 import { fromNodeHeaders } from 'better-auth/node'
 import { z } from 'zod'
+import { assetSourceSchema, assetTagsSchema } from './assetSourceSchema.ts'
 import { store } from './store.ts'
 import { addPage, fromToolPage, noPageMessage, savePages, toToolPage, updateFrameMeta } from './pageTools.ts'
 import { fontsForCanvas } from './fonts.ts'
@@ -39,7 +40,7 @@ import * as workspaces from './workspaces.ts'
 import { auth, getAccessProfile, getUserName, isBanned } from './auth.ts'
 import { capture, captureThrottled } from './analytics.ts'
 import { renderFrame } from './screenshot.ts'
-import { imagesForFrames } from './assets.ts'
+import { imagesForFrames, imageDetailsForFrame } from './assets.ts'
 import type { FrameImage } from '../shared/imageDescriptions.ts'
 import {
   MAX_PDF_FRAMES,
@@ -1755,6 +1756,7 @@ export function buildMcpServer(
       arrive(f.canvasId, agent_name)
       const canvas = store.getCanvas(f.canvasId)
       const images = (await imagesForFrames([f.id])).get(f.id)
+      const imageAssets = await imageDetailsForFrame(f.id)
       const instances = f.html.includes(INSTANCE_ATTR) ? instancesIn(f) : []
       return withFeedbackNotice(
         text({
@@ -1763,6 +1765,14 @@ export function buildMcpServer(
           ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}),
           ...(include_html === false ? {} : { html: expand_components ? f.html : compactFrameHtml(f) }),
           ...(instances.length ? { instances } : {}),
+          ...(imageAssets.length
+            ? {
+                image_assets: imageAssets.map(({ src, ...rest }) => ({
+                  ...rest,
+                  url: `${env.BETTER_AUTH_URL}${src}`,
+                })),
+              }
+            : {}),
         }),
         f.canvasId,
         agent_name ? actorFrom(agent_name) : undefined,
@@ -1859,7 +1869,7 @@ export function buildMcpServer(
     {
       title: 'Upload an image or stylesheet asset',
       description:
-        'Upload an image (png/jpg/webp/gif/svg) or a CSS stylesheet (.css), max 5 MB, and get back a permanent public URL to reference in frame HTML: <img src> or a CSS background for an image, <link rel="stylesheet" href> in the <head> for a stylesheet — use this instead of inlining data: URIs, and upload a shared theme stylesheet once instead of pasting the same large <style> block into every frame. Pick ONE input by where the file lives: (1) remote — pass source_url and the server fetches it; (2) LOCAL FILE — pass local_file=true to receive a one-time upload URL and a ready-to-run curl command, run it in your shell, and the curl response JSON contains the permanent url. (3) data — base64, LAST RESORT for tiny files (under ~100 KB) when you cannot run shell commands; larger base64 payloads are slow and corrupt easily.',
+        'Upload an image (png/jpg/webp/gif/svg) or a CSS stylesheet (.css), max 5 MB, and get back a permanent public URL to reference in frame HTML: <img src> or a CSS background for an image, <link rel="stylesheet" href> in the <head> for a stylesheet — use this instead of inlining data: URIs, and upload a shared theme stylesheet once instead of pasting the same large <style> block into every frame. Pick ONE input by where the file lives: (1) remote — pass source_url and the server fetches it; (2) LOCAL FILE — pass local_file=true to receive a one-time upload URL and a ready-to-run curl command, run it in your shell, and the curl response JSON contains the permanent url. (3) data — base64, LAST RESORT for tiny files (under ~100 KB) when you cannot run shell commands; larger base64 payloads are slow and corrupt easily. Optional source and tags record where a file came from and make it findable with list_assets.',
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       inputSchema: {
         source_url: z.string().optional().describe('Public http(s) URL to fetch the file from (remote files)'),
@@ -1878,10 +1888,16 @@ export function buildMcpServer(
           .describe(
             'URL of a stylesheet (/a/<id>.css) uploaded earlier to replace in place: the URL stays the same, every frame linking it picks up the new file, and the old file stays at <url>?v=<n>. Stylesheets only.',
           ),
+        source: assetSourceSchema
+          .optional()
+          .describe(
+            'Where the file came from (provenance): { kind: frame|store|url, ... }; source_url defaults to { kind: "url" }',
+          ),
+        tags: assetTagsSchema.optional().describe('Tags to find the asset again with list_assets'),
         agent_name: agentName,
       },
     },
-    async ({ data, source_url, local_file, canvas_id, replace_url, agent_name }) => {
+    async ({ data, source_url, local_file, canvas_id, replace_url, source, tags, agent_name }) => {
       const provided = [data, source_url, local_file].filter(Boolean).length
       if (provided !== 1)
         return err(
@@ -1903,6 +1919,7 @@ export function buildMcpServer(
           ownerId,
           uploadedBy: agent_name,
           ...(replaceId ? { replaceAssetId: replaceId } : {}),
+          ...(replaceId ? {} : { ...(source ? { source } : {}), ...(tags ? { tags } : {}) }),
         })
         const upload_url = `${env.BETTER_AUTH_URL}/u/${token}`
         return withFeedback(
@@ -1948,9 +1965,16 @@ export function buildMcpServer(
             actorFrom(agent_name),
           )
         }
+        const origin = source ?? (source_url ? { kind: 'url' as const, url: source_url } : undefined)
         const asset = await assets.createAsset(
           buf,
-          { canvasId: canvas_id, ownerId, uploadedBy: agent_name },
+          {
+            canvasId: canvas_id,
+            ownerId,
+            uploadedBy: agent_name,
+            ...(origin ? { source: origin } : {}),
+            ...(tags ? { tags } : {}),
+          },
           { stylesheets: true },
         )
         const url = `${env.BETTER_AUTH_URL}/a/${asset.id}.${asset.ext}`
