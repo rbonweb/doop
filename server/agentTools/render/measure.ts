@@ -85,7 +85,7 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
     {
       title: 'Measure a frame',
       description: MEASURE_DESCRIPTION,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: measureShape(ctx),
     },
     async ({ frame_id, width, targets, agent_name }) => {
@@ -115,7 +115,7 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
     {
       title: 'Lint a frame',
       description: LINT_DESCRIPTION,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         ...measureShape(ctx),
         rules: lintRulesSchema.describe(

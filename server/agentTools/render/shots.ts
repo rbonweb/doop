@@ -140,7 +140,7 @@ export function registerShotTools(server: McpServer, ctx: AgentToolContext): voi
     {
       title: 'Compare frames side by side',
       description: COMPARE_DESCRIPTION,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: { ...compareSchema.shape, agent_name: ctx.agentName.optional() },
     },
     async ({ items, layout, format, scale, agent_name }) => {

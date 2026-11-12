@@ -143,7 +143,10 @@ export async function resolveFrameTargets(
       resolved.push({ element_id: found.elementId })
       continue
     }
-    const stamped = opts.stampAs ? await ensureElementId(frame.id, found.path, opts.stampAs) : undefined
+    /* a stamp is a courtesy: when it cannot be written the page still gets a selector */
+    const stamped = opts.stampAs
+      ? await ensureElementId(frame.id, found.path, opts.stampAs).catch(() => undefined)
+      : undefined
     if (stamped) {
       current = stamped.frame
       resolved.push({ element_id: stamped.id })

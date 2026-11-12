@@ -13,12 +13,18 @@ vi.mock('../server/actions.ts', () => ({
   },
 }))
 vi.mock('../server/componentActions.ts', () => ({ compactFrameHtml: (frame: Frame) => frame.html }))
-vi.mock('../server/store.ts', () => ({ store: { renderSource: async (frame: Frame) => frame } }))
+vi.mock('../server/store.ts', () => ({
+  store: {
+    renderSource: async (frame: Frame) => frame,
+    getFrame: (id: string) => (id === 'labels' ? frameFor(id) : undefined),
+  },
+}))
 
 const { resolveFrameTargets } = await import('../server/targetResolution.ts')
 const { measureFrame } = await import('../server/measure.ts')
 const { frameScreenshot } = await import('../server/frameShots.ts')
 const { TargetError } = await import('../server/renderTargets.ts')
+const { measureResidentTools } = await import('../server/agentTools/render/measure.ts')
 const { frameOutline } = await import('../server/sectionEdits.ts')
 const { findBrowserPath, getBrowser } = await import('../server/screenshot.ts')
 
@@ -123,5 +129,22 @@ describe.skipIf(!findBrowserPath())('outline labels in the render tools', () => 
       'no element matches label "Nope"',
     )
     await expect(frameScreenshot(frame, { target: { label: 'Twin' } })).rejects.toThrow(/matches 2 sections/)
+  })
+})
+
+describe.skipIf(!findBrowserPath())('resident measure and lint tools', () => {
+  const ctx = { canvasId: 'c', actor: { name: 'Doop Agent' } } as unknown as Parameters<
+    (typeof measureResidentTools)[number]['run']
+  >[1]
+
+  it('answer a target that matches nothing with an error naming it', async () => {
+    const [measure, lint] = measureResidentTools
+    const targets = [{ label: 'No such section' }]
+    const measured = await measure!.run({ frame_id: 'labels', targets }, ctx)
+    expect(measured).toMatchObject({ ok: false })
+    expect(JSON.stringify(measured)).toContain('label \\"No such section\\"')
+    const linted = await lint!.run({ frame_id: 'labels', targets, rules: { no_overflow: true } }, ctx)
+    expect(linted).toMatchObject({ ok: false })
+    expect(JSON.stringify(linted)).toContain('label \\"No such section\\"')
   })
 })

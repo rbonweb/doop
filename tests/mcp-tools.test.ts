@@ -419,7 +419,8 @@ describe('MCP ChatGPT app contract', () => {
       const byName = Object.fromEntries(tools.map((t) => [t.name, t]))
       expect(byName.delete_frame!.annotations!.destructiveHint).toBe(true)
       expect(byName.set_frame_html!.annotations!.destructiveHint).toBe(true)
-      expect(byName.get_frame_screenshot!.annotations!.readOnlyHint).toBe(true)
+      /* a label target may stamp a data-doop-id annotation for an editor */
+      expect(byName.get_frame_screenshot!.annotations!.readOnlyHint).toBe(false)
       expect(byName.search_images!.annotations!.openWorldHint).toBe(true)
       expect(byName.list_backgrounds!.annotations!.openWorldHint).toBe(false)
       expect(byName.save_decision!.annotations!.idempotentHint).toBe(true)
