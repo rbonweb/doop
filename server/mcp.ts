@@ -1840,7 +1840,14 @@ export function buildMcpServer(
           ...frameSummary({ ...f, pageId: canvas ? framePageId(canvas, f) : f.pageId }, images),
           ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}),
           ...(include_html === false || outline ? {} : { html: expand_components ? f.html : compactFrameHtml(f) }),
-          ...(outline ? { outline: await frameOutlineFor(f, { measure }) } : {}),
+          ...(outline
+            ? {
+                outline: await frameOutlineFor(f, {
+                  measure,
+                  mayRender: () => takeSlot('render', ownerId ?? agent_name ?? 'agent', env.MCP_RENDERS_PER_MIN),
+                }),
+              }
+            : {}),
           ...(instances.length ? { instances } : {}),
           ...(imageAssets.length
             ? {
