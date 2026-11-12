@@ -725,7 +725,13 @@ app.put('/u/:token', async (req, res) => {
     /* tickets come only from upload_asset, which takes theme stylesheets as well as images */
     const asset = await createAsset(
       Buffer.concat(chunks),
-      { canvasId: ticket.canvasId, ownerId: ticket.ownerId, uploadedBy: ticket.uploadedBy },
+      {
+        canvasId: ticket.canvasId,
+        ownerId: ticket.ownerId,
+        uploadedBy: ticket.uploadedBy,
+        ...(ticket.source ? { source: ticket.source } : {}),
+        ...(ticket.tags ? { tags: ticket.tags } : {}),
+      },
       { stylesheets: true },
     )
     success = true
