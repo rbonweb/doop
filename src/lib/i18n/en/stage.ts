@@ -55,6 +55,8 @@ export const stage = {
   pathCopyFailed: 'Couldn’t copy the path',
   slide: 'Slide',
   slideTip: 'A slide: plays with the other slides on this page in present mode',
+  claimTip: '{name} is working on this frame until {time}: “{note}”',
+  claimTipNoNote: '{name} is working on this frame until {time}',
   exportFrameLabel: 'Export',
   exportFrame: 'Export {name}',
   exportFrameTip: 'Export this frame ({shortcut})',
