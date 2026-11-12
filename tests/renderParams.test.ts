@@ -81,6 +81,11 @@ describe('normalizeRenderParams', () => {
     expect(normalizeRenderParams(FRAME, { scale: 2, width: 500 }).scale).toBe(0.5)
   })
 
+  it('rounds a width-derived scale to two decimals and floors it at 0.1', () => {
+    expect(normalizeRenderParams({ width: 1200, height: 800 }, { width: 380 }).scale).toBe(0.32)
+    expect(normalizeRenderParams(FRAME, { width: 5 }).scale).toBe(0.1)
+  })
+
   it('measures width against the crop, not the whole frame', () => {
     expect(normalizeRenderParams(FRAME, { crop: { x: 0, y: 0, w: 200, h: 100 }, width: 100 }).scale).toBe(0.5)
   })
@@ -195,9 +200,12 @@ describe('render keys, types and URLs', () => {
   })
 
   it('round-trips its query string through parseRenderQuery', () => {
-    for (const p of [wide, small, parsed(parseRenderQuery(FRAME, 'png', { scale: '1.5' }))]) {
+    const fromWidth = parsed(parseRenderQuery({ width: 1200, height: 800 }, 'png', { width: '380' }))
+    const tiny = parsed(parseRenderQuery(FRAME, 'png', { width: '5' }))
+    for (const p of [wide, small, parsed(parseRenderQuery(FRAME, 'png', { scale: '1.5' })), fromWidth, tiny]) {
       const query = Object.fromEntries(new URLSearchParams(renderUrlQuery(p, 3)))
-      expect(parsed(parseRenderQuery(FRAME, renderExt(p.format), query))).toEqual(p)
+      const frame = p === fromWidth ? { width: 1200, height: 800 } : FRAME
+      expect(parsed(parseRenderQuery(frame, renderExt(p.format), query))).toEqual(p)
     }
   })
 })

@@ -72,7 +72,8 @@ export function normalizeRenderParams(frame: Pick<Frame, 'width' | 'height'>, in
   )
   /* width only ever lowers the scale: asking for a wider image than the area cannot invent pixels */
   if (input.width !== undefined && input.width > 0 && input.width < areaW * scale) scale = input.width / areaW
-  scale = Math.max(0.01, Math.round(scale * 10_000) / 10_000)
+  /* the precision and floor parseExportScale accepts, so renderUrlQuery output parses back to equal params */
+  scale = Math.max(MIN_EXPORT_SCALE, Math.round(scale * 100) / 100)
   const quality = format === 'png' ? 0 : Math.round(clamp(input.quality ?? DEFAULT_QUALITY[format], 1, 100))
   return { format, scale, quality, ...(crop ? { crop } : {}) }
 }

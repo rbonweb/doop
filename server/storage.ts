@@ -88,8 +88,13 @@ export async function getObject(key: string, signal?: AbortSignal): Promise<Buff
   }
 }
 
-/** Every object under the `render/` prefix, with size and last-modified time — the render sweep's view of byte storage. Bucket listings paginate; disk listings skip names `assertKey` would reject. */
-export async function listObjects(prefix: 'render/'): Promise<Array<{ key: string; size: number; modified: number }>> {
+const RENDER_PREFIX = /^render\/[A-Za-z0-9_-]*$/
+
+/** Every object whose key starts with a `render/` prefix (`render/` alone lists them all), with size and last-modified time. Bucket listings paginate; disk listings skip names `assertKey` would reject. */
+export async function listObjects(
+  prefix: `render/${string}`,
+): Promise<Array<{ key: string; size: number; modified: number }>> {
+  if (!RENDER_PREFIX.test(prefix)) throw new Error(`malformed list prefix: ${prefix}`)
   if (BUCKET) {
     const { ListObjectsV2Command } = await import('@aws-sdk/client-s3')
     const out: Array<{ key: string; size: number; modified: number }> = []
@@ -112,8 +117,10 @@ export async function listObjects(prefix: 'render/'): Promise<Array<{ key: strin
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw e
   }
+  const namePrefix = prefix.slice('render/'.length)
   const out: Array<{ key: string; size: number; modified: number }> = []
   for (const name of names) {
+    if (!name.startsWith(namePrefix)) continue
     try {
       assertKey(`render/${name}`)
     } catch {

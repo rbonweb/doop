@@ -90,7 +90,7 @@ export async function purgeFrameRenders(frameId: string): Promise<number> {
   let deleted = 0
   let objects: Awaited<ReturnType<typeof storage.listObjects>>
   try {
-    objects = await storage.listObjects('render/')
+    objects = await storage.listObjects(`render/${frameId}_`)
   } catch (e) {
     console.error(`[renders] purge list failed for ${frameId}:`, e)
     return 0

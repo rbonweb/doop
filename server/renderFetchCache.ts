@@ -12,8 +12,6 @@ export interface CachedResponse {
 
 export const MAX_CACHE_BYTES = 128 * 1024 * 1024
 export const MAX_ENTRY_BYTES = 8 * 1024 * 1024
-/** an unpinned stylesheet can be replaced in place, so it is only remembered briefly */
-export const UNPINNED_CSS_TTL_MS = 5_000
 export const GOOGLE_CSS_TTL_MS = 24 * 60 * 60 * 1000
 
 const GOOGLE_CSS_ORIGIN = 'https://fonts.googleapis.com'
@@ -91,18 +89,16 @@ async function loadAsset(url: URL): Promise<Loaded | undefined> {
   if (!id || !ext) return undefined
   const v = url.searchParams.get('v')
   const pinnedVersion = v !== null && /^\d{1,9}$/.test(v) ? Number(v) : undefined
+  /* a stylesheet can be replaced in place and only a pinned URL names one revision, so an unpinned one is never cached: the normal request path serves it */
+  if (ext === 'css' && pinnedVersion === undefined) return undefined
   const found = await getAsset(id, pinnedVersion)
   if (!found || found.meta.ext !== ext) return undefined
   const { mime, version } = found.meta
   const pinned = pinnedVersion !== undefined
   const { 'Content-Type': contentType = mime, ...headers } = assetResponseHeaders(mime, { id, version, pinned })
   headers['Access-Control-Allow-Origin'] = '*'
-  /* only a stylesheet can be replaced in place, and only an unpinned URL follows the replacement */
-  const mutable = mime === 'text/css' && !pinned
-  return {
-    response: { status: 200, headers, contentType, body: found.buf },
-    ttlMs: mutable ? UNPINNED_CSS_TTL_MS : Infinity,
-  }
+  if (mime === 'text/css' && !pinned) return undefined
+  return { response: { status: 200, headers, contentType, body: found.buf }, ttlMs: Infinity }
 }
 
 async function readBounded(response: Response, limit: number): Promise<Buffer | undefined> {
