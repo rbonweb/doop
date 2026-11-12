@@ -33,6 +33,14 @@ describe('gapBetween', () => {
   it('is negative by the smaller side of an overlap', () => {
     expect(gapBetween(box(0, 0), box(90, 80))).toBe(-10)
   })
+
+  it('measures a box nested in a larger one by its intersection', () => {
+    expect(gapBetween(box(0, 0, 1440, 900), box(100, 100, 240, 180))).toBe(-180)
+  })
+
+  it('measures a narrow box nested in a larger one by its width', () => {
+    expect(gapBetween(box(0, 0, 100, 100), box(20, 20, 10, 40))).toBe(-10)
+  })
 })
 
 describe('tooClose', () => {
