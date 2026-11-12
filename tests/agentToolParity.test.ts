@@ -32,6 +32,7 @@ const BY_CONTEXT = [
   'add_comment', // a resident run starts from the threads it answers, so it replies with reply_to_comment instead of opening new ones
   'add_canvas_page', // the deprecated alias of create_canvas_page, which the resident has
   'move_frame', // moves a frame to another canvas; a resident run is scoped to its own canvas
+  'run_batch', // the resident agent already runs several tool calls per turn
 ]
 
 /** Real gaps: MCP agents can do these and resident agents cannot yet. */

@@ -5,6 +5,7 @@
 
 import { AGENT_ROLES } from '../shared/agents.ts'
 import { MAX_DECISION_CHARS } from '../shared/designDecisions.ts'
+import { AGENT_TOOL_GUIDE } from './agentTools/guide/index.ts'
 
 export const GUIDE_TOPICS = ['doop-instructions'] as const
 
@@ -159,7 +160,7 @@ get_canvas and list_components show a canvas's components with their props.
   from another canvas: list_components with libraries=true, import_component, and sync_component
   when list_components says library_update_available.`
 
-export const DOOP_GUIDE = `# Doop Agent Guide
+const DOOP_GUIDE_CORE = `# Doop Agent Guide
 
 ## The room you're in
 
@@ -613,3 +614,6 @@ Two tools reach this Doop instance's admins, never the humans on the canvas, and
 
 Never include secrets. A human's design feedback is not this: record that with save_decision.
 `
+
+/** The core guide, then each agent speed area's section (`server/agentTools/guide/`). */
+export const DOOP_GUIDE = DOOP_GUIDE_CORE + AGENT_TOOL_GUIDE

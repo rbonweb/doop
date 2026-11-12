@@ -123,6 +123,8 @@ function handle(msg: ServerMessage) {
         if (firstJoin && !roleAllows(msg.role, 'edit')) s.setTool('hand')
       }
       s.setPresences(msg.presences)
+      /* the room sends the claims right after init when there are any */
+      s.setClaims([])
       s.setActivity(msg.activity)
       s.setTasks(msg.tasks)
       s.setFeedback(msg.feedback)
@@ -155,6 +157,9 @@ function handle(msg: ServerMessage) {
       break
     case 'presence:join':
       if (msg.presence.clientId !== me) s.upsertPresence(msg.presence)
+      break
+    case 'frame:claims':
+      if (msg.canvasId === s.canvas?.id) s.setClaims(msg.claims)
       break
     case 'presence:leave':
       s.removePresence(msg.clientId)

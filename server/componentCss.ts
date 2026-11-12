@@ -491,3 +491,141 @@ function serializedAttrs(root: Element): string {
   }
   return values.join(';')
 }
+
+/* ------------------------------------------------------------------ */
+/* Sections: what a part of a frame cannot take along                  */
+/* ------------------------------------------------------------------ */
+
+export interface SectionSheet {
+  /** the source sheet without the rules that cannot be carried; hand it to `extractComponentCss` */
+  sheet: string
+  /** the document-wide rules of this sheet (`body`, `html`, `:root`, `*` resets), unscoped */
+  base: string
+  dropped: { selector: string; reason: string }[]
+}
+
+const STRUCTURAL_PSEUDO =
+  /:(nth-child|nth-last-child|nth-of-type|nth-last-of-type|first-child|last-child|only-child|first-of-type|last-of-type|only-of-type|has)\b/i
+const RESET_SELECTOR = /^\*(::?(?:before|after|backdrop))?$/i
+
+function serializeNodes(nodes: CssNode[]): string {
+  return nodes
+    .map((node) => {
+      if (node.kind === 'rule') return `${node.selector} {${node.body}}`
+      if (node.kind === 'group') return `${node.prelude} {\n${serializeNodes(node.nodes)}\n}`
+      return node.text
+    })
+    .join('\n')
+}
+
+/** Why a selector cannot be carried with one section of a frame, or null when it can. The server has no
+ *  layout, so this is read off the selector and the section's own tokens, like the rest of this module:
+ *  a structural pseudo-class or sibling combinator that may land on the section root depends on where the
+ *  root sat in its source, and a compound naming something outside the section would over-apply once cut off. */
+function uncarriableReason(selector: string, tokens: Tokens, rootTokens: Tokens): string | null {
+  if (relevantSelector(selector, tokens) === null) return null
+  const compounds = compoundsOf(selector)
+  let first = compounds.length - 1
+  while (first > 0 && compoundMatches(compounds[first - 1]!.compound, tokens)) first--
+  for (let i = first; i < compounds.length; i++) {
+    const { compound, combinator } = compounds[i]!
+    if (!compoundMatches(compound, rootTokens)) continue
+    const pseudo = STRUCTURAL_PSEUDO.exec(compound)
+    if (pseudo)
+      return `:${pseudo[1]!.toLowerCase()} on the section root or an ancestor depends on its place in the source`
+    if (combinator === '+' || combinator === '~') return 'sibling combinator on the section root reaches outside it'
+  }
+  if (first > 0) {
+    const outside = compounds
+      .slice(0, first)
+      .map((piece) => piece.compound)
+      .join(' ')
+    return `names ${outside} outside the section`
+  }
+  const last = compounds.length - 1
+  const document = compounds.some((piece, i) => {
+    if (i === last) return false
+    const tags = compoundTokens(piece.compound).tags
+    return /(^|[^\w-]):root\b/i.test(piece.compound) || tags.has('html') || tags.has('body')
+  })
+  return document ? 'names the document root, which is not part of the section' : null
+}
+
+/** Split one source's sheet for carrying a section: document-wide rules go to `base`, rules that cannot travel
+ *  faithfully go to `dropped` (and out of `sheet`). Inherited and custom properties of `body`, `html` and `:root`
+ *  stay in `sheet`: `extractComponentCss` puts them on the section root. `keepBase` is true for the one source
+ *  whose document rules the composed document takes; for any other, such a rule is dropped when it sets anything
+ *  that is not inherited. */
+export function prepareSectionSheet(sheet: string, root: Element, keepBase: boolean): SectionSheet {
+  const tokens = tokensOf(root, () => false)
+  const rootTokens = tokensOf(root, () => true)
+  const dropped: SectionSheet['dropped'] = []
+  const seen = new Set<string>()
+  const drop = (selector: string, reason: string) => {
+    if (seen.has(`${selector}\0${reason}`)) return
+    seen.add(`${selector}\0${reason}`)
+    dropped.push({ selector, reason })
+  }
+
+  const partition = (nodes: CssNode[]): { kept: CssNode[]; base: CssNode[] } => {
+    const kept: CssNode[] = []
+    const base: CssNode[] = []
+    for (const node of nodes) {
+      if (node.kind === 'atomic') {
+        kept.push(node)
+      } else if (node.kind === 'group') {
+        const inner = partition(node.nodes)
+        if (inner.kept.length) kept.push({ ...node, nodes: inner.kept })
+        if (inner.base.length) base.push({ ...node, nodes: inner.base })
+      } else {
+        const keptSelectors: string[] = []
+        const baseSelectors: string[] = []
+        const setsLayout = declarationsOf(node.body).some(
+          ({ name }) => !name.startsWith('--') && !INHERITED.has(name.toLowerCase()),
+        )
+        for (const selector of splitTopLevel(node.selector, ',')) {
+          const isDocument = isDocumentSelector(selector)
+          if (isDocument || RESET_SELECTOR.test(selector)) {
+            if (keepBase) baseSelectors.push(selector)
+            else if (setsLayout) drop(selector, 'document-wide rule: only the first source supplies these')
+            if (isDocument) keptSelectors.push(selector)
+            continue
+          }
+          const reason = uncarriableReason(selector, tokens, rootTokens)
+          if (reason) drop(selector, reason)
+          else keptSelectors.push(selector)
+        }
+        if (keptSelectors.length) kept.push({ ...node, selector: keptSelectors.join(', ') })
+        if (baseSelectors.length) base.push({ ...node, selector: baseSelectors.join(', ') })
+      }
+    }
+    return { kept, base }
+  }
+
+  const { kept, base } = partition(parseCss(sheet))
+  return { sheet: serializeNodes(kept), base: serializeNodes(base), dropped }
+}
+
+export interface CssSummary {
+  /** style rules, at any depth of media and supports groups */
+  rules: number
+  /** families of the `@font-face` rules */
+  fonts: string[]
+  /** names of the `@keyframes` */
+  keyframes: string[]
+}
+
+export function summarizeCss(css: string): CssSummary {
+  const summary: CssSummary = { rules: 0, fonts: [], keyframes: [] }
+  const stack = parseCss(css)
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    if (node.kind === 'rule') summary.rules += 1
+    else if (node.kind === 'group') stack.push(...node.nodes)
+    else if (node.name === 'keyframes') summary.keyframes.push(node.prelude.replace(/^@\S+\s*/, '').trim())
+    else if (node.name === 'font-face') {
+      const family = /font-family\s*:\s*([^;]+)/i.exec(node.body)?.[1]?.replace(/["']/g, '').trim()
+      if (family) summary.fonts.push(family)
+    }
+  }
+  return summary
+}

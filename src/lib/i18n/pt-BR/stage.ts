@@ -55,6 +55,8 @@ export const stage: Catalog['stage'] = {
   pathCopyFailed: 'Não foi possível copiar o caminho',
   slide: 'Slide',
   slideTip: 'Um slide: toca com os outros slides desta página no modo de apresentação',
+  claimTip: '{name} está trabalhando neste frame até {time}: “{note}”',
+  claimTipNoNote: '{name} está trabalhando neste frame até {time}',
   exportFrameLabel: 'Exportar',
   exportFrame: 'Exportar {name}',
   exportFrameTip: 'Exportar este frame ({shortcut})',

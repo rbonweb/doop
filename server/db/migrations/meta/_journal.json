@@ -393,6 +393,13 @@
       "when": 1794352711304,
       "tag": "0056_components",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1794479620640,
+      "tag": "0057_agent_speed_asset_provenance",
+      "breakpoints": true
     }
   ]
 }

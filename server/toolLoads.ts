@@ -1,4 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
+import type { ZodRawShape } from 'zod'
 import { store } from './store.ts'
 
 /** The canvases a tool call names: `canvas_id`, and the canvases of
@@ -29,6 +31,21 @@ export async function withArgsCanvases<T>(args: unknown, run: () => T | Promise<
   }
 }
 
+/** A registered tool as a batch calls it: `run` is the very callback the SDK is given (the one that loads and holds the canvases), so a batched call passes through everything a direct call does. */
+export interface RegisteredHandler {
+  inputSchema?: ZodRawShape
+  annotations?: ToolAnnotations
+  run: (...params: unknown[]) => Promise<unknown>
+}
+
+/** Per server, never global: each `buildMcpServer` closes over its own account, role checks and rate-limit state, so two accounts' handlers must never mix. */
+const registries = new WeakMap<McpServer, Map<string, RegisteredHandler>>()
+
+/** The handler `name` was registered with on `server`, if any. */
+export function registeredTool(server: McpServer, name: string): RegisteredHandler | undefined {
+  return registries.get(server)?.get(name)
+}
+
 /** Every tool registered on `server` from here on loads and holds its
  *  canvases. A tool with an input schema is called with (args, extra), one
  *  without with (extra) alone. */
@@ -36,9 +53,16 @@ export function loadToolTargets(server: McpServer): void {
   type Register = typeof server.registerTool
   type Callback = Parameters<Register>[2]
   const register: Register = server.registerTool.bind(server)
-  server.registerTool = ((name: string, config: Parameters<Register>[1], callback: Callback) =>
-    register(name, config, (async (...params: unknown[]) => {
+  const registry = new Map<string, RegisteredHandler>()
+  registries.set(server, registry)
+  server.registerTool = ((name: string, config: Parameters<Register>[1], callback: Callback) => {
+    const run = async (...params: unknown[]) => {
       const forward = () => (callback as (...forwarded: unknown[]) => unknown)(...params)
       return params.length > 1 ? withArgsCanvases(params[0], forward) : forward()
-    }) as unknown as Callback)) as Register
+    }
+    const registered = register(name, config, run as unknown as Callback)
+    const { inputSchema, annotations } = config as { inputSchema?: ZodRawShape; annotations?: ToolAnnotations }
+    registry.set(name, { inputSchema, annotations, run })
+    return registered
+  }) as Register
 }

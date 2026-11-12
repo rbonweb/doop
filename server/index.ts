@@ -39,10 +39,14 @@ import { oAuthDiscoveryMetadata } from 'better-auth/plugins'
 import { WebSocketServer, WebSocket } from 'ws'
 import { GuideLimitError, PageLimitError, store } from './store.ts'
 import { parseGuide } from '../shared/guides.ts'
-import { getImage, invalidateFrameImages } from './previews.ts'
+import { getImage, getRender, invalidateFrameImages } from './previews.ts'
+import { parseRenderQuery, renderExt, renderMime } from './renderParams.ts'
+import { startRenderSweep } from './renderStore.ts'
+import { bearerMayRender } from './renderAuth.ts'
 import * as actions from './actions.ts'
 import { liveActivitiesRouter, logLiveActivityRequests, startLiveActivityDelivery } from './liveActivities.ts'
 import { onCanvasEvent } from './events.ts'
+import { claimsOn, onClaimsChange, type FrameClaim } from './frameClaims.ts'
 import * as imageDescriptions from './imageDescriptions.ts'
 import * as commentNotifications from './commentNotifications.ts'
 import { notificationsRouter } from './notifications.ts'
@@ -103,6 +107,7 @@ import {
   getAsset,
   reconcileAssetRefs,
   beginTicketUpload,
+  ticketAssetMeta,
   endTicketUpload,
   createAsset,
   MAX_ASSET_BYTES,
@@ -274,6 +279,7 @@ const RESTRICTED_MESSAGES: ReadonlySet<ServerMessage['type']> = new Set([
   'frame:updated',
   'frame:deleted',
   'frame:streaming',
+  'frame:claims',
   'canvas:renamed',
   'canvas:pages',
   'note:upsert',
@@ -298,7 +304,29 @@ function restrictedPresence<P extends Presence>({ status: _status, ...presence }
 /** A room message as a guest or view-only member may see it, or null when it is withheld. */
 function forRestricted(msg: ServerMessage): ServerMessage | null {
   if (!RESTRICTED_MESSAGES.has(msg.type)) return null
+  if (msg.type === 'frame:claims') return withoutClaimNotes(msg)
   return msg.type === 'presence:join' ? { ...msg, presence: restrictedPresence(msg.presence) } : msg
+}
+
+type ClaimsMessage = Extract<ServerMessage, { type: 'frame:claims' }>
+
+/** The claims a guest or view-only member sees: who holds a frame, not what they said they were doing. */
+function withoutClaimNotes(msg: ClaimsMessage): ClaimsMessage {
+  return { ...msg, claims: msg.claims.map((claim) => ({ ...claim, note: '' })) }
+}
+
+/** A canvas's advisory claims as the room carries them. */
+function claimsMessage(canvasId: string, claims: FrameClaim[]): ClaimsMessage {
+  return {
+    type: 'frame:claims',
+    canvasId,
+    claims: claims.map((c) => ({
+      frameId: c.frameId,
+      holder: c.holder,
+      note: c.note,
+      expiresAt: new Date(c.expiresAt).toISOString(),
+    })),
+  }
 }
 
 const conns = new Map<WebSocket, Conn>()
@@ -414,6 +442,9 @@ function agentTouch(
     }
   }
 }
+
+/* claims change when an agent claims, releases or lets one lapse: the room always gets the whole list */
+onClaimsChange((canvasId, claims) => broadcast(canvasId, claimsMessage(canvasId, claims)))
 
 setInterval(() => {
   const now = Date.now()
@@ -561,31 +592,56 @@ app.use('/relay', async (req, res) => {
 
 app.get('/i/:id.:ext', async (req, res) => {
   const { id, ext } = req.params as { id: string; ext: string }
-  if (ext !== 'png' && ext !== 'jpg') return res.status(404).end()
+  if (ext !== 'png' && ext !== 'jpg' && ext !== 'webp') return res.status(404).end()
   /* metadata only: a cached image needs no html, and a render reads the
      one frame's html when it starts (store.renderableFrame) */
   const frame = store.getFrame(id)
   if (!frame) return res.status(404).end()
 
-  /* any multiplier the export picker offers; a missing or unreadable one
-     is 1x, as before there was a picker */
-  const scale = fitExportScale(frame, parseExportScale(req.query.scale) ?? 1)
-  let result: Awaited<ReturnType<typeof getImage>>
+  /* the render limit targets anonymous hotlink abuse — a logged-in user
+     loading a dashboard of many canvases shouldn't hit it (and behind
+     the Railway proxy many users can share one req.ip). Only called
+     when the budget is exhausted, so cached serves stay auth-free. An
+     agent key counts too, but only for people who can see this frame. */
+  const isAuthenticated = async () =>
+    !!(await auth.api.getSession({ headers: fromNodeHeaders(req.headers) }).catch(() => null)) ||
+    (await bearerMayRender(req.headers, frame.canvasId).catch(() => false))
+  const ip = req.ip ?? 'unknown'
+
+  /* the dashboard card's small persisted jpeg keeps its own path */
+  if (req.query.preview !== undefined && ext === 'jpg') {
+    const scale = fitExportScale(frame, parseExportScale(req.query.scale) ?? 1)
+    let result: Awaited<ReturnType<typeof getImage>>
+    try {
+      result = await getImage(frame, {
+        ext,
+        scale,
+        quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
+        preview: true,
+        ip,
+        isAuthenticated,
+      })
+    } catch (e) {
+      return res.status(500).json({ error: e instanceof Error ? e.message : 'render failed' })
+    }
+    if (result.status === 'rate-limited') {
+      res.set('Retry-After', '60')
+      return res.status(429).json({ error: 'render rate limit — cached URLs are unaffected' })
+    }
+    res.set('Content-Type', 'image/jpeg')
+    res.set('Cache-Control', 'public, max-age=60')
+    if (req.query.download !== undefined) {
+      const safe = frame.name.replace(/[^\w\- ]+/g, '').trim() || 'frame'
+      res.set('Content-Disposition', `attachment; filename="${safe}${exportScaleSuffix(scale)}.${ext}"`)
+    }
+    return res.send(result.buf)
+  }
+
+  const params = parseRenderQuery(frame, ext, req.query)
+  if ('error' in params) return res.status(400).json({ error: params.error })
+  let result: Awaited<ReturnType<typeof getRender>>
   try {
-    result = await getImage(frame, {
-      ext,
-      scale,
-      quality: Math.min(100, Math.max(1, Number(req.query.quality) || 90)),
-      /* ?preview — the dashboard-card variant; see previews.ts */
-      preview: req.query.preview !== undefined,
-      ip: req.ip ?? 'unknown',
-      /* the render limit targets anonymous hotlink abuse — a logged-in user
-         loading a dashboard of many canvases shouldn't hit it (and behind
-         the Railway proxy many users can share one req.ip). Only called
-         when the budget is exhausted, so cached serves stay auth-free. */
-      isAuthenticated: async () =>
-        !!(await auth.api.getSession({ headers: fromNodeHeaders(req.headers) }).catch(() => null)),
-    })
+    result = await getRender(frame, params, { ip, isAuthenticated })
   } catch (e) {
     return res.status(500).json({ error: e instanceof Error ? e.message : 'render failed' })
   }
@@ -593,14 +649,23 @@ app.get('/i/:id.:ext', async (req, res) => {
     res.set('Retry-After', '60')
     return res.status(429).json({ error: 'render rate limit — cached URLs are unaffected' })
   }
-  const { buf } = result
+  const { buf, etag } = result
 
-  res.set('Content-Type', ext === 'jpg' ? 'image/jpeg' : 'image/png')
-  res.set('Cache-Control', 'public, max-age=60')
+  res.set('Content-Type', renderMime(params.format))
+  res.set('ETag', etag)
+  /* a URL pinned to this version of the frame never changes; a bare one revalidates against the ETag */
+  res.set(
+    'Cache-Control',
+    req.query.v === String(frame.updatedAt) ? 'public, max-age=31536000, immutable' : 'public, max-age=60',
+  )
   if (req.query.download !== undefined) {
     const safe = frame.name.replace(/[^\w\- ]+/g, '').trim() || 'frame'
-    res.set('Content-Disposition', `attachment; filename="${safe}${exportScaleSuffix(scale)}.${ext}"`)
+    res.set(
+      'Content-Disposition',
+      `attachment; filename="${safe}${exportScaleSuffix(params.scale)}.${renderExt(params.format)}"`,
+    )
   }
+  if (etagMatches(req.headers['if-none-match'], etag)) return res.status(304).end()
   res.send(buf)
 })
 
@@ -723,11 +788,7 @@ app.put('/u/:token', async (req, res) => {
       })
     }
     /* tickets come only from upload_asset, which takes theme stylesheets as well as images */
-    const asset = await createAsset(
-      Buffer.concat(chunks),
-      { canvasId: ticket.canvasId, ownerId: ticket.ownerId, uploadedBy: ticket.uploadedBy },
-      { stylesheets: true },
-    )
+    const asset = await createAsset(Buffer.concat(chunks), ticketAssetMeta(ticket), { stylesheets: true })
     success = true
     const url = `${env.BETTER_AUTH_URL}/a/${asset.id}.${asset.ext}`
     res.json({
@@ -3295,6 +3356,11 @@ wss.on('connection', (ws, upgradeReq) => {
         role,
         ...(guest ? { guest: true } : {}),
       })
+      const joinClaims = claimsOn(msg.canvasId)
+      if (joinClaims.length) {
+        const claimsShown = claimsMessage(msg.canvasId, joinClaims)
+        send(ws, restricted ? withoutClaimNotes(claimsShown) : claimsShown)
+      }
       /* An admin looking at a canvas must not act on it. Announcing presence
          would impersonate the owner in the room; maybePlay would have the
          demo agent perform on an untouched signup canvas; the card kick would
@@ -3384,6 +3450,8 @@ wss.on('connection', (ws, upgradeReq) => {
 
 server.listen(PORT, () => {
   console.log(`⟡ doop server     http://localhost:${PORT}`)
+  /* persisted renders of a frame's old versions are removed in the background */
+  startRenderSweep((id) => store.getFrame(id)?.updatedAt)
   /* frame HTML is loaded per canvas; a canvas nobody has used for
      CANVAS_IDLE_MS gives it back, unless a room, agent or stream is on it.
      Started here, once the room state it asks about exists. */

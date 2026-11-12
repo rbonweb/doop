@@ -1,0 +1,16 @@
+/** The agent guide's section for the render tools (markdown, appended to `get_guide` after the core guide). */
+export const RENDER_GUIDE = `## Seeing and checking your work
+
+Judge the design, not the code: these tools read the rendered frame the way a person sees it. Each render costs one unit of a per-user budget (\`MCP_RENDERS_PER_MIN\`, 60 a minute by default), so measure and lint before you screenshot, and take one screenshot per round of review rather than one per edit.
+
+Anywhere a tool takes a \`target\`, pass \`{ element_id }\` (a \`data-doop-id\`), \`{ label }\` (a \`data-doop-label\` or a section heading) or \`{ selector }\` (CSS).
+
+- \`get_frame_screenshot\`: judge one section at full size, or show a tab or drawer state after \`actions\` click, hover, type or wait (up to 10 steps, 5 seconds). \`target\` and \`region\` are exclusive, and \`format: 'webp'\` keeps the result small. With none of them it renders the whole frame as before. Example: \`get_frame_screenshot({ frame_id, target: { label: 'Pricing' }, format: 'webp' })\`.
+- \`compare_frames\`: put concepts side by side in one labelled image, a row or a grid, up to 8 items. Example: \`compare_frames({ items: [{ frame_id: a, label: 'Draft A' }, { frame_id: b, label: 'Draft B' }] })\`.
+- \`measure_frame\`: get each section's box and height, every text block's line count, any overflow or clipping, the colours in use and each text's WCAG contrast before you screenshot; \`width\` checks another breakpoint. Example: \`measure_frame({ frame_id, width: 390 })\`.
+- \`lint_frame\`: check rules across a frame — section height, heading and text lines, palette, banned words, overflow, contrast — and get the offending element ids. Example: \`lint_frame({ frame_id, rules: { max_section_height: 900, max_heading_lines: 2, min_contrast: 4.5 } })\`.
+- \`snapshot_frame\`: cut a region or one element straight to a permanent \`/a/\` webp asset with its provenance; use its \`url\` in another frame or a listing instead of render, crop and upload. Example: \`snapshot_frame({ frame_id, target: { element_id: 'hero-cta' }, tags: ['hero'] })\`.
+- \`list_assets\`: find images by \`tag\`, \`source_kind\` (\`frame\`, \`store\` or \`url\`) or \`frame_id\`; \`get_frame\` also lists a frame's \`image_assets\` with the same provenance. Example: \`list_assets({ canvas_id, tag: 'hero' })\`.
+- \`upload_asset\`: \`source\` records where a picture came from and \`tags\` make it findable later, the same as a snapshot. Example: \`upload_asset({ canvas_id, source: { kind: 'url', url: 'https://example.com/a.jpg' }, tags: ['reference'] })\`.
+- \`export_frame\`: \`image_url\` is pinned to this version (cache it forever), \`live_url\` always shows the current design; \`format: 'webp'\` works, and \`/i/\` accepts \`format\`, \`q\`, \`width\` and a crop \`x,y,w,h\`. Agent keys are not rate-limited on \`/i/\` for frames they can see. Example: \`export_frame({ frame_id, format: 'webp', scale: 2 })\`.
+`
