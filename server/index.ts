@@ -42,6 +42,7 @@ import { parseGuide } from '../shared/guides.ts'
 import { getImage, getRender, invalidateFrameImages } from './previews.ts'
 import { parseRenderQuery, renderExt, renderMime } from './renderParams.ts'
 import { startRenderSweep } from './renderStore.ts'
+import { scheduleWarm, startRenderWarm } from './renderWarm.ts'
 import { bearerMayRender } from './renderAuth.ts'
 import * as actions from './actions.ts'
 import { liveActivitiesRouter, logLiveActivityRequests, startLiveActivityDelivery } from './liveActivities.ts'
@@ -477,6 +478,7 @@ onAssetReplaced(({ assetId, version, frameIds }) => {
   const byCanvas = new Map<string, string[]>()
   for (const frameId of frameIds) {
     invalidateFrameImages(frameId)
+    scheduleWarm(frameId)
     const frame = store.getFrame(frameId)
     if (frame) byCanvas.set(frame.canvasId, [...(byCanvas.get(frame.canvasId) ?? []), frameId])
   }
@@ -653,11 +655,8 @@ app.get('/i/:id.:ext', async (req, res) => {
 
   res.set('Content-Type', renderMime(params.format))
   res.set('ETag', etag)
-  /* a URL pinned to this version of the frame never changes; a bare one revalidates against the ETag */
-  res.set(
-    'Cache-Control',
-    req.query.v === String(frame.updatedAt) ? 'public, max-age=31536000, immutable' : 'public, max-age=60',
-  )
+  /* a URL pinned to this version of the frame never changes; a bare one always revalidates against the strong ETag (a 304 costs no render and a stale image is never served) */
+  res.set('Cache-Control', req.query.v === String(frame.updatedAt) ? 'public, max-age=31536000, immutable' : 'no-cache')
   if (req.query.download !== undefined) {
     const safe = frame.name.replace(/[^\w\- ]+/g, '').trim() || 'frame'
     res.set(
@@ -3452,6 +3451,8 @@ server.listen(PORT, () => {
   console.log(`⟡ doop server     http://localhost:${PORT}`)
   /* persisted renders of a frame's old versions are removed in the background */
   startRenderSweep((id) => store.getFrame(id)?.updatedAt)
+  /* a saved frame is rendered once it has been quiet for a moment, so its first /i/ request is a stored hit; never started in tests */
+  if (env.DOOP_RENDER_WARM) startRenderWarm({ isBusy: actions.isFrameStreaming })
   /* frame HTML is loaded per canvas; a canvas nobody has used for
      CANVAS_IDLE_MS gives it back, unless a room, agent or stream is on it.
      Started here, once the room state it asks about exists. */

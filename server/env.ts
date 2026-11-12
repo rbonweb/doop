@@ -279,6 +279,8 @@ const schema = {
   MCP_RENDERS_PER_MIN: perMinute({ default: 60 }),
   SYNC_INGESTS_PER_MIN: perMinute({ default: 30 }),
   PREVIEW_RENDERS_PER_MIN: perMinute({ default: 12 }),
+  /* render the default /i/ image after a frame is saved (server/renderWarm.ts); false turns it off */
+  DOOP_RENDER_WARM: bool({ default: true }),
   DECK_PDFS_PER_MIN: perMinute({ default: 4 }),
   /* image descriptions (server/imageDescriptions.ts): a day's budget per
      canvas, and how many describe calls run at once */
