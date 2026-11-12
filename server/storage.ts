@@ -19,12 +19,13 @@ export const storageMode: 'bucket' | 'disk' = BUCKET ? 'bucket' : 'disk'
 
 /* keys are `<nanoid>.<ext>`, optionally under the `thumb/` prefix (derived
    frame previews — a folder of their own so they can be purged or lifecycle-
-   ruled without touching user uploads) or the `bg/` prefix (the curated
-   background library, server/backgrounds.ts). Anything else is a bug, and in
-   disk mode the check doubles as the path-traversal guard: known literal
+   ruled without touching user uploads), the `bg/` prefix (the curated
+   background library, server/backgrounds.ts) or the `render/` prefix (derived
+   full-size frame renders, server/renderStore.ts). Anything else is a bug, and
+   in disk mode the check doubles as the path-traversal guard: known literal
    prefixes, no dots or slashes in the name. */
 function assertKey(key: string) {
-  if (!/^(thumb\/|bg\/)?[A-Za-z0-9_-]+\.[a-z0-9]+$/.test(key)) throw new Error(`malformed storage key: ${key}`)
+  if (!/^(thumb\/|bg\/|render\/)?[A-Za-z0-9_-]+\.[a-z0-9]+$/.test(key)) throw new Error(`malformed storage key: ${key}`)
 }
 
 let s3: S3Client | undefined
@@ -85,4 +86,46 @@ export async function getObject(key: string, signal?: AbortSignal): Promise<Buff
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null
     throw e
   }
+}
+
+/** Every object under the `render/` prefix, with size and last-modified time — the render sweep's view of byte storage. Bucket listings paginate; disk listings skip names `assertKey` would reject. */
+export async function listObjects(prefix: 'render/'): Promise<Array<{ key: string; size: number; modified: number }>> {
+  if (BUCKET) {
+    const { ListObjectsV2Command } = await import('@aws-sdk/client-s3')
+    const out: Array<{ key: string; size: number; modified: number }> = []
+    let token: string | undefined
+    do {
+      const res = await (
+        await client()
+      ).send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: prefix, ContinuationToken: token }))
+      for (const o of res.Contents ?? [])
+        if (o.Key) out.push({ key: o.Key, size: o.Size ?? 0, modified: o.LastModified?.getTime() ?? 0 })
+      token = res.IsTruncated ? res.NextContinuationToken : undefined
+    } while (token)
+    return out
+  }
+  const dir = path.join(DISK_DIR, 'render')
+  let names: string[]
+  try {
+    names = await fs.readdir(dir)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw e
+  }
+  const out: Array<{ key: string; size: number; modified: number }> = []
+  for (const name of names) {
+    try {
+      assertKey(`render/${name}`)
+    } catch {
+      continue
+    }
+    try {
+      const st = await fs.stat(path.join(dir, name))
+      if (!st.isFile()) continue
+      out.push({ key: `render/${name}`, size: st.size, modified: st.mtimeMs })
+    } catch {
+      /* raced away between readdir and stat */
+    }
+  }
+  return out
 }

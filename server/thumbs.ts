@@ -1,6 +1,7 @@
 import { PREVIEW_MAX_HEIGHT, type Frame } from '../shared/types.ts'
 import * as storage from './storage.ts'
 import { store } from './store.ts'
+import { purgeFrameRenders } from './renderStore.ts'
 
 /**
  * Persisted dashboard previews: `thumb/<frameId>.jpg` in byte storage,
@@ -139,4 +140,5 @@ export function purge(frameId: string): void {
   written.delete(frameId)
   lastAttempt.delete(frameId)
   storage.deleteObject(keyFor(frameId)).catch(() => {})
+  void purgeFrameRenders(frameId)
 }
