@@ -7,7 +7,20 @@ const DUPLICATE_GUIDE = ''
 const LAYOUT_GUIDE = ''
 
 /* run_batch */
-const BATCH_GUIDE = ''
+const BATCH_GUIDE = `### run_batch
+
+Use run_batch when you have many small independent edits or reads to make and each round trip is slow (a remote server): rename ten frames, nudge a column of frames, read three frames before deciding. It runs the ops in order in one call. Each op is checked, rate-limited and run exactly as if you had called that tool alone, so every op still carries its own \`agent_name\` and ids, and a view-only account still cannot write. An unknown tool, \`run_batch\` itself or arguments the tool would refuse fail that op only. With \`stop_on_error\` (default true) the ops after the first failure are reported as skipped; pass false to run the rest anyway. The answer starts with a JSON summary (\`ok\`, then each op's index, tool and status), followed by each op's own output under \`--- op <index> <tool> ---\`. Do not batch streaming writes (\`append_frame_html\`) or steps that depend on a previous op's output, since the ops are fixed before any runs.
+
+\`\`\`json
+run_batch({
+  "ops": [
+    { "tool": "get_canvas", "args": { "canvas_id": "c1", "agent_name": "Claude" } },
+    { "tool": "update_frame", "args": { "frame_id": "f1", "name": "Hero", "agent_name": "Claude" } },
+    { "tool": "update_frame", "args": { "frame_id": "f2", "x": 800, "agent_name": "Claude" } }
+  ],
+  "stop_on_error": true
+})
+\`\`\``
 
 /* end of the tool families */
 
