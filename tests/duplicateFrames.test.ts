@@ -111,6 +111,18 @@ describe('duplicateFrames', () => {
     expect(mains).toHaveLength(1)
   })
 
+  it('copies a frame holding only an instance byte for byte, head and css markers included', () => {
+    const canvas = store.createCanvas('instances')
+    const html =
+      '<!doctype html><html><head><style data-doop-component-css="c1">.btn{color:red}</style>' +
+      '<style data-doop-component-head="c1"></style><style data-doop-component-source="c1"></style></head>' +
+      '<body><button class="btn" data-doop-instance="c1" data-doop-component-rev="1">Buy</button></body></html>'
+    const frame = store.createFrame(canvas.id, { name: 'Uses', html }, actor.name)!
+    const [made] = copy(canvas.id, [{ frame_id: frame.id }])
+    expect(made!.frame.html).toBe(html)
+    expect(made!.rewritten).toBe(false)
+  })
+
   it('places copies clear of the source, other frames and earlier copies', () => {
     const { canvas, source } = setup()
     actions.createFrame(

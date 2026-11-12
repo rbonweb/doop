@@ -2187,7 +2187,7 @@ export function duplicateFrames(
   for (const { item, source, id } of planned) {
     let html = remapFrameTargets(source.html, ids)
     let rewritten = false
-    if (html.includes(COMPONENT_ATTR)) {
+    if (html.includes(`${COMPONENT_ATTR}="`)) {
       /* no id yet: a main marker arriving in a new frame is a copy of that main */
       html = prepareWrite(canvasId, '', html, '', actor.name).html
       takeComponentIssues('')
