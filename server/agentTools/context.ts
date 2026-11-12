@@ -2,6 +2,8 @@ import type { z } from 'zod'
 import type { Actor, Canvas, Frame } from '../../shared/types.ts'
 import type { CanvasRole } from '../../shared/canvasRole.ts'
 import type { CanvasPreview } from '../chatgptApp.ts'
+import { claimWarning } from '../frameClaims.ts'
+import { versionConflict, type ExpectedVersion } from '../frameVersion.ts'
 
 /** The content a tool answers with: text blocks, images, resources. */
 export type AgentToolContent = { content: { type: 'text' | 'image'; [k: string]: unknown }[] }
@@ -58,3 +60,24 @@ export interface AgentToolContext {
 
 /** The slot a tool of `bucket` takes for the connected user, the way the built-in tools key theirs. */
 export const limitKey = (ctx: Pick<AgentToolContext, 'ownerId'>, agentName: string): string => ctx.ownerId ?? agentName
+
+export { expectedVersionSchema } from '../frameVersion.ts'
+export type { ExpectedVersion } from '../frameVersion.ts'
+
+/** The refusal for a write whose `expected_version` is stale, else undefined. Call it in the same synchronous tick as the write. */
+export function assertExpectedVersion(
+  frame: Frame,
+  expected: ExpectedVersion | undefined,
+): (AgentToolResult & { isError: true; content: { type: 'text'; text: string }[] }) | undefined {
+  const conflict = versionConflict(frame, expected)
+  return conflict === undefined
+    ? undefined
+    : { isError: true as const, content: [{ type: 'text' as const, text: `Error: ${conflict}` }] }
+}
+
+/** Adds the advisory notice when another agent holds a claim on one of the frames just written. */
+export function withClaimWarning<T extends AgentToolContent>(result: T, frameIds: string[], actor: Actor): T {
+  const warning = claimWarning(frameIds, actor)
+  if (!warning) return result
+  return { ...result, content: [...result.content, { type: 'text', text: warning }] }
+}

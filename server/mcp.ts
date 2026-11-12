@@ -153,6 +153,10 @@ const REVIEW_NUDGE =
 import type { Actor, Canvas, CanvasPageInfo, Frame } from '../shared/types.ts'
 import { loadToolTargets } from './toolLoads.ts'
 import { registerAgentSpeedTools } from './agentTools/index.ts'
+import { assertExpectedVersion, withClaimWarning } from './agentTools/context.ts'
+import { frameOutlineFor } from './agentTools/html/outline.ts'
+import { claimsOn } from './frameClaims.ts'
+import { expectedVersionSchema, FrameVersionConflictError } from './frameVersion.ts'
 
 /** Reaches agents whose session predates set_status (or who skipped the guide). */
 type ToolContent = { content: { type: 'text' | 'image'; [k: string]: unknown }[] }
@@ -724,6 +728,12 @@ export function buildMcpServer(
          the synced screens — context a redesign must respect */
       const flow = describeSyncFlow(await getSyncFlow(c), c.frames)
       const images = await imagesForFrames(shown.map((f) => f.id))
+      const claims = claimsOn(canvas_id).map((claim) => ({
+        frameId: claim.frameId,
+        holder: claim.holder,
+        note: claim.note,
+        expiresAt: new Date(claim.expiresAt).toISOString(),
+      }))
       const notes = [
         ...(images.size ? [IMAGES_NOTE] : []),
         ...(flow.length
@@ -779,6 +789,7 @@ export function buildMcpServer(
             ...(tokens.length ? { tokens: describeTokens(tokens) } : {}),
             ...(tokenThemes.length ? { tokenThemes } : {}),
             ...(flow.length ? { flow } : {}),
+            ...(claims.length ? { claims } : {}),
             ...(notes.length ? { note: notes.join(' ') } : {}),
           }),
           canvas_id,
@@ -1742,6 +1753,11 @@ export function buildMcpServer(
       inputSchema: {
         frame_id: z.string(),
         include_html: z.boolean().optional().describe('Default true; false leaves the HTML out'),
+        mode: z
+          .enum(['html', 'outline'])
+          .optional()
+          .describe("outline: each section's element id, tag, label, size and first words, without the HTML"),
+        measure: z.boolean().optional().describe("with outline: each section's rendered height, one render"),
         expand_components: z
           .boolean()
           .optional()
@@ -1749,19 +1765,21 @@ export function buildMcpServer(
         agent_name: agentName.optional(),
       },
     },
-    async ({ frame_id, include_html, expand_components, agent_name }) => {
+    async ({ frame_id, include_html, mode, measure, expand_components, agent_name }) => {
       const f = frameFor(frame_id, 'view')
       if (!f) return noFrame(frame_id)
       arrive(f.canvasId, agent_name)
       const canvas = store.getCanvas(f.canvasId)
       const images = (await imagesForFrames([f.id])).get(f.id)
-      const instances = f.html.includes(INSTANCE_ATTR) ? instancesIn(f) : []
+      const outline = mode === 'outline'
+      const instances = !outline && f.html.includes(INSTANCE_ATTR) ? instancesIn(f) : []
       return withFeedbackNotice(
         text({
           canvasId: f.canvasId,
           ...frameSummary({ ...f, pageId: canvas ? framePageId(canvas, f) : f.pageId }, images),
           ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}),
-          ...(include_html === false ? {} : { html: expand_components ? f.html : compactFrameHtml(f) }),
+          ...(include_html === false || outline ? {} : { html: expand_components ? f.html : compactFrameHtml(f) }),
+          ...(outline ? { outline: await frameOutlineFor(f, { measure }) } : {}),
           ...(instances.length ? { instances } : {}),
         }),
         f.canvasId,
@@ -1776,21 +1794,34 @@ export function buildMcpServer(
       title: 'Replace a frame’s HTML',
       _meta: previewToolMeta('Redesigning the frame…', 'Frame redesigned'),
       description:
-        'Replace the HTML design of a frame in one shot. The change renders live for everyone viewing the canvas. For new or heavily reworked designs, prefer append_frame_html so viewers can watch the design stream in. Keep data-doop-* attributes on elements you carry over: comments and links point at data-doop-id, prototype wiring and locks ride on the others.',
+        'Replace the HTML design of a frame in one shot. The change renders live for everyone viewing the canvas. For new or heavily reworked designs, prefer append_frame_html so viewers can watch the design stream in. Keep data-doop-* attributes on elements you carry over: comments and links point at data-doop-id, prototype wiring and locks ride on the others. Pass expected_version (the updatedAt from your last read) to refuse the write when someone changed the frame since.',
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-      inputSchema: { frame_id: z.string(), html: z.string(), agent_name: agentName },
+      inputSchema: {
+        frame_id: z.string(),
+        html: z.string(),
+        expected_version: expectedVersionSchema,
+        agent_name: agentName,
+      },
     },
-    async ({ frame_id, html, agent_name }) => {
-      if (!frameFor(frame_id, 'edit')) return noFrame(frame_id, 'edit')
+    async ({ frame_id, html, expected_version, agent_name }) => {
+      const current = frameFor(frame_id, 'edit')
+      if (!current) return noFrame(frame_id, 'edit')
+      /* the check and the write share one synchronous tick: nothing can land between them */
+      const refused = assertExpectedVersion(current, expected_version)
+      if (refused) return refused
       const frame = actions.updateFrame(frame_id, { html }, actorFrom(agent_name), { replace: true })
       if (!frame) return noFrame(frame_id)
-      return withPreview(
-        withGuidelinesNudge(
-          withStatusNudge(
-            withFeedback(
-              withComponentNotes(
-                withEscapeNote(textWithNudge({ ok: true, frame: frameSummary(frame) }, REVIEW_NUDGE), html),
-                frame,
+      return withClaimWarning(
+        withPreview(
+          withGuidelinesNudge(
+            withStatusNudge(
+              withFeedback(
+                withComponentNotes(
+                  withEscapeNote(textWithNudge({ ok: true, frame: frameSummary(frame) }, REVIEW_NUDGE), html),
+                  frame,
+                ),
+                frame.canvasId,
+                actorFrom(agent_name),
               ),
               frame.canvasId,
               actorFrom(agent_name),
@@ -1799,10 +1830,10 @@ export function buildMcpServer(
             actorFrom(agent_name),
           ),
           frame.canvasId,
-          actorFrom(agent_name),
+          [frame],
         ),
-        frame.canvasId,
-        [frame],
+        [frame.id],
+        actorFrom(agent_name),
       )
     },
   )
@@ -2537,7 +2568,7 @@ export function buildMcpServer(
     {
       title: 'Stream HTML into a frame',
       description:
-        'Stream a design into a frame section by section — every chunk renders for viewers the moment it arrives, so they watch the design build up live. Prefer this over set_frame_html when creating or reworking a whole design. Send the HTML in document order, ONE complete section per call (head+styles first, then the hero, then each following section), roughly 1–4 KB per chunk. Set start=true on the FIRST chunk (replaces any existing content and shows a live "designing…" badge) and done=true on the LAST chunk. End chunks at element boundaries — partial HTML is healed, but a complete section paints cleanly. When reworking, keep data-doop-* attributes on elements you carry over (comments and links point at data-doop-id).',
+        'Stream a design into a frame section by section — every chunk renders for viewers the moment it arrives, so they watch the design build up live. Prefer this over set_frame_html when creating or reworking a whole design. Send the HTML in document order, ONE complete section per call (head+styles first, then the hero, then each following section), roughly 1–4 KB per chunk. Set start=true on the FIRST chunk (replaces any existing content and shows a live "designing…" badge) and done=true on the LAST chunk. End chunks at element boundaries — partial HTML is healed, but a complete section paints cleanly. When reworking, keep data-doop-* attributes on elements you carry over (comments and links point at data-doop-id). On the start=true chunk, expected_version (the updatedAt from your last read) refuses the stream when someone changed the frame since.',
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
@@ -2546,11 +2577,18 @@ export function buildMcpServer(
           .describe('The next piece of HTML, appended to what has been sent so far. Raw markup — never escaped.'),
         start: z.boolean().optional().describe('true on the first chunk — clears the frame and starts the live stream'),
         done: z.boolean().optional().describe('true on the final chunk — ends the live stream'),
+        expected_version: expectedVersionSchema,
         agent_name: agentName,
       },
     },
-    async ({ frame_id, html_chunk, start, done, agent_name }) => {
-      if (!frameFor(frame_id, 'edit')) return noFrame(frame_id, 'edit')
+    async ({ frame_id, html_chunk, start, done, expected_version, agent_name }) => {
+      const current = frameFor(frame_id, 'edit')
+      if (!current) return noFrame(frame_id, 'edit')
+      /* only the chunk that opens the stream is checked: later chunks continue the same stream */
+      if (start) {
+        const refused = assertExpectedVersion(current, expected_version)
+        if (refused) return refused
+      }
       const frame = actions.appendFrameHtml(frame_id, html_chunk, actorFrom(agent_name), { start, done })
       if (!frame) return noFrame(frame_id)
       const result = done
@@ -2567,9 +2605,13 @@ export function buildMcpServer(
       const nudged = start
         ? withGuidelinesNudge(withEscapeNote(result, html_chunk), frame.canvasId, actorFrom(agent_name))
         : result
-      return withStatusNudge(
-        withFeedback(nudged, frame.canvasId, actorFrom(agent_name)),
-        frame.canvasId,
+      return withClaimWarning(
+        withStatusNudge(
+          withFeedback(nudged, frame.canvasId, actorFrom(agent_name)),
+          frame.canvasId,
+          actorFrom(agent_name),
+        ),
+        [frame.id],
         actorFrom(agent_name),
       )
     },
@@ -2581,33 +2623,41 @@ export function buildMcpServer(
       title: 'Edit a frame’s HTML in place',
       _meta: previewToolMeta('Editing the frame…', 'Frame edited'),
       description:
-        'Make a targeted edit to a frame: exact find-and-replace in its HTML, as get_frame returned it (a <doop-use> can be edited like any tag). Use this for small tweaks (copy, a color, spacing, one element) instead of resending the whole document — the change morphs into the rendered frame in place. old_str must appear EXACTLY ONCE in the current HTML (call get_frame first if unsure); include enough surrounding context to make it unique. Keep data-doop-* attributes on the element you edit: comments and links point at its data-doop-id.',
+        'Make a targeted edit to a frame: exact find-and-replace in its HTML, as get_frame returned it (a <doop-use> can be edited like any tag). Use this for small tweaks (copy, a color, spacing, one element) instead of resending the whole document — the change morphs into the rendered frame in place. old_str must appear EXACTLY ONCE in the current HTML (call get_frame first if unsure); include enough surrounding context to make it unique. Keep data-doop-* attributes on the element you edit: comments and links point at its data-doop-id. Pass expected_version (the updatedAt from your last read) to refuse the edit when someone changed the frame since.',
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
         old_str: z.string().describe('Exact text to find in the frame HTML — must occur exactly once'),
         new_str: z.string().describe('Replacement text'),
+        expected_version: expectedVersionSchema,
         agent_name: agentName,
       },
     },
-    async ({ frame_id, old_str, new_str, agent_name }) => {
+    async ({ frame_id, old_str, new_str, expected_version, agent_name }) => {
       const f = frameFor(frame_id, 'edit')
       if (!f) return noFrame(frame_id, 'edit')
+      /* the check, the edit and the write share one synchronous tick: nothing can land between them */
+      const refused = assertExpectedVersion(f, expected_version)
+      if (refused) return refused
       const edited = editFrameSource(f, old_str, new_str)
       if ('error' in edited) return err(edited.error)
       const frame = actions.updateFrame(frame_id, { html: edited.html }, actorFrom(agent_name))!
-      return withPreview(
-        withStatusNudge(
-          withFeedback(
-            withComponentNotes(textWithNudge({ ok: true, frame: frameSummary(frame) }, REVIEW_NUDGE), frame),
+      return withClaimWarning(
+        withPreview(
+          withStatusNudge(
+            withFeedback(
+              withComponentNotes(textWithNudge({ ok: true, frame: frameSummary(frame) }, REVIEW_NUDGE), frame),
+              frame.canvasId,
+              actorFrom(agent_name),
+            ),
             frame.canvasId,
             actorFrom(agent_name),
           ),
           frame.canvasId,
-          actorFrom(agent_name),
+          [frame],
         ),
-        frame.canvasId,
-        [frame],
+        [frame.id],
+        actorFrom(agent_name),
       )
     },
   )
@@ -2618,7 +2668,7 @@ export function buildMcpServer(
       title: 'Rename, move or resize a frame',
       _meta: previewToolMeta('Updating the frame…', 'Frame updated'),
       description:
-        "Update frame metadata in one call: rename it (name), move it on its page (x, y), resize it (width, height), turn it (rotation: degrees clockwise about its centre; 0 straightens it), or move it to another page (pageId from get_canvas; it keeps its x/y unless you pass new ones and lands in front of that page's frames). Make it a slide (slide) or set its presenter notes (speaker_notes; an empty string clears them). Set locked to true to lock the frame on the canvas (humans cannot select, move, resize or delete it from the stage until it is unlocked) or false to unlock it.",
+        "Update frame metadata in one call: rename it (name), move it on its page (x, y), resize it (width, height), turn it (rotation: degrees clockwise about its centre; 0 straightens it), or move it to another page (pageId from get_canvas; it keeps its x/y unless you pass new ones and lands in front of that page's frames). Make it a slide (slide) or set its presenter notes (speaker_notes; an empty string clears them). Set locked to true to lock the frame on the canvas (humans cannot select, move, resize or delete it from the stage until it is unlocked) or false to unlock it. Pass expected_version (the updatedAt from your last read) to refuse the change when someone changed the frame since.",
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
@@ -2632,21 +2682,29 @@ export function buildMcpServer(
         speaker_notes: z.string().max(MAX_SPEAKER_NOTES_CHARS).optional(),
         locked: z.boolean().optional(),
         rotation: z.number().optional(),
+        expected_version: expectedVersionSchema,
         agent_name: agentName,
       },
     },
-    async ({ frame_id, agent_name, speaker_notes, ...rest }) => {
+    async ({ frame_id, agent_name, speaker_notes, expected_version, ...rest }) => {
       const patch = { ...rest, ...(speaker_notes === undefined ? {} : { speakerNotes: speaker_notes }) }
       const found = frameFor(frame_id, 'edit')
       const canvas = found && store.getCanvas(found.canvasId)
-      if (!canvas) return noFrame(frame_id, 'edit')
+      if (!found || !canvas) return noFrame(frame_id, 'edit')
+      /* updateFrameMeta validates and writes synchronously, so the check and the write share one tick */
+      const refused = assertExpectedVersion(found, expected_version)
+      if (refused) return refused
       const updated = updateFrameMeta(canvas, frame_id, patch, actorFrom(agent_name))
       if (!updated.ok) return err(updated.error)
       const frame = updated.value
-      return withPreview(
-        withFeedback(text({ ok: true, frame: frameSummary(frame) }), frame.canvasId, actorFrom(agent_name)),
-        frame.canvasId,
-        [frame],
+      return withClaimWarning(
+        withPreview(
+          withFeedback(text({ ok: true, frame: frameSummary(frame) }), frame.canvasId, actorFrom(agent_name)),
+          frame.canvasId,
+          [frame],
+        ),
+        [frame.id],
+        actorFrom(agent_name),
       )
     },
   )
@@ -2729,22 +2787,43 @@ export function buildMcpServer(
     {
       title: 'Restore an earlier version of a frame',
       description:
-        'Put a frame back to one of its earlier states (from list_frame_versions): its HTML and size are restored, and its name when the version recorded one; position stays. The design being replaced is filed as a version first, so a restore can itself be undone. Use it when a human asks for the previous version, or when your own rework turned out worse than what was there.',
-      inputSchema: { frame_id: z.string(), version_id: z.string(), agent_name: agentName },
+        'Put a frame back to one of its earlier states (from list_frame_versions): its HTML and size are restored, and its name when the version recorded one; position stays. The design being replaced is filed as a version first, so a restore can itself be undone. Use it when a human asks for the previous version, or when your own rework turned out worse than what was there. Pass expected_version (the updatedAt from your last read) to refuse the restore when someone changed the frame since.',
+      inputSchema: {
+        frame_id: z.string(),
+        version_id: z.string(),
+        expected_version: expectedVersionSchema,
+        agent_name: agentName,
+      },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async ({ frame_id, version_id, agent_name }) => {
-      if (!frameFor(frame_id, 'edit')) return noFrame(frame_id, 'edit')
-      const restored = await actions.restoreFrameVersion(frame_id, version_id, actorFrom(agent_name))
+    async ({ frame_id, version_id, expected_version, agent_name }) => {
+      const current = frameFor(frame_id, 'edit')
+      if (!current) return noFrame(frame_id, 'edit')
+      /* refuse early; the action re-checks in the tick of its own write, since it awaits the version read first */
+      const refused = assertExpectedVersion(current, expected_version)
+      if (refused) return refused
+      let restored: Awaited<ReturnType<typeof actions.restoreFrameVersion>>
+      try {
+        restored = await actions.restoreFrameVersion(frame_id, version_id, actorFrom(agent_name), {
+          expectedVersion: expected_version,
+        })
+      } catch (e) {
+        if (e instanceof FrameVersionConflictError) return err(e.message)
+        throw e
+      }
       if (restored === null) return err(`no version ${version_id} on frame ${frame_id} — call list_frame_versions`)
       if (!restored) return noFrame(frame_id)
-      return withStatusNudge(
-        withFeedback(
-          textWithNudge({ ok: true, frame: frameSummary(restored.frame) }, REVIEW_NUDGE),
+      return withClaimWarning(
+        withStatusNudge(
+          withFeedback(
+            textWithNudge({ ok: true, frame: frameSummary(restored.frame) }, REVIEW_NUDGE),
+            restored.frame.canvasId,
+            actorFrom(agent_name),
+          ),
           restored.frame.canvasId,
           actorFrom(agent_name),
         ),
-        restored.frame.canvasId,
+        [frame_id],
         actorFrom(agent_name),
       )
     },
@@ -2754,15 +2833,19 @@ export function buildMcpServer(
     'delete_frame',
     {
       title: 'Delete a frame',
-      description: 'Delete a frame from its canvas.',
+      description:
+        'Delete a frame from its canvas. Pass expected_version (the updatedAt from your last read) to refuse the delete when someone changed the frame since.',
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-      inputSchema: { frame_id: z.string(), agent_name: agentName },
+      inputSchema: { frame_id: z.string(), expected_version: expectedVersionSchema, agent_name: agentName },
     },
-    async ({ frame_id, agent_name }) => {
-      if (!frameFor(frame_id, 'edit')) return noFrame(frame_id, 'edit')
+    async ({ frame_id, expected_version, agent_name }) => {
+      const current = frameFor(frame_id, 'edit')
+      if (!current) return noFrame(frame_id, 'edit')
+      const refused = assertExpectedVersion(current, expected_version)
+      if (refused) return refused
       const frame = actions.deleteFrame(frame_id, actorFrom(agent_name))
       if (!frame) return noFrame(frame_id)
-      return text({ ok: true, deleted: frame.name })
+      return withClaimWarning(text({ ok: true, deleted: frame.name }), [frame.id], actorFrom(agent_name))
     },
   )
 
