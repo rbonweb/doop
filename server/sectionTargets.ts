@@ -139,6 +139,69 @@ export function sectionLabel(el: Element): string | undefined {
   return undefined
 }
 
+/** First heading text per element in one bottom-up pass; `null` marks a heading with no text and `undefined` no heading. */
+function firstHeadingLabels(root: ParentNode): Map<Element, string | null | undefined> {
+  const labels = new Map<Element, string | null | undefined>()
+  const stack: Array<{ el: Element; entered: boolean }> = []
+  const children = elementChildren(root)
+  for (let i = children.length - 1; i >= 0; i--) stack.push({ el: children[i]!, entered: false })
+  while (stack.length) {
+    const frame = stack[stack.length - 1]!
+    if (!frame.entered) {
+      frame.entered = true
+      const kids = elementChildren(frame.el)
+      for (let i = kids.length - 1; i >= 0; i--) stack.push({ el: kids[i]!, entered: false })
+      continue
+    }
+    stack.pop()
+    const el = frame.el
+    let first: string | null | undefined
+    if (HEADING_TAGS.has(el.name.toLowerCase())) {
+      first = visibleText(el, 80) || null
+    } else {
+      for (const child of elementChildren(el)) {
+        const text = labels.get(child)
+        if (text !== undefined) {
+          first = text
+          break
+        }
+      }
+    }
+    labels.set(el, first)
+  }
+  return labels
+}
+
+/** Blocks whose heading label matches `wanted`, keeping only the innermost one of each nested group. */
+function headingCandidates(
+  root: ParentNode,
+  wanted: string,
+  labels: Map<Element, string | null | undefined>,
+): Element[] {
+  const found = new Set<Element>()
+  const stack: Array<{ el: Element; ancestor?: Element }> = []
+  const children = elementChildren(root)
+  for (let i = children.length - 1; i >= 0; i--) stack.push({ el: children[i]! })
+  while (stack.length) {
+    const { el, ancestor } = stack.pop()!
+    const text = labels.get(el)
+    const match =
+      BLOCK_TAGS.has(el.name.toLowerCase()) &&
+      el.attribs[LABEL_ATTR] === undefined &&
+      typeof text === 'string' &&
+      normalize(text) === wanted
+    let nextAncestor = ancestor
+    if (match) {
+      if (ancestor) found.delete(ancestor)
+      found.add(el)
+      nextAncestor = el
+    }
+    const kids = elementChildren(el)
+    for (let i = kids.length - 1; i >= 0; i--) stack.push({ el: kids[i]!, ancestor: nextAncestor })
+  }
+  return [...found]
+}
+
 function hasInstance(el: Element): boolean {
   return el.attribs[INSTANCE_ATTR] !== undefined
 }
@@ -150,15 +213,36 @@ function isInsideInstance(el: Element): boolean {
   return false
 }
 
-function pathOf(el: Element): string {
+type PathIndex = Map<ParentNode, Map<string, Map<Element, number>>>
+
+/** Positions of each tag among a parent's element children, built once per parent so paths are linear. */
+function typePositions(parent: ParentNode, tag: string, index: PathIndex): Map<Element, number> {
+  let byTag = index.get(parent)
+  if (!byTag) {
+    byTag = new Map()
+    index.set(parent, byTag)
+  }
+  let positions = byTag.get(tag)
+  if (!positions) {
+    positions = new Map()
+    let position = 0
+    for (const child of elementChildren(parent)) {
+      if (child.name.toLowerCase() === tag) positions.set(child, ++position)
+    }
+    byTag.set(tag, positions)
+  }
+  return positions
+}
+
+function pathOf(el: Element, index: PathIndex): string {
   const parts: string[] = []
   for (let node: Element | undefined = el; node;) {
     const tag = node.name.toLowerCase()
     const parent: ParentNode | null = node.parent
     let step = tag
     if (parent) {
-      const sameTag = elementChildren(parent).filter((child) => child.name.toLowerCase() === tag)
-      if (sameTag.length > 1) step += `:nth-of-type(${sameTag.indexOf(node) + 1})`
+      const positions = typePositions(parent, tag, index)
+      if (positions.size > 1) step += `:nth-of-type(${positions.get(node)})`
     }
     parts.unshift(step)
     if (tag === 'body') break
@@ -167,12 +251,12 @@ function pathOf(el: Element): string {
   return parts.join(' > ')
 }
 
-export function toResolved(fd: FrameDocument, el: Element): ResolvedTarget | undefined {
+export function toResolved(fd: FrameDocument, el: Element, index: PathIndex = new Map()): ResolvedTarget | undefined {
   const loc = el.sourceCodeLocation as TagLocation | null | undefined
   const startTag = loc?.startTag
   if (!loc || !startTag) return undefined
   const endTag = loc.endTag
-  const end = endTag ? endTag.endOffset : startTag.endOffset
+  const end = loc.endOffset
   const attrs: ResolvedTarget['attrs'] = {}
   for (const [name, range] of Object.entries(loc.attrs ?? {})) {
     const key = name.toLowerCase()
@@ -196,7 +280,7 @@ export function toResolved(fd: FrameDocument, el: Element): ResolvedTarget | und
     ...(label !== undefined ? { label } : {}),
     isInstance: hasInstance(el),
     insideInstance: isInsideInstance(el),
-    path: pathOf(el),
+    path: pathOf(el, index),
     text: visibleText(el, 120),
   }
 }
@@ -213,13 +297,6 @@ export function describeTarget(target: SectionTarget): string {
   if ('element_id' in target) return `element_id "${target.element_id}"`
   if ('label' in target) return `label "${target.label}"`
   return `selector "${target.selector}"`
-}
-
-function contains(outer: Element, inner: Element): boolean {
-  for (let node = inner.parent; node; node = node.parent) {
-    if (node === outer) return true
-  }
-  return false
 }
 
 function ambiguous(target: SectionTarget, matches: ResolvedTarget[]): ResolveResult {
@@ -239,7 +316,7 @@ function ambiguous(target: SectionTarget, matches: ResolvedTarget[]): ResolveRes
 function resolveElementId(fd: FrameDocument, id: string): ResolveResult {
   for (const el of walk(fd.doc)) {
     if (el.attribs[ELEMENT_ID_ATTR] !== id) continue
-    const match = toResolved(fd, el)
+    const match = toResolved(fd, el, new Map())
     return match ? { ok: true, matches: [match] } : noSource(id)
   }
   return notFound(describeTarget({ element_id: id }))
@@ -252,16 +329,9 @@ function resolveLabel(fd: FrameDocument, label: string): ResolveResult {
     const value = el.attribs[LABEL_ATTR]
     if (value !== undefined && normalize(value) === wanted) exact.push(el)
   }
-  let found = exact
-  if (!found.length) {
-    const blocks = [...walk(fd.doc)].filter((el) => BLOCK_TAGS.has(el.name.toLowerCase()))
-    const byHeading = blocks.filter((el) => {
-      const own = sectionLabel(el)
-      return own !== undefined && normalize(own) === wanted
-    })
-    found = byHeading.filter((el) => !byHeading.some((other) => other !== el && contains(el, other)))
-  }
-  const matches = found.map((el) => toResolved(fd, el)).filter((m): m is ResolvedTarget => m !== undefined)
+  const found = exact.length ? exact : headingCandidates(fd.doc, wanted, firstHeadingLabels(fd.doc))
+  const index: PathIndex = new Map()
+  const matches = found.map((el) => toResolved(fd, el, index)).filter((m): m is ResolvedTarget => m !== undefined)
   if (!matches.length) {
     return found.length ? noSource(describeTarget({ label })) : notFound(describeTarget({ label }))
   }
@@ -280,8 +350,9 @@ function resolveSelector(fd: FrameDocument, selector: string, all: boolean): Res
       error: `Invalid selector "${selector}": ${err instanceof Error ? err.message : String(err)}`,
     }
   }
+  const index: PathIndex = new Map()
   const matches = elements
-    .map((el) => toResolved(fd, el))
+    .map((el) => toResolved(fd, el, index))
     .filter((m): m is ResolvedTarget => m !== undefined)
     .sort((a, b) => a.start - b.start)
   if (!matches.length) {
