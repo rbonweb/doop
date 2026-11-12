@@ -5,6 +5,7 @@ import type Sharp from 'sharp'
 import puppeteer, { type Browser, type Page } from 'puppeteer-core'
 import type { Frame } from '../shared/types.ts'
 import { guardPublicPageRequests } from './publicUrl.ts'
+import { cachedRenderResponse } from './renderFetchCache.ts'
 
 /**
  * Render a frame's HTML in headless Chrome so agents can *see* their work.
@@ -139,6 +140,7 @@ export async function loadFramePage(
   try {
     const assetOrigin = new URL(env.BETTER_AUTH_URL).origin
     await guardPublicPageRequests(page, {
+      cached: cachedRenderResponse,
       allowUrl: (url) =>
         (url.origin === assetOrigin && url.pathname.startsWith('/a/')) ||
         /* webfonts referenced by imported frames (imports request the
