@@ -1,10 +1,6 @@
 import { parse, parseFragment } from 'parse5'
 import type { DefaultTreeAdapterTypes } from 'parse5'
-
-export interface SourceRange {
-  start: number
-  end: number
-}
+import type { SourceRange } from './sectionTargets.ts'
 
 export interface EditableElement {
   tagName: string
@@ -60,6 +56,13 @@ const FATAL_PARSE_ERRORS = new Set([
   'eof-before-tag-name',
   'end-tag-without-matching-open-element',
   'missing-end-tag-name',
+  'incorrectly-opened-comment',
+  'unexpected-question-mark-instead-of-tag-name',
+  'cdata-in-html-content',
+  'eof-in-cdata',
+  'abrupt-closing-of-empty-comment',
+  'incorrectly-closed-comment',
+  'nested-comment',
 ])
 
 const VOID_TAGS = new Set([
@@ -480,9 +483,15 @@ function findUnclosed(node: TreeNode): { tag: string; line: number; col: number 
   return undefined
 }
 
-export function editsForOp(html: string, el: EditableElement, op: OpBody): EditResult {
+export function editsForOp(html: string, el: EditableElement, op: OpBody, parentTag?: string): EditResult {
   switch (op.op) {
     case 'set_text': {
+      if (el.tagName.toLowerCase() === 'script' || el.tagName.toLowerCase() === 'style') {
+        return {
+          ok: false,
+          error: `<${el.tagName}> holds raw CSS or JavaScript that escaping would corrupt; use replace_section`,
+        }
+      }
       if (VOID_TAGS.has(el.tagName.toLowerCase()) || !el.endTag) {
         return {
           ok: false,
@@ -522,19 +531,19 @@ export function editsForOp(html: string, el: EditableElement, op: OpBody): EditR
       return setAttr(html, el, 'style', merged)
     }
     case 'insert_before': {
-      const check = checkFragment(op.html)
+      const check = checkFragment(op.html, parentTag)
       if (!check.ok) return check
       return { ok: true, edits: [{ start: el.start, end: el.start, text: op.html }] }
     }
     case 'insert_after': {
-      const check = checkFragment(op.html)
+      const check = checkFragment(op.html, parentTag)
       if (!check.ok) return check
       return { ok: true, edits: [{ start: el.end, end: el.end, text: op.html }] }
     }
     case 'remove':
       return { ok: true, edits: [{ start: el.start, end: el.end, text: '' }] }
     case 'replace': {
-      const check = checkFragment(op.html)
+      const check = checkFragment(op.html, parentTag)
       if (!check.ok) return check
       return { ok: true, edits: [{ start: el.start, end: el.end, text: op.html }] }
     }
