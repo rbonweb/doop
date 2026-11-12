@@ -60,6 +60,7 @@ import {
   parseExportScale,
 } from '../shared/exportScale.ts'
 import { DOOP_GUIDE, GUIDE_TOPICS } from './guide.ts'
+import { findGuideSection, guideIndex } from './guideSections.ts'
 import {
   describeInspiration,
   INSPIRATION_NO_MATCH_NOTE,
@@ -547,13 +548,26 @@ export function buildMcpServer(
     {
       title: 'Read the Doop agent guide',
       description:
-        'Read the Doop agent guide: mandatory review checkpoints, the streaming workflow, frame sizing, design-quality doctrine, and multiplayer etiquette. Call with topic "doop-instructions" ONCE before using other Doop tools; call again if a long conversation may have compressed earlier context.',
+        'Read the Doop agent guide: mandatory review checkpoints, the streaming workflow, frame sizing, design-quality doctrine, and multiplayer etiquette. Call with topic "doop-instructions" ONCE before using other Doop tools; call again if a long conversation may have compressed earlier context. Pass section to read one part (section: "index" lists them).',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         topic: z.enum(GUIDE_TOPICS).describe('Guide topic to load'),
+        section: z
+          .string()
+          .max(120)
+          .optional()
+          .describe(
+            'One section of the guide by its slug or title; "index" lists the sections. Leave it out for the whole guide.',
+          ),
       },
     },
-    async () => text(DOOP_GUIDE),
+    async ({ section }) => {
+      if (!section) return text(DOOP_GUIDE)
+      const wanted = section.trim()
+      if (wanted.toLowerCase() === 'index' || wanted.toLowerCase() === 'list') return text(guideIndex(DOOP_GUIDE))
+      const found = findGuideSection(DOOP_GUIDE, wanted)
+      return found ? text(found.body) : err(`no guide section "${section}". ${guideIndex(DOOP_GUIDE)}`)
+    },
   )
 
   server.registerTool(
