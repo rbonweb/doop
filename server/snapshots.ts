@@ -1,7 +1,8 @@
 import type { Frame } from '../shared/types.ts'
 import type { AssetSource } from '../shared/assetSource.ts'
 import { captureFrame } from './screenshot.ts'
-import { TargetError, clipForTarget, describeTarget, resolveTargets } from './renderTargets.ts'
+import { TargetError, clipForTarget, describeTarget, noMatchError, resolveTargets } from './renderTargets.ts'
+import { resolveFrameTargets } from './targetResolution.ts'
 import { normalizeRenderParams } from './renderParams.ts'
 import type { FrameTarget, RenderCrop, RenderFormat } from './renderTypes.ts'
 import { MAX_ASSET_BYTES, createAsset } from './assets.ts'
@@ -48,15 +49,19 @@ export async function snapshotFrame(input: SnapshotInput): Promise<SnapshotResul
     quality: input.quality ?? SNAPSHOT_QUALITY[format],
     ...(input.region ? { crop: input.region } : {}),
   })
-  const sourceFrame = await store.renderSource(input.frame)
+  const loaded = await store.renderSource(input.frame)
+  const resolved = input.target
+    ? await resolveFrameTargets(loaded, [input.target], { stampAs: input.agentName })
+    : undefined
+  const sourceFrame = resolved?.frame ?? loaded
   let element: string | undefined
   let clip: { x: number; y: number; width: number; height: number } | undefined
   if (params.crop) clip = { x: params.crop.x, y: params.crop.y, width: params.crop.w, height: params.crop.h }
-  const target = input.target
+  const target = resolved?.targets[0]
   const prepare = target
     ? async (page: import('puppeteer-core').Page): Promise<{ x: number; y: number; width: number; height: number }> => {
         const matches = await resolveTargets(page, target)
-        if (matches.length === 0) throw new TargetError(`no element matches ${describeTarget(target)}`)
+        if (matches.length === 0) throw noMatchError(target)
         if (matches.length > 1) {
           throw new TargetError(`${matches.length} elements match ${describeTarget(target)}; name one by element_id`)
         }

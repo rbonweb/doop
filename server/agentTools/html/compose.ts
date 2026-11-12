@@ -19,11 +19,14 @@ import type { ResidentAgentTool } from '../resident.ts'
  * listed under `dropped` instead of being guessed.
  */
 
+const DRY_RUN_HINT =
+  'Dry run: nothing was created. Check carriedRules and dropped per section, then call compose_frame again without dry_run to build the frame.'
+
 const COMPOSE_NUDGE =
   'You have not seen this composed page yet. Call get_frame_screenshot on the new frame, check the sections in order and their spacing, then call update_frame with the full height so nothing is cut off.'
 
 const COMPOSE_DESCRIPTION =
-  'Build a final page from labelled sections of other frames on this canvas, in order. Each section keeps its CSS scoped to itself, so two sources may both style `.title` without colliding; rules that depend on the source page\'s structure (siblings, nth-child, body/html context) are listed under `dropped`, never guessed. Every source frame must be on this canvas because components belong to the canvas. Example: compose_frame({ canvas_id: "…", name: "Landing page", width: 1280, sections: [{ frame_id: "…", target: { label: "Hero" } }, { frame_id: "…", target: { element_id: "features" } }], agent_name: "Claude" }).'
+  'Build a final page from labelled sections of other frames on this canvas, in order. Each section keeps its CSS scoped to itself, so two sources may both style `.title` without colliding; rules that depend on the source page\'s structure (siblings, nth-child, body/html context) are listed under `dropped`, never guessed. Every source frame must be on this canvas because components belong to the canvas. Example: compose_frame({ canvas_id: "…", name: "Landing page", width: 1280, sections: [{ frame_id: "…", target: { label: "Hero" } }, { frame_id: "…", target: { element_id: "features" } }], agent_name: "Claude" }). Pass dry_run: true to see what it would build (each section with its source frame, the CSS rules it carries and drops, the size of the document in bytes) without creating a frame.'
 
 interface ComposeRequest {
   canvasId: string
@@ -72,6 +75,19 @@ function composeSections(request: ComposeRequest, frameOf: (id: string) => Frame
 /** The ctx helpers type their content blocks loosely; the SDK wants its own CallToolResult shape. */
 const reply = (result: AgentToolResult): CallToolResult => result as unknown as CallToolResult
 
+/** What a dry run reports: the sections as they would be built and the size of the document, no frame. */
+function dryRunAnswer(result: ComposeResult, frameOf: (id: string) => Frame | undefined) {
+  return {
+    ok: true,
+    dry_run: true,
+    sections: result.sections.map((section) => ({ ...section, frameName: frameOf(section.frameId)?.name })),
+    headTags: result.headTags.length,
+    htmlBytes: Buffer.byteLength(result.html, 'utf8'),
+    ...(result.documentRulesFrom ? { documentRulesFrom: result.documentRulesFrom } : {}),
+    note: DRY_RUN_HINT,
+  }
+}
+
 function answer(result: ComposeResult, frame: Frame, frameSummary: (frame: Frame) => Record<string, unknown>) {
   return {
     ok: true,
@@ -102,10 +118,16 @@ export function registerComposeTools(server: McpServer, ctx: AgentToolContext): 
           .min(1)
           .max(30)
           .describe('Sections in order: a source frame on this canvas and the target inside it'),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe(
+            'Report what would be built (sections, carried and dropped CSS, size in bytes) and create no frame',
+          ),
         agent_name: ctx.agentName,
       },
     },
-    async ({ canvas_id, name, page_id, width, height, x, y, sections, agent_name }) => {
+    async ({ canvas_id, name, page_id, width, height, x, y, sections, dry_run, agent_name }) => {
       const canvas = ctx.canvasFor(canvas_id, 'edit')
       if (!canvas) return reply(ctx.noCanvas(canvas_id, 'edit'))
       if (page_id && !canvasPages(canvas).some((page) => page.id === page_id))
@@ -114,6 +136,7 @@ export function registerComposeTools(server: McpServer, ctx: AgentToolContext): 
         ctx.frameFor(id, 'view'),
       )
       if (!composed.ok) return reply(ctx.err(composed.error))
+      if (dry_run) return reply(ctx.text(dryRunAnswer(composed.result, (id) => ctx.frameFor(id, 'view'))))
       const actor = ctx.actorFrom(agent_name)
       const frame = actions.createFrame(
         canvas_id,
@@ -151,6 +174,7 @@ export const composeResidentTools: ResidentAgentTool[] = [
           height: { type: 'number', description: 'Frame height in px; default 1200' },
           x: { type: 'number' },
           y: { type: 'number' },
+          dry_run: { type: 'boolean', description: 'Report what would be built and create no frame' },
           sections: {
             type: 'array',
             minItems: 1,
@@ -219,6 +243,15 @@ export const composeResidentTools: ResidentAgentTool[] = [
         (id) => store.getFrame(id),
       )
       if (!composed.ok) return { ok: false, error: composed.error }
+      if (input.dry_run === true)
+        return {
+          ok: true,
+          content: JSON.stringify(
+            dryRunAnswer(composed.result, (id) => store.getFrame(id)),
+            null,
+            2,
+          ),
+        }
       const frame = actions.createFrame(
         ctx.canvasId,
         {

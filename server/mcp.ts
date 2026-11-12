@@ -778,14 +778,26 @@ export function buildMcpServer(
       const tokenThemes = store.getTokenThemes(canvas_id)
       /* design-synced canvases carry a flow map: real user navigation between
          the synced screens — context a redesign must respect */
-      const flow = describeSyncFlow(await getSyncFlow(c), c.frames)
+      const syncFlow = await getSyncFlow(c)
+      /* on one page, only the navigation between frames of that page, so no other page's frame is named */
+      const pageIds = new Set(c.frames.filter((f) => onPage(framePageId(c, f))).map((f) => f.id))
+      const onThisPage = (link: { fromFrameId: string; toFrameId: string }) =>
+        !page_id || (pageIds.has(link.fromFrameId) && pageIds.has(link.toFrameId))
+      const flow = describeSyncFlow(
+        { links: syncFlow.links.filter(onThisPage), edges: syncFlow.edges.filter(onThisPage) },
+        c.frames,
+      )
       const images = await imagesForFrames(listed.map((f) => f.id))
-      const claims = claimsOn(canvas_id).map((claim) => ({
-        frameId: claim.frameId,
-        holder: claim.holder,
-        note: claim.note,
-        expiresAt: new Date(claim.expiresAt).toISOString(),
-      }))
+      /* claims follow the frames listed, so a page_id (or a limit) never names a frame that is not in the answer */
+      const listedIds = new Set(listed.map((f) => f.id))
+      const claims = claimsOn(canvas_id)
+        .filter((claim) => listedIds.has(claim.frameId))
+        .map((claim) => ({
+          frameId: claim.frameId,
+          holder: claim.holder,
+          note: claim.note,
+          expiresAt: new Date(claim.expiresAt).toISOString(),
+        }))
       const notes = [
         ...(images.size ? [IMAGES_NOTE] : []),
         ...(flow.length
@@ -1834,20 +1846,23 @@ export function buildMcpServer(
       const imageAssets = await imageDetailsForFrame(f.id)
       const outline = mode === 'outline'
       const instances = !outline && f.html.includes(INSTANCE_ATTR) ? instancesIn(f) : []
+      /* before the summary: reading the outline may stamp ids, which moves the frame's version */
+      const outlineView = outline
+        ? await frameOutlineFor(f, {
+            measure,
+            /* only an editor's read stamps ids; a viewer's writes nothing and gets selectors instead */
+            stamp: frameFor(frame_id, 'edit') ? { by: actorFrom(agent_name).name } : undefined,
+            mayRender: () => takeSlot('render', ownerId ?? agent_name ?? 'agent', env.MCP_RENDERS_PER_MIN),
+          })
+        : undefined
+      const current = store.getFrame(f.id) ?? f
       return withFeedbackNotice(
         text({
           canvasId: f.canvasId,
-          ...frameSummary({ ...f, pageId: canvas ? framePageId(canvas, f) : f.pageId }, images),
+          ...frameSummary({ ...current, pageId: canvas ? framePageId(canvas, current) : current.pageId }, images),
           ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}),
           ...(include_html === false || outline ? {} : { html: expand_components ? f.html : compactFrameHtml(f) }),
-          ...(outline
-            ? {
-                outline: await frameOutlineFor(f, {
-                  measure,
-                  mayRender: () => takeSlot('render', ownerId ?? agent_name ?? 'agent', env.MCP_RENDERS_PER_MIN),
-                }),
-              }
-            : {}),
+          ...(outlineView ? { outline: outlineView } : {}),
           ...(instances.length ? { instances } : {}),
           ...(imageAssets.length
             ? {
@@ -2616,7 +2631,7 @@ export function buildMcpServer(
       _meta: previewToolMeta('Rendering the frame…', 'Frame rendered'),
       description:
         'Render a frame and return a PNG screenshot of it — this is how you SEE your design. Always review your work with this after creating or updating a frame, then fix what looks wrong (spacing, overflow, contrast, alignment) and check again. Iterate until it actually looks good, not just until the HTML seems right. Pass target or region to render one section of the frame at full size instead of the whole page downscaled; pass actions to click, hover, type or wait in the page before the capture, so interactive states show.',
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
         scale: z
@@ -2640,7 +2655,14 @@ export function buildMcpServer(
       const f = { ...live }
       if (target !== undefined || region !== undefined || format !== undefined || actions !== undefined) {
         try {
-          const shot = await frameScreenshot(f, { target, region, format, actions, scale: scale ?? 1 })
+          const shot = await frameScreenshot(f, {
+            target,
+            region,
+            format,
+            actions,
+            scale: scale ?? 1,
+            stampAs: frameFor(frame_id, 'edit') ? actorFrom(agent_name).name : undefined,
+          })
           const outcome = shot.actions
             ? `, actions: ${shot.actions.ok ? `${shot.actions.done}/${actions?.length ?? shot.actions.done} ok` : (shot.actions.error ?? 'failed')}`
             : ''

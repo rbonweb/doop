@@ -1,6 +1,6 @@
 /* Design lint: rule engine over a FrameMeasurement, pure so it is cheap to test. */
 
-import { normalizeColor } from './colorMath.ts'
+import { isAllowedColor, normalizeColor, parseCssColor, type Rgba } from './colorMath.ts'
 import type { FrameMeasurement, LintReport, LintResult, LintRules, MeasuredSection, TextBlock } from './measureTypes.ts'
 
 const HEADING_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
@@ -77,16 +77,17 @@ function checkTextLines(m: FrameMeasurement, rules: NonNullable<LintRules['max_t
 
 const baseHex = (color: string) => normalizeColor(color)?.slice(0, 7) ?? color.toLowerCase()
 
+/** Flags every colour in use that is not an allowed colour, a tint or shade of one, white, black or transparent (see `isAllowedColor`). */
 function checkPalette(m: FrameMeasurement, values: string[]): LintResult {
   const c = collector()
-  const allowed = new Set<string>()
+  const allowed: Rgba[] = []
   for (const value of values) {
-    const hex = normalizeColor(value)
-    if (!hex) {
+    const parsed = parseCssColor(value)
+    if (!parsed) {
       c.note(`unreadable colour ${value}`)
       continue
     }
-    allowed.add(hex.slice(0, 7))
+    allowed.push(parsed)
   }
   const usedBy = new Map<string, string[]>()
   for (const section of m.sections) {
@@ -100,10 +101,15 @@ function checkPalette(m: FrameMeasurement, values: string[]): LintResult {
   }
   for (const color of m.colors) {
     const hex = baseHex(color)
-    if (allowed.has(hex)) continue
-    const ids = (usedBy.get(hex) ?? []).slice(0, 5)
-    const where = ids.length > 0 ? ` (used in ${ids.join(', ')})` : ''
-    c.add(hex, `${hex} is not in the palette${where}`)
+    const parsed = parseCssColor(hex)
+    if (parsed && isAllowedColor(parsed, allowed)) continue
+    const sections = (usedBy.get(hex) ?? []).slice(0, 5)
+    const source = m.color_sources?.[hex]
+    const where = [
+      ...(sections.length > 0 ? [`used in ${sections.join(', ')}`] : []),
+      ...(source ? [`first on ${source}`] : []),
+    ]
+    c.add(hex, `${hex} is not in the palette${where.length > 0 ? ` (${where.join('; ')})` : ''}`)
   }
   return c.result('allowed_colors')
 }

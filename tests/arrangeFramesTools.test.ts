@@ -107,6 +107,31 @@ describe('arrange_frames', () => {
     }
   })
 
+  it('plans the moves on a dry run and writes nothing', async () => {
+    const big = addFrame({ name: 'Home', x: 500, y: 40, width: 1440, height: 900, pageId: 'p1', updatedAt: 111 })
+    const mid = addFrame({ name: 'Pricing', x: 0, y: 900, width: 1280, height: 700, pageId: 'p1', updatedAt: 222 })
+    const { client, close } = await as(OWNER)
+    try {
+      const args = { canvas_id: canvas.id, page_id: 'p1', agent_name: 'Claude' }
+      const dry = json((await call(client, 'arrange_frames', { ...args, dry_run: true })).text)
+      expect(dry.dry_run).toBe(true)
+      expect(dry.moved).toBeUndefined()
+      expect(dry.planned).toEqual([
+        { frame_id: big.id, name: 'Home', from: { x: 500, y: 40 }, to: { x: 1580, y: 40 } },
+        { frame_id: mid.id, name: 'Pricing', from: { x: 0, y: 900 }, to: { x: 0, y: 40 } },
+      ])
+      expect(store.getFrame(big.id)).toMatchObject({ x: 500, y: 40, updatedAt: 111 })
+      expect(store.getFrame(mid.id)).toMatchObject({ x: 0, y: 900, updatedAt: 222 })
+      /* the real call then makes exactly the planned moves */
+      const real = json((await call(client, 'arrange_frames', args)).text)
+      expect((real.moved as { id: string; x: number; y: number }[]).map(({ id, x, y }) => ({ id, x, y }))).toEqual(
+        (dry.planned as { frame_id: string; to: { x: number; y: number } }[]).map((p) => ({ id: p.frame_id, ...p.to })),
+      )
+    } finally {
+      await close()
+    }
+  })
+
   it('leaves a locked frame where it is and reports it', async () => {
     const a = addFrame({ name: 'A', x: 1000, y: 0, width: 1000, height: 600, pageId: 'p1' })
     const locked = addFrame({ name: 'Locked', x: 50, y: 50, width: 1000, height: 600, pageId: 'p1', locked: true })

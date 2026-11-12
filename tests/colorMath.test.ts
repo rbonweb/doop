@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   composite,
   contrastRatio,
+  isAllowedColor,
   normalizeColor,
   parseCssColor,
   relativeLuminance,
@@ -119,5 +120,66 @@ describe('contrastRatio', () => {
     const ratio = contrastRatio({ r: 0x11, g: 0x11, b: 0x11, a: 1 }, white)
     expect(ratio).toBe(18.88)
     expect(Number.isInteger(ratio * 100)).toBe(true)
+  })
+})
+
+describe('isAllowedColor', () => {
+  const brand = parseCssColor('#0177d3')!
+  const allowed = [brand]
+  const mix = (from: Rgba, to: Rgba, t: number): Rgba => ({
+    r: Math.round(from.r + (to.r - from.r) * t),
+    g: Math.round(from.g + (to.g - from.g) * t),
+    b: Math.round(from.b + (to.b - from.b) * t),
+    a: 1,
+  })
+
+  it('accepts the allowed colour itself', () => {
+    expect(isAllowedColor(brand, allowed)).toBe(true)
+  })
+
+  it.each([0.1, 0.5, 0.9])('accepts a %s tint toward white', (t) => {
+    expect(isAllowedColor(mix(brand, white, t), allowed)).toBe(true)
+  })
+
+  it('accepts a shade toward black', () => {
+    expect(isAllowedColor(mix(brand, black, 0.4), allowed)).toBe(true)
+  })
+
+  it('accepts an alpha version of the colour', () => {
+    expect(isAllowedColor({ ...brand, a: 0.35 }, allowed)).toBe(true)
+  })
+
+  it('accepts the colour with some other colour at low alpha composited over white', () => {
+    const translucent = { r: 1, g: 119, b: 211, a: 0.2 }
+    expect(isAllowedColor(translucent, allowed)).toBe(true)
+  })
+
+  it('stays within the tolerance of the line and no further', () => {
+    const tint = mix(brand, white, 0.5)
+    expect(isAllowedColor({ ...tint, r: tint.r + 3 }, allowed)).toBe(true)
+    expect(isAllowedColor({ ...tint, r: tint.r + 30 }, allowed)).toBe(false)
+  })
+
+  it('accepts pure white, pure black and transparent whatever the palette', () => {
+    expect(isAllowedColor(white, allowed)).toBe(true)
+    expect(isAllowedColor(black, allowed)).toBe(true)
+    expect(isAllowedColor({ r: 12, g: 200, b: 99, a: 0 }, allowed)).toBe(true)
+    expect(isAllowedColor(white, [])).toBe(true)
+  })
+
+  it('judges white and black after compositing, so translucent black is a grey', () => {
+    expect(isAllowedColor({ ...black, a: 0.5 }, allowed)).toBe(false)
+    expect(isAllowedColor({ ...white, a: 0.5 }, allowed)).toBe(true)
+  })
+
+  it('still flags an unrelated colour', () => {
+    expect(isAllowedColor(parseCssColor('#ff0000')!, allowed)).toBe(false)
+    expect(isAllowedColor(parseCssColor('#f0a030')!, allowed)).toBe(false)
+  })
+
+  it('gives an allowed white or black no tints of its own, so a grey is not free', () => {
+    const grey = parseCssColor('#111111')!
+    expect(isAllowedColor(grey, [white])).toBe(false)
+    expect(isAllowedColor(grey, [black])).toBe(false)
   })
 })

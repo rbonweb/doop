@@ -18,6 +18,24 @@ h1 { font-size: 40px; line-height: 1.2; color: #111111 }
 </section>
 </body></html>`
 
+/* A brand-coloured page with a store screenshot mock-up: off-palette colours, a banned word, an image and an svg. */
+const SHOT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAP8AAP///yH5BAAAAAAALAAAAAABAAEAAAICRAEAOw=='
+const SHOT_HTML = `<!doctype html><html><head><style>
+* { box-sizing: border-box; margin: 0 }
+body { font-family: monospace; background: #ffffff }
+.brand { padding: 24px; background: #0177d3; color: #ffffff }
+.tint { padding: 24px; background: #e6f1fb; color: #014a84 }
+.shot { padding: 24px; background: #ff00aa; color: #00ffcc }
+</style></head><body>
+<section class="brand" data-doop-id="brand"><h1>Brand</h1></section>
+<section class="tint" data-doop-id="tint"><p>A tint of the brand</p></section>
+<section data-doop-id="mock">
+<div class="shot" data-doop-id="shot"><p data-doop-id="shot-copy">synergy inside the mock-up</p></div>
+<img data-doop-id="pic" alt="" width="40" height="40" style="border: 3px solid #12ab34; background: #ab12cd" src="${SHOT_PIXEL}">
+<svg data-doop-id="art" width="40" height="40"><text x="0" y="20" style="color: #abcdef">x</text><rect width="10" height="10" fill="#fedcba" style="background-color: #fedcba"/></svg>
+</section>
+</body></html>`
+
 interface TextContent {
   type: string
   text?: string
@@ -190,6 +208,122 @@ describe.skipIf(!findBrowserPath())('measure_frame and lint_frame', { timeout: 1
     })
     expect(report.pass).toBe(true)
     expect(report.summary).toBe('2 of 2 rules pass')
+  })
+
+  it('measures a section by an outline label: a viewer writes nothing, an editor gets the id stamped', async () => {
+    const html = `<!doctype html><html><head><style>*{margin:0}section{height:100px}</style></head><body><div><section><h2>Plans</h2></section><section><h2>Contact</h2></section></div></body></html>`
+    const labelled = (await (
+      await owner.post(`/api/canvases/${canvas.id}/frames`, { name: 'Labels', html, width: 400, height: 400 })
+    ).json()) as Frame
+    const stored = async () =>
+      ((await (await owner.get(`/api/canvases/${canvas.id}`)).json()) as Canvas).frames.find(
+        (f) => f.id === labelled.id,
+      )!.html
+    const targets = [{ label: 'Contact' }]
+    const asViewer = await json<{ sections: Array<{ element_id: string | null; label: string | null }> }>(
+      viewerAgent,
+      'measure_frame',
+      { frame_id: labelled.id, targets, agent_name: 'Viewer' },
+    )
+    expect(asViewer.sections).toMatchObject([{ element_id: null, label: 'Contact' }])
+    expect(await stored()).toBe(html)
+
+    const asEditor = await json<{ sections: Array<{ element_id: string | null; label: string | null }> }>(
+      ownerAgent,
+      'measure_frame',
+      { frame_id: labelled.id, targets, agent_name: 'Editor' },
+    )
+    const id = asEditor.sections[0]!.element_id
+    expect(id).toBeTruthy()
+    expect(await stored()).toContain(`data-doop-id="${id}"`)
+    expect((await stored()).match(/data-doop-id=/g)).toHaveLength(1)
+  })
+
+  it('answers a target that matches nothing with an error naming it, for measure_frame and lint_frame', async () => {
+    const measure = await call(ownerAgent, 'measure_frame', {
+      frame_id: frame.id,
+      targets: [{ label: 'No such section' }],
+      agent_name: 'Measurer',
+    })
+    expect(measure.isError).toBe(true)
+    expect(measure.text).toContain('label "No such section"')
+    const lint = await call(ownerAgent, 'lint_frame', {
+      frame_id: frame.id,
+      targets: [{ selector: '.missing' }],
+      rules: { no_overflow: true },
+      agent_name: 'Linter',
+    })
+    expect(lint.isError).toBe(true)
+    expect(lint.text).toContain('selector ".missing"')
+  })
+
+  describe('palette matching and exclude', () => {
+    let shotFrame: Frame
+
+    interface Report {
+      pass: boolean
+      results: Array<{ rule: string; pass: boolean; offenders: string[]; details: string[] }>
+    }
+
+    const lint = (args: Record<string, unknown>) =>
+      json<Report>(ownerAgent, 'lint_frame', { frame_id: shotFrame.id, agent_name: 'Linter', ...args })
+
+    beforeAll(async () => {
+      shotFrame = (await (
+        await owner.post(`/api/canvases/${canvas.id}/frames`, {
+          name: 'Shot',
+          html: SHOT_HTML,
+          width: 600,
+          height: 800,
+        })
+      ).json()) as Frame
+    })
+
+    it('flags off-palette colours, accepts tints, and names where each one is used', async () => {
+      const report = await lint({ rules: { allowed_colors: ['#0177d3'] } })
+      const palette = report.results[0]!
+      expect(palette.pass).toBe(false)
+      expect(palette.offenders).toEqual(expect.arrayContaining(['#ff00aa', '#00ffcc']))
+      expect(palette.offenders).not.toContain('#e6f1fb')
+      expect(palette.offenders).not.toContain('#014a84')
+      expect(palette.details.join('\n')).toContain('first on shot')
+    })
+
+    it('never collects colours from inside an svg, while an image keeps its own box styles', async () => {
+      const report = await lint({ rules: { allowed_colors: ['#0177d3'] } })
+      const offenders = report.results[0]!.offenders
+      for (const drawn of ['#abcdef', '#fedcba']) expect(offenders).not.toContain(drawn)
+      expect(offenders).toEqual(expect.arrayContaining(['#12ab34', '#ab12cd']))
+    })
+
+    it('skips an excluded subtree for colours and banned words', async () => {
+      const report = await lint({
+        rules: { allowed_colors: ['#0177d3'], banned_words: ['synergy'] },
+        exclude: ['[data-doop-id="shot"]', 'img'],
+      })
+      expect(report.pass, JSON.stringify(report.results)).toBe(true)
+      const without = await lint({ rules: { banned_words: ['synergy'] } })
+      expect(without.pass).toBe(false)
+    })
+
+    it('skips an excluded subtree for contrast', async () => {
+      const exclude = ['.shot']
+      const included = await lint({ rules: { min_contrast: 7 } })
+      expect(included.results[0]!.offenders).toContain('shot-copy')
+      const skipped = await lint({ rules: { min_contrast: 7 }, exclude })
+      expect(skipped.results[0]!.offenders).not.toContain('shot-copy')
+    })
+
+    it('refuses an invalid exclude selector by name', async () => {
+      const answer = await call(ownerAgent, 'lint_frame', {
+        frame_id: shotFrame.id,
+        rules: { allowed_colors: ['#0177d3'] },
+        exclude: ['div[[nope'],
+        agent_name: 'Linter',
+      })
+      expect(answer.isError).toBe(true)
+      expect(answer.text).toContain('div[[nope')
+    })
   })
 
   it('refuses an empty rule set', async () => {

@@ -119,6 +119,8 @@ class Store {
   private holds = new Map<string, number>()
   /** rooms, agents and streams the store cannot see (wired by index.ts) */
   private inUse: (canvasId: string) => boolean = () => false
+  /** told after a frame is created or its html or size changes (the render warm-up); a listener never fails a write */
+  private renderListeners = new Set<(frame: Frame) => void>()
 
   constructor() {
     /* a missed load still fails, but the canvas is on its way for a retry */
@@ -1149,6 +1151,22 @@ class Store {
     return ref
   }
 
+  /** Listens for frame writes that change what the frame looks like (create, html, width, height); returns the way to stop. */
+  onFrameRenderChange(listener: (frame: Frame) => void): () => void {
+    this.renderListeners.add(listener)
+    return () => void this.renderListeners.delete(listener)
+  }
+
+  private renderChanged(frame: Frame): void {
+    for (const listener of this.renderListeners) {
+      try {
+        listener(frame)
+      } catch (error) {
+        console.error('[store] render listener failed', error)
+      }
+    }
+  }
+
   getFrame(frameId: string): Frame | undefined {
     const canvasId = this.frameIndex.get(frameId)
     if (!canvasId) return undefined
@@ -1217,6 +1235,7 @@ class Store {
     this.frameIndex.set(frame.id, canvasId)
     persist.saveFrame(frame, true)
     persist.saveCanvas(c)
+    if (frame.html.length > 0) this.renderChanged(frame)
     return frame
   }
 
@@ -1272,6 +1291,10 @@ class Store {
     /* a frame moved to another page lands in front there, as Figma does */
     if (patch.pageId !== undefined && patch.pageId !== frame.pageId && patch.z === undefined)
       patch = { ...patch, z: frontOf(pageFrames(c, patch.pageId)) ?? frame.z }
+    const looksDifferent =
+      (patch.html !== undefined && patch.html !== frame.html) ||
+      (patch.width !== undefined && patch.width !== frame.width) ||
+      (patch.height !== undefined && patch.height !== frame.height)
     Object.assign(frame, patch)
     if (patch.z !== undefined) c.frames.sort(byStack)
     // All writers (including streams, sync and restores) invalidate sign-off.
@@ -1294,6 +1317,7 @@ class Store {
     c.updatedAt = frame.updatedAt
     persist.saveFrame(frame) // debounced: streaming appends land as one write per burst
     persist.saveCanvas(c)
+    if (looksDifferent) this.renderChanged(frame)
     return frame
   }
 

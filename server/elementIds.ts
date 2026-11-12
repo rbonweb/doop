@@ -204,15 +204,21 @@ export function stampElementId(html: string, selector: string, opts: StampOption
   return stampElement(html, doc, el, opts.id)
 }
 
-/** Write the id into an element already found in `html`'s own parse. An id the
+interface StampEdit {
+  id: string
+  /** the start-tag rewrite that carries the id; absent when the element already wears a usable one */
+  edit?: { start: number; end: number; text: string }
+}
+
+/** What writing an id into an element already found in `html`'s own parse takes. An id the
  *  element already wears is kept even when this format would not mint it (the
  *  fork's `r10`): other markup and comments may name it. It is replaced only
  *  when it is unusable (empty, or holding a quote) or another element before
  *  this one carries the same id, since an id must name one element. */
-function stampElement(html: string, doc: Tree.Document, el: Element, wanted?: string): Stamped | undefined {
+function stampEdit(html: string, doc: Tree.Document, el: Element, wanted?: string): StampEdit | undefined {
   const existing = attr(el, ELEMENT_ID_ATTR)
-  if (isElementId(existing)) return { html, id: existing }
-  if (isReusableElementId(existing) && findByElementId(doc, existing) === el) return { html, id: existing }
+  if (isElementId(existing)) return { id: existing }
+  if (isReusableElementId(existing) && findByElementId(doc, existing) === el) return { id: existing }
   const tag = el.sourceCodeLocation?.startTag
   if (!tag) return undefined
   const id = wanted ?? newElementId()
@@ -230,8 +236,47 @@ function stampElement(html: string, doc: Tree.Document, el: Element, wanted?: st
     const to = stale.endOffset - tag.startOffset
     open = open.slice(0, from).replace(/\s+$/, '') + open.slice(to)
   }
-  const next = html.slice(0, tag.startOffset) + open + html.slice(tag.endOffset)
-  return hasElementId(next, id) ? { html: next, id } : undefined
+  return { id, edit: { start: tag.startOffset, end: tag.endOffset, text: open } }
+}
+
+function stampElement(html: string, doc: Tree.Document, el: Element, wanted?: string): Stamped | undefined {
+  const stamp = stampEdit(html, doc, el, wanted)
+  if (!stamp) return undefined
+  if (!stamp.edit) return { html, id: stamp.id }
+  const next = html.slice(0, stamp.edit.start) + stamp.edit.text + html.slice(stamp.edit.end)
+  return hasElementId(next, stamp.id) ? { html: next, id: stamp.id } : undefined
+}
+
+export interface StampedMany {
+  /** the frame HTML with every stamp in place; unchanged when none was needed or the batch could not be verified */
+  html: string
+  /** the id of each selector's element, in order; undefined where the selector did not resolve or the batch was refused */
+  ids: Array<string | undefined>
+}
+
+/** `stampElementId` for many positional selectors in one parse and one rewrite. Every start tag is
+ *  edited by source offset, then the result is parsed once more: if any stamped id does not
+ *  resolve, nothing is written at all, so a batch never lands half-stamped. */
+export function stampElementIds(html: string, selectors: string[]): StampedMany {
+  const doc = parseDocument(html)
+  const found = selectors.map((selector) => {
+    const el = resolve(doc, selector)
+    return el ? stampEdit(html, doc, el) : undefined
+  })
+  const edits = found.flatMap((stamp) => (stamp?.edit ? [stamp.edit] : []))
+  if (!edits.length) return { html, ids: found.map((stamp) => stamp?.id) }
+  let next = html
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    next = next.slice(0, edit.start) + edit.text + next.slice(edit.end)
+  }
+  const verified = parseDocument(next)
+  const present = new Set<string>()
+  for (const el of walk(verified)) {
+    const id = attr(el, ELEMENT_ID_ATTR)
+    if (id) present.add(id)
+  }
+  if (found.some((stamp) => stamp && !present.has(stamp.id))) return { html, ids: found.map(() => undefined) }
+  return { html: next, ids: found.map((stamp) => stamp?.id) }
 }
 
 /** Whether a stamped element is still in the HTML. */

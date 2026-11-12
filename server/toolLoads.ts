@@ -4,13 +4,16 @@ import type { ZodRawShape } from 'zod'
 import { store } from './store.ts'
 
 /** The canvases a tool call names: `canvas_id`, and the canvases of
- *  `frame_id` / `frame_ids`. */
+ *  `frame_id` / `frame_ids` and of each `items[].frame_id` (compare_frames). */
 function argsCanvases(args: unknown): string[] {
   if (!args || typeof args !== 'object') return []
-  const { canvas_id, frame_id, frame_ids } = args as Record<string, unknown>
+  const { canvas_id, frame_id, frame_ids, items } = args as Record<string, unknown>
   const ids = new Set<string>()
   if (typeof canvas_id === 'string') ids.add(canvas_id)
-  for (const id of [frame_id, ...(Array.isArray(frame_ids) ? frame_ids : [])]) {
+  const itemFrames = (Array.isArray(items) ? items : []).map((item: unknown) =>
+    item && typeof item === 'object' ? (item as Record<string, unknown>).frame_id : undefined,
+  )
+  for (const id of [frame_id, ...(Array.isArray(frame_ids) ? frame_ids : []), ...itemFrames]) {
     const canvasId = typeof id === 'string' ? store.getFrame(id)?.canvasId : undefined
     if (canvasId) ids.add(canvasId)
   }

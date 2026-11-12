@@ -2,6 +2,7 @@ import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterAll, beforeAll, expect, it } from 'vitest'
 import { REVIEW_NUDGE } from '../server/reviewNudge.ts'
+import { findBrowserPath } from '../server/screenshot.ts'
 import { Client, startServer, type Server } from './harness.ts'
 
 /* /mcp is stateless: initialize and every tool call are separate requests, each served by a fresh MCP server.
@@ -80,3 +81,23 @@ it('sends the review reminder on the first write to a frame only', async () => {
   expect(texts(await edit('Hello', 'Hi'))).not.toContain(REVIEW_NUDGE)
   expect(texts(await edit('Hi', 'Hey'))).not.toContain(REVIEW_NUDGE)
 })
+
+it.skipIf(!findBrowserPath())(
+  'shapes measure_frame like a read for Claude Code and leaves it whole for other clients',
+  async () => {
+    const claude = await connect('claude-code')
+    const { frameId } = await canvasWithFrame(claude)
+    const args = { frame_id: frameId, agent_name: 'T' }
+    const shaped = await claude.callTool({ name: 'measure_frame', arguments: args })
+    const line = texts(shaped)[0] ?? ''
+    expect(line.split('\n')).toHaveLength(1)
+    expect(line).toMatch(/^measure_frame: .*sections.*Full data in structuredContent\.$/)
+    expect(shaped.structuredContent).toMatchObject({ width: expect.any(Number), sections: expect.any(Array) })
+
+    const other = await connect('some-other-client')
+    const whole = await other.callTool({ name: 'measure_frame', arguments: args })
+    expect(JSON.parse(texts(whole)[0] ?? '')).toMatchObject({ sections: expect.any(Array) })
+    expect(whole.structuredContent).toBeUndefined()
+  },
+  120_000,
+)

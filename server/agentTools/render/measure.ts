@@ -4,9 +4,9 @@ import { z } from 'zod'
 import type { Frame } from '../../../shared/types.ts'
 import { env } from '../../env.ts'
 import { lintMeasurement } from '../../lint.ts'
-import { measureFrame } from '../../measure.ts'
+import { InvalidSelectorError, measureFrame } from '../../measure.ts'
 import type { FrameMeasurement, LintResult, LintRules } from '../../measureTypes.ts'
-import { frameTargetSchema } from '../../renderTargets.ts'
+import { frameTargetSchema, TargetError } from '../../renderTargets.ts'
 import type { FrameTarget } from '../../renderTypes.ts'
 import { store } from '../../store.ts'
 import { limitKey, type AgentToolContext, type AgentToolResult } from '../context.ts'
@@ -55,7 +55,7 @@ const MEASURE_DESCRIPTION =
   'Measure the rendered frame at a width: each section’s box and height, every text block’s line count, overflow and clipping, the colours in use and each text’s WCAG contrast. Read-only; use it to check fit and readability without cutting screenshots up.'
 
 const LINT_DESCRIPTION =
-  'Check a rendered frame against rules — section height, heading and text line counts, palette, banned words, overflow, contrast — and list the element ids that offend.'
+  'Check a rendered frame against rules — section height, heading and text line counts, palette, banned words, overflow, contrast — and list the element ids that offend. allowed_colors also accepts tints, shades and alpha versions of an allowed colour; exclude skips CSS-selector subtrees (screenshots, third-party widgets) for colour, contrast and banned-word rules.'
 
 /* The context hands results back with a content type wider than the SDK's CallToolResult; the seam's built-in tools infer the narrow shape, an area file has to say so. */
 function asToolResult(result: AgentToolResult): CallToolResult {
@@ -73,6 +73,21 @@ const measureShape = (ctx: AgentToolContext) => ({
   agent_name: ctx.agentName.optional(),
 })
 
+/** The name an element id is stamped under when a label resolves to an element without one: only for a caller who may edit the frame, else undefined (the page gets a positional selector). */
+function stampName(ctx: AgentToolContext, frameId: string, agentName: string | undefined): string | undefined {
+  return ctx.frameFor(frameId, 'edit') ? ctx.actorFrom(agentName).name : undefined
+}
+
+const excludeSchema = z.array(z.string().min(1).max(500)).max(50)
+
+const EXCLUDE_DESCRIPTION =
+  'CSS selectors: matching elements and everything inside them are skipped by the colour, contrast and banned-word rules (for example a store screenshot mock-up). An invalid selector is refused by name'
+
+/** The tool error for a measurement the page refused, or undefined when the failure is not the caller's. */
+function selectorRefusal(error: unknown): string | undefined {
+  return error instanceof InvalidSelectorError ? error.message : undefined
+}
+
 /** measure_frame and lint_frame (item 5). */
 export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): void {
   server.registerTool(
@@ -80,7 +95,7 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
     {
       title: 'Measure a frame',
       description: MEASURE_DESCRIPTION,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: measureShape(ctx),
     },
     async ({ frame_id, width, targets, agent_name }) => {
@@ -89,10 +104,19 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
       if (!ctx.takeSlot('render', limitKey(ctx, agent_name ?? 'agent'), env.MCP_RENDERS_PER_MIN))
         return asToolResult(ctx.err('render rate limit — wait a minute'))
       ctx.arrive(frame.canvasId, agent_name)
-      const measurement = await measureFrame(await store.renderSource(frame), { width, targets })
-      return asToolResult(
-        ctx.withFeedbackNotice(ctx.text(measured(measurement)), frame.canvasId, ctx.actorFrom(agent_name)),
-      )
+      try {
+        const measurement = await measureFrame(await store.renderSource(frame), {
+          width,
+          targets,
+          stampAs: stampName(ctx, frame_id, agent_name),
+        })
+        return asToolResult(
+          ctx.withFeedbackNotice(ctx.text(measured(measurement)), frame.canvasId, ctx.actorFrom(agent_name)),
+        )
+      } catch (e) {
+        if (e instanceof TargetError) return asToolResult(ctx.err(e.message))
+        throw e
+      }
     },
   )
 
@@ -101,33 +125,44 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
     {
       title: 'Lint a frame',
       description: LINT_DESCRIPTION,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         ...measureShape(ctx),
         rules: lintRulesSchema.describe(
           'At least one rule: section height, heading/text lines, palette, words, overflow, contrast',
         ),
+        exclude: excludeSchema.optional().describe(EXCLUDE_DESCRIPTION),
       },
     },
-    async ({ frame_id, rules, width, targets, agent_name }) => {
+    async ({ frame_id, rules, exclude, width, targets, agent_name }) => {
       const frame = ctx.frameFor(frame_id, 'view')
       if (!frame) return asToolResult(ctx.noFrame(frame_id))
       if (!ctx.takeSlot('render', limitKey(ctx, agent_name ?? 'agent'), env.MCP_RENDERS_PER_MIN))
         return asToolResult(ctx.err('render rate limit — wait a minute'))
       ctx.arrive(frame.canvasId, agent_name)
-      const measurement = await measureFrame(await store.renderSource(frame), {
-        width,
-        targets,
-        lineQueries: rules.max_text_lines?.map((rule) => rule.selector),
-      })
-      const report = lintMeasurement(measurement, rules)
-      const passed = report.results.filter((result) => result.pass).length
-      const answer = {
-        pass: report.pass,
-        summary: `${passed} of ${report.results.length} rules pass`,
-        results: report.results,
+      try {
+        const measurement = await measureFrame(await store.renderSource(frame), {
+          width,
+          targets,
+          stampAs: stampName(ctx, frame_id, agent_name),
+          lineQueries: rules.max_text_lines?.map((rule) => rule.selector),
+          exclude,
+          colorSources: true,
+        })
+        const report = lintMeasurement(measurement, rules)
+        const passed = report.results.filter((result) => result.pass).length
+        const answer = {
+          pass: report.pass,
+          summary: `${passed} of ${report.results.length} rules pass`,
+          results: report.results,
+        }
+        return asToolResult(ctx.withFeedbackNotice(ctx.text(answer), frame.canvasId, ctx.actorFrom(agent_name)))
+      } catch (e) {
+        if (e instanceof TargetError) return asToolResult(ctx.err(e.message))
+        const refusal = selectorRefusal(e)
+        if (refusal) return asToolResult(ctx.err(refusal))
+        throw e
       }
-      return asToolResult(ctx.withFeedbackNotice(ctx.text(answer), frame.canvasId, ctx.actorFrom(agent_name)))
     },
   )
 }
@@ -160,6 +195,15 @@ function residentWidth(input: Record<string, unknown>): number | undefined {
   return typeof width === 'number' && Number.isFinite(width)
     ? Math.min(4000, Math.max(1, Math.round(width)))
     : undefined
+}
+
+/** The caller's exclude list under the MCP schema's rules, or the refusal to give back. */
+function residentExclude(input: Record<string, unknown>): { exclude?: string[]; refusal?: string } {
+  if (input.exclude === undefined) return {}
+  const parsed = excludeSchema.safeParse(input.exclude)
+  return parsed.success
+    ? { exclude: parsed.data }
+    : { refusal: 'exclude must be an array of up to 50 non-empty CSS selectors (500 characters each)' }
 }
 
 function residentTargets(input: Record<string, unknown>): FrameTarget[] | undefined {
@@ -197,11 +241,17 @@ export const measureResidentTools: ResidentAgentTool[] = [
       const frame = residentFrame(input, ctx)
       if (typeof frame === 'string') return fail(frame)
       if (!residentMayRender(ctx.actor.name)) return fail('render rate limit — wait a minute')
-      const measurement = await measureFrame(await store.renderSource(frame), {
-        width: residentWidth(input),
-        targets: residentTargets(input),
-      })
-      return ok(measured(measurement))
+      try {
+        const measurement = await measureFrame(await store.renderSource(frame), {
+          width: residentWidth(input),
+          targets: residentTargets(input),
+          stampAs: ctx.actor.name,
+        })
+        return ok(measured(measurement))
+      } catch (e) {
+        if (e instanceof TargetError) return fail(e.message)
+        throw e
+      }
     },
   },
   {
@@ -213,6 +263,7 @@ export const measureResidentTools: ResidentAgentTool[] = [
           type: 'object',
           description: 'At least one rule: section height, heading/text lines, palette, words, overflow, contrast',
         },
+        exclude: { type: 'array', items: { type: 'string' }, description: EXCLUDE_DESCRIPTION },
       }),
     },
     async run(input, ctx) {
@@ -223,18 +274,30 @@ export const measureResidentTools: ResidentAgentTool[] = [
         return fail('give at least one rule')
       if (!residentMayRender(ctx.actor.name)) return fail('render rate limit — wait a minute')
       const lintRules = rules as LintRules
-      const measurement = await measureFrame(await store.renderSource(frame), {
-        width: residentWidth(input),
-        targets: residentTargets(input),
-        lineQueries: lintRules.max_text_lines?.map((rule) => rule.selector),
-      })
-      const report = lintMeasurement(measurement, lintRules)
-      const passed = report.results.filter((result: LintResult) => result.pass).length
-      return ok({
-        pass: report.pass,
-        summary: `${passed} of ${report.results.length} rules pass`,
-        results: report.results,
-      })
+      const { exclude, refusal: excludeRefusal } = residentExclude(input)
+      if (excludeRefusal) return fail(excludeRefusal)
+      try {
+        const measurement = await measureFrame(await store.renderSource(frame), {
+          width: residentWidth(input),
+          targets: residentTargets(input),
+          stampAs: ctx.actor.name,
+          lineQueries: lintRules.max_text_lines?.map((rule) => rule.selector),
+          exclude,
+          colorSources: true,
+        })
+        const report = lintMeasurement(measurement, lintRules)
+        const passed = report.results.filter((result: LintResult) => result.pass).length
+        return ok({
+          pass: report.pass,
+          summary: `${passed} of ${report.results.length} rules pass`,
+          results: report.results,
+        })
+      } catch (e) {
+        if (e instanceof TargetError) return fail(e.message)
+        const refusal = selectorRefusal(e)
+        if (refusal) return fail(refusal)
+        throw e
+      }
     },
   },
 ]

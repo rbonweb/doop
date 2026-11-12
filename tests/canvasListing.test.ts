@@ -3,8 +3,16 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it, vi } from 'vitest'
 import { buildMcpServer } from '../server/mcp.ts'
 import { pickCanvasFields, pickFrameFields, pageOf } from '../server/canvasListing.ts'
+import { claimFrames } from '../server/frameClaims.ts'
 import { webFontsBrief } from '../shared/webFonts.ts'
 
+const syncFlow = vi.hoisted(() => ({
+  current: { links: [], edges: [] } as { links: unknown[]; edges: unknown[] },
+}))
+vi.mock('../server/ingest.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../server/ingest.ts')>()),
+  getSyncFlow: async () => syncFlow.current,
+}))
 vi.mock('../server/db/persist.ts', () => ({ saveCanvas: () => {}, saveFrame: () => {}, saveActivity: () => {} }))
 
 describe('pickCanvasFields', () => {
@@ -64,19 +72,63 @@ function frame(id: string) {
   }
 }
 
-async function canvasClient(canvasId: string) {
+async function canvasClient(canvasId: string, options: { pages?: boolean; clientName?: string } = {}) {
   const { store } = await import('../server/store.ts')
+  /* two pages: a, b, e on the first, c, d on the second */
+  const onSecond = new Set(['c', 'd'])
   store.canvases.set(canvasId, {
     id: canvasId,
     ownerId: 'test-owner-id',
     name: 'Listing',
     createdById: 'test-owner-id',
-    frames: ['a', 'b', 'c', 'd', 'e'].map(frame),
+    frames: ['a', 'b', 'c', 'd', 'e'].map((id) =>
+      options.pages
+        ? { ...frame(id), name: `Screen-${id}`, canvasId, pageId: onSecond.has(id) ? 'page-two' : 'page-one' }
+        : frame(id),
+    ),
+    ...(options.pages
+      ? {
+          pages: [
+            { id: 'page-one', name: 'One' },
+            { id: 'page-two', name: 'Two' },
+          ],
+          notes: [
+            {
+              id: 'n1',
+              pageId: 'page-one',
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 100,
+              markdown: 'one',
+              color: 'yellow',
+              canvasId,
+              createdBy: 'T',
+              createdAt: 0,
+              updatedAt: 0,
+            },
+            {
+              id: 'n2',
+              pageId: 'page-two',
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 100,
+              markdown: 'two',
+              color: 'yellow',
+              canvasId,
+              createdBy: 'T',
+              createdAt: 0,
+              updatedAt: 0,
+            },
+          ],
+        }
+      : {}),
     createdAt: 0,
     updatedAt: 0,
   } as never)
   const server = buildMcpServer('Test Owner', 'test-owner-id')
-  const client = new Client({ name: 'canvas-listing-test', version: '1.0.0' })
+  const client = new Client({ name: options.clientName ?? 'canvas-listing-test', version: '1.0.0' })
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await server.connect(serverTransport)
   await client.connect(clientTransport)
@@ -155,5 +207,106 @@ describe('get_canvas listing controls', () => {
     } finally {
       await close()
     }
+  })
+
+  describe('with page_id', () => {
+    const ids = (value: unknown) => (value as { id: string }[]).map((f) => f.id)
+    const claimed = (value: unknown) => (value as { frameId: string }[]).map((c) => c.frameId)
+    type Result = Awaited<ReturnType<Client['callTool']>>
+    const structured = (result: Result) => result.structuredContent as Record<string, unknown>
+
+    async function pageClient(canvasId: string, clientName: string) {
+      const canvas = await canvasClient(canvasId, { pages: true, clientName })
+      const { store } = await import('../server/store.ts')
+      const frames = store.canvases.get(canvasId)!.frames
+      claimFrames(
+        frames.filter((f) => ['a', 'c'].includes(f.id)),
+        { kind: 'agent', name: 'Other agent', color: '#000000' },
+        15,
+        'working',
+      )
+      /* the sync flow: a -> c crosses the pages, c -> d stays on the second, a -> b stays on the first */
+      syncFlow.current = {
+        links: [
+          { fromFrameId: 'a', toFrameId: 'c', x: 0, y: 0, width: 1, height: 1, label: 'to two' },
+          { fromFrameId: 'c', toFrameId: 'd', x: 0, y: 0, width: 1, height: 1, label: 'within two' },
+        ],
+        edges: [
+          { fromFrameId: 'a', toFrameId: 'b', count: 5 },
+          { fromFrameId: 'c', toFrameId: 'd', count: 7 },
+          { fromFrameId: 'a', toFrameId: 'c', count: 9 },
+        ],
+      }
+      return canvas
+    }
+
+    for (const clientName of ['canvas-listing-test', 'claude-code']) {
+      it(`keeps every part of the answer on the page (${clientName})`, async () => {
+        const canvasId = `mcp-canvas-listing-page-id-${clientName}`
+        const { client, close, body } = await pageClient(canvasId, clientName)
+        const read = (result: Result) => (clientName === 'claude-code' ? structured(result) : body(result))
+        try {
+          const cases: { extra: Record<string, unknown>; frames: string[]; notes: boolean }[] = [
+            { extra: {}, frames: ['c', 'd'], notes: true },
+            { extra: { limit: 1 }, frames: ['c'], notes: true },
+            { extra: { limit: 5 }, frames: ['c', 'd'], notes: true },
+            { extra: { frame_fields: ['name'] }, frames: ['c', 'd'], notes: true },
+            { extra: { fields: ['frames', 'claims', 'notes', 'flow'] }, frames: ['c', 'd'], notes: true },
+          ]
+          for (const { extra, frames, notes } of cases) {
+            const result = await client.callTool({
+              name: 'get_canvas',
+              arguments: { canvas_id: canvasId, page_id: 'page-two', ...extra },
+            })
+            for (const shown of [read(result), structured(result)]) {
+              expect(ids(shown.frames)).toEqual(frames)
+              expect(claimed(shown.claims)).toEqual(['c'])
+              if (notes) expect(ids(shown.notes)).toEqual(['n2'])
+              /* only navigation between the page's own frames: no frame of the other page by id or name */
+              const flow = (shown.flow as string[]).join('\n')
+              expect(flow).toContain('Screen-c')
+              expect(flow).toContain('Screen-d')
+              expect(flow).not.toMatch(/Screen-[abe]|\((a|b|e)\)/)
+            }
+          }
+          const wholeResult = await client.callTool({ name: 'get_canvas', arguments: { canvas_id: canvasId } })
+          const whole = read(wholeResult)
+          expect(claimed(whole.claims).sort()).toEqual(['a', 'c'])
+          expect(ids(whole.frames)).toHaveLength(5)
+          expect((whole.flow as string[]).join('\n')).toContain('Screen-a')
+        } finally {
+          await close()
+        }
+      })
+    }
+
+    it('keeps a limit and its cursor on the page', async () => {
+      const canvasId = 'mcp-canvas-listing-page-id-cursor'
+      const { client, close, body } = await pageClient(canvasId, 'canvas-listing-test')
+      try {
+        const first = body(
+          await client.callTool({
+            name: 'get_canvas',
+            arguments: { canvas_id: canvasId, page_id: 'page-two', limit: 1 },
+          }),
+        )
+        expect(ids(first.frames)).toEqual(['c'])
+        expect(first.total).toBe(2)
+        expect(first.nextCursor).toBe('1')
+        const second = body(
+          await client.callTool({
+            name: 'get_canvas',
+            arguments: { canvas_id: canvasId, page_id: 'page-two', limit: 1, cursor: first.nextCursor },
+          }),
+        )
+        expect(ids(second.frames)).toEqual(['d'])
+        expect(second.total).toBe(2)
+        expect(second.nextCursor).toBeUndefined()
+        /* the claim on c is not in the answer that lists only d */
+        expect(second.claims).toBeUndefined()
+      } finally {
+        await close()
+      }
+    })
   })
 })

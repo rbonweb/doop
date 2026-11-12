@@ -164,3 +164,55 @@ section + section { border-top: 4px solid red }
   expect(textOf(ambiguous)).toContain('Candidates:')
   expect(textOf(ambiguous)).toContain('"path"')
 })
+
+it('reports what compose_frame would build on a dry run and creates no frame', async () => {
+  const canvasId = await createCanvas('Compose dry run')
+  const source = await createFrame(
+    canvasId,
+    'Dry source',
+    `<!doctype html><html><head><style>
+body { margin: 0 }
+.title { color: rgb(200, 0, 0) }
+section + section { border-top: 1px solid red }
+</style></head><body>
+<section data-doop-label="Hero"><h2 class="title">Hero</h2></section>
+<section data-doop-label="Footer"><h2 class="title">Footer</h2></section>
+</body></html>`,
+  )
+  const frames = async () =>
+    jsonOf(await agent.callTool({ name: 'get_canvas', arguments: { canvas_id: canvasId, fields: ['frames'] } }))
+      .frames as { id: string; version?: unknown; updatedAt?: unknown }[]
+  const before = await frames()
+  const args = {
+    canvas_id: canvasId,
+    name: 'Dry page',
+    width: 900,
+    sections: [{ frame_id: source, target: { label: 'Hero' } }],
+    agent_name: 'agent-a',
+  }
+  const dry = await agent.callTool({ name: 'compose_frame', arguments: { ...args, dry_run: true } })
+  expect(dry.isError).toBeFalsy()
+  const report = jsonOf(dry) as {
+    dry_run: boolean
+    frame?: unknown
+    htmlBytes: number
+    sections: { frameId: string; frameName: string; carriedRules: number; dropped: unknown[] }[]
+  }
+  expect(report.dry_run).toBe(true)
+  expect(report.frame).toBeUndefined()
+  expect(report.htmlBytes).toBeGreaterThan(100)
+  expect(report.sections).toHaveLength(1)
+  expect(report.sections[0]).toMatchObject({ frameId: source, frameName: 'Dry source', carriedRules: 1 })
+  /* nothing was created: the same frames, at the same versions */
+  expect(await frames()).toEqual(before)
+  /* a dry run still refuses what the real call refuses */
+  const bad = await agent.callTool({
+    name: 'compose_frame',
+    arguments: { ...args, sections: [{ frame_id: 'nope', target: { label: 'Hero' } }], dry_run: true },
+  })
+  expect(bad.isError).toBe(true)
+  /* and the real call builds the frame of that size */
+  const real = jsonOf(await agent.callTool({ name: 'compose_frame', arguments: args }))
+  expect((await frames()).length).toBe(before.length + 1)
+  expect(real.sections).toEqual(report.sections.map(({ frameName: _frameName, ...section }) => section))
+})

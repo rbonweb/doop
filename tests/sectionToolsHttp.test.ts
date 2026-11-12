@@ -40,8 +40,13 @@ async function currentVersion(): Promise<string> {
   return jsonOf(result).updatedAt as string
 }
 
-async function versionCount(): Promise<number> {
-  const result = await call('list_frame_versions', { frame_id: frame.id })
+async function currentVersionOf(frameId: string): Promise<string> {
+  const result = await call('get_frame', { frame_id: frameId, include_html: false })
+  return jsonOf(result).updatedAt as string
+}
+
+async function versionCount(frameId = frame.id): Promise<number> {
+  const result = await call('list_frame_versions', { frame_id: frameId })
   return (jsonOf(result).versions as unknown[]).length
 }
 
@@ -201,5 +206,196 @@ describe('writing sections', () => {
     expect(result.isError).toBe(true)
     expect(textOf(result)).toContain('no closing tag')
     expect(await versionCount()).toBe(before)
+  })
+})
+
+interface OutlineRow {
+  tag: string
+  bytes: number
+  compactBytes?: number
+  elementId?: string
+  element_id: string | null
+  selector?: string
+}
+
+interface OutlineAnswer {
+  version: string
+  sections: OutlineRow[]
+}
+
+async function outlineOf(client: McpClient, frameId: string): Promise<OutlineAnswer> {
+  const result = await client.callTool({
+    name: 'get_frame',
+    arguments: { frame_id: frameId, mode: 'outline', agent_name: 'Sections' },
+  })
+  return jsonOf(result).outline as OutlineAnswer
+}
+
+async function frameHtml(frameId: string): Promise<string> {
+  return jsonOf(await call('get_frame', { frame_id: frameId })).html as string
+}
+
+describe('true section sizes and element ids in the outline', () => {
+  let viewerAgent: McpClient
+  let plain: Frame
+  const footerFiller = 'F'.repeat(30_000)
+  /* no ids anywhere, and a footer whose <p> is closed by the footer's end tag, not its own */
+  const bare = `<!doctype html><html><body><header><h1>Top</h1></header><section><h2>Middle</h2></section><footer><p>${footerFiller}</footer></body></html>`
+
+  beforeAll(async () => {
+    const viewer = await new Client(server).signUp('sections-viewer@test.dev', 'Sections Viewer')
+    expect(
+      (await owner.post(`/api/canvases/${canvas.id}/members`, { email: 'sections-viewer@test.dev', role: 'view' }))
+        .status,
+    ).toBe(200)
+    const { secret } = await (await viewer.post('/api/agent-keys', { name: 'Sections viewer' })).json()
+    viewerAgent = new McpClient({ name: 'sections-viewer', version: '1.0.0' })
+    await viewerAgent.connect(
+      new StreamableHTTPClientTransport(new URL('/mcp', server.base), {
+        requestInit: { headers: { Authorization: `Bearer ${secret}` } },
+      }),
+    )
+    plain = await (await owner.post(`/api/canvases/${canvas.id}/frames`, { name: 'Bare page', html: bare })).json()
+  }, 60_000)
+
+  afterAll(async () => {
+    await viewerAgent?.close()
+  })
+
+  it('writes nothing for a view-only caller and gives a positional selector instead of an id', async () => {
+    const before = await versionCount(plain.id)
+    const outline = await outlineOf(viewerAgent, plain.id)
+    expect(outline.sections.map((s) => s.element_id)).toEqual([null, null, null])
+    expect(outline.sections.map((s) => s.selector)).toEqual(['body > header', 'body > section', 'body > footer'])
+    expect(await frameHtml(plain.id)).toBe(bare)
+    expect(await versionCount(plain.id)).toBe(before)
+  })
+
+  it('stamps every section once for an editor, keeps the version history and does not write again', async () => {
+    const before = await versionCount(plain.id)
+    const first = await outlineOf(agent, plain.id)
+    expect(first.sections.every((s) => typeof s.element_id === 'string' && s.element_id.length > 0)).toBe(true)
+    expect(first.sections.every((s) => s.elementId === s.element_id && s.selector === undefined)).toBe(true)
+    expect(first.version).toBe(await currentVersionOf(plain.id))
+    expect(await versionCount(plain.id)).toBe(before)
+
+    const second = await outlineOf(agent, plain.id)
+    expect(second.version).toBe(first.version)
+    expect(second.sections.map((s) => s.element_id)).toEqual(first.sections.map((s) => s.element_id))
+    expect(await currentVersionOf(plain.id)).toBe(first.version)
+  })
+
+  it('reports the footer at its real size, which replace_section then matches', async () => {
+    const outline = await outlineOf(agent, plain.id)
+    const footer = outline.sections[2]!
+    const html = await frameHtml(plain.id)
+    const span = html.indexOf('</footer>') + '</footer>'.length - html.indexOf('<footer')
+    expect(footer.bytes).toBe(span)
+    expect(footer.bytes).toBeGreaterThan(30_000)
+
+    const replacement = '<footer data-doop-label="Footer"><p>short</p></footer>'
+    const result = jsonOf(
+      await call('replace_section', {
+        frame_id: plain.id,
+        target: { element_id: footer.element_id },
+        html: replacement,
+        expected_version: outline.version,
+      }),
+    )
+    const replaced = result.replaced as {
+      bytesBefore: number
+      bytesAfter: number
+      frameBytesBefore: number
+      frameBytesAfter: number
+    }
+    expect(replaced.bytesBefore).toBe(footer.bytes)
+    expect(replaced.frameBytesBefore - replaced.frameBytesAfter).toBe(footer.bytes - replacement.length)
+    expect(replaced.frameBytesAfter).toBe((await frameHtml(plain.id)).length)
+  })
+
+  it('counts a component instance at its stored size and the <doop-use> form beside it', async () => {
+    await call('create_component', {
+      canvas_id: canvas.id,
+      name: 'Big footer',
+      description: 'A footer with a lot in it',
+      html: `<footer class="big"><p>${footerFiller}</p></footer>`,
+      css: '',
+    })
+    const withInstance = await (
+      await owner.post(`/api/canvases/${canvas.id}/frames`, {
+        name: 'Instance page',
+        html: '<!doctype html><html><body><header><h1>Top</h1></header><doop-use component="Big footer"></doop-use></body></html>',
+      })
+    ).json()
+    const outline = await outlineOf(agent, withInstance.id)
+    const instance = outline.sections[1]!
+    expect(instance.bytes).toBeGreaterThan(30_000)
+    expect(instance.compactBytes).toBeLessThan(300)
+    expect(instance.element_id).toMatch(/^[a-z0-9]{6}$/)
+    /* the instance root already wears its instance id as data-doop-id: the outline reuses it, never stamps another */
+    const stored = jsonOf(await call('get_frame', { frame_id: withInstance.id, expand_components: true }))
+      .html as string
+    expect(stored.split(`data-doop-id="${instance.element_id}"`)).toHaveLength(2)
+    expect(await frameHtml(withInstance.id)).toContain(`id="${instance.element_id}"`)
+    await call('patch_frame', {
+      frame_id: withInstance.id,
+      ops: [{ op: 'set_attr', target: { element_id: outline.sections[0]!.element_id }, name: 'data-x', value: '1' }],
+      expected_version: outline.version,
+    })
+    const again = await outlineOf(agent, withInstance.id)
+    expect(again.sections[1]!.element_id).toBe(instance.element_id)
+    const replaceVersion = again.version
+
+    const before = (
+      jsonOf(await call('get_frame', { frame_id: withInstance.id, expand_components: true })).html as string
+    ).length
+    const replacement = '<footer data-doop-label="Footer">bye</footer>'
+    const result = jsonOf(
+      await call('replace_section', {
+        frame_id: withInstance.id,
+        target: { selector: 'doop-use' },
+        html: replacement,
+        expected_version: replaceVersion,
+      }),
+    )
+    const replaced = result.replaced as {
+      bytesBefore: number
+      storedBytesBefore: number
+      frameBytesBefore: number
+      frameBytesAfter: number
+    }
+    expect(replaced.bytesBefore).toBe(instance.compactBytes)
+    expect(replaced.storedBytesBefore).toBe(instance.bytes)
+    expect(replaced.frameBytesBefore).toBe(before)
+    expect(replaced.frameBytesBefore - replaced.frameBytesAfter).toBeGreaterThan(30_000 - 300)
+  })
+
+  it('keeps the id and size of a lone instance whose root wraps one chain, and writes nothing', async () => {
+    await call('create_component', {
+      canvas_id: canvas.id,
+      name: 'Wrapped title',
+      description: 'A title in two wrappers',
+      html: '<div class="outer"><div class="inner"><h3>Title</h3></div></div>',
+      css: '',
+    })
+    const lone = await (
+      await owner.post(`/api/canvases/${canvas.id}/frames`, {
+        name: 'Lone instance',
+        html: '<!doctype html><html><body><doop-use component="Wrapped title"></doop-use></body></html>',
+      })
+    ).json()
+    const expanded = async () =>
+      jsonOf(await call('get_frame', { frame_id: lone.id, expand_components: true })).html as string
+    const before = await expanded()
+    const versionBefore = await currentVersionOf(lone.id)
+    const outline = await outlineOf(agent, lone.id)
+    const compact = await frameHtml(lone.id)
+    const id = /<doop-use[^>]* id="([a-z0-9]+)"/.exec(compact)?.[1]
+    expect(id).toBeDefined()
+    expect(outline.sections).toHaveLength(1)
+    expect(outline.sections[0]).toMatchObject({ tag: 'doop-use', element_id: id })
+    expect(outline.sections[0]!.bytes).toBeGreaterThan(outline.sections[0]!.compactBytes!)
+    expect(await expanded()).toBe(before)
+    expect(await currentVersionOf(lone.id)).toBe(versionBefore)
   })
 })
