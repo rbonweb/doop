@@ -246,9 +246,15 @@ Build: half a day.
 
 Suggested order: 1 and 3 (a day and a half, the biggest unblockers), then 4 and 5, then 2 and 9, then the rest.
 
-## Questions for the owner
+## Owner decisions (2026-11-12)
 
-1. Which items to build, and in which order.
-2. Render at save time: cache on first request only (cheapest), or pre-render every saved frame in the background (renders ready when an agent asks, at the cost of server CPU on every save)?
-3. Claims: advisory (other agents are warned and can still write) or enforced (writes by others are refused until the claim expires)? Version checks refuse stale writes either way.
-4. Duplicate payloads: keep sending the JSON in both the text block and `structuredContent` (works for every client), or send a short text summary to clients known to read `structuredContent` (Claude Code), halving every read?
+1. Build all thirteen items, P1 first.
+2. Renders are made on first request and then kept (storage, ETag and 304); nothing renders at save time.
+3. Claims are advisory: another agent's write goes through, and its response names who holds the claim. Writes with a stale `expected_version` are refused.
+4. Clients known to read `structuredContent` (Claude Code) get a one-line text summary on reads; every other client keeps the full text block.
+
+## Build layout
+
+- Base branch `feat/agent-speed` (local) holds the shared groundwork: the new tools live in `server/agentTools/` (one file per area, registered from one call in `server/mcp.ts` and mirrored for the resident agent), guide sections in their own files, the assets provenance migration, and `scripts/measure-agent-tools.ts`.
+- Three areas branch from it, each with its own lead: render and vision (items 1, 2, 5, 6, 11), HTML editing (4, 7, 9, 10), canvas tools and responses (3, 8, 12, 13).
+- Nothing is pushed to the shared remote or deployed until the owner says so.
