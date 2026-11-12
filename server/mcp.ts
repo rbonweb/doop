@@ -51,6 +51,7 @@ import {
   takePdfExportSlot,
 } from './pdfExport.ts'
 import { primeImage } from './previews.ts'
+import { normalizeRenderParams, renderUrlQuery } from './renderParams.ts'
 import {
   DEFAULT_EXPORT_SCALE,
   MAX_EXPORT_SCALE,
@@ -1812,12 +1813,17 @@ export function buildMcpServer(
     {
       title: 'Export frame as image or PDF',
       description:
-        "Export the frame's CURRENT design. PNG/JPG return public URLs for publishing it elsewhere (CMS media library, social post, og:image; the URL re-renders when the frame changes) at `scale` (default 2x; 1, 3 or 4 for other sizes). PDF returns the file itself (an embedded application/pdf resource): vector, text selectable, one page per frame sized to the frame; pass frame_ids to put several frames of the same canvas into one multi-page PDF (pages in the order given: frame_id first, then frame_ids as listed).",
+        "Export the frame's CURRENT design. PNG/JPG/WebP return public URLs for publishing it elsewhere (CMS media library, social post, og:image): `image_url` is pinned to this version of the frame (cache it forever), `live_url` always shows the current design. Rendered at `scale` (default 2x; 1, 3 or 4 for other sizes). PDF returns the file itself (an embedded application/pdf resource): vector, text selectable, one page per frame sized to the frame; pass frame_ids to put several frames of the same canvas into one multi-page PDF (pages in the order given: frame_id first, then frame_ids as listed).",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
-        format: z.enum(['png', 'jpg', 'pdf']).optional().describe('default png'),
-        quality: z.number().min(1).max(100).optional().describe('jpg only, default 90'),
+        format: z.enum(['png', 'jpg', 'webp', 'pdf']).optional().describe('default png'),
+        quality: z
+          .number()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe('jpg and webp only, default 90 for jpg and 80 for webp'),
         scale: z
           .number()
           .min(MIN_EXPORT_SCALE)
@@ -1839,17 +1845,20 @@ export function buildMcpServer(
       const f = frameFor(frame_id, 'view')
       if (!f) return noFrame(frame_id)
       if (format === 'pdf') return exportPdf(f, frame_ids ?? [])
-      const ext = format === 'jpg' ? 'jpg' : 'png'
-      const q = ext === 'jpg' ? `&quality=${quality ?? 90}` : ''
+      const imageFormat = format === 'jpg' || format === 'webp' ? format : 'png'
       const density = fitExportScale(f, parseExportScale(scale ?? DEFAULT_EXPORT_SCALE) ?? DEFAULT_EXPORT_SCALE)
-      const pixels = exportPixelSize(f, density)
+      const params = normalizeRenderParams(f, { format: imageFormat, scale: density, quality })
+      const pixels = exportPixelSize(f, params.scale)
+      const base = `${env.BETTER_AUTH_URL}/i/${frame_id}.${imageFormat}`
+      const pinned = `${base}?${renderUrlQuery(params, f.updatedAt)}`
       return text({
-        image_url: `${env.BETTER_AUTH_URL}/i/${frame_id}.${ext}?scale=${density}${q}`,
-        download_url: `${env.BETTER_AUTH_URL}/i/${frame_id}.${ext}?scale=${density}${q}&download`,
-        scale: density,
+        image_url: pinned,
+        download_url: `${pinned}&download`,
+        live_url: `${base}?${renderUrlQuery(params)}`,
+        scale: params.scale,
         width: pixels.width,
         height: pixels.height,
-        note: 'Public URL, no auth needed. To publish: fetch the URL and upload the bytes to the target platform (e.g. WordPress POST /wp/v2/media), or hotlink it directly — it always shows the current design.',
+        note: 'Public URLs, no auth needed. image_url is pinned to this version of the frame (cache it forever); live_url always shows the current design. To publish: fetch the URL and upload the bytes to the target platform (e.g. WordPress POST /wp/v2/media), or hotlink one directly.',
       })
     },
   )
