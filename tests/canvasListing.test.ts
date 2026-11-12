@@ -3,6 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it, vi } from 'vitest'
 import { buildMcpServer } from '../server/mcp.ts'
 import { pickCanvasFields, pickFrameFields, pageOf } from '../server/canvasListing.ts'
+import { claimFrames } from '../server/frameClaims.ts'
 import { webFontsBrief } from '../shared/webFonts.ts'
 
 vi.mock('../server/db/persist.ts', () => ({ saveCanvas: () => {}, saveFrame: () => {}, saveActivity: () => {} }))
@@ -64,19 +65,61 @@ function frame(id: string) {
   }
 }
 
-async function canvasClient(canvasId: string) {
+async function canvasClient(canvasId: string, options: { pages?: boolean; clientName?: string } = {}) {
   const { store } = await import('../server/store.ts')
+  /* two pages: a, b, e on the first, c, d on the second */
+  const onSecond = new Set(['c', 'd'])
   store.canvases.set(canvasId, {
     id: canvasId,
     ownerId: 'test-owner-id',
     name: 'Listing',
     createdById: 'test-owner-id',
-    frames: ['a', 'b', 'c', 'd', 'e'].map(frame),
+    frames: ['a', 'b', 'c', 'd', 'e'].map((id) =>
+      options.pages ? { ...frame(id), canvasId, pageId: onSecond.has(id) ? 'page-two' : 'page-one' } : frame(id),
+    ),
+    ...(options.pages
+      ? {
+          pages: [
+            { id: 'page-one', name: 'One' },
+            { id: 'page-two', name: 'Two' },
+          ],
+          notes: [
+            {
+              id: 'n1',
+              pageId: 'page-one',
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 100,
+              markdown: 'one',
+              color: 'yellow',
+              canvasId,
+              createdBy: 'T',
+              createdAt: 0,
+              updatedAt: 0,
+            },
+            {
+              id: 'n2',
+              pageId: 'page-two',
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 100,
+              markdown: 'two',
+              color: 'yellow',
+              canvasId,
+              createdBy: 'T',
+              createdAt: 0,
+              updatedAt: 0,
+            },
+          ],
+        }
+      : {}),
     createdAt: 0,
     updatedAt: 0,
   } as never)
   const server = buildMcpServer('Test Owner', 'test-owner-id')
-  const client = new Client({ name: 'canvas-listing-test', version: '1.0.0' })
+  const client = new Client({ name: options.clientName ?? 'canvas-listing-test', version: '1.0.0' })
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await server.connect(serverTransport)
   await client.connect(clientTransport)
@@ -154,6 +197,55 @@ describe('get_canvas listing controls', () => {
       expect(payload.note as string).not.toContain('Fira Code')
     } finally {
       await close()
+    }
+  })
+
+  describe('with page_id', () => {
+    const ids = (value: unknown) => (value as { id: string }[]).map((f) => f.id)
+    const claimed = (value: unknown) => (value as { frameId: string }[]).map((c) => c.frameId)
+
+    for (const clientName of ['canvas-listing-test', 'claude-code']) {
+      it(`keeps every part of the answer on the page (${clientName})`, async () => {
+        const canvasId = `mcp-canvas-listing-page-id-${clientName}`
+        const { client, close, body } = await canvasClient(canvasId, { pages: true, clientName })
+        try {
+          const { store } = await import('../server/store.ts')
+          const frames = store.canvases.get(canvasId)!.frames
+          claimFrames(
+            frames.filter((f) => ['a', 'c'].includes(f.id)),
+            { kind: 'agent', name: 'Other agent', color: '#000000' },
+            15,
+            'working',
+          )
+          const structured = (result: Awaited<ReturnType<Client['callTool']>>) =>
+            result.structuredContent as Record<string, unknown>
+          for (const extra of [
+            {},
+            { limit: 1 },
+            { limit: 5 },
+            { frame_fields: ['name'] },
+            { fields: ['frames', 'claims'] },
+          ]) {
+            const result = await client.callTool({
+              name: 'get_canvas',
+              arguments: { canvas_id: canvasId, page_id: 'page-two', ...extra },
+            })
+            const shown = clientName === 'claude-code' ? structured(result) : body(result)
+            if (shown.frames) expect(ids(shown.frames).every((id) => ['c', 'd'].includes(id))).toBe(true)
+            if (shown.claims) expect(claimed(shown.claims)).toEqual(['c'])
+            if (shown.notes) expect(ids(shown.notes)).toEqual(['n2'])
+            const preview = structured(result)
+            expect(ids(preview.frames).every((id) => ['c', 'd'].includes(id))).toBe(true)
+            if (preview.claims) expect(claimed(preview.claims)).toEqual(['c'])
+          }
+          const wholeResult = await client.callTool({ name: 'get_canvas', arguments: { canvas_id: canvasId } })
+          const whole = clientName === 'claude-code' ? structured(wholeResult) : body(wholeResult)
+          expect(claimed(whole.claims).sort()).toEqual(['a', 'c'])
+          expect(ids(whole.frames)).toHaveLength(5)
+        } finally {
+          await close()
+        }
+      })
     }
   })
 })

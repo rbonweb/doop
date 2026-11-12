@@ -112,7 +112,8 @@ export function composeDocument(sources: ComposeSource[], opts: { title?: string
     )
     const summary = summarizeCss(css)
     /* the one rule that only carries the root's custom and inherited properties is not a rule of the design */
-    const rootRule = css.includes(`:where([${SECTION_ATTR}="${scopeId}"]) {`) ? 1 : 0
+    const rootSelector = `:where([${SECTION_ATTR}="${scopeId}"]) {`
+    const rootRule = css.split('\n').some((line) => line.trimStart().startsWith(rootSelector)) ? 1 : 0
     if (css.trim()) styles.push(`<style ${COMPOSE_STYLE_ATTR}="${scopeId}">\n${css}\n</style>`)
     for (const tag of frameHeadTags(source.html)) if (!headTags.includes(tag)) headTags.push(tag)
     bodies.push(stampSection(source.html, root, scopeId))
