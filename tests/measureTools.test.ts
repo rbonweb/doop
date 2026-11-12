@@ -210,6 +210,53 @@ describe.skipIf(!findBrowserPath())('measure_frame and lint_frame', { timeout: 1
     expect(report.summary).toBe('2 of 2 rules pass')
   })
 
+  it('measures a section by an outline label: a viewer writes nothing, an editor gets the id stamped', async () => {
+    const html = `<!doctype html><html><head><style>*{margin:0}section{height:100px}</style></head><body><div><section><h2>Plans</h2></section><section><h2>Contact</h2></section></div></body></html>`
+    const labelled = (await (
+      await owner.post(`/api/canvases/${canvas.id}/frames`, { name: 'Labels', html, width: 400, height: 400 })
+    ).json()) as Frame
+    const stored = async () =>
+      ((await (await owner.get(`/api/canvases/${canvas.id}`)).json()) as Canvas).frames.find(
+        (f) => f.id === labelled.id,
+      )!.html
+    const targets = [{ label: 'Contact' }]
+    const asViewer = await json<{ sections: Array<{ element_id: string | null; label: string | null }> }>(
+      viewerAgent,
+      'measure_frame',
+      { frame_id: labelled.id, targets, agent_name: 'Viewer' },
+    )
+    expect(asViewer.sections).toMatchObject([{ element_id: null, label: 'Contact' }])
+    expect(await stored()).toBe(html)
+
+    const asEditor = await json<{ sections: Array<{ element_id: string | null; label: string | null }> }>(
+      ownerAgent,
+      'measure_frame',
+      { frame_id: labelled.id, targets, agent_name: 'Editor' },
+    )
+    const id = asEditor.sections[0]!.element_id
+    expect(id).toBeTruthy()
+    expect(await stored()).toContain(`data-doop-id="${id}"`)
+    expect((await stored()).match(/data-doop-id=/g)).toHaveLength(1)
+  })
+
+  it('answers a target that matches nothing with an error naming it, for measure_frame and lint_frame', async () => {
+    const measure = await call(ownerAgent, 'measure_frame', {
+      frame_id: frame.id,
+      targets: [{ label: 'No such section' }],
+      agent_name: 'Measurer',
+    })
+    expect(measure.isError).toBe(true)
+    expect(measure.text).toContain('label "No such section"')
+    const lint = await call(ownerAgent, 'lint_frame', {
+      frame_id: frame.id,
+      targets: [{ selector: '.missing' }],
+      rules: { no_overflow: true },
+      agent_name: 'Linter',
+    })
+    expect(lint.isError).toBe(true)
+    expect(lint.text).toContain('selector ".missing"')
+  })
+
   describe('palette matching and exclude', () => {
     let shotFrame: Frame
 

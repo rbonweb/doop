@@ -6,7 +6,7 @@ import { env } from '../../env.ts'
 import { lintMeasurement } from '../../lint.ts'
 import { InvalidSelectorError, measureFrame } from '../../measure.ts'
 import type { FrameMeasurement, LintResult, LintRules } from '../../measureTypes.ts'
-import { frameTargetSchema } from '../../renderTargets.ts'
+import { frameTargetSchema, TargetError } from '../../renderTargets.ts'
 import type { FrameTarget } from '../../renderTypes.ts'
 import { store } from '../../store.ts'
 import { limitKey, type AgentToolContext, type AgentToolResult } from '../context.ts'
@@ -73,6 +73,11 @@ const measureShape = (ctx: AgentToolContext) => ({
   agent_name: ctx.agentName.optional(),
 })
 
+/** The name an element id is stamped under when a label resolves to an element without one: only for a caller who may edit the frame, else undefined (the page gets a positional selector). */
+function stampName(ctx: AgentToolContext, frameId: string, agentName: string | undefined): string | undefined {
+  return ctx.frameFor(frameId, 'edit') ? ctx.actorFrom(agentName).name : undefined
+}
+
 const excludeSchema = z.array(z.string().min(1).max(500)).max(50)
 
 const EXCLUDE_DESCRIPTION =
@@ -90,7 +95,7 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
     {
       title: 'Measure a frame',
       description: MEASURE_DESCRIPTION,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: measureShape(ctx),
     },
     async ({ frame_id, width, targets, agent_name }) => {
@@ -99,10 +104,19 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
       if (!ctx.takeSlot('render', limitKey(ctx, agent_name ?? 'agent'), env.MCP_RENDERS_PER_MIN))
         return asToolResult(ctx.err('render rate limit — wait a minute'))
       ctx.arrive(frame.canvasId, agent_name)
-      const measurement = await measureFrame(await store.renderSource(frame), { width, targets })
-      return asToolResult(
-        ctx.withFeedbackNotice(ctx.text(measured(measurement)), frame.canvasId, ctx.actorFrom(agent_name)),
-      )
+      try {
+        const measurement = await measureFrame(await store.renderSource(frame), {
+          width,
+          targets,
+          stampAs: stampName(ctx, frame_id, agent_name),
+        })
+        return asToolResult(
+          ctx.withFeedbackNotice(ctx.text(measured(measurement)), frame.canvasId, ctx.actorFrom(agent_name)),
+        )
+      } catch (e) {
+        if (e instanceof TargetError) return asToolResult(ctx.err(e.message))
+        throw e
+      }
     },
   )
 
@@ -111,7 +125,7 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
     {
       title: 'Lint a frame',
       description: LINT_DESCRIPTION,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         ...measureShape(ctx),
         rules: lintRulesSchema.describe(
@@ -126,28 +140,29 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
       if (!ctx.takeSlot('render', limitKey(ctx, agent_name ?? 'agent'), env.MCP_RENDERS_PER_MIN))
         return asToolResult(ctx.err('render rate limit — wait a minute'))
       ctx.arrive(frame.canvasId, agent_name)
-      let measurement: FrameMeasurement
       try {
-        measurement = await measureFrame(await store.renderSource(frame), {
+        const measurement = await measureFrame(await store.renderSource(frame), {
           width,
           targets,
+          stampAs: stampName(ctx, frame_id, agent_name),
           lineQueries: rules.max_text_lines?.map((rule) => rule.selector),
           exclude,
           colorSources: true,
         })
-      } catch (error) {
-        const refusal = selectorRefusal(error)
+        const report = lintMeasurement(measurement, rules)
+        const passed = report.results.filter((result) => result.pass).length
+        const answer = {
+          pass: report.pass,
+          summary: `${passed} of ${report.results.length} rules pass`,
+          results: report.results,
+        }
+        return asToolResult(ctx.withFeedbackNotice(ctx.text(answer), frame.canvasId, ctx.actorFrom(agent_name)))
+      } catch (e) {
+        if (e instanceof TargetError) return asToolResult(ctx.err(e.message))
+        const refusal = selectorRefusal(e)
         if (refusal) return asToolResult(ctx.err(refusal))
-        throw error
+        throw e
       }
-      const report = lintMeasurement(measurement, rules)
-      const passed = report.results.filter((result) => result.pass).length
-      const answer = {
-        pass: report.pass,
-        summary: `${passed} of ${report.results.length} rules pass`,
-        results: report.results,
-      }
-      return asToolResult(ctx.withFeedbackNotice(ctx.text(answer), frame.canvasId, ctx.actorFrom(agent_name)))
     },
   )
 }
@@ -226,11 +241,17 @@ export const measureResidentTools: ResidentAgentTool[] = [
       const frame = residentFrame(input, ctx)
       if (typeof frame === 'string') return fail(frame)
       if (!residentMayRender(ctx.actor.name)) return fail('render rate limit — wait a minute')
-      const measurement = await measureFrame(await store.renderSource(frame), {
-        width: residentWidth(input),
-        targets: residentTargets(input),
-      })
-      return ok(measured(measurement))
+      try {
+        const measurement = await measureFrame(await store.renderSource(frame), {
+          width: residentWidth(input),
+          targets: residentTargets(input),
+          stampAs: ctx.actor.name,
+        })
+        return ok(measured(measurement))
+      } catch (e) {
+        if (e instanceof TargetError) return fail(e.message)
+        throw e
+      }
     },
   },
   {
@@ -255,27 +276,28 @@ export const measureResidentTools: ResidentAgentTool[] = [
       const lintRules = rules as LintRules
       const { exclude, refusal: excludeRefusal } = residentExclude(input)
       if (excludeRefusal) return fail(excludeRefusal)
-      let measurement: FrameMeasurement
       try {
-        measurement = await measureFrame(await store.renderSource(frame), {
+        const measurement = await measureFrame(await store.renderSource(frame), {
           width: residentWidth(input),
           targets: residentTargets(input),
+          stampAs: ctx.actor.name,
           lineQueries: lintRules.max_text_lines?.map((rule) => rule.selector),
           exclude,
           colorSources: true,
         })
-      } catch (error) {
-        const refusal = selectorRefusal(error)
+        const report = lintMeasurement(measurement, lintRules)
+        const passed = report.results.filter((result: LintResult) => result.pass).length
+        return ok({
+          pass: report.pass,
+          summary: `${passed} of ${report.results.length} rules pass`,
+          results: report.results,
+        })
+      } catch (e) {
+        if (e instanceof TargetError) return fail(e.message)
+        const refusal = selectorRefusal(e)
         if (refusal) return fail(refusal)
-        throw error
+        throw e
       }
-      const report = lintMeasurement(measurement, lintRules)
-      const passed = report.results.filter((result: LintResult) => result.pass).length
-      return ok({
-        pass: report.pass,
-        summary: `${passed} of ${report.results.length} rules pass`,
-        results: report.results,
-      })
     },
   },
 ]

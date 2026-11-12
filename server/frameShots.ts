@@ -5,6 +5,7 @@ import { runPageActions, type ActionsOutcome, type PageAction } from './pageActi
 import { clipForTarget } from './renderTargets.ts'
 import { captureFrame } from './screenshot.ts'
 import { store } from './store.ts'
+import { resolveFrameTargets } from './targetResolution.ts'
 
 /** One screenshot of a frame, of one element or region of it, optionally after page actions (item 6). Shared by `get_frame_screenshot` and `compare_frames`. */
 
@@ -14,6 +15,8 @@ export interface ShotInput {
   format?: 'png' | 'webp'
   scale?: number
   actions?: PageAction[]
+  /** the name an element id is stamped under when a label resolves to an element without one; absent for a read-only caller */
+  stampAs?: string
 }
 
 export interface ShotResult {
@@ -38,14 +41,19 @@ export async function frameScreenshot(frame: Frame, input: ShotInput): Promise<S
   if (input.target !== undefined && input.region !== undefined) {
     throw new RangeError('pass either target or region, not both')
   }
-  const source = await store.renderSource(frame)
+  const loaded = await store.renderSource(frame)
+  const resolved = input.target
+    ? await resolveFrameTargets(loaded, [input.target], { stampAs: input.stampAs })
+    : undefined
+  const source = resolved?.frame ?? loaded
+  const target = resolved?.targets[0]
   const format = input.format ?? 'png'
   let actions: ActionsOutcome | undefined
   const prepare =
-    input.actions?.length || input.target
+    input.actions?.length || target
       ? async (page: Page): Promise<Clip | undefined> => {
           if (input.actions?.length) actions = await runPageActions(page, input.actions)
-          return input.target ? clipForTarget(page, input.target, source) : undefined
+          return target ? clipForTarget(page, target, source) : undefined
         }
       : undefined
   const capture = await captureFrame(source, {

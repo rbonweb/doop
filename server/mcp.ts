@@ -2628,7 +2628,7 @@ export function buildMcpServer(
       _meta: previewToolMeta('Rendering the frame…', 'Frame rendered'),
       description:
         'Render a frame and return a PNG screenshot of it — this is how you SEE your design. Always review your work with this after creating or updating a frame, then fix what looks wrong (spacing, overflow, contrast, alignment) and check again. Iterate until it actually looks good, not just until the HTML seems right. Pass target or region to render one section of the frame at full size instead of the whole page downscaled; pass actions to click, hover, type or wait in the page before the capture, so interactive states show.',
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         frame_id: z.string(),
         scale: z
@@ -2652,7 +2652,14 @@ export function buildMcpServer(
       const f = { ...live }
       if (target !== undefined || region !== undefined || format !== undefined || actions !== undefined) {
         try {
-          const shot = await frameScreenshot(f, { target, region, format, actions, scale: scale ?? 1 })
+          const shot = await frameScreenshot(f, {
+            target,
+            region,
+            format,
+            actions,
+            scale: scale ?? 1,
+            stampAs: frameFor(frame_id, 'edit') ? actorFrom(agent_name).name : undefined,
+          })
           const outcome = shot.actions
             ? `, actions: ${shot.actions.ok ? `${shot.actions.done}/${actions?.length ?? shot.actions.done} ok` : (shot.actions.error ?? 'failed')}`
             : ''

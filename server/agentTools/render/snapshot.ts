@@ -13,7 +13,7 @@ import type { ResidentAgentTool } from '../resident.ts'
 /** snapshot_frame and list_assets (items 2 and 11). */
 
 const SNAPSHOT_DESCRIPTION =
-  'Render a frame, a region of it or one element straight to a permanent /a/ image asset (webp by default) with its provenance, for use in other frames, store listings or reports — one call instead of render, download, crop, convert and upload. Pass region OR target, not both; a target is { element_id } (data-doop-id), { label } (data-doop-label or a section heading) or { selector }. tags make it findable with list_assets.'
+  'Render a frame, a region of it or one element straight to a permanent /a/ image asset (webp by default) with its provenance, for use in other frames, store listings or reports — one call instead of render, download, crop, convert and upload. Pass region OR target, not both; a target is { element_id } (data-doop-id), { label } (a section label from get_frame mode outline, or a data-doop-label) or { selector }. tags make it findable with list_assets.'
 
 const LIST_DESCRIPTION =
   "List the images an agent can use on a canvas: those uploaded for it plus any asset one of its frames references, newest first, with each one's URL, size, provenance and tags. Narrow by tag, source_kind (frame = a snapshot, store, url) and frame_id. Use it to find a snapshot again instead of rendering it twice."
@@ -141,7 +141,9 @@ const targetJson = {
     },
     {
       type: 'object',
-      properties: { label: { type: 'string', description: 'A data-doop-label, or a section heading' } },
+      properties: {
+        label: { type: 'string', description: 'A section label from get_frame mode outline, or a data-doop-label' },
+      },
       required: ['label'],
       additionalProperties: false,
     },

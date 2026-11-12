@@ -1,9 +1,11 @@
 import type { Frame } from '../shared/types.ts'
 import type { FrameMeasurement, MeasureOptions } from './measureTypes.ts'
 import type { FrameTarget } from './renderTypes.ts'
+import { assertTargetsMatch } from './renderTargets.ts'
 import { loadFramePage } from './screenshot.ts'
+import { resolveFrameTargets } from './targetResolution.ts'
 
-/** One target as the page sees it: a CSS selector, or a label (data-doop-label, else a section heading). */
+/** One target as the page sees it: a CSS selector, or a `data-doop-label` (outline and heading labels are resolved on the server first). */
 interface PageTarget {
   kind: 'selector' | 'label'
   value: string
@@ -50,7 +52,8 @@ function pageTargets(targets: FrameTarget[] | undefined): PageTarget[] {
 }
 
 /** Measure a frame's layout in headless Chrome: its sections, text blocks, colours and line counts. */
-export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise<FrameMeasurement> {
+export async function measureFrame(input: Frame, opts?: MeasureOptions): Promise<FrameMeasurement> {
+  const { frame, targets } = await resolveFrameTargets(input, opts?.targets ?? [], { stampAs: opts?.stampAs })
   const width = Math.max(1, Math.round(opts?.width ?? frame.width))
   const loaded = await loadFramePage(frame, {
     width,
@@ -61,6 +64,7 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
   try {
     /* tsx annotates nested functions with __name, which the page does not have; see inspectFrame */
     await page.evaluate('globalThis.__name = (target) => target')
+    await assertTargetsMatch(page, targets)
     const measured = await page.evaluate(
       (input: PageInput): PageMeasurement => {
         interface Rgba {
@@ -372,16 +376,7 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
               continue
             }
             const labelled = firstMatch(attr('data-doop-label', target.value))
-            if (labelled) {
-              found.push(labelled)
-              continue
-            }
-            const wanted = target.value.trim().toLowerCase()
-            const match = sections.find((el) => {
-              const heading = el.querySelector('h1, h2, h3')
-              return (heading?.textContent ?? '').replace(/\s+/g, ' ').trim().toLowerCase() === wanted
-            })
-            if (match) found.push(match)
+            if (labelled) found.push(labelled)
           }
           return found
         }
@@ -436,7 +431,7 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
           queries,
         }
       },
-      { targets: pageTargets(opts?.targets), lineQueries: opts?.lineQueries ?? [], exclude: opts?.exclude ?? [] },
+      { targets: pageTargets(targets), lineQueries: opts?.lineQueries ?? [], exclude: opts?.exclude ?? [] },
     )
     if (measured.invalid_exclude !== undefined) throw new InvalidSelectorError(measured.invalid_exclude)
 

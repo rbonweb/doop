@@ -119,10 +119,11 @@ describe.skipIf(!findBrowserPath())('resolveTargets and clipForTarget in Chromiu
     })
   })
 
-  it('falls back to a top-level section whose first heading reads the label, case-insensitive', async () => {
+  it('leaves heading labels to the server: the page only looks up data-doop-label', async () => {
     await withPage(async (page) => {
-      const clip = await clipForTarget(page, { label: 'pricing PLANS' }, frame)
-      expect(clip).toEqual({ x: 20, y: 400, width: 320, height: 140 })
+      await expect(clipForTarget(page, { label: 'pricing PLANS' }, frame)).rejects.toThrow(
+        'no element matches label "pricing PLANS"',
+      )
     })
   })
 

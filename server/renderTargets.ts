@@ -12,7 +12,7 @@ export const frameTargetSchema = z
     z.object({ selector: z.string().min(1).max(500) }).strict(),
   ])
   .describe(
-    'One element: { element_id } (its data-doop-id), { label } (data-doop-label or a section heading) or { selector } (CSS)',
+    'One element: { element_id } (its data-doop-id), { label } (a section label from get_frame mode: "outline", or a data-doop-label) or { selector } (CSS)',
   ) as z.ZodType<FrameTarget>
 
 export const regionSchema = z
@@ -21,6 +21,12 @@ export const regionSchema = z
 
 /** A target that cannot be resolved; the message is what the agent reads. */
 export class TargetError extends Error {}
+
+/** The refusal for a target that names nothing: never dropped silently, always named. */
+export function noMatchError(t: FrameTarget): TargetError {
+  const hint = 'label' in t ? "; call get_frame with mode: 'outline' to see the frame's section labels" : ''
+  return new TargetError(`no element matches ${describeTarget(t)}${hint}`)
+}
 
 function escapeAttr(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
@@ -46,7 +52,11 @@ interface Match {
 
 type Resolution = { matches: Match[] } | { invalidSelector: string }
 
-/** Every element the target names, in document coordinates (design px). Throws TargetError for a bad selector. */
+/**
+ * Every element the target names, in document coordinates (design px). Throws TargetError for a bad selector.
+ * A `label` here is only the `data-doop-label` lookup: outline and heading labels are resolved on the server first
+ * (`resolveFrameTargets` in `targetResolution.ts`), which is the one label rule every render tool shares.
+ */
 export async function resolveTargets(page: Page, t: FrameTarget): Promise<Match[]> {
   /* tsx annotates nested functions with __name, which the page does not have; see inspectFrame */
   await page.evaluate('globalThis.__name = (target) => target')
@@ -71,19 +81,6 @@ export async function resolveTargets(page: Page, t: FrameTarget): Promise<Match[
     } catch (error) {
       return { invalidSelector: error instanceof Error ? error.message : String(error) }
     }
-    if (matches.length === 0 && 'label' in target) {
-      /* a label may instead name a top-level section: its first heading reads it */
-      const wanted = target.label.trim().toLowerCase()
-      const candidates = new Set<Element>()
-      for (const candidate of document.querySelectorAll('body > *, main > *, body > div:only-child > *')) {
-        candidates.add(candidate)
-      }
-      for (const candidate of candidates) {
-        const heading = candidate.querySelector('h1, h2, h3')
-        if (!heading || (heading.textContent ?? '').trim().toLowerCase() !== wanted) continue
-        collect(candidate)
-      }
-    }
     return { matches }
   }, t)
   if ('invalidSelector' in resolved) throw new TargetError(`invalid selector: ${resolved.invalidSelector}`)
@@ -98,7 +95,7 @@ export async function clipForTarget(
   opts: { pad?: number; all?: boolean } = {},
 ): Promise<Clip> {
   const matches = await resolveTargets(page, t)
-  if (matches.length === 0) throw new TargetError(`no element matches ${describeTarget(t)}`)
+  if (matches.length === 0) throw noMatchError(t)
   if (matches.length > 1 && !opts.all) {
     throw new TargetError(`${matches.length} elements match ${describeTarget(t)}; name one by element_id`)
   }
@@ -122,5 +119,28 @@ export async function clipForTarget(
     y,
     width: Math.max(0, clippedRight - x),
     height: Math.max(0, clippedBottom - y),
+  }
+}
+
+/**
+ * Refuses every target the loaded page has no element for (a hidden or zero-size element still counts as found).
+ * `measure_frame` and `lint_frame` call it so an unmatched target is an error, not a section that quietly goes missing.
+ */
+export async function assertTargetsMatch(page: Page, targets: readonly FrameTarget[]): Promise<void> {
+  if (targets.length === 0) return
+  await page.evaluate('globalThis.__name = (target) => target')
+  const selectors = targets.map((t) => targetSelector(t) ?? '')
+  const results = await page.evaluate((list: string[]): Array<boolean | string> => {
+    return list.map((selector) => {
+      try {
+        return document.querySelector(selector) !== null
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+    })
+  }, selectors)
+  for (const [index, result] of results.entries()) {
+    if (typeof result === 'string') throw new TargetError(`invalid selector: ${result}`)
+    if (!result) throw noMatchError(targets[index]!)
   }
 }
