@@ -1,10 +1,10 @@
-import type Anthropic from '@anthropic-ai/sdk'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { zodToJsonSchema } from 'zod-to-json-schema'
 import type { Frame } from '../../../shared/types.ts'
 import * as actions from '../../actions.ts'
 import { compactFrameHtml } from '../../componentActions.ts'
+import { claimWarning } from '../../frameClaims.ts'
 import { frameVersion, versionConflict } from '../../frameVersion.ts'
 import { store } from '../../store.ts'
 import { applyEdits, checkFragment, editsForOp, type Edit, type OpBody } from '../../sectionEdits.ts'
@@ -308,17 +308,27 @@ function residentFrame(ctx: ResidentToolContext, frameId: string): Frame | undef
 }
 
 function residentWrite(ctx: ResidentToolContext, frame: Frame, html: string): ResidentToolOutcome {
-  const written = actions.updateFrame(frame.id, { html }, ctx.actor, { replace: true }) ?? frame
+  const written = actions.updateFrame(frame.id, { html }, ctx.actor, { replace: true })
+  if (!written) return { ok: false, error: `frame ${frame.id} not found` }
   ctx.runState.mutatedFrames.add(written.id)
   ctx.runState.verifiedFrames.delete(written.id)
+  const warning = claimWarning([written.id], ctx.actor)
   return {
     ok: true,
-    content: JSON.stringify({
+    content: `${JSON.stringify({
       ok: true,
       frame: { id: written.id, name: written.name, version: frameVersion(written) },
-    }),
+    })}${warning ? `\n${warning}` : ''}`,
   }
 }
+
+const expectedVersionField = {
+  type: ['string', 'number'],
+  description:
+    'The frame’s updatedAt from your last read (get_frame / get_canvas / a write’s answer). If the frame changed since, the write is refused and nothing is written.',
+}
+
+const patchOpsJsonField = zodToJsonSchema(patchOpsSchema) as Record<string, unknown>
 
 const residentTargetSchema = {
   type: 'object',
@@ -368,6 +378,7 @@ export const sectionResidentTools: ResidentAgentTool[] = [
           frame_id: { type: 'string' },
           target: residentTargetSchema,
           html: { type: 'string', description: 'The complete replacement markup for the target element.' },
+          expected_version: expectedVersionField,
         },
         required: ['frame_id', 'target', 'html'],
       },
@@ -398,12 +409,15 @@ export const sectionResidentTools: ResidentAgentTool[] = [
       name: 'patch_frame',
       description:
         'Make several small edits across a frame in one atomic write: set text, attributes or styles, insert or remove elements, each resolved by element id, label or selector. Any bad target refuses the whole patch. Example: { frame_id: "f1", ops: [{ op: "set_text", target: { selector: "#cta" }, text: "Start free" }] }.',
-      input_schema: zodToJsonSchema(
-        z.object({
-          frame_id: z.string(),
-          ops: patchOpsSchema,
-        }),
-      ) as Anthropic.Tool['input_schema'],
+      input_schema: {
+        type: 'object',
+        properties: {
+          frame_id: { type: 'string' },
+          ops: patchOpsJsonField,
+          expected_version: expectedVersionField,
+        },
+        required: ['frame_id', 'ops'],
+      },
     },
     run(input, ctx) {
       const parsed = patchFrameInput.safeParse(input)

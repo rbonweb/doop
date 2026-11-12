@@ -16,7 +16,7 @@ import {
   snippetAround,
   type Hit,
 } from '../../frameSearch.ts'
-import { dropClaims } from '../../frameClaims.ts'
+import { claimWarning, dropClaims } from '../../frameClaims.ts'
 import { versionConflict, type ExpectedVersion } from '../../frameVersion.ts'
 import { noPageMessage } from '../../pageTools.ts'
 import { store } from '../../store.ts'
@@ -550,7 +550,8 @@ const deleteFramesTool: ResidentAgentTool = {
       ctx.runState.verificationFrames.delete(id)
       ctx.runState.verifiedFrames.delete(id)
     }
-    return { ok: true, content: JSON.stringify(result.payload) }
+    const warning = claimWarning(result.deletedIds, ctx.actor)
+    return { ok: true, content: `${JSON.stringify(result.payload)}${warning ? `\n${warning}` : ''}` }
   },
 }
 
@@ -623,7 +624,8 @@ const replaceInFramesTool: ResidentAgentTool = {
       ctx.runState.mutatedFrames.add(id)
       ctx.runState.verifiedFrames.delete(id)
     }
-    return { ok: true, content: JSON.stringify(result.payload) }
+    const warning = claimWarning(result.changedIds, ctx.actor)
+    return { ok: true, content: `${JSON.stringify(result.payload)}${warning ? `\n${warning}` : ''}` }
   },
 }
 
