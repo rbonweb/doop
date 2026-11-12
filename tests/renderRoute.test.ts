@@ -159,13 +159,13 @@ describe.skipIf(!findBrowserPath())('the /i/ route', { timeout: 120_000 }, () =>
     expect((await sharp(Buffer.from(await ext.arrayBuffer())).metadata()).width).toBe(600)
   })
 
-  it('pins a versioned URL as immutable and leaves a bare one at a minute', async () => {
+  it('pins a versioned URL as immutable and answers a bare one no-cache', async () => {
     const pinned = await fetch(url(`/i/${r.frame.id}.png?v=${r.frame.updatedAt}`))
     expect(pinned.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
     const bare = await fetch(url(`/i/${r.frame.id}.png`))
-    expect(bare.headers.get('cache-control')).toBe('public, max-age=60')
+    expect(bare.headers.get('cache-control')).toBe('no-cache')
     const stale = await fetch(url(`/i/${r.frame.id}.png?v=${r.frame.updatedAt - 1}`))
-    expect(stale.headers.get('cache-control')).toBe('public, max-age=60')
+    expect(stale.headers.get('cache-control')).toBe('no-cache')
   })
 
   it('refuses a crop outside the frame or a partial one with 400', async () => {
