@@ -1,5 +1,8 @@
-# Publishes every commit on main that passes CI as a release of this fork: a
-# container image on GHCR and a GitHub release of the same tag. A server set up
+# Publishes every commit merged to main as a release of this fork: a container
+# image on GHCR and a GitHub release of the same tag. It is the only workflow
+# that runs on its own; CI and the others are disabled in the repository's
+# Actions settings and run only when started by hand (owner, 2026-11-12), so
+# the checks run locally before a merge. A server set up
 # with deploy/doop.sh runs that image, and its Admin page's Update now installs
 # the latest one (server/selfUpdate.ts reads the releases; the host pulls the
 # image).
@@ -11,9 +14,7 @@
 name: Fork release
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
   workflow_dispatch:
 
@@ -27,14 +28,12 @@ concurrency:
 
 jobs:
   release:
-    if: >-
-      github.repository != 'kgoedecke/doop' && (github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    if: github.repository != 'kgoedecke/doop'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Pick the tag
