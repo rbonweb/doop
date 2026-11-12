@@ -33,6 +33,7 @@ import { COMPONENTS, DESIGN_BRIEF, DESIGN_QUALITY, FRAME_STYLES, PROTOTYPES } fr
 import { zodToJsonSchema } from 'zod-to-json-schema'
 import { z } from 'zod'
 import { catalogEntry, compactFrameHtml, findComponent } from './componentActions.ts'
+import { RESIDENT_AGENT_TOOLS, residentAgentTool } from './agentTools/resident.ts'
 import { COMPONENT_TOOLS, COMPONENT_TOOL_NAMES, componentWriteNotes, runComponentTool } from './componentTools.ts'
 import { canvasRole } from './access.ts'
 import { roleAllows } from '../shared/canvasRole.ts'
@@ -202,7 +203,7 @@ export function systemFor(role: AgentRole): string {
     .join('; ')}) — leave it to them rather than fixing it yourself.`
 }
 
-interface RunState {
+export interface RunState {
   mutatedFrames: Set<string>
   sourceFrames: Set<string>
   verificationFrames: Set<string>
@@ -1615,6 +1616,8 @@ for (const tool of COMPONENT_TOOLS) {
     input_schema: zodToJsonSchema(z.object(tool.shape)) as Anthropic.Tool['input_schema'],
   })
 }
+/* the agent speed tools, one list per area (server/agentTools/) */
+for (const tool of RESIDENT_AGENT_TOOLS) TOOLS.push(tool.definition)
 TOOLS.push({
   name: 'screenshot_component',
   description:
@@ -2373,6 +2376,11 @@ export async function execTool(
         return ok(await frameImageBlocks(previewFrame(canvasId, def)))
       }
       default: {
+        const areaTool = residentAgentTool(block.name)
+        if (areaTool) {
+          const outcome = await areaTool.run(block.input as Record<string, unknown>, { canvasId, actor, runState })
+          return outcome.ok ? ok(outcome.content) : fail(outcome.error)
+        }
         if (!COMPONENT_TOOL_NAMES.includes(block.name)) return fail(`unknown tool ${block.name}`)
         const canvas = store.getCanvas(canvasId)
         if (!canvas) return fail('canvas not found')

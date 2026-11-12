@@ -13,6 +13,7 @@ import {
 } from 'drizzle-orm/pg-core'
 import { open, seal } from '../secretBox.ts'
 import type { CanvasGuide, CanvasPageInfo, CommentAnchor, FrameApproval } from '../../shared/types.ts'
+import type { AssetSource } from '../../shared/assetSource.ts'
 import type { AutomationRunState, AutomationTrigger, Schedule, Step } from '../../shared/automations.ts'
 import type {
   ComponentCode,
@@ -510,6 +511,10 @@ export const assets = pgTable(
     /** Fixed before the first attempt; null payer means server credentials. */
     describePayerId: text('describe_payer_id'),
     describeProvider: text('describe_provider'),
+    /** where the asset came from (a frame snapshot, a store, a URL); null for assets that predate it */
+    source: jsonb('source').$type<AssetSource>(),
+    /** labels agents put on the asset to find it again */
+    tags: text('tags').array(),
   },
   (t) => [index('assets_canvas_idx').on(t.canvasId)],
 )

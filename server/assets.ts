@@ -5,6 +5,7 @@ import { db } from './db/index.ts'
 import * as t from './db/schema.ts'
 import * as storage from './storage.ts'
 import type { FrameImage } from '../shared/imageDescriptions.ts'
+import type { AssetSource, AssetTags } from '../shared/assetSource.ts'
 import { emitCanvasEvent } from './events.ts'
 import { htmlLoaded } from './frameHtml.ts'
 import { store } from './store.ts'
@@ -221,11 +222,20 @@ export interface AssetMeta {
   mime: string
   ext: string
   size: number
+  /** where the asset came from; absent on assets that predate it */
+  source?: AssetSource
+  tags?: AssetTags
+}
+
+/** What a writer may record about an asset beyond who uploaded it. */
+export interface AssetProvenance {
+  source?: AssetSource
+  tags?: AssetTags
 }
 
 export async function createAsset(
   buf: Buffer,
-  meta: { canvasId?: string; ownerId?: string; uploadedBy: string },
+  meta: { canvasId?: string; ownerId?: string; uploadedBy: string } & AssetProvenance,
   accept: AssetAcceptance = {},
 ): Promise<AssetMeta> {
   if (buf.length === 0) throw new Error('empty file')
@@ -240,7 +250,7 @@ export async function createAsset(
 export async function storeAsset(
   buf: Buffer,
   type: { mime: string; ext: string },
-  meta: { canvasId?: string; ownerId?: string; uploadedBy: string },
+  meta: { canvasId?: string; ownerId?: string; uploadedBy: string } & AssetProvenance,
 ): Promise<AssetMeta> {
   const { mime, ext } = type
   const id = nanoid(10)
@@ -257,10 +267,22 @@ export async function storeAsset(
     size: buf.length,
     uploadedBy: meta.uploadedBy,
     createdAt: Date.now(),
+    source: meta.source ?? null,
+    tags: meta.tags ?? null,
   })
-  const asset = { id, mime, ext, size: buf.length }
+  const asset: AssetMeta = {
+    id,
+    mime,
+    ext,
+    size: buf.length,
+    ...(meta.source ? { source: meta.source } : {}),
+    ...(meta.tags ? { tags: meta.tags } : {}),
+  }
   if (meta.canvasId && isDescribableImage(mime))
-    emitCanvasEvent(meta.canvasId, { type: 'asset.stored', asset: { ...asset, canvasId: meta.canvasId } })
+    emitCanvasEvent(meta.canvasId, {
+      type: 'asset.stored',
+      asset: { id, mime, ext, size: buf.length, canvasId: meta.canvasId },
+    })
   return asset
 }
 
@@ -337,7 +359,15 @@ export async function getAsset(
   const buf = await storage.getObject(revisionKey(row.id, wanted, row.ext), signal)
   if (!buf) return null
   return {
-    meta: { id: row.id, mime: row.mime, ext: row.ext, size: buf.length, version: wanted },
+    meta: {
+      id: row.id,
+      mime: row.mime,
+      ext: row.ext,
+      size: buf.length,
+      version: wanted,
+      ...(row.source ? { source: row.source } : {}),
+      ...(row.tags ? { tags: row.tags } : {}),
+    },
     buf,
     latest: row.version,
   }

@@ -152,6 +152,7 @@ const REVIEW_NUDGE =
 
 import type { Actor, Canvas, CanvasPageInfo, Frame } from '../shared/types.ts'
 import { loadToolTargets } from './toolLoads.ts'
+import { registerAgentSpeedTools } from './agentTools/index.ts'
 
 /** Reaches agents whose session predates set_status (or who skipped the guide). */
 type ToolContent = { content: { type: 'text' | 'image'; [k: string]: unknown }[] }
@@ -312,6 +313,22 @@ const GENERATIONS_PER_MIN = env.MCP_GENERATIONS_PER_MIN
    conservative per-user rate as the browser UI's import endpoint */
 const importHits = new Map<string, number[]>()
 const IMPORTS_PER_MIN = env.MCP_IMPORTS_PER_MIN
+
+/** The rolling-minute budgets of the agent speed tools, one list of hits per bucket and user. */
+const slotHits = new Map<string, number[]>()
+
+function takeSlot(bucket: string, key: string, limitPerMin: number): boolean {
+  const now = Date.now()
+  const slot = `${bucket}:${key}`
+  const hits = (slotHits.get(slot) ?? []).filter((t) => now - t < 60_000)
+  if (hits.length >= limitPerMin) {
+    slotHits.set(slot, hits)
+    return false
+  }
+  hits.push(now)
+  slotHits.set(slot, hits)
+  return true
+}
 
 const agentName = z
   .string()
@@ -2370,6 +2387,30 @@ export function buildMcpServer(
     },
   }
   for (const extension of extensions) extension.registerMcpTools?.(server, extensionHelpers)
+
+  /* the agent speed tools (server/agentTools/), registered here so they pass through loadToolTargets like every tool above */
+  registerAgentSpeedTools(server, {
+    ownerId,
+    owner,
+    agentName,
+    actorFrom,
+    arrive,
+    canvasFor,
+    frameFor,
+    noCanvas,
+    noFrame,
+    err,
+    text,
+    textWithNudge,
+    withFeedback,
+    withFeedbackNotice,
+    withStatusNudge,
+    withGuidelinesNudge,
+    withPreview,
+    reviewNudge: REVIEW_NUDGE,
+    frameSummary,
+    takeSlot,
+  })
 
   for (const tool of COMPONENT_TOOLS) {
     server.registerTool(
