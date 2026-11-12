@@ -73,6 +73,8 @@ const measureShape = (ctx: AgentToolContext) => ({
   agent_name: ctx.agentName.optional(),
 })
 
+const excludeSchema = z.array(z.string().min(1).max(500)).max(50)
+
 const EXCLUDE_DESCRIPTION =
   'CSS selectors: matching elements and everything inside them are skipped by the colour, contrast and banned-word rules (for example a store screenshot mock-up). An invalid selector is refused by name'
 
@@ -115,7 +117,7 @@ export function registerMeasureTools(server: McpServer, ctx: AgentToolContext): 
         rules: lintRulesSchema.describe(
           'At least one rule: section height, heading/text lines, palette, words, overflow, contrast',
         ),
-        exclude: z.array(z.string().min(1).max(500)).max(50).optional().describe(EXCLUDE_DESCRIPTION),
+        exclude: excludeSchema.optional().describe(EXCLUDE_DESCRIPTION),
       },
     },
     async ({ frame_id, rules, exclude, width, targets, agent_name }) => {
@@ -180,10 +182,13 @@ function residentWidth(input: Record<string, unknown>): number | undefined {
     : undefined
 }
 
-function residentExclude(input: Record<string, unknown>): string[] | undefined {
-  return Array.isArray(input.exclude)
-    ? input.exclude.filter((entry): entry is string => typeof entry === 'string')
-    : undefined
+/** The caller's exclude list under the MCP schema's rules, or the refusal to give back. */
+function residentExclude(input: Record<string, unknown>): { exclude?: string[]; refusal?: string } {
+  if (input.exclude === undefined) return {}
+  const parsed = excludeSchema.safeParse(input.exclude)
+  return parsed.success
+    ? { exclude: parsed.data }
+    : { refusal: 'exclude must be an array of up to 50 non-empty CSS selectors (500 characters each)' }
 }
 
 function residentTargets(input: Record<string, unknown>): FrameTarget[] | undefined {
@@ -248,13 +253,15 @@ export const measureResidentTools: ResidentAgentTool[] = [
         return fail('give at least one rule')
       if (!residentMayRender(ctx.actor.name)) return fail('render rate limit — wait a minute')
       const lintRules = rules as LintRules
+      const { exclude, refusal: excludeRefusal } = residentExclude(input)
+      if (excludeRefusal) return fail(excludeRefusal)
       let measurement: FrameMeasurement
       try {
         measurement = await measureFrame(await store.renderSource(frame), {
           width: residentWidth(input),
           targets: residentTargets(input),
           lineQueries: lintRules.max_text_lines?.map((rule) => rule.selector),
-          exclude: residentExclude(input),
+          exclude,
           colorSources: true,
         })
       } catch (error) {

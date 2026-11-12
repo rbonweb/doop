@@ -99,10 +99,8 @@ export async function measureFrame(frame: Frame, opts?: MeasureOptions): Promise
         /** inside (or is) an element the caller excluded */
         const isExcluded = (el: Element): boolean => excludeSelector !== '' && el.closest(excludeSelector) !== null
 
-        /** pixels a stylesheet cannot name: an image, video or canvas, or what an svg draws (the svg's own box still counts) */
-        const isMediaContent = (el: Element): boolean =>
-          el.closest('img, video, canvas') !== null ||
-          (el.tagName.toLowerCase() !== 'svg' && el.closest('svg') !== null)
+        /** inside an image, video, canvas or svg: what it draws is not a stylesheet colour (the element's own box still counts) */
+        const isMediaContent = (el: Element): boolean => el.parentElement?.closest('img, video, canvas, svg') != null
 
         const colorSources = new Map<string, string>()
 

@@ -143,17 +143,16 @@ function onLine(color: Rgba, base: Rgba, end: Rgba): boolean {
 }
 
 /**
- * Whether `color` belongs to a palette. It does when it is transparent, pure white or pure black, when it is an allowed colour with any alpha,
+ * Whether `color` belongs to a palette. It does when it is transparent, or pure white or pure black once composited over white (so black at 50% alpha does not count), when it is an allowed colour with any alpha,
  * or when it is a tint or shade of one: on the line from the allowed colour to white or to black (alpha composited over white first), see `TINT_TOLERANCE`.
  * An allowed pure white or pure black has no tints or shades of its own (its line would be the whole grey axis), so it admits only itself.
  */
 export function isAllowedColor(color: Rgba, allowed: Rgba[]): boolean {
   if (color.a <= 0) return true
   const flat = color.a < 1 ? composite(color, WHITE) : color
-  const candidates = color.a < 1 ? [color, flat] : [color]
-  for (const candidate of candidates) {
-    if (sameRgb(candidate, WHITE) || sameRgb(candidate, BLACK)) return true
-  }
+  /* a translucent colour's own rgb counts as a tint or shade too, unless it is white or black, which would sit on every line's end */
+  const candidates = color.a < 1 && !sameRgb(color, WHITE) && !sameRgb(color, BLACK) ? [color, flat] : [flat]
+  if (sameRgb(flat, WHITE) || sameRgb(flat, BLACK)) return true
   return allowed.some((base) => {
     if (sameRgb(color, base)) return true
     if (sameRgb(base, WHITE) || sameRgb(base, BLACK)) return false

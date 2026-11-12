@@ -242,16 +242,17 @@ describe.skipIf(!findBrowserPath())('measure_frame and lint_frame', { timeout: 1
       expect(palette.details.join('\n')).toContain('first on shot')
     })
 
-    it('never collects colours from an image or an svg’s content', async () => {
+    it('never collects colours from inside an svg, while an image keeps its own box styles', async () => {
       const report = await lint({ rules: { allowed_colors: ['#0177d3'] } })
       const offenders = report.results[0]!.offenders
-      for (const drawn of ['#12ab34', '#ab12cd', '#abcdef', '#fedcba']) expect(offenders).not.toContain(drawn)
+      for (const drawn of ['#abcdef', '#fedcba']) expect(offenders).not.toContain(drawn)
+      expect(offenders).toEqual(expect.arrayContaining(['#12ab34', '#ab12cd']))
     })
 
     it('skips an excluded subtree for colours and banned words', async () => {
       const report = await lint({
         rules: { allowed_colors: ['#0177d3'], banned_words: ['synergy'] },
-        exclude: ['[data-doop-id="shot"]'],
+        exclude: ['[data-doop-id="shot"]', 'img'],
       })
       expect(report.pass, JSON.stringify(report.results)).toBe(true)
       const without = await lint({ rules: { banned_words: ['synergy'] } })

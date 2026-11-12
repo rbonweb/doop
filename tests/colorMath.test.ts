@@ -167,6 +167,11 @@ describe('isAllowedColor', () => {
     expect(isAllowedColor(white, [])).toBe(true)
   })
 
+  it('judges white and black after compositing, so translucent black is a grey', () => {
+    expect(isAllowedColor({ ...black, a: 0.5 }, allowed)).toBe(false)
+    expect(isAllowedColor({ ...white, a: 0.5 }, allowed)).toBe(true)
+  })
+
   it('still flags an unrelated colour', () => {
     expect(isAllowedColor(parseCssColor('#ff0000')!, allowed)).toBe(false)
     expect(isAllowedColor(parseCssColor('#f0a030')!, allowed)).toBe(false)
