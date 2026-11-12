@@ -72,16 +72,16 @@ function editable(html: string, tag: string): EditableElement {
   }
 }
 
-function run(html: string, tag: string, op: OpBody): string {
-  const result = editsForOp(html, editable(html, tag), op)
+function run(html: string, tag: string, op: OpBody, parentTag?: string): string {
+  const result = editsForOp(html, editable(html, tag), op, parentTag)
   if (!result.ok) throw new Error(result.error)
   const applied = applyEdits(html, result.edits)
   if (!applied.ok) throw new Error(applied.error)
   return applied.html
 }
 
-function refuse(html: string, tag: string, op: OpBody): string {
-  const result = editsForOp(html, editable(html, tag), op)
+function refuse(html: string, tag: string, op: OpBody, parentTag?: string): string {
+  const result = editsForOp(html, editable(html, tag), op, parentTag)
   expect(result.ok).toBe(false)
   return result.ok ? '' : result.error
 }
@@ -101,6 +101,13 @@ describe('editsForOp', () => {
     const html = '<div><span data-doop-id="e_1">x</span></div>'
     const error = refuse(html, 'div', { op: 'set_text', text: 'y' })
     expect(error).toContain('replace_section')
+  })
+
+  it('refuses set_text on style and script', () => {
+    const css = refuse('<style>a > b{color:red}</style>', 'style', { op: 'set_text', text: 'a > b{color:red}' })
+    expect(css).toContain('replace_section')
+    const js = refuse('<script>var a = 1</script>', 'script', { op: 'set_text', text: 'var b = 2' })
+    expect(js).toContain('replace_section')
   })
 
   it('rewrites an existing attribute with escaping', () => {
@@ -183,6 +190,12 @@ describe('editsForOp', () => {
     refuse(html, 'div', { op: 'replace', html: '<div>' })
   })
 
+  it('parses an inserted table row in its parent context', () => {
+    const html = '<table><tbody><tr><td>a</td></tr></tbody></table>'
+    const out = run(html, 'tr', { op: 'insert_after', html: '<tr><td>x</td></tr>' }, 'tbody')
+    expect(out).toBe('<table><tbody><tr><td>a</td></tr><tr><td>x</td></tr></tbody></table>')
+  })
+
   it('removes and replaces the whole element', () => {
     const html = '<main><div class="a">x</div><p>y</p></main>'
     expect(run(html, 'div', { op: 'remove' })).toBe('<main><p>y</p></main>')
@@ -254,6 +267,12 @@ describe('checkFragment', () => {
 
   it('uses the context tag when given', () => {
     expect(checkFragment('<td>a</td>', 'tr')).toEqual({ ok: true })
+  })
+
+  it('refuses bogus comments, questions and CDATA', () => {
+    expect(checkFragment('<!x').ok).toBe(false)
+    expect(checkFragment('<?x').ok).toBe(false)
+    expect(checkFragment('<![CDATA[x').ok).toBe(false)
   })
 })
 

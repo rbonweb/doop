@@ -137,6 +137,13 @@ function writeRefusal(match: ResolvedTarget, write: 'content' | 'structure'): st
   return undefined
 }
 
+/** The parent element's tag, from the resolved path, used as the parse context for inserted markup. */
+function parentTagOf(match: ResolvedTarget): string | undefined {
+  const segments = match.path.split(' > ')
+  const parent = segments.length > 1 ? segments[segments.length - 2] : undefined
+  return parent ? parent.replace(/:nth-of-type\(\d+\)$/, '') : undefined
+}
+
 function collectPatchEdits(
   compact: string,
   fd: FrameDocument,
@@ -154,7 +161,7 @@ function collectPatchEdits(
     for (const match of resolved.matches) {
       const refused = writeRefusal(match, write)
       if (refused) return { ok: false, error: `op ${index} (${op.op}): ${refused}` }
-      const result = editsForOp(compact, match, body)
+      const result = editsForOp(compact, match, body, parentTagOf(match))
       if (!result.ok) return { ok: false, error: `op ${index} (${op.op}): ${result.error}` }
       edits.push(...result.edits)
     }
@@ -234,9 +241,9 @@ export function registerSectionTools(server: McpServer, ctx: AgentToolContext): 
       const match = resolved.matches[0]!
       const refused = writeRefusal(match, 'structure')
       if (refused) return ctx.err(refused)
-      const check = checkFragment(html)
+      const check = checkFragment(html, parentTagOf(match))
       if (!check.ok) return ctx.err(check.error)
-      const edits = editsForOp(compact, match, { op: 'replace', html })
+      const edits = editsForOp(compact, match, { op: 'replace', html }, parentTagOf(match))
       if (!edits.ok) return ctx.err(edits.error)
       const applied = applyEdits(compact, edits.edits)
       if (!applied.ok) return ctx.err(applied.error)
@@ -379,7 +386,7 @@ export const sectionResidentTools: ResidentAgentTool[] = [
       const match = resolved.matches[0]!
       const refused = writeRefusal(match, 'structure')
       if (refused) return { ok: false, error: refused }
-      const edited = editsForOp(compact, match, { op: 'replace', html })
+      const edited = editsForOp(compact, match, { op: 'replace', html }, parentTagOf(match))
       if (!edited.ok) return { ok: false, error: edited.error }
       const applied = applyEdits(compact, edited.edits)
       if (!applied.ok) return { ok: false, error: applied.error }
