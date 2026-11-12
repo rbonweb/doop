@@ -150,11 +150,13 @@ function textWithNudge(data: unknown, nudge: string) {
   }
 }
 
-const REVIEW_NUDGE =
-  'You have not seen this design yet. Call get_frame_screenshot on it now, judge it against the review checkpoints (fit, spacing, hierarchy, contrast, alignment, realism), and fix any issues before moving on.'
+import { REVIEW_NUDGE } from './reviewNudge.ts'
+
+export { REVIEW_NUDGE }
 
 import type { Actor, Canvas, CanvasPageInfo, Frame } from '../shared/types.ts'
 import { loadToolTargets } from './toolLoads.ts'
+import { shapeResponses } from './responseShaping.ts'
 import { registerAgentSpeedTools } from './agentTools/index.ts'
 
 /** Reaches agents whose session predates set_status (or who skipped the guide). */
@@ -444,6 +446,7 @@ export function buildMcpServer(
   ownerId?: string,
   profile?: { email?: string | null; emailVerified?: boolean | null },
   clientName?: () => Promise<string | undefined>,
+  sessionKey?: string,
 ): McpServer {
   const actorFrom = (agent_name?: string) =>
     actions.resolveActor({ name: agent_name, kind: 'agent', owner, userId: ownerId })
@@ -543,6 +546,10 @@ export function buildMcpServer(
     { instructions: INSTRUCTIONS },
   )
   loadToolTargets(server)
+  shapeResponses(server, {
+    sessionKey,
+    clientName: async () => server.server.getClientVersion()?.name ?? (await clientName?.()),
+  })
   registerFramePreview(server)
 
   server.registerTool(
@@ -3073,7 +3080,8 @@ export async function handleMcpRequest(req: Request, res: Response) {
   const clientName = async () =>
     (bearer ? clientNamesByCredential.get(credentialKey(bearer)) : undefined) ??
     (oauthClientId ? await oauthClientName(oauthClientId) : undefined)
-  const server = buildMcpServer(owner, session?.userId ?? undefined, profile, clientName)
+  const sessionKey = bearer ? credentialKey(bearer) : session?.userId ? `user:${session.userId}` : undefined
+  const server = buildMcpServer(owner, session?.userId ?? undefined, profile, clientName, sessionKey)
   /* Stateless, and plain JSON rather than an SSE stream per response: no
      tool here sends notifications mid-call, so a stream carries nothing a
      JSON body does not, and JSON is what every client — including ChatGPT's
