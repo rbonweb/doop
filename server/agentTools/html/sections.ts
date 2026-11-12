@@ -250,6 +250,7 @@ export function registerSectionTools(server: McpServer, ctx: AgentToolContext): 
       const stale = assertExpectedVersion(frame, expected_version)
       if (stale) return stale
       const actor = ctx.actorFrom(agent_name)
+      const frameBytesBefore = frame.html.length
       const written = actions.updateFrame(frame_id, { html: applied.html }, actor, { replace: true })
       if (!written) return ctx.noFrame(frame_id, 'edit')
       return writeAnswer(
@@ -258,7 +259,14 @@ export function registerSectionTools(server: McpServer, ctx: AgentToolContext): 
         {
           ok: true,
           frame: ctx.frameSummary(written),
-          replaced: { path: match.path, bytesBefore: match.end - match.start, bytesAfter: html.length },
+          replaced: {
+            path: match.path,
+            bytesBefore: match.end - match.start,
+            bytesAfter: html.length,
+            /* the frame as stored: a component instance is `<doop-use>` in the section's own count but whole here */
+            frameBytesBefore,
+            frameBytesAfter: written.html.length,
+          },
         },
         actor,
       )
@@ -290,12 +298,20 @@ export function registerSectionTools(server: McpServer, ctx: AgentToolContext): 
       const stale = assertExpectedVersion(frame, expected_version)
       if (stale) return stale
       const actor = ctx.actorFrom(agent_name)
+      const frameBytesBefore = frame.html.length
       const written = actions.updateFrame(frame_id, { html: applied.html }, actor, { replace: true })
       if (!written) return ctx.noFrame(frame_id, 'edit')
       return writeAnswer(
         ctx,
         written,
-        { ok: true, frame: ctx.frameSummary(written), applied: ops.length, edits: collected.edits.length },
+        {
+          ok: true,
+          frame: ctx.frameSummary(written),
+          applied: ops.length,
+          edits: collected.edits.length,
+          frameBytesBefore,
+          frameBytesAfter: written.html.length,
+        },
         actor,
       )
     },

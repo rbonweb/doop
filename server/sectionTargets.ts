@@ -80,6 +80,23 @@ interface TagLocation extends OffsetLocation {
   attrs?: Record<string, OffsetLocation>
 }
 
+/** Where an element's source really ends. parse5 closes an element with no end tag of its own (a
+ *  `<footer>` left open when `</body>` arrives, or at the end of the file) at the end of the
+ *  document, which would swallow `</body></html>` and whatever follows; its content ends where
+ *  its last child does. */
+function sourceEnd(el: Element): number {
+  let current: AnyNode = el
+  for (;;) {
+    const location = current.sourceCodeLocation as TagLocation | null | undefined
+    if (!location) return 0
+    if (location.endTag) return location.endOffset
+    const children: ChildNode[] = 'children' in current ? current.children : []
+    const last = [...children].reverse().find((child) => child.sourceCodeLocation)
+    if (!last) return location.startTag ? Math.min(location.endOffset, location.startTag.endOffset) : location.endOffset
+    current = last
+  }
+}
+
 function isElement(node: AnyNode): node is Element {
   return node.type === 'tag' || node.type === 'script' || node.type === 'style'
 }
@@ -256,7 +273,7 @@ export function toResolved(fd: FrameDocument, el: Element, index: PathIndex = ne
   const startTag = loc?.startTag
   if (!loc || !startTag) return undefined
   const endTag = loc.endTag
-  const end = loc.endOffset
+  const end = sourceEnd(el)
   const attrs: ResolvedTarget['attrs'] = {}
   for (const [name, range] of Object.entries(loc.attrs ?? {})) {
     const key = name.toLowerCase()

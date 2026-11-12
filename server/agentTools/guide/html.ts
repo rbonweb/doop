@@ -4,6 +4,8 @@ export const HTML_GUIDE = `
 
 Read a big page's outline before editing it: \`get_frame\` with \`mode: "outline"\` returns each section's element id, tag, label, size and first words, a few KB instead of the whole HTML. Example: { "frame_id": "f1", "mode": "outline" }.
 
+Every outline section carries \`element_id\` (its data-doop-id) by default: when you may edit the frame, sections without one are given an id in one quiet write (no version, sign-off kept), so the \`version\` in the answer is the one to send back; a view-only account writes nothing and gets \`element_id: null\` with a positional \`selector\` to target instead. \`bytes\` is the section's size as stored, with \`compactBytes\` beside it when component instances (shown as \`<doop-use>\`) make what \`get_section\` returns smaller; \`measure: true\` adds heights. \`replace_section\` and \`patch_frame\` answer \`frameBytesBefore\` and \`frameBytesAfter\`, the real size of the whole frame.
+
 - A section target is one of { "element_id": "hero" }, { "label": "Pricing" } (its data-doop-label, else its heading text) or { "selector": "main > section:nth-of-type(2) h2" }; add \`all: true\` to a selector that matches several elements. A target inside a component instance is refused: change the component with \`update_component\` instead.
 - \`get_section\` reads one element's exact source, size and path when the outline is not enough: { "frame_id": "f1", "target": { "label": "Pricing" } }.
 - \`replace_section\` swaps one element and everything inside it in one write, for a reworked block: { "frame_id": "f1", "target": { "element_id": "hero" }, "html": "<section data-doop-id=\\"hero\\">…</section>" }.

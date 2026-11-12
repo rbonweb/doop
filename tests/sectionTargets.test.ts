@@ -272,3 +272,25 @@ describe('text, implied elements and deep nesting', () => {
     expect(elapsed).toBeLessThan(1000)
   })
 })
+
+describe('source spans of a large element', () => {
+  it('spans a 30 KB footer from its start tag to its end, with and without an end tag', () => {
+    const filler = 'x'.repeat(30_000)
+    const closed = `<html><body><header>h</header><footer><p>${filler}</p></footer></body></html>`
+    const open = `<html><body><header>h</header><footer><p>${filler}`
+    const openInBody = `${open}</body></html>`
+    for (const html of [closed, open, openInBody]) {
+      const result = resolveTarget(html, { selector: 'footer' })
+      if (!result.ok) throw new Error(result.error)
+      const match = result.matches[0]!
+      const start = html.indexOf('<footer')
+      const end = html.includes('</footer>')
+        ? html.indexOf('</footer>') + 9
+        : html.indexOf('</body>') === -1
+          ? html.length
+          : html.indexOf('</body>')
+      expect({ start: match.start, end: match.end }).toEqual({ start, end })
+      expect(match.end - match.start).toBeGreaterThan(30_000)
+    }
+  })
+})
