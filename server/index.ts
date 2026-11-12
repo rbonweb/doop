@@ -46,6 +46,7 @@ import { bearerMayRender } from './renderAuth.ts'
 import * as actions from './actions.ts'
 import { liveActivitiesRouter, logLiveActivityRequests, startLiveActivityDelivery } from './liveActivities.ts'
 import { onCanvasEvent } from './events.ts'
+import { claimsOn, onClaimsChange, type FrameClaim } from './frameClaims.ts'
 import * as imageDescriptions from './imageDescriptions.ts'
 import * as commentNotifications from './commentNotifications.ts'
 import { notificationsRouter } from './notifications.ts'
@@ -278,6 +279,7 @@ const RESTRICTED_MESSAGES: ReadonlySet<ServerMessage['type']> = new Set([
   'frame:updated',
   'frame:deleted',
   'frame:streaming',
+  'frame:claims',
   'canvas:renamed',
   'canvas:pages',
   'note:upsert',
@@ -302,7 +304,29 @@ function restrictedPresence<P extends Presence>({ status: _status, ...presence }
 /** A room message as a guest or view-only member may see it, or null when it is withheld. */
 function forRestricted(msg: ServerMessage): ServerMessage | null {
   if (!RESTRICTED_MESSAGES.has(msg.type)) return null
+  if (msg.type === 'frame:claims') return withoutClaimNotes(msg)
   return msg.type === 'presence:join' ? { ...msg, presence: restrictedPresence(msg.presence) } : msg
+}
+
+type ClaimsMessage = Extract<ServerMessage, { type: 'frame:claims' }>
+
+/** The claims a guest or view-only member sees: who holds a frame, not what they said they were doing. */
+function withoutClaimNotes(msg: ClaimsMessage): ClaimsMessage {
+  return { ...msg, claims: msg.claims.map((claim) => ({ ...claim, note: '' })) }
+}
+
+/** A canvas's advisory claims as the room carries them. */
+function claimsMessage(canvasId: string, claims: FrameClaim[]): ClaimsMessage {
+  return {
+    type: 'frame:claims',
+    canvasId,
+    claims: claims.map((c) => ({
+      frameId: c.frameId,
+      holder: c.holder,
+      note: c.note,
+      expiresAt: new Date(c.expiresAt).toISOString(),
+    })),
+  }
 }
 
 const conns = new Map<WebSocket, Conn>()
@@ -418,6 +442,9 @@ function agentTouch(
     }
   }
 }
+
+/* claims change when an agent claims, releases or lets one lapse: the room always gets the whole list */
+onClaimsChange((canvasId, claims) => broadcast(canvasId, claimsMessage(canvasId, claims)))
 
 setInterval(() => {
   const now = Date.now()
@@ -3329,6 +3356,11 @@ wss.on('connection', (ws, upgradeReq) => {
         role,
         ...(guest ? { guest: true } : {}),
       })
+      const joinClaims = claimsOn(msg.canvasId)
+      if (joinClaims.length) {
+        const claimsShown = claimsMessage(msg.canvasId, joinClaims)
+        send(ws, restricted ? withoutClaimNotes(claimsShown) : claimsShown)
+      }
       /* An admin looking at a canvas must not act on it. Announcing presence
          would impersonate the owner in the room; maybePlay would have the
          demo agent perform on an untouched signup canvas; the card kick would

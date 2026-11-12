@@ -11,6 +11,7 @@ export const CANVAS_FIELDS = [
   'tokens',
   'tokenThemes',
   'flow',
+  'claims',
   'note',
 ] as const
 

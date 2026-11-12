@@ -4,6 +4,7 @@ import { prepareChunk, prepareFrameHtml, referencesComponent } from './component
 import { COMPONENT_ATTR, type ComponentDef, type ComponentIssue } from '../shared/components.ts'
 import { MAX_PAGES, PageLimitError, store } from './store.ts'
 import * as persist from './db/persist.ts'
+import { FrameVersionConflictError, versionConflict, type ExpectedVersion } from './frameVersion.ts'
 import * as thumbs from './thumbs.ts'
 import { colorFor } from '../shared/types.ts'
 import type { StackWrite } from '../shared/frameStack.ts'
@@ -1656,11 +1657,15 @@ export async function restoreFrameVersion(
   frameId: string,
   versionId: string,
   actor: Actor,
+  opts: { expectedVersion?: ExpectedVersion } = {},
 ): Promise<RestoredFrame | null | undefined> {
   const version = await persist.getFrameVersion(frameId, versionId)
   if (!version) return null
   const before = store.getFrame(frameId)
   if (!before) return undefined
+  /* the version check runs here, after the read's await and in the write's own tick, so a write that landed meanwhile is caught */
+  const conflict = versionConflict(before, opts.expectedVersion)
+  if (conflict !== undefined) throw new FrameVersionConflictError(conflict)
   const replaced = { html: before.html, width: before.width, height: before.height, name: before.name }
   const name = version.name !== undefined && version.name !== before.name ? version.name : undefined
   if (
