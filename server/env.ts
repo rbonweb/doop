@@ -48,6 +48,39 @@ const origin = makeExactValidator<string>((input) => {
   return input.replace(/\/+$/, '')
 })
 
+/** A Dokploy panel's origin: https, or http where the panel is on this machine or a private network
+ *  (loopback, a private address, a single-label name such as a compose service). No path, query or
+ *  credentials, so the API key can only ever be sent to the host the operator named. */
+const dokployOrigin = makeExactValidator<string>((input) => {
+  let parsed: URL
+  try {
+    parsed = new URL(input)
+  } catch {
+    throw new TypeError('Invalid URL (expected https://dokploy.example.com)')
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new TypeError('Invalid URL (expected https://dokploy.example.com)')
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || !['', '/'].includes(parsed.pathname)) {
+    throw new TypeError('Give the origin only: no path, query or credentials')
+  }
+  if (parsed.protocol === 'http:') {
+    const host = parsed.hostname.replace(/^\[|\]$/g, '')
+    const privateHost =
+      host === 'localhost' ||
+      host === '::1' ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+      /^f[cd][0-9a-f]{2}:/i.test(host) ||
+      !host.includes('.')
+    if (!privateHost)
+      throw new TypeError('http is only accepted for a panel on this machine or a private network; use https')
+  }
+  return parsed.origin
+})
+
 /** Comma-separated values, trimmed, empties dropped. */
 const list = makeExactValidator<string[]>((input) =>
   input
@@ -339,6 +372,15 @@ const schema = {
   /* the compose project directory the updater pulls and restarts */
   DOOP_UPDATE_DIR: str({ default: undefined }),
   DOOP_UPDATE_API: origin({ default: 'https://api.github.com' }),
+  /* Update now through a Dokploy panel: all three are set together, with DOOP_UPDATE_REPO, and never beside DOOP_UPDATE_DIR */
+  DOOP_DOKPLOY_URL: dokployOrigin({ default: undefined }),
+  /* a Dokploy API key, sent as x-api-key to DOOP_DOKPLOY_URL and nowhere else; never logged or returned */
+  DOOP_DOKPLOY_API_KEY: str({ default: undefined }),
+  /* the compose service's id, from its page URL in Dokploy */
+  DOOP_DOKPLOY_COMPOSE_ID: str({ default: undefined }),
+  /* where database backups are written, and how long they are kept */
+  DOOP_BACKUP_DIR: str({ default: '/app/data/backups' }),
+  DOOP_BACKUP_KEEP_DAYS: int(1)({ default: 14 }),
 }
 
 /** Every declared variable name, for the .env.example coverage test. */
@@ -383,6 +425,21 @@ function parse() {
   if (parsed.STALL_LOG_MS > 0 && parsed.STALL_EXIT_MS > 0 && parsed.STALL_LOG_MS > parsed.STALL_EXIT_MS)
     throw new Error(
       `Invalid environment configuration:\n  STALL_LOG_MS: ${parsed.STALL_LOG_MS} is greater than STALL_EXIT_MS (${parsed.STALL_EXIT_MS}); the log threshold must come first`,
+    )
+  const dokploy = (['DOOP_DOKPLOY_URL', 'DOOP_DOKPLOY_API_KEY', 'DOOP_DOKPLOY_COMPOSE_ID'] as const).filter(
+    (key) => parsed[key] !== undefined,
+  )
+  if (dokploy.length > 0 && dokploy.length < 3) {
+    const missing = ['DOOP_DOKPLOY_URL', 'DOOP_DOKPLOY_API_KEY', 'DOOP_DOKPLOY_COMPOSE_ID'].filter(
+      (key) => !dokploy.includes(key as (typeof dokploy)[number]),
+    )
+    throw new Error(
+      `Invalid environment configuration:\n  ${missing.join(', ')}: missing (Update now through Dokploy needs DOOP_DOKPLOY_URL, DOOP_DOKPLOY_API_KEY and DOOP_DOKPLOY_COMPOSE_ID together)`,
+    )
+  }
+  if (dokploy.length === 3 && parsed.DOOP_UPDATE_DIR !== undefined)
+    throw new Error(
+      'Invalid environment configuration:\n  DOOP_UPDATE_DIR: set together with DOOP_DOKPLOY_URL; an install updates through its host folder or through Dokploy, not both',
     )
   return parsed
 }

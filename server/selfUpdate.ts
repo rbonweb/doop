@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
 import type { UpdateInfo, UpdateRelease, UpdateStatus } from '../shared/selfUpdate.ts'
+import { dokployUpdater } from './dokployUpdate.ts'
 import { env } from './env.ts'
 
 /**
@@ -19,6 +20,7 @@ import { env } from './env.ts'
  *   DOOP_VERSION      the release this image was built as (baked in by the Dockerfile)
  *   DOOP_UPDATE_REPO  owner/repo whose releases to follow
  *   DOOP_UPDATE_DIR   the folder the host's updater watches; unset = no button
+ *   DOOP_DOKPLOY_*    instead of the folder, Dokploy installs it (server/dokployUpdate.ts)
  *   DOOP_UPDATE_API   the GitHub API base, overridden only by tests
  */
 
@@ -26,6 +28,8 @@ const CURRENT = env.DOOP_VERSION
 const REPO = env.DOOP_UPDATE_REPO ?? ''
 const DIR = env.DOOP_UPDATE_DIR ?? ''
 const API = env.DOOP_UPDATE_API
+const DOKPLOY = dokployUpdater(CURRENT)
+const MODE: UpdateInfo['mode'] = !REPO ? null : DOKPLOY ? 'dokploy' : DIR ? 'folder' : null
 
 /* GitHub allows 60 anonymous API calls an hour per address */
 const CACHE_MS = 10 * 60_000
@@ -81,6 +85,7 @@ async function exists(file: string): Promise<boolean> {
 }
 
 async function readStatus(): Promise<UpdateStatus> {
+  if (MODE === 'dokploy' && DOKPLOY) return DOKPLOY.status()
   if (!DIR) return { state: 'idle' }
   let status: UpdateStatus = { state: 'idle' }
   try {
@@ -116,7 +121,8 @@ export async function updateInfo(fresh = false): Promise<UpdateInfo> {
   }
   return {
     current: CURRENT,
-    enabled: Boolean(DIR && REPO),
+    enabled: MODE !== null,
+    mode: MODE,
     latest,
     updateAvailable: latest !== null && latest.tag !== CURRENT,
     status,
@@ -124,16 +130,29 @@ export async function updateInfo(fresh = false): Promise<UpdateInfo> {
   }
 }
 
-/** Ask the host to install `tag`, which must be the latest release. */
+/** Ask the host, or Dokploy, to install `tag`, which must be the latest release. */
 export async function requestUpdate(tag: string, requestedBy: string): Promise<UpdateInfo> {
-  if (!DIR || !REPO) throw new UpdateRefused('This server installs updates from its command line only.')
-  if (!TAG.test(tag)) throw new UpdateRefused('That is not a release tag.')
-  const latest = await latestRelease(true)
-  if (!latest || latest.tag !== tag) throw new UpdateRefused('Only the latest release can be installed.')
-  if (tag === CURRENT) throw new UpdateRefused(`This server already runs ${tag}.`)
-  const status = await readStatus()
-  if (status.state === 'requested' || status.state === 'running') {
-    throw new UpdateRefused('An update is already under way.')
+  if (MODE === null) throw new UpdateRefused('This server installs updates from its command line only.')
+  /* Dokploy installs run from this process: one slot, taken before any await so two clicks cannot both start */
+  const slot = MODE === 'dokploy' && DOKPLOY ? DOKPLOY : null
+  if (slot && !slot.reserve()) throw new UpdateRefused('An update is already under way.')
+  let started = false
+  try {
+    if (!TAG.test(tag)) throw new UpdateRefused('That is not a release tag.')
+    const latest = await latestRelease(true)
+    if (!latest || latest.tag !== tag) throw new UpdateRefused('Only the latest release can be installed.')
+    if (tag === CURRENT) throw new UpdateRefused(`This server already runs ${tag}.`)
+    const status = await readStatus()
+    if (status.state === 'requested' || status.state === 'running') {
+      throw new UpdateRefused('An update is already under way.')
+    }
+    if (slot) {
+      await slot.start(tag)
+      started = true
+      return updateInfo()
+    }
+  } finally {
+    if (slot && !started) slot.release()
   }
   /* written whole, then renamed, so the watcher never reads half a file */
   const file = path.join(DIR, 'request.json')

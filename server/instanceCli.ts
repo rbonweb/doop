@@ -1,3 +1,6 @@
+import pg from 'pg'
+import { normalizeAdminEmail, setAdminRole } from './adminRole.ts'
+import { env } from './env.ts'
 import {
   createInvite,
   inviteLink,
@@ -17,13 +20,16 @@ import {
  *   tsx server/instanceCli.ts invites              the links waiting to be used
  *   tsx server/instanceCli.ts uninvite EMAIL
  *   tsx server/instanceCli.ts models [agent|distill NAME]   NAME "default" clears it
+ *   tsx server/instanceCli.ts admin EMAIL            makes an existing account an admin
+ *   tsx server/instanceCli.ts admin --remove EMAIL   takes the role away
  *
  * The running server reads the same file on every use, so nothing restarts.
+ * admin needs DATABASE_URL, a real Postgres: the embedded database cannot be opened by a second process.
  */
 
 const BY = 'the server command line'
 
-function run(command: string | undefined, args: string[]): void {
+async function run(command: string | undefined, args: string[]): Promise<void> {
   switch (command) {
     case 'invite':
       for (const email of args) {
@@ -59,14 +65,47 @@ function run(command: string | undefined, args: string[]): void {
       )
       return
     }
+    case 'admin': {
+      const remove = args[0] === '--remove'
+      const raw = remove ? args[1] : args[0]
+      if (raw === undefined || args.length !== (remove ? 2 : 1)) {
+        throw new SettingRefused('Usage: admin EMAIL (or admin --remove EMAIL)')
+      }
+      let email: string
+      try {
+        email = normalizeAdminEmail(raw)
+      } catch (e) {
+        throw new SettingRefused(e instanceof Error ? e.message : String(e))
+      }
+      const url = env.DATABASE_URL
+      if (!url) {
+        throw new SettingRefused(
+          'admin needs DATABASE_URL: the embedded database cannot be opened by a second process.',
+        )
+      }
+      const client = new pg.Client({ connectionString: url })
+      let changed: boolean
+      try {
+        await client.connect()
+        changed = await setAdminRole(client, email, !remove)
+      } catch {
+        throw new SettingRefused('Could not reach the database.')
+      } finally {
+        await client.end().catch(() => {})
+      }
+      if (!changed) {
+        if (remove) throw new SettingRefused(`${email} is not an admin`)
+        throw new SettingRefused(`No account for ${email}. Create it first (sign up through an invite link).`)
+      }
+      console.log(remove ? `${email} is no longer an admin.` : `${email} is an admin: Admin is in the account menu.`)
+      return
+    }
     default:
       throw new SettingRefused(`Unknown command ${command ?? '(none)'}`)
   }
 }
 
-try {
-  run(process.argv[2], process.argv.slice(3))
-} catch (e) {
+run(process.argv[2], process.argv.slice(3)).catch((e: unknown) => {
   console.error(e instanceof Error ? e.message : String(e))
   process.exit(1)
-}
+})
