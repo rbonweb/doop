@@ -7,14 +7,14 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Client, startServer, type Server } from './harness.ts'
 
 /**
- * Update now on a real server configured for Dokploy, against a fake GitHub and a fake Dokploy panel.
+ * Update now on a real server configured for the Dokploy deploy webhook, against a fake GitHub and a fake Dokploy panel.
  * There is no Postgres here (the harness runs the embedded database), so the backup step fails, which
  * is the case worth proving end to end: nothing reaches Dokploy beyond a read, and the key stays put.
  */
 
 const CURRENT = 'v1.2.0-fork.2'
 const LATEST = 'v1.2.0-fork.3'
-const KEY = 'dk_live_HTTP-SECRET-KEY-456'
+const TOKEN = 'HTTPsecrettoken_456789abcdef'
 
 let github: http.Server
 let panel: http.Server
@@ -39,10 +39,10 @@ beforeAll(async () => {
   })
   /* slow enough that a second click arrives while the first update still holds the slot */
   panel = http.createServer((req, res) => {
-    panelCalls.push(`${req.method} ${req.url?.split('?')[0]} key=${req.headers['x-api-key'] === KEY}`)
+    panelCalls.push(`${req.method} ${req.url}`)
     setTimeout(() => {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ env: 'A=1\nDOOP_TAG=v1.2.0-fork.2\n' }))
+      res.end('{}')
     }, 400)
   })
   await Promise.all([
@@ -54,9 +54,7 @@ beforeAll(async () => {
     DOOP_VERSION: CURRENT,
     DOOP_UPDATE_REPO: 'acme/doop',
     DOOP_UPDATE_API: `http://127.0.0.1:${(github.address() as AddressInfo).port}`,
-    DOOP_DOKPLOY_URL: `http://127.0.0.1:${(panel.address() as AddressInfo).port}`,
-    DOOP_DOKPLOY_API_KEY: KEY,
-    DOOP_DOKPLOY_COMPOSE_ID: 'cmp_1',
+    DOOP_DOKPLOY_WEBHOOK_URL: `http://127.0.0.1:${(panel.address() as AddressInfo).port}/api/deploy/compose/${TOKEN}`,
     DOOP_BACKUP_DIR: backups,
     ADMIN_EMAILS: 'admin@example.test',
   })
@@ -74,11 +72,11 @@ afterAll(() => {
 })
 
 describe('Update now through Dokploy', () => {
-  it('is for admins, and says it installs through Dokploy without showing the key', async () => {
+  it('is for admins, and says it installs through Dokploy without showing the webhook', async () => {
     expect((await member.get('/api/admin/update')).status).toBe(404)
     const res = await admin.get('/api/admin/update')
     const text = await res.text()
-    expect(text).not.toContain(KEY)
+    expect(text).not.toContain(TOKEN)
     expect(JSON.parse(text)).toMatchObject({
       enabled: true,
       mode: 'dokploy',
@@ -91,7 +89,7 @@ describe('Update now through Dokploy', () => {
     expect((await admin.post('/api/admin/update', { tag: 'v1.0.0' })).status).toBe(409)
   })
 
-  it('lets one update run at a time, and a failed backup changes nothing in Dokploy', async () => {
+  it('lets one update run at a time, and a failed backup never reaches Dokploy', async () => {
     const [first, second] = await Promise.all([
       admin.post('/api/admin/update', { tag: LATEST }),
       admin.post('/api/admin/update', { tag: LATEST }),
@@ -115,12 +113,12 @@ describe('Update now through Dokploy', () => {
     const info = await (await admin.get('/api/admin/update')).json()
     expect(info.status.message).toContain('DATABASE_URL')
     expect(info.status.message).toContain(`Nothing was changed; ${CURRENT} is still running.`)
-    expect(JSON.stringify(info)).not.toContain(KEY)
+    expect(JSON.stringify(info)).not.toContain(TOKEN)
 
-    /* only the preflight read reached Dokploy: no write, no redeploy */
-    expect(panelCalls).toEqual(['GET /api/compose.one key=true'])
+    /* the backup came first and failed, so nothing reached Dokploy at all */
+    expect(panelCalls).toEqual([])
     const file = readFileSync(path.join(server.dataDir, 'data', 'updates', 'status.json'), 'utf8')
-    expect(file).not.toContain(KEY)
+    expect(file).not.toContain(TOKEN)
 
     /* the slot is free again */
     const again = await admin.post('/api/admin/update', { tag: LATEST })

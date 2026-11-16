@@ -100,16 +100,16 @@ describe('runBackup', () => {
 
   it('gives the dump no server secrets', async () => {
     const { root, dir } = tempDir()
-    process.env.DOOP_DOKPLOY_API_KEY = 'sekret-key'
+    process.env.DOOP_DOKPLOY_WEBHOOK_URL = 'https://dokploy.example.com/api/deploy/compose/sekret-token-123'
     try {
       const file = await runBackup('nightly', options(dir, pgDump(root, OK_SCRIPT)))
       const text = gunzipped(file)
       const lines = text.trim().split('\n')
-      expect(text).not.toContain('sekret-key')
+      expect(text).not.toContain('sekret-token-123')
       expect(lines).toHaveLength(4)
       expect(lines.at(-1)).toBe('0')
     } finally {
-      delete process.env.DOOP_DOKPLOY_API_KEY
+      delete process.env.DOOP_DOKPLOY_WEBHOOK_URL
     }
   })
 
