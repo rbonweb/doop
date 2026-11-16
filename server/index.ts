@@ -1,3 +1,5 @@
+import { startNightlyBackup } from './dbBackup.ts'
+import { dokployUpdater } from './dokployUpdate.ts'
 import { env } from './env.ts'
 import {
   changeInstances,
@@ -3857,6 +3859,16 @@ server.listen(PORT, () => {
   console.log(`⟡ doop server     http://localhost:${PORT}`)
   /* persisted renders of a frame's old versions are removed in the background */
   startRenderSweep((id) => store.getFrame(id)?.updatedAt)
+  /* a Dokploy install: finish the record of the update this process came from, and back the database up every night */
+  const dokploy = dokployUpdater(env.DOOP_VERSION)
+  if (dokploy) {
+    dokploy
+      .settleAtBoot()
+      .catch((err) =>
+        console.error('[update] settling the last update failed:', err instanceof Error ? err.message : err),
+      )
+    startNightlyBackup()
+  }
   /* a saved frame is rendered once it has been quiet for a moment, so its first /i/ request is a stored hit; never started in tests */
   if (env.DOOP_RENDER_WARM) startRenderWarm({ isBusy: actions.isFrameStreaming })
   /* frame HTML is loaded per canvas; a canvas nobody has used for

@@ -99,7 +99,11 @@ export function VersionCard() {
           if (!open) setConfirming(null)
         }}
         title={`Install ${confirming ?? ''}?`}
-        description="The database is backed up first, then Doop restarts: everyone is disconnected for about a minute."
+        description={
+          info.mode === 'dokploy'
+            ? 'The database is backed up first, then Dokploy installs the update and Doop restarts: everyone is disconnected for a minute or two.'
+            : 'The database is backed up first, then Doop restarts: everyone is disconnected for about a minute.'
+        }
         confirmLabel="Update now"
         onConfirm={() => {
           if (confirming) void install(confirming)
@@ -112,6 +116,10 @@ export function VersionCard() {
 function describe(info: UpdateInfo): string {
   const { latest, status } = info
   if (status.state === 'requested') return `Waiting for the server to start installing ${status.tag ?? 'the update'}…`
+  if (info.mode === 'dokploy' && status.state === 'running' && status.message) return status.message
+  if (info.mode === 'dokploy' && status.state === 'failed') {
+    return `Installing ${status.tag ?? 'the update'} failed. ${status.message ?? `${info.current} is still running.`}`
+  }
   if (status.state === 'running') {
     return `Installing ${status.tag ?? 'the update'}. Doop restarts, and this page reloads when it is back.`
   }

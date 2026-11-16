@@ -45,6 +45,20 @@ RUN apt-get update \
     fonts-liberation fonts-dejavu-core fonts-noto-color-emoji \
   && rm -rf /var/lib/apt/lists/*
 
+# The Postgres 16 client, for the in-app database backup (server/dbBackup.ts runs pg_dump before an update and every night). From the PostgreSQL project's own apt repository, pinned to major 16 to match the server image, trusting only its signing key (checked against the published fingerprint) through a keyring file and `signed-by`, never the system-wide keyring. Debian's own postgresql-client follows the distribution release and would be a different major.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+  && install -d -m 0755 /etc/apt/keyrings \
+  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc \
+  && gpg --show-keys --with-colons /etc/apt/keyrings/pgdg.asc | grep -q "^fpr:::::::::B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8:" \
+  && . /etc/os-release \
+  && echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+    > /etc/apt/sources.list.d/pgdg.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends postgresql-client-16 \
+  && pg_dump --version | grep -q "(PostgreSQL) 16" \
+  && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production \
     CHROME_PATH=/usr/bin/chromium \
     CHROME_NO_SANDBOX=1 \
