@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   restackFrames: vi.fn(async (_canvasId: string, _frames: StackWrite[]) => []),
   updateFrame: vi.fn(async () => undefined),
   deleteFrame: vi.fn(async () => undefined),
+  canvasLibrary: () => new Promise(() => {}),
 }))
 vi.mock('../src/lib/api', () => ({
   api,

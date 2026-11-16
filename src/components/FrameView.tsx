@@ -2035,8 +2035,8 @@ export const FrameView = memo(function FrameView({
                   /* a frame whose document is still on its way is a quiet placeholder, not a stark white box */
                   frame.html && !runtimeReady ? 'before:bg-paper-deep' : 'before:bg-white',
                 ),
-              /* frames far outside the view are not rendered at all, so a large canvas keeps a bounded set of live iframe layers and tiles however far out it is zoomed */
-              '[content-visibility:auto]',
+              /* frames far outside the view are not rendered at all, so a large canvas keeps a bounded set of live iframe layers and tiles however far out it is zoomed; it implies paint containment, which would clip a standalone shape's stroke spilling past its box */
+              !isCanvasElement(frame.html) && '[content-visibility:auto]',
               /* Select keeps the arrow, like Figma: the frame is a thing to
                  point at, not a handle. The Hand tool's grab and the Comment
                  tool's bubble come from the Stage, which overrides every

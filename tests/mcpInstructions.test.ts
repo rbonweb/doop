@@ -12,8 +12,7 @@ vi.mock('../server/db/persist.ts', () => ({ saveCanvas: () => {}, saveFrame: () 
    a main guide every agent loads, and topics loaded when a task needs one. */
 
 const OLDEST_CLAUDE_CODE_CUT = 2048
-/* The fork's main guide also carries the agent speed tools and the deck, note and page sections, so it is larger than upstream's 30,000. get_guide({ section }) reads one part of it. */
-const MAIN_GUIDE_BUDGET = 52_000
+const MAIN_GUIDE_BUDGET = 30_000
 
 async function connect() {
   const client = new Client({ name: 'instructions-test', version: '1.0.0' })

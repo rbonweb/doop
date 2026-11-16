@@ -74,7 +74,7 @@ import {
   fitExportScale,
   parseExportScale,
 } from '../shared/exportScale.ts'
-import { COMPOSE_CHECK, GUIDE_TOPIC_SUMMARIES, GUIDE_TOPICS, guideFor } from './guide.ts'
+import { COMPOSE_CHECK, GUIDE_TOPIC_SUMMARIES, GUIDE_TOPICS, guideFor, type GuideTopic } from './guide.ts'
 import { findGuideSection, guideIndex } from './guideSections.ts'
 import {
   describeInspiration,
@@ -153,6 +153,16 @@ You MUST call get_guide({ topic: "doop-instructions" }) before using other Doop 
 /** What this server's integrations add to the main guide. */
 function extensionGuideLines(): string[] {
   return extensions.flatMap((extension) => extension.mcpGuideLines ?? [])
+}
+
+/** The section of whichever other guide topic has it: the fork's speed-tool sections moved out of the main guide into topics, and their old slugs still resolve. */
+function findSectionInOtherTopics(loaded: GuideTopic, wanted: string) {
+  for (const topic of GUIDE_TOPICS) {
+    if (topic === loaded) continue
+    const found = findGuideSection(guideFor(topic), wanted)
+    if (found) return found
+  }
+  return undefined
 }
 
 function escapeRegExp(value: string): string {
@@ -605,7 +615,9 @@ export function buildMcpServer(
         (topic) => topic !== 'doop-instructions',
       )
         .map((topic) => `"${topic}" (${GUIDE_TOPIC_SUMMARIES[topic]})`)
-        .join('; ')}. Pass section to read one part of the topic you load (section: "index" lists them).`,
+        .join(
+          '; ',
+        )}. Pass section to read one part of a topic (section: "index" lists the loaded topic's; a section of any other topic is found too).`,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         topic: z.enum(GUIDE_TOPICS).describe('Guide topic to load'),
@@ -614,7 +626,7 @@ export function buildMcpServer(
           .max(120)
           .optional()
           .describe(
-            'One section of the guide by its slug or title; "index" lists the sections. Leave it out for the whole guide.',
+            'One section of the guide by its slug or title, looked up in the topic first, then in the other topics; "index" lists the topic\'s sections. Leave it out for the whole guide.',
           ),
       },
     },
@@ -623,7 +635,7 @@ export function buildMcpServer(
       if (!section) return text(guide)
       const wanted = section.trim()
       if (wanted.toLowerCase() === 'index' || wanted.toLowerCase() === 'list') return text(guideIndex(guide))
-      const found = findGuideSection(guide, wanted)
+      const found = findGuideSection(guide, wanted) ?? findSectionInOtherTopics(topic, wanted)
       return found ? text(found.body) : err(`no guide section "${section}" in topic "${topic}". ${guideIndex(guide)}`)
     },
   )

@@ -328,7 +328,13 @@ describe.skipIf(!findBrowserPath())('pages in the URL', { timeout: 30_000 }, () 
   const open = (search = '', canvas = board) => openCanvasPage(page, frames, search, canvas)
   const activePage = () =>
     page.$eval('[data-page-id]:has(button[aria-current="page"])', (row) => row.getAttribute('data-page-id'))
-  const mounted = () => page.evaluate(() => (window as unknown as { mountedFrames: () => string[] }).mountedFrames())
+  /* frames mount progressively once the camera is still, so wait for the first one before reading the set */
+  const mounted = async () => {
+    await page.waitForFunction(
+      () => (window as unknown as { mountedFrames: () => string[] }).mountedFrames().length > 0,
+    )
+    return page.evaluate(() => (window as unknown as { mountedFrames: () => string[] }).mountedFrames())
+  }
   const search = () => page.evaluate(() => location.search)
   async function switchTo(pageId: string) {
     await page.locator(`[data-page-id="${pageId}"] button`).click()

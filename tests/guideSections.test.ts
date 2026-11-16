@@ -166,6 +166,25 @@ describe('get_guide sections over MCP', () => {
     }
   })
 
+  it.each([
+    ['seeing-and-checking-your-work', 'measure_frame'],
+    ['canvas-tools', 'run_batch'],
+    ['editing-part-of-a-frame-many-frames-at-once-and-working-alongside-other-agents', 'patch_frame'],
+    ['decks-slides-on-a-page', 'speaker_notes'],
+  ])('finds the section %s in another topic when the main guide has none', async (slug, needle) => {
+    const client = await guideClient()
+    try {
+      const result = await client.callTool({
+        name: 'get_guide',
+        arguments: { topic: 'doop-instructions', section: slug },
+      })
+      expect(result.isError).toBeFalsy()
+      expect(textOf(result)).toContain(needle)
+    } finally {
+      await client.close()
+    }
+  })
+
   it('refuses a blank section instead of returning the first one', async () => {
     const client = await guideClient()
     try {

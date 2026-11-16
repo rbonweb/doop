@@ -8,7 +8,7 @@
 
 import { AGENT_ROLES } from '../shared/agents.ts'
 import { MAX_DECISION_CHARS } from '../shared/designDecisions.ts'
-import { AGENT_TOOL_GUIDE } from './agentTools/guide/index.ts'
+import { CANVAS_TOOLS_GUIDE, CHECKING_TOOLS_GUIDE, EDITING_TOOLS_GUIDE } from './agentTools/guide/index.ts'
 
 export const GUIDE_TOPICS = [
   'doop-instructions',
@@ -19,6 +19,11 @@ export const GUIDE_TOPICS = [
   'comments-and-agents',
   'export',
   'imported-frames',
+  'editing-tools',
+  'checking-tools',
+  'canvas-tools',
+  'pages-decks-notes',
+  'working-with-people',
 ] as const
 
 export type GuideTopic = (typeof GUIDE_TOPICS)[number]
@@ -33,6 +38,12 @@ export const GUIDE_TOPIC_SUMMARIES: Record<GuideTopic, string> = {
   'comments-and-agents': "comment threads, and the built-in Doop Agent's roles",
   export: 'images and PDF of a frame or one element',
   'imported-frames': 'frames imported from a GitHub repo or synced from a live app',
+  'editing-tools': 'part of a frame or many frames: sections, patches, search, bulk, claims, compose',
+  'checking-tools': 'measure, lint, targeted screenshots, compare, snapshot',
+  'canvas-tools': 'duplicate, arrange, check layout, batch many calls',
+  'pages-decks-notes': 'pages and nesting, slide decks, sticky notes',
+  'working-with-people':
+    'show the work first, fork a reviewed frame instead of rewriting it, pin questions, roll back versions',
 }
 
 /** The check a frame-writing tool's description asks for, at the moment the HTML is written:
@@ -96,7 +107,7 @@ export const DESIGN_QUALITY = `- Commit to ONE clear aesthetic direction per fra
 export const DESIGN_BRIEF = `Before creating frames on a canvas whose style is not already established, commit to a
 brief. It is part of the deliverable, not private scratch work:
 
-1. **Discover before you ask.** Read the canvas, its style guides and its pinned references first; most questions answer themselves there. Ask only what is still open, at most 5 questions in one message. When no human is answering, decide yourself and write each assumption into the brief marked UNCONFIRMED, so a human can find and overturn it.
+1. **Discover before you ask.** Read the canvas, its style guides and pinned references first. Ask only what is still open, at most 5 questions in one message. With no human answering, decide and mark each assumption UNCONFIRMED in the brief.
 2. **Look at real pages first.** Call search_inspiration with the genre plus the look
    you are aiming for, in the words the catalog is tagged with — "saas landing page,
    editorial", "finance, dark minimal", "app, illustrative" — not the product noun on
@@ -334,10 +345,6 @@ next to your name and logged to the activity feed.
 
 Do not spam it: one update per phase of work, not one per tool call.
 
-## Show the work first
-
-Before research or long generation, create the frames the work will land in, named for what they will hold ("Pricing — desktop", "Checkout — empty cart"), and call set_status. Humans see where the work is going within seconds and can redirect you early. Fill the frames afterwards.
-
 ## Human feedback — TOP PRIORITY
 
 Humans reply to agent tasks from the canvas UI. Each reply is an OPEN REQUEST on the
@@ -374,20 +381,16 @@ and fix real issues before moving on:
   copy (invented product names, believable numbers, human sentences).
 - **Logos**: any placeholder brand mark (gray tile, "LOGO", initials, an invented company
   wordmark) still in the frame — replace it with a real logo from search_logos.
-- **States**: the empty, loading and error state of every list, form and data view exists, not just the happy path.
-- **Widths**: every width the frame claims to support, checked at the device presets: mobile 390, tablet 834, laptop 1280, desktop 1440.
-- **Themes**: both themes, if the design has two.
-- **Strings**: every string, read as a user would read it: typos, truncation, wrong tone.
-- **Links**: every data-goto leads to a frame that exists and makes sense there.
+- **States**: the empty, loading and error state of every list, form and data view exists.
+- **Widths**: every supported width at the presets (mobile 390, tablet 834, laptop 1280, desktop 1440), in both themes if there are two.
+- **Strings and links**: typos, truncation, tone; every data-goto lands on a real frame.
 - **Reuse**: is the screen composed from the canvas's components? A part of the system
   drawn inline, a reusable piece (button, input, nav, card, row) that is not a component yet,
   or a block repeated in this frame, inside a component it uses, or copied from another frame,
   that is not a <doop-use>? A hex, font or size that a token already names? Make the component
   or use the token.
 
-Review with a budget: one inspection round, one batch of fixes, then at most one confirmation screenshot. The cap applies to polish (spacing, alignment, taste) only. Broken function, unreadable contrast and missing states are always fixed and re-checked, however many rounds that takes.
-
-Look sideways: after fixing a defect, check the sibling frames for the same defect and fix it there too, within the etiquette below.
+Review with a budget: one inspection round, one batch of fixes, then at most one confirmation screenshot (never for broken function, contrast or missing states). After fixing a defect, check the sibling frames for it too.
 
 Prefer targeted fixes over rewrites. Never delete and restart a mostly-good frame — the
 humans watching lose work they may have been reacting to.
@@ -453,12 +456,7 @@ ${FRAME_STYLES}
 - Size frames to their content: mobile screen 390×844, desktop page 1280×800, card or
   component 480×360, square social post 640×640. Set width/height on create_frame, or
   adjust later with update_frame.
-- Pages: a canvas is a set of pages, each its own board, listed by get_canvas with every
-  frame's pageId. Put one screen in a frame and a body of work on a page: a second product
-  surface, a platform (web vs. mobile), a round of explorations. create_canvas_page adds one
-  (nested under another page with parent_id) and returns its id for create_frame's pageId; get_canvas with page_id reads one page;
-  set_canvas_pages renames, reorders or deletes pages. A link to a page is
-  /c/<canvas_id>?page=<page_id>.
+- Pages: a canvas is a set of pages, each its own board. One screen is a frame, a body of work a page: create_canvas_page (optional parent_id) returns an id for create_frame's pageId; set_canvas_pages renames, reorders, nests or deletes (topic "pages-decks-notes"). A page link is /c/<canvas_id>?page=<page_id>.
 - Element links: /c/<canvas_id>?frame=<frame_id>&element=<element_id> points at the one
   element carrying data-doop-id="<element_id>" in that frame's HTML. Find that attribute with
   get_frame before applying the feedback; if no element carries it any more, ask for an
@@ -466,22 +464,6 @@ ${FRAME_STYLES}
 - Rearranging: update_frame is one call for a frame's name, x/y, size, lock, or its page
   (pageId; it keeps its x/y unless you pass new ones). Move a frame with it; never recreate
   or copy a frame's HTML to move it, which loses its comments, versions and approval.
-
-## Pages
-
-- A canvas is split into pages. Every frame belongs to exactly one page (its pageId in
-  get_canvas); create_frame and update_frame take a pageId, and a page that still holds
-  frames cannot be deleted.
-- Pages can be nested to group related ones: set parent_id on a page in set_canvas_pages
-  to the id of the page it sits under. A parent is still a normal page that can hold its
-  own frames, and an empty parent works as a pure group.
-- Nesting is at most 3 levels in total (a top-level page, its subpage, and that subpage's
-  subpage). List every parent before its subpages; subpages keep the list order among
-  themselves. get_canvas shows each nested page's parent_id.
-- To add a page, call create_canvas_page (name, optional parent_id; add_canvas_page is its deprecated alias): it appends without the full list, so it never conflicts with other agents adding pages at the same time.
-- set_canvas_pages (rename, reorder, nest, delete) takes the complete list plus the expectedPages you read from get_canvas, so re-read get_canvas first and send parent_id back unchanged for pages you are not moving. If someone changed the pages meanwhile, the error lists the current pages: re-apply your change to that list and retry.
-- move_frame moves a frame to another canvas you can edit, keeping its id, version history, attached notes and comment threads (update_frame pageId moves it between pages of the same canvas).
-- get_canvas takes an optional page_id to list one page's frames and notes, which keeps the result small on a large canvas. Everything else in that answer stays on the page too: claims name only that page's frames and the sync flow lists only navigation between that page's frames. get_frame with include_html: false returns a frame's metadata without its markup.
 
 ## Images — real imagery, never placeholders
 
@@ -556,26 +538,17 @@ rationale per call, at most ${MAX_DECISION_CHARS} characters; split longer feedb
 decisions by topic, preserving the reason for each choice. Design taste only —
 never one-off content edits like typos or copy tweaks.
 
-## Fork, don't overwrite
+## Fast tools for big canvases
 
-A frame a human has reviewed or approved (they commented on it, resolved a thread, or said it is good) is not yours to rewrite for a new idea. Put the idea in a variant frame beside it, named "<name> — B (<the idea>)" (C, D for more), because side-by-side variants are how people compare. Retire a losing variant by renaming it "Retired: <why>"; delete it only when asked. A frame you made yourself that nobody has reviewed yet you can keep editing in place.
-
-## Questions go on the frame
-
-When you need a decision, pin it with add_comment on the element in question (get_guide topic "comments-and-agents"). Never resolve your own question: the human resolves it. A thread waiting on a human is what puts the orange "needs you" mark on the frame, so a question left only in chat gets missed.
+- Edit without the whole HTML: get_section, replace_section, patch_frame, find_frames (topic "editing-tools"). Pass expected_version (your last read's version) when another agent may edit.
+- Judge a render by numbers first: measure_frame, lint_frame (topic "checking-tools").
+- duplicate_frames instead of re-typing a frame; arrange_frames, check_layout, run_batch (topic "canvas-tools").
 
 ## Report back — honest, with the link
 
-- Lead with the one or two decisions you need from the human, then say what changed.
-- Verify against get_frame_screenshot, never against the HTML alone.
-- Say what you did not check, and list the defects you deferred.
-- Say so when you think the concept itself is wrong.
-- End every reply with the link /c/<canvasId>?frame=<frameId> for each frame you changed.
-
-## Version history and access
-
-- Doop saves a version of a frame before every change. list_frame_versions shows them, newest first; restore_frame_version rolls the frame back (the current design is saved first, so a restore can be undone). When you break a frame, restore it; do not rebuild it from memory.
-- You act as the owner of your key. If that owner only has view or comment access, tools that write (including these two) fail with a role error naming the access needed. Tell the human that access is missing instead of retrying.
+- Lead with the one or two decisions you need from the human, then say what changed, verified against get_frame_screenshot and not the HTML alone.
+- Say what you did not check, what you deferred, and when you think the concept is wrong.
+- End every reply with /c/<canvasId>?frame=<frameId> for each frame you changed.
 
 ## Design quality
 
@@ -609,21 +582,6 @@ get_comments reads a canvas's comment threads (an element comment's elementId is
 element's data-doop-id); reply_to_comment answers one and resolve_comment closes it once
 the request is carried out. The built-in Doop Agent's roles take only work addressed to
 them; the rest is open to you. get_guide({ topic: "comments-and-agents" }) has both in full.
-
-## Decks — slides on a page
-
-- Make a frame a slide with slide: true on create_frame or update_frame. A slide with no size is 1280×720; keep every slide of a deck the same size. The slides of a page play as one deck in present mode, in reading order (rows top to bottom, left to right), so place them in a row or a grid in that order.
-- Build the deck kit first, as one frame or a shared style block you paste into every slide: a master layout, tones as CSS-variable swaps (light, dark, accent), the brand's type, one accent colour.
-- Write the answer in one paragraph, then a slide list of sentences that tells the argument on its own. Put every slide on the canvas early, as its sentence, then fill them in.
-- One idea per slide, and the headline is a full sentence that states the point ("Revenue doubled once onboarding got shorter"), not a topic ("Revenue"). Use space instead of boxes. Use real images, and use them big. Numbers must be honest.
-- While a deck plays, <html> carries data-sl-play for the whole show, and data-sl-entered once a slide has arrived. Key entrance animations to [data-sl-entered] (hide in [data-sl-play], reveal in [data-sl-entered]) so they run each time a slide arrives, and never hide anything outside [data-sl-play]: on the canvas and in exports a slide must show everything.
-- speaker_notes on create_frame and update_frame holds what the presenter says on that slide (markdown, up to 10000 characters). It shows in the presenter view (S while presenting), never on the slide. get_frame returns it.
-- Review a deck twice: read only the headlines in order (a cold read, does the argument hold?), then look at all the slides at once and squint (does the rhythm and hierarchy hold?).
-- People export the deck as a PDF from the present toolbar or the page menu: one page per slide, each at the slide's own size.
-
-## Sticky notes — say why, not just what
-
-A sticky note is a short markdown card pinned to the canvas. create_note attaches it beside a frame (pass frame_id: it sits in the free space next to the frame, left first, never over another frame or note, and moves with it) or leaves it free-floating. Use one to explain the intent of a frame, how two variants differ, or an open question the team should see at a glance, and link to a frame with [label](goto:<frame_id>). Keep notes to a few lines. A question that needs a decision from someone is still a comment, not a note, because comments can be answered and resolved. get_canvas lists existing notes (id, page, frame, position, size, text excerpt) and list_notes returns their full markdown: update_note revises one instead of adding a second, and delete_note removes one that went stale.
 
 ## Exports
 
@@ -672,8 +630,8 @@ ${GUIDE_TOPICS.filter((topic) => topic !== 'doop-instructions')
   .join('\n')}
 `
 
-/** The core guide, then each agent speed area's section (`server/agentTools/guide/`), then the topic list. */
-export const DOOP_GUIDE = `${DOOP_GUIDE_CORE}${AGENT_TOOL_GUIDE}\n${MORE_TOPICS}`
+/** The core guide, then the topic list. The fork's speed-tool guidance (`server/agentTools/guide/`) loads as topics. */
+export const DOOP_GUIDE = `${DOOP_GUIDE_CORE}${MORE_TOPICS}`
 
 /** The topics past the main guide, each loaded on its own when a task needs it. */
 const TOPIC_TEXT: Record<Exclude<GuideTopic, 'doop-instructions'>, string> = {
@@ -896,6 +854,61 @@ captured it remembers that and stops sending that screen, reloads included. To c
 again, delete the frame, then on that page in the app run window.doopSync.capture() in the
 browser console (a plain revisit sends nothing). Content marked data-doop-mask arrives
 masked and data-doop-sync-ignore never arrives. Design changes in a separate frame.
+`,
+  'editing-tools': EDITING_TOOLS_GUIDE,
+  'checking-tools': CHECKING_TOOLS_GUIDE,
+  'canvas-tools': CANVAS_TOOLS_GUIDE,
+  'pages-decks-notes': `# Pages, decks and sticky notes
+
+## Pages
+
+- A canvas is split into pages. Every frame belongs to exactly one page (its pageId in
+  get_canvas); create_frame and update_frame take a pageId, and a page that still holds
+  frames cannot be deleted.
+- Pages can be nested to group related ones: set parent_id on a page in set_canvas_pages
+  to the id of the page it sits under. A parent is still a normal page that can hold its
+  own frames, and an empty parent works as a pure group.
+- Nesting is at most 3 levels in total (a top-level page, its subpage, and that subpage's
+  subpage). List every parent before its subpages; subpages keep the list order among
+  themselves. get_canvas shows each nested page's parent_id.
+- To add a page, call create_canvas_page (name, optional parent_id; add_canvas_page is its deprecated alias): it appends without the full list, so it never conflicts with other agents adding pages at the same time.
+- set_canvas_pages (rename, reorder, nest, delete) takes the complete list plus the expectedPages you read from get_canvas, so re-read get_canvas first and send parent_id back unchanged for pages you are not moving. If someone changed the pages meanwhile, the error lists the current pages: re-apply your change to that list and retry.
+- move_frame moves a frame to another canvas you can edit, keeping its id, version history, attached notes and comment threads (update_frame pageId moves it between pages of the same canvas).
+- get_canvas takes an optional page_id to list one page's frames and notes, which keeps the result small on a large canvas. Everything else in that answer stays on the page too: claims name only that page's frames and the sync flow lists only navigation between that page's frames. get_frame with include_html: false returns a frame's metadata without its markup.
+
+## Decks — slides on a page
+
+- Make a frame a slide with slide: true on create_frame or update_frame. A slide with no size is 1280×720; keep every slide of a deck the same size. The slides of a page play as one deck in present mode, in reading order (rows top to bottom, left to right), so place them in a row or a grid in that order.
+- Build the deck kit first, as one frame or a shared style block you paste into every slide: a master layout, tones as CSS-variable swaps (light, dark, accent), the brand's type, one accent colour.
+- Write the answer in one paragraph, then a slide list of sentences that tells the argument on its own. Put every slide on the canvas early, as its sentence, then fill them in.
+- One idea per slide, and the headline is a full sentence that states the point ("Revenue doubled once onboarding got shorter"), not a topic ("Revenue"). Use space instead of boxes. Use real images, and use them big. Numbers must be honest.
+- While a deck plays, <html> carries data-sl-play for the whole show, and data-sl-entered once a slide has arrived. Key entrance animations to [data-sl-entered] (hide in [data-sl-play], reveal in [data-sl-entered]) so they run each time a slide arrives, and never hide anything outside [data-sl-play]: on the canvas and in exports a slide must show everything.
+- speaker_notes on create_frame and update_frame holds what the presenter says on that slide (markdown, up to 10000 characters). It shows in the presenter view (S while presenting), never on the slide. get_frame returns it.
+- Review a deck twice: read only the headlines in order (a cold read, does the argument hold?), then look at all the slides at once and squint (does the rhythm and hierarchy hold?).
+- People export the deck as a PDF from the present toolbar or the page menu: one page per slide, each at the slide's own size.
+
+## Sticky notes — say why, not just what
+
+A sticky note is a short markdown card pinned to the canvas. create_note attaches it beside a frame (pass frame_id: it sits in the free space next to the frame, left first, never over another frame or note, and moves with it) or leaves it free-floating. Use one to explain the intent of a frame, how two variants differ, or an open question the team should see at a glance, and link to a frame with [label](goto:<frame_id>). Keep notes to a few lines. A question that needs a decision from someone is still a comment, not a note, because comments can be answered and resolved. get_canvas lists existing notes (id, page, frame, position, size, text excerpt) and list_notes returns their full markdown: update_note revises one instead of adding a second, and delete_note removes one that went stale.
+`,
+  'working-with-people': `# Working with people on the canvas
+
+## Show the work first
+
+Before research or long generation, create the frames the work will land in, named for what they will hold ("Pricing — desktop", "Checkout — empty cart"), and call set_status. Humans see where the work is going within seconds and can redirect you early. Fill the frames afterwards.
+
+## Fork, don't overwrite
+
+A frame a human has reviewed or approved (they commented on it, resolved a thread, or said it is good) is not yours to rewrite for a new idea. Put the idea in a variant frame beside it, named "<name> — B (<the idea>)" (C, D for more), because side-by-side variants are how people compare. Retire a losing variant by renaming it "Retired: <why>"; delete it only when asked. A frame you made yourself that nobody has reviewed yet you can keep editing in place.
+
+## Questions go on the frame
+
+When you need a decision, pin it with add_comment on the element in question (get_guide topic "comments-and-agents"). Never resolve your own question: the human resolves it. A thread waiting on a human is what puts the orange "needs you" mark on the frame, so a question left only in chat gets missed.
+
+## Version history and access
+
+- Doop saves a version of a frame before every change. list_frame_versions shows them, newest first; restore_frame_version rolls the frame back (the current design is saved first, so a restore can be undone). When you break a frame, restore it; do not rebuild it from memory.
+- You act as the owner of your key. If that owner only has view or comment access, tools that write (including these two) fail with a role error naming the access needed. Tell the human that access is missing instead of retrying.
 `,
 }
 

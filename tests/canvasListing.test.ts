@@ -2,7 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it, vi } from 'vitest'
 import { buildMcpServer } from '../server/mcp.ts'
-import { pickCanvasFields, pickFrameFields, pageOf } from '../server/canvasListing.ts'
+import { HOSTED_FONTS_NOTE, pickCanvasFields, pickFrameFields, pageOf } from '../server/canvasListing.ts'
 import { claimFrames } from '../server/frameClaims.ts'
 import { webFontsBrief } from '../shared/webFonts.ts'
 
@@ -202,7 +202,9 @@ describe('get_canvas listing controls', () => {
       expect((payload.frames as unknown[]).length).toBe(5)
       expect(payload.webFonts).toContain('Inter')
       expect(typeof payload.note).toBe('string')
-      expect((payload.note as string).length).toBeLessThan(webFontsBrief().length)
+      /* the roster is data in webFonts: the note carries the short pointer, never the full brief (the no-tokens line is upstream's, needed on a canvas without tokens) */
+      expect(payload.note as string).toContain(HOSTED_FONTS_NOTE)
+      expect(payload.note as string).not.toContain(webFontsBrief())
       expect(payload.note as string).not.toContain('Fira Code')
     } finally {
       await close()
