@@ -1,0 +1,47 @@
+# Paste this into a Dokploy Compose service (Raw), not into deploy/doop.sh:
+# Dokploy's Traefik does HTTPS and Update now goes through Dokploy's API.
+# deploy/README.md, section "Install on Dokploy", explains every step.
+name: doop
+
+services:
+  doop:
+    image: ghcr.io/rbonweb/doop:${DOOP_TAG:?set DOOP_TAG in the Dokploy Environment tab}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://doop:${POSTGRES_PASSWORD}@db:5432/doop
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      DOOP_INVITE_ONLY: '1'
+      DOOP_NOINDEX: '1'
+      DOOP_UPDATE_REPO: rbonweb/doop
+      DOOP_DOKPLOY_URL: ${DOOP_DOKPLOY_URL:-}
+      DOOP_DOKPLOY_API_KEY: ${DOOP_DOKPLOY_API_KEY:-}
+      DOOP_DOKPLOY_COMPOSE_ID: ${DOOP_DOKPLOY_COMPOSE_ID:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      DOOP_AGENT_MODEL: ${DOOP_AGENT_MODEL:-}
+      DOOP_DISTILL_MODEL: ${DOOP_DISTILL_MODEL:-}
+    # Dokploy maps the domain onto the container's port 4400 (Domains tab);
+    # nothing is published to the host here. /app/data holds the database
+    # backups, so they land in the service's files/data/backups folder.
+    volumes:
+      - ../files/data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: doop
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: doop
+    volumes:
+      - ../files/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U doop -d doop']
+      interval: 5s
+      timeout: 3s
+      retries: 20
