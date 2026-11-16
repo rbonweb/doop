@@ -21,8 +21,10 @@ export interface UpdateStatus {
 export interface UpdateInfo {
   /** the release this server runs; 'dev' for an image built by hand */
   current: string
-  /** whether this server can install an update itself (its host runs the updater) */
+  /** whether this server can install an update itself (its host runs the updater, or Dokploy does) */
   enabled: boolean
+  /** how updates are installed: through the host's updater folder, through Dokploy, or not at all */
+  mode: 'folder' | 'dokploy' | null
   latest: UpdateRelease | null
   updateAvailable: boolean
   status: UpdateStatus

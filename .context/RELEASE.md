@@ -29,6 +29,8 @@ Local self-hosting is still `docker compose up` (`docker-compose.yml` + `Dockerf
 
 The CI build uses `bun run --bun build` to match the `oven/bun` Docker build stage, where `node` commands run with Bun. Extension tests also build with both runtimes and run the Bun-built archive under Node, including its nested runtime dependencies.
 
+A Dokploy install uses `deploy/dokploy/docker-compose.yml` instead: Dokploy's Traefik terminates HTTPS, and **Admin -> Update now** goes through Dokploy's API (`DOOP_DOKPLOY_URL`, `DOOP_DOKPLOY_API_KEY`, `DOOP_DOKPLOY_COMPOSE_ID`, `server/dokployUpdate.ts`), which backs the database up with `pg_dump` from the app image into `DOOP_BACKUP_DIR` (`server/dbBackup.ts`, also nightly) and sets the service's `DOOP_TAG` before redeploying; see `deploy/README.md` section 3b.
+
 ## Desktop app (Tauri: macOS DMG + Windows NSIS installer + Linux AppImage/.deb/.rpm)
 
 Driven by `.github/workflows/desktop-release.yml`; every desktop job shares the toolchain setup

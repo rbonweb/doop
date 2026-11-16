@@ -17,7 +17,8 @@ It runs three containers: Doop, its Postgres database, and Caddy, which handles 
 is managed by one script, `/opt/doop/deploy/doop.sh`.
 
 **Contents:** [First release](#1-once-on-github-publish-the-first-release) ·
-[Prepare the server](#2-prepare-the-server) · [Install](#3-install) · [Admins](#4-admins) ·
+[Prepare the server](#2-prepare-the-server) · [Install](#3-install) ·
+[Install on Dokploy](#3b-install-on-dokploy) · [Admins](#4-admins) ·
 [People](#5-people) · [Models](#6-models) · [Updating](#7-updating) · [Backups](#8-backups) ·
 [Changing settings](#9-changing-settings) · [Claude Code](#10-connect-claude-code) ·
 [Krova Cloud](#11-behind-krova-clouds-domain-mapping) ·
@@ -112,6 +113,125 @@ With a key, also set `DOOP_ANTHROPIC_BASE_URL` (empty for Anthropic itself), `DO
 `DOOP_DISTILL_MODEL`.
 
 </details>
+
+## 3b. Install on Dokploy
+
+[Dokploy](https://dokploy.com) is a panel that runs Docker services on your own server. You get what [section 3](#3-install) installs: your own address with HTTPS, no public sign-up, an admin account, model names you can change on the Admin page, and no search engine indexing. Doop runs there with three differences:
+
+- Dokploy's Traefik answers on ports 80 and 443 and gets the HTTPS certificate, so Doop's Caddy is left out.
+- **Update now** works through Dokploy's API instead of the `doop-update` service on the host.
+- Backups are made by Doop itself, before every update and every night, because Dokploy has no host cron to run `doop.sh backup`.
+
+Everything else is the same: no public sign-up, an admin account, no search engine indexing, model names you can change on the Admin page. You manage the server from Dokploy's dashboard instead of with `doop.sh`, so the commands in [section 13](#13-all-commands) do not apply here.
+
+**1. Make the image public.** Follow step 3 of [section 1](#1-once-on-github-publish-the-first-release): Dokploy downloads the image from GHCR, so it must be public.
+
+**2. Create the Compose service.** Open your project in Dokploy (create one if this is its first service), press **Create Service**, choose **Compose**, and name it `doop`. On the service's **General** tab set **Provider** to **Raw**, then paste the contents of [`deploy/dokploy/docker-compose.yml`](dokploy/docker-compose.yml) from this repository.
+
+**3. Fill the Environment tab.** Paste this and replace the values:
+
+```sh
+DOOP_TAG=v0.7.0-fork.1
+BETTER_AUTH_URL=https://doop.yourbrand.com
+BETTER_AUTH_SECRET=<openssl rand -base64 32>
+POSTGRES_PASSWORD=<openssl rand -hex 24>
+
+# optional: Doop's built-in agent
+ANTHROPIC_API_KEY=
+ANTHROPIC_BASE_URL=
+DOOP_AGENT_MODEL=
+DOOP_DISTILL_MODEL=
+```
+
+- `DOOP_TAG` is the release to run: the latest tag on the fork's **Releases** page on GitHub, for example `v0.7.0-fork.1`. **Update now** changes it for you later.
+- `BETTER_AUTH_URL` is the address people will open, starting with `https://`. It must match the domain you add next.
+- `BETTER_AUTH_SECRET` signs people in. Run `openssl rand -base64 32` on any machine and paste the output.
+- `POSTGRES_PASSWORD` is the database password. Run `openssl rand -hex 24` and paste the output. Never change either secret after the first deploy: the first signs everyone out, the second stops Doop from opening its database.
+- The Anthropic lines are optional: a key for Doop's built-in agent, a base URL for a proxy or compatible endpoint (no `/v1`), and the two model names. Leave them empty to skip; an empty value counts as unset, and the model names then keep their defaults. They can also be changed later on the Admin page.
+
+**4. Add the domain.** On the service's **Domains** tab press **Add Domain** and fill it in: **Host** `doop.yourbrand.com`, **Path** `/`, **Internal Path** `/`, **Port** `4400`, **HTTPS** on, **Certificate Provider** `Let's Encrypt`, **Service Name** `doop`. Point an **A record** for that name at the Dokploy server's public IP address and leave ports 80 and 443 open; Traefik asks Let's Encrypt for the certificate on the first request.
+
+**5. Deploy.** Press **Deploy** and follow the deployment log until both containers are running. Doop creates its database schema on first boot; it takes a few seconds.
+
+**6. Make the first admin account.** Accounts come only from invite links and there is no mail server here, so the invite and the admin role come from the container's terminal. On the service's page open the **doop** container's terminal and run:
+
+```sh
+node_modules/.bin/tsx server/instanceCli.ts invite you@example.com
+```
+
+It prints a link. Open it, sign up with that address, then promote the account with:
+
+```sh
+node_modules/.bin/tsx server/instanceCli.ts admin you@example.com
+```
+
+Add `--remove` before the address to take the role away again. After this, invite people from the Admin page, **Accounts**, **Invite someone** (see [section 5](#5-people)).
+
+**7. Turn on Update now.** With three more variables, the Admin page's version card installs the latest release through Dokploy:
+
+1. In Dokploy, open **Settings**, **Profile**, **API/CLI Keys** and press **Create API Key**. Copy it: it is shown once.
+2. Copy the compose service's id: it is the last part of the service page's address in your browser.
+3. Add these to the Environment tab:
+
+   ```sh
+   DOOP_DOKPLOY_URL=https://dokploy.yourbrand.com
+   DOOP_DOKPLOY_API_KEY=<the key>
+   DOOP_DOKPLOY_COMPOSE_ID=<the id>
+   ```
+
+   `DOOP_DOKPLOY_URL` is Dokploy's own address, `https://` only, and with no path. Plain `http://` is accepted only when the address is this machine or a private network: `localhost`, a `127.x`, `10.x`, `172.16-31.x` or `192.168.x` address, an IPv6 `::1`, `fc00::/7` or `fe80::/10` address, or a bare service name such as `dokploy` (never a dotted name such as `10.example.com`).
+
+4. Press **Redeploy** once so Doop reads the new variables. Both containers restart, which takes about a minute.
+
+The key can redeploy any service in Dokploy, so keep it private: it is as sensitive as the panel's own login. Doop never shows it in a page or writes it to its log. If it leaks, delete it in Dokploy and add a new one the same way.
+
+**What Update now does.** Pressing it on the Admin page:
+
+1. backs the database up into `../files/data/backups`,
+2. sets `DOOP_TAG` in the service's Environment to the newest release,
+3. asks Dokploy to redeploy the compose service and watches that deployment,
+4. reloads the page once the new version answers.
+
+If the backup fails, nothing is sent to Dokploy. If the deployment fails, Doop puts the previous tag back, and the version that was already running keeps running; the card then says the update failed. If Dokploy is still deploying after 15 minutes, Doop stops watching and leaves the new tag in place: the card says Dokploy is still installing and to check its deployment log, and it shows the update as done once the new version is up.
+
+**The one limit.** A new release that starts and then crashes leaves nothing running to put the old one back by itself. The previous image is still on the server: set `DOOP_TAG` in the Environment tab back to the tag you were on and press **Redeploy**. The backup from just before the update is in `../files/data/backups`, if the database needs it too.
+
+**Backups.** Doop backs the database up before every update and every night at 03:17 server time, into `../files/data/backups` on the Dokploy host (`/app/data/backups` inside the container). A backup is named `doop-<UTC stamp>-before-<tag>.sql.gz`, and the nightly ones `doop-<UTC stamp>-nightly.sql.gz`. They are kept for 14 days; add `DOOP_BACKUP_KEEP_DAYS` to the Environment tab to change that.
+
+A backup holds accounts and canvases. Uploaded images, pending invites and the model names chosen on the Admin page are files under `../files/data` and are not part of it, so **copy the whole `files` folder off the server regularly**:
+
+```sh
+rsync -a /etc/dokploy/compose/doop/files/ you@backup-machine:doop-backup/
+```
+
+`doop` there is the folder Dokploy made for the service; `ls /etc/dokploy/compose` shows its name.
+
+**Restore a backup.** Stop `doop` in Dokploy first (or `docker stop` its container), copy the file into the `db` container, and restore it into an empty database:
+
+```sh
+docker cp doop-20261008-031700.sql.gz doop-db-1:/tmp/
+# in the db container's terminal, this erases the current database:
+dropdb -U doop doop && createdb -U doop doop
+gunzip -c /tmp/doop-20261008-031700.sql.gz | psql -U doop -d doop
+```
+
+`docker ps` shows the `db` container's real name if it is not `doop-db-1`. Start `doop` again when the restore finishes. The file has to be in the container or on a volume it mounts; `docker cp` is the simplest way.
+
+**Moving an existing doop.sh server.** The data moves over:
+
+1. On the old server run `sudo /opt/doop/deploy/doop.sh backup`, then copy the new file from `/srv/doop/backups` and the whole `/srv/doop/data` folder to your machine.
+2. In Dokploy, paste the compose with the `doop` service left out (or commented out), fill in the Environment tab, and Deploy: this starts the database only.
+3. Restore the old dump into `db` with the commands above, before Doop ever starts against it.
+4. Copy `/srv/doop/data` into the service's `files/data` folder on the Dokploy host, so uploaded images and invites waiting to be used come along.
+5. Put the `doop` service back, keep the old server's `BETTER_AUTH_SECRET` and `BETTER_AUTH_URL` (a new secret signs everyone out; a new address breaks the links people saved), and Deploy.
+
+**Troubleshooting.**
+
+| What you see                                          | What to do                                                                                                                                                                                                                 |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No **Update now**, though a newer release exists      | All three `DOOP_DOKPLOY_*` variables must be set in the Environment tab (the compose already sets `DOOP_UPDATE_REPO`); check for a path, a plain `http://` to a public host or a typo in `DOOP_DOKPLOY_URL`, then redeploy |
+| "Dokploy refused the API key"                         | The key was deleted or copied incomplete: create a new one under **Settings**, **Profile**, **API/CLI Keys** and update `DOOP_DOKPLOY_API_KEY`                                                                             |
+| An update failed and the old version is still running | Open the service's **Deployments** tab in Dokploy and read that deployment's log: it says why the new image did not start                                                                                                  |
 
 ## 4. Admins
 
