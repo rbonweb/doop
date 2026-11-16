@@ -22,6 +22,7 @@ import { Automations } from './pages/Automations'
 import { AutomationEditor } from './pages/AutomationEditor'
 import { Integrations } from './pages/Integrations'
 import { Workspace } from './pages/Workspace'
+import { UpgradeHost } from './components/UpgradeHost'
 import { authClient } from './lib/auth'
 import { useStore } from './lib/store'
 import { setName } from './lib/identity'
@@ -202,7 +203,7 @@ export function App() {
   const presenterWindow = !!canvasId && new URLSearchParams(location.search).has('presenter')
   /* /c/<id>/proto: the prototype player, full page */
   const prototypeOf = path.match(/^\/c\/([^/]+)\/proto\/?$/)?.[1]
-  const page = prototypeOf ? (
+  const screen = prototypeOf ? (
     <PrototypePage canvasId={prototypeOf} key={prototypeOf} />
   ) : canvasId ? (
     presenterWindow ? (
@@ -232,6 +233,12 @@ export function App() {
     <Automations />
   ) : (
     <Home />
+  )
+  const page = (
+    <>
+      {screen}
+      <UpgradeHost />
+    </>
   )
 
   /* The banner is not decoration: an impersonated session looks exactly like

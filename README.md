@@ -269,7 +269,10 @@ Agents can read `approvalStatus` (`draft`, `ready_for_dev`, `needs_review`) and
 `approval` attribution in `get_canvas` and `get_frame`. Call
 `get_canvas({ canvas_id, approval_status: "ready_for_dev" })` to find approved
 screens, then re-read `get_frame` before implementing. Only `ready_for_dev` is
-current sign-off. Approval is set by people in the app. In **Automations**, choose
+current sign-off. Approval is set by people in the app, or by an agent when a person asks
+it to: `set_frame_approval({ frame_id, status: "ready_for_dev" | "draft" })` (MCP and the Doop
+Agent) records the approval in that person's name, with the agent shown as "via". An agent
+never approves unasked, and automation runs cannot approve. In **Automations**, choose
 **Designs are approved** to run a workflow when frames on a selected canvas become
 ready for dev. Without an enabled workflow, approval only records sign-off.
 
@@ -316,6 +319,15 @@ The SwiftUI iOS app lives in [`ios/`](ios/README.md). Open `ios/Doop.xcodeproj`
 in Xcode to run it against Doop Cloud or your own HTTPS server. It uses SwiftUI for the app interface and a native canvas that
 renders frames with the Blitz HTML/CSS engine (Rust, no WebKit), over the same REST API and WebSocket rooms. The app is in development;
 see the iOS README for validation status and remaining release requirements.
+
+## Android app
+
+The native Kotlin/Jetpack Compose app lives in [`android/`](android/README.md).
+Open that directory in Android Studio or run `./gradlew assembleDebug` from it.
+It shares iOS's Blitz/Skia renderer and the existing REST/WebSocket backend, with
+native canvas gestures, editing, agent prompts, comments, exports and optional
+background task notifications. It targets ARM64 phones and tablets on Android 8+.
+See the Android README for setup, tests and release signing.
 
 ## Connect Claude
 

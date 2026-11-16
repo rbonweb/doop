@@ -65,6 +65,7 @@ async function chromiumRender(frame: Frame, params: RenderParams): Promise<Buffe
     format: params.format,
     scale: params.scale,
     quality: params.quality,
+    priority: 'background',
   })
   return buf
 }

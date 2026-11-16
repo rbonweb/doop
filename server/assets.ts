@@ -9,6 +9,7 @@ import { normalizeAssetTags, type AssetSource, type AssetTags } from '../shared/
 import { emitCanvasEvent } from './events.ts'
 import { htmlLoaded } from './frameHtml.ts'
 import { store } from './store.ts'
+import { FREE_UPLOAD_BYTES } from '../shared/billing.ts'
 
 /**
  * Uploaded assets: images, the files of font libraries, plus CSS stylesheets for the callers that opt in. Bytes live in object storage (server/storage.ts), one metadata row per asset in the assets table (including the canvas it was uploaded for). Frame HTML is the ground truth for which assets are still in use, tracked as a projection in asset_refs: every durable frame write re-extracts that frame's /a/<id> references (db/persist.ts), and boot rebuilds the whole table from the stored frames — so a failed fire-and-forget write self-heals. Nothing is ever deleted; if cleanup is wanted some day, asset_refs is the ledger to build it on.
@@ -16,7 +17,8 @@ import { store } from './store.ts'
  * Images are immutable. A stylesheet can be replaced in place (replaceAsset): same id and URL, a bumped `version`. Version 1 stays at `<id>.<ext>`; version n > 1 lives at `<id>-v<n>.<ext>`. An object served under a version number is never overwritten, so `?v=<n>` is safe to cache forever.
  */
 
-export const MAX_ASSET_BYTES = 5 * 1024 * 1024
+/** The default cap: imports, generated images and Free uploads. */
+export const MAX_ASSET_BYTES = FREE_UPLOAD_BYTES
 
 const MIME_EXT = {
   'image/png': 'png',
@@ -174,6 +176,8 @@ interface UploadTicket {
   /** provenance carried from the tool call to the PUT that lands the bytes */
   source?: AssetSource
   tags?: AssetTags
+  /** what the curl brings: an image for upload_asset (the default), a font file for upload_font */
+  kind?: 'asset' | 'font'
   expiresAt: number
   inFlight: boolean
 }
@@ -186,6 +190,7 @@ export function createUploadTicket(meta: {
   replaceAssetId?: string
   source?: AssetSource
   tags?: AssetTags
+  kind?: 'asset' | 'font'
 }): {
   token: string
   expiresAt: number
@@ -243,16 +248,21 @@ export interface AssetProvenance {
   tags?: AssetTags
 }
 
+const defaultLimitMessage = (bytes: number) => `file is ${(bytes / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB`
+
+/** What `createAsset` is told beyond the bytes: the uploader's cap where a person uploads (`bytes` and `message`, from entitlements.ts uploadCap; imports and generated images keep the default 5 MB) and whether a stylesheet is acceptable (`stylesheets`, the agent upload paths). */
+export type AssetOptions = AssetAcceptance & { bytes?: number; message?: (bytes: number) => string }
+
 export async function createAsset(
   buf: Buffer,
   meta: { canvasId?: string; ownerId?: string; uploadedBy: string } & AssetProvenance,
-  accept: AssetAcceptance = {},
+  options: AssetOptions = {},
 ): Promise<AssetMeta> {
+  const limit = { bytes: options.bytes ?? MAX_ASSET_BYTES, message: options.message ?? defaultLimitMessage }
   if (buf.length === 0) throw new Error('empty file')
-  if (buf.length > MAX_ASSET_BYTES)
-    throw new Error(`file is ${(buf.length / 1024 / 1024).toFixed(1)} MB — the limit is 5 MB`)
-  const mime = sniffMime(buf, accept)
-  if (!mime) throw new Error(accept.stylesheets ? WITH_CSS_ERROR : IMAGES_ONLY_ERROR)
+  if (buf.length > limit.bytes) throw new Error(limit.message(buf.length))
+  const mime = sniffMime(buf, options)
+  if (!mime) throw new Error(options.stylesheets ? WITH_CSS_ERROR : IMAGES_ONLY_ERROR)
   return storeAsset(buf, { mime, ext: MIME_EXT[mime] }, { ...meta, tags: normalizeAssetTags(meta.tags) })
 }
 
@@ -614,10 +624,12 @@ export async function replaceAsset(
   })
 }
 
-/** Fetch a remote file through the SSRF guard, validating every redirect
- *  hop, with a hard size cap enforced while streaming. */
-export async function fetchRemote(rawUrl: string): Promise<Buffer> {
+/** Fetch a remote image through the SSRF guard, validating every redirect
+ *  hop, with a hard size cap enforced while streaming. A caller that only
+ *  reads a small file (a favicon) may pass a tighter cap than the store's. */
+export async function fetchRemote(rawUrl: string, maxBytes: number = MAX_ASSET_BYTES): Promise<Buffer> {
   const { fetchPinnedPublicUrl, parsePublicHttpUrl } = await import('./publicUrl.ts')
+  const tooBig = new Error(`file exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit`)
   let url = parsePublicHttpUrl(rawUrl)
   for (let hop = 0; hop < 4; hop++) {
     const res = await fetchPinnedPublicUrl(url, {
@@ -632,7 +644,7 @@ export async function fetchRemote(rawUrl: string): Promise<Buffer> {
       continue
     }
     if (!res.ok) throw new Error(`fetch failed: HTTP ${res.status}`)
-    if (Number(res.headers.get('content-length') || 0) > MAX_ASSET_BYTES) throw new Error('file exceeds the 5 MB limit')
+    if (Number(res.headers.get('content-length') || 0) > maxBytes) throw tooBig
     if (!res.body) throw new Error('empty response')
     const chunks: Uint8Array[] = []
     let total = 0
@@ -641,9 +653,9 @@ export async function fetchRemote(rawUrl: string): Promise<Buffer> {
       const { done, value } = await reader.read()
       if (done) break
       total += value.byteLength
-      if (total > MAX_ASSET_BYTES) {
+      if (total > maxBytes) {
         await reader.cancel()
-        throw new Error('file exceeds the 5 MB limit')
+        throw tooBig
       }
       chunks.push(value)
     }

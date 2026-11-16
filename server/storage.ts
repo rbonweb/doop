@@ -25,7 +25,8 @@ export const storageMode: 'bucket' | 'disk' = BUCKET ? 'bucket' : 'disk'
    in disk mode the check doubles as the path-traversal guard: known literal
    prefixes, no dots or slashes in the name. */
 function assertKey(key: string) {
-  if (!/^(thumb\/|bg\/|render\/)?[A-Za-z0-9_-]+\.[a-z0-9]+$/.test(key)) throw new Error(`malformed storage key: ${key}`)
+  if (!/^(thumb\/|bg\/|render\/|iconify\/|pexels\/)?[A-Za-z0-9_-]+\.[a-z0-9]+$/.test(key))
+    throw new Error(`malformed storage key: ${key}`)
 }
 
 let s3: S3Client | undefined

@@ -1,16 +1,10 @@
 import { useState } from 'react'
 import { useStore } from '../lib/store'
+import { useRoster } from '../hooks/use-roster'
 import { api } from '../lib/api'
 import { cn } from '../lib/utils'
 import { timeAgo } from '../lib/time'
-import {
-  AGENT_ROLES,
-  DEFAULT_ROLE_ID,
-  PIPELINE_PRESETS,
-  roleByAgentName,
-  roleById,
-  roleName,
-} from '../../shared/agents'
+import { DEFAULT_ROLE_ID, PIPELINE_PRESETS, roleByAgentName, roleById, roleName } from '../../shared/agents'
 import type { AgentTask } from '../../shared/types'
 import { posthog } from '../lib/posthog'
 import { MeterLine, isResidentLimit, useAllowance } from './TeamAllowance'
@@ -83,12 +77,13 @@ function groupImports(queued: AgentTask[]): { key: string; cards: AgentTask[] }[
 
 /** The pipeline of a card with its current position marked. */
 function Trail({ task, state }: { task: AgentTask; state: 'queued' | 'working' | 'done' }) {
+  const roster = useRoster()
   const pipeline = pipelineOf(task)
   const at = Math.min(task.stage ?? 0, pipeline.length - 1)
   return (
     <div className="mt-[9px] flex flex-wrap items-center gap-x-[5px] gap-y-1">
       {pipeline.map((id, i) => {
-        const role = roleById(id)
+        const role = roleById(id, roster)
         const phase = state === 'done' || i < at ? 'past' : i === at ? state : 'ahead'
         return (
           <span
@@ -111,6 +106,7 @@ function Trail({ task, state }: { task: AgentTask; state: 'queued' | 'working' |
 
 /** The roster: who is on the team, what each one owns, and what they're on. */
 function Team({ tasks, onPick }: { tasks: AgentTask[]; onPick: (id: string) => void }) {
+  const roster = useRoster()
   return (
     <div className="mb-[26px]">
       <div className="mb-3 flex items-baseline gap-2.5 border-b border-line pb-2.5">
@@ -118,7 +114,7 @@ function Team({ tasks, onPick }: { tasks: AgentTask[]; onPick: (id: string) => v
         <span className={hintCls}>Pick one to queue a card · @mention them on any element</span>
       </div>
       <div className="flex flex-nowrap gap-2 overflow-x-auto pb-1 [scroll-snap-type:x_proximity] md:flex-wrap md:overflow-visible md:pb-0">
-        {AGENT_ROLES.map((role) => {
+        {roster.map((role) => {
           const working = tasks.find((t) => t.agentName === role.name && !t.endedAt && !t.failedAt)
           const waiting = tasks.filter(
             (t) => t.queuedBy && !t.agentName && !t.failedAt && !t.endedAt && pipelineOf(t)[t.stage ?? 0] === role.id,
@@ -165,6 +161,7 @@ function Team({ tasks, onPick }: { tasks: AgentTask[]; onPick: (id: string) => v
 }
 
 export function Board({ canvasId }: { canvasId: string }) {
+  const roster = useRoster()
   const tasks = useStore((s) => s.tasks)
   const [draft, setDraft] = useState<string | null>(null)
   const [agents, setAgents] = useState<string[]>([DEFAULT_ROLE_ID])
@@ -310,7 +307,7 @@ export function Board({ canvasId }: { canvasId: string }) {
                     <b>{t.queuedBy}</b> · {timeAgo(t.startedAt)}
                   </div>
                   <div className="mt-[9px] font-mono text-[11px] text-ink-faint">
-                    ✦ waiting for {roleName(pipelineOf(t)[t.stage ?? 0])}
+                    ✦ waiting for {roleName(pipelineOf(t)[t.stage ?? 0], roster)}
                   </div>
                 </Card>
               )
@@ -361,7 +358,7 @@ export function Board({ canvasId }: { canvasId: string }) {
                     </div>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1">
-                    {AGENT_ROLES.map((role) => {
+                    {roster.map((role) => {
                       const at = agents.indexOf(role.id)
                       return (
                         <Button
@@ -400,8 +397,11 @@ export function Board({ canvasId }: { canvasId: string }) {
                     {agents.length === 0
                       ? 'Doop picks it up right away'
                       : agents.length === 1
-                        ? `${roleName(agents[0])} picks it up right away`
-                        : `${roleName(agents[0])} starts, then ${agents.slice(1).map(roleName).join(' → ')}`}
+                        ? `${roleName(agents[0], roster)} picks it up right away`
+                        : `${roleName(agents[0], roster)} starts, then ${agents
+                            .slice(1)
+                            .map((id) => roleName(id, roster))
+                            .join(' → ')}`}
                   </span>
                 </div>
               </Card>
@@ -436,7 +436,7 @@ export function Board({ canvasId }: { canvasId: string }) {
                     style={{ background: t.color }}
                   />
                   <b className="inline-flex items-center gap-1">
-                    <RoleMark role={roleByAgentName(t.agentName)} size={13} />
+                    <RoleMark role={roleByAgentName(t.agentName, roster)} size={13} />
                     {t.agentName}
                   </b>
                   {t.owner && <span> · for {t.owner}</span>}

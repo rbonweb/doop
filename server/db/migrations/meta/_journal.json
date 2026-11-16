@@ -400,6 +400,55 @@
       "when": 1794479620640,
       "tag": "0057_agent_speed_asset_provenance",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1794783639191,
+      "tag": "0058_library_components",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1794783640191,
+      "tag": "0059_library_publish_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1794783641191,
+      "tag": "0060_library_nested_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1794783642191,
+      "tag": "0061_work_replies",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1794783643191,
+      "tag": "0062_custom_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1794783644191,
+      "tag": "0063_component_soft_delete",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1794783645191,
+      "tag": "0064_workspace_seats_bought",
+      "breakpoints": true
     }
   ]
 }

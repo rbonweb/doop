@@ -5,7 +5,11 @@ import { createRoot, type Root } from 'react-dom/client'
 import type { Canvas, Frame } from '../shared/types'
 
 vi.mock('../src/lib/api', () => ({
-  api: { updateFrame: () => Promise.resolve(), deleteFrame: () => Promise.resolve() },
+  api: {
+    updateFrame: () => Promise.resolve(),
+    deleteFrame: () => Promise.resolve(),
+    canvasLibrary: () => new Promise(() => {}),
+  },
 }))
 vi.mock('../src/lib/posthog', () => ({ posthog: { capture: vi.fn() } }))
 
