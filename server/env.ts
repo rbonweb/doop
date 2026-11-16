@@ -1,6 +1,7 @@
 import { bool, cleanEnv, EnvMissingError, makeExactValidator, port, str } from 'envalid'
 import type { ReporterOptions } from 'envalid'
 import { createHash } from 'node:crypto'
+import { isIPv4, isIPv6 } from 'node:net'
 import {
   DEFAULT_DEEPSEEK_MODEL,
   DEFAULT_GEMINI_MODEL,
@@ -48,6 +49,23 @@ const origin = makeExactValidator<string>((input) => {
   return input.replace(/\/+$/, '')
 })
 
+/** Loopback, a private address or a bare local name; decided on parsed addresses, never on a string prefix. */
+export function isPrivateHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  if (isIPv4(host)) {
+    const [a = 0, b = 0] = host.split('.').map(Number)
+    return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31)
+  }
+  if (isIPv6(host)) {
+    if (host === '::1') return true
+    /* the first group decides fc00::/7 and fe80::/10; a v4-mapped address (::ffff:…) starts with 0 and is refused */
+    const first = parseInt(host.split(':')[0] || '0', 16)
+    return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80
+  }
+  /* a name: localhost, or a single label such as a compose service; never a dotted name or a number */
+  return host === 'localhost' || (!host.includes(':') && !host.includes('.') && !/^\d+$/.test(host))
+}
+
 /** A Dokploy panel's origin: https, or http where the panel is on this machine or a private network
  *  (loopback, a private address, a single-label name such as a compose service). No path, query or
  *  credentials, so the API key can only ever be sent to the host the operator named. */
@@ -64,19 +82,8 @@ const dokployOrigin = makeExactValidator<string>((input) => {
   if (parsed.username || parsed.password || parsed.search || parsed.hash || !['', '/'].includes(parsed.pathname)) {
     throw new TypeError('Give the origin only: no path, query or credentials')
   }
-  if (parsed.protocol === 'http:') {
-    const host = parsed.hostname.replace(/^\[|\]$/g, '')
-    const privateHost =
-      host === 'localhost' ||
-      host === '::1' ||
-      /^127\./.test(host) ||
-      /^10\./.test(host) ||
-      /^192\.168\./.test(host) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-      /^f[cd][0-9a-f]{2}:/i.test(host) ||
-      !host.includes('.')
-    if (!privateHost)
-      throw new TypeError('http is only accepted for a panel on this machine or a private network; use https')
+  if (parsed.protocol === 'http:' && !isPrivateHost(parsed.hostname)) {
+    throw new TypeError('http is only accepted for a panel on this machine or a private network; use https')
   }
   return parsed.origin
 })
@@ -435,6 +442,11 @@ function parse() {
     )
     throw new Error(
       `Invalid environment configuration:\n  ${missing.join(', ')}: missing (Update now through Dokploy needs DOOP_DOKPLOY_URL, DOOP_DOKPLOY_API_KEY and DOOP_DOKPLOY_COMPOSE_ID together)`,
+    )
+  }
+  if (dokploy.length > 0 && parsed.DOOP_UPDATE_REPO === undefined) {
+    throw new Error(
+      'Invalid environment configuration:\n  DOOP_UPDATE_REPO: missing (Update now through Dokploy follows the releases of this owner/repo, and needs it set beside DOOP_DOKPLOY_*)',
     )
   }
   if (dokploy.length === 3 && parsed.DOOP_UPDATE_DIR !== undefined)
