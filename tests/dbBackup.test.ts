@@ -12,12 +12,13 @@ import {
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BackupFailed,
   dumpConnection,
   lastBackupAt,
   nextNightly,
+  startNightlyBackup,
   runBackup,
   type BackupOptions,
 } from '../server/dbBackup.ts'
@@ -150,7 +151,7 @@ describe('runBackup', () => {
     expect(error.message).toMatch(/Another database backup/)
     expect(existsSync(lock)).toBe(true)
 
-    const stale = new Date(NOW.getTime() - 31 * 60_000)
+    const stale = new Date(NOW.getTime() - 46 * 60_000)
     utimesSync(lock, stale, stale)
     const file = await runBackup('nightly', options(dir, executable))
     expect(existsSync(file)).toBe(true)
@@ -224,5 +225,45 @@ describe('lastBackupAt', () => {
     utimesSync(older, olderAt, olderAt)
     utimesSync(newer, NOW, NOW)
     expect(await lastBackupAt(dir)).toBe(statSync(newer).mtimeMs)
+  })
+})
+
+describe('sslmode', () => {
+  it('reaches pg_dump only as one of the six libpq values, with no-verify mapped to require', () => {
+    const mode = (query: string) => dumpConnection(`postgres://u:p@h/db${query}`).env.PGSSLMODE
+    for (const value of ['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full']) {
+      expect(mode(`?sslmode=${value}`)).toBe(value)
+    }
+    expect(mode('?sslmode=no-verify')).toBe('require')
+    expect(mode('?sslmode=bogus')).toBeUndefined()
+    expect(mode('?sslmode=')).toBeUndefined()
+    expect(mode('')).toBeUndefined()
+  })
+})
+
+describe('a stalled dump', () => {
+  it('is killed at the bound, reported, and leaves no lock or temp file', async () => {
+    const { root, dir } = tempDir()
+    const hang = pgDump(root, 'exec sleep 30')
+    const error = await rejection(runBackup('before-v2', { ...options(dir, hang), limitMs: 300 }))
+    expect(error.message).toMatch(/took longer than 0 seconds|took longer than \d+ seconds and was stopped/)
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  it('does not stop the nightly schedule: it is armed again before the run starts', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      vi.setSystemTime(new Date(2026, 10, 16, 2, 0, 0))
+      const { root, dir } = tempDir()
+      const hang = pgDump(root, 'exec sleep 30')
+      const stop = startNightlyBackup({ databaseUrl: DATABASE_URL, dir, keepDays: 14, executable: hang, limitMs: 200 })
+      expect(vi.getTimerCount()).toBe(1)
+      vi.advanceTimersByTime(80 * 60_000)
+      /* the run is under way (and will hang until its bound), yet the next night is already scheduled */
+      expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1)
+      stop()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

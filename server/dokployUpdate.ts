@@ -61,6 +61,11 @@ function describeFailure(e: unknown): string {
   return 'An unexpected error stopped the update.'
 }
 
+/** The watch ran out while Dokploy was still deploying: not a failure to undo, the deployment may yet finish. */
+class StillInstalling extends DokployError {}
+
+const STILL_INSTALLING = 'Dokploy is still installing'
+
 export class DokployUpdater {
   private readonly client: DokployClient
   private readonly dir: string
@@ -141,6 +146,15 @@ export class DokployUpdater {
         await this.write(record).catch(() => {})
       }
     }
+    /* the deployment outlasted the watch but finished: this process is the new version */
+    if (
+      record.state === 'failed' &&
+      record.tag === this.options.current &&
+      record.message.startsWith(STILL_INSTALLING)
+    ) {
+      record = { ...record, state: 'succeeded', message: `Updated to ${record.tag}.`, at: this.now() }
+      await this.write(record).catch(() => {})
+    }
     return { state: record.state, tag: record.tag, at: record.at, message: record.message }
   }
 
@@ -177,13 +191,17 @@ export class DokployUpdater {
   private async run(tag: string, previous: string): Promise<void> {
     let wrote = false
     let original = ''
+    /* the DOOP_TAG value to put back: what the Environment names, which need not equal the running version's name */
+    let oldTag = previous
     try {
       /* the Environment is checked before the backup, so a bad key or a missing DOOP_TAG does not cost a dump */
       withTag(await this.client.composeEnv(), tag)
       await this.backup(`before-${tag}`)
       await this.write({ state: 'running', tag, previous, message: `Asking Dokploy to install ${tag}…` })
       original = await this.client.composeEnv()
-      const next = withTag(original, tag).env
+      const swapped = withTag(original, tag)
+      const next = swapped.env
+      oldTag = swapped.previous || previous
       const known = new Set((await this.client.deployments()).map((d) => d.id).filter((id) => id !== null))
       const startedAt = this.now()
       wrote = true
@@ -191,7 +209,7 @@ export class DokployUpdater {
       await this.write({
         state: 'running',
         tag,
-        previous,
+        previous: oldTag,
         message: `Dokploy is installing ${tag}; Doop restarts and this page reloads.`,
       })
       await this.client.redeploy()
@@ -201,15 +219,20 @@ export class DokployUpdater {
       if (!(e instanceof DokployError || e instanceof BackupFailed)) {
         console.error('[update] unexpected failure:', e instanceof Error ? e.name : 'error')
       }
-      const reverted = wrote ? await this.revert(previous, original) : true
-      await this.fail(tag, previous, this.failureText(reason, wrote, reverted, previous))
+      if (e instanceof StillInstalling) {
+        /* the tag stays: the deployment may still finish, and the next boot marks it done */
+        await this.fail(tag, oldTag, e.message)
+        return
+      }
+      const reverted = wrote ? await this.revert(oldTag, original) : true
+      await this.fail(tag, oldTag, this.failureText(reason, wrote, reverted, previous, oldTag))
     }
   }
 
-  private failureText(reason: string, wrote: boolean, reverted: boolean, previous: string): string {
-    if (!wrote) return `${reason} Nothing was changed; ${previous} is still running.`
-    if (reverted) return `${reason} DOOP_TAG is back at ${previous}, which is still running.`
-    return `${reason} DOOP_TAG could not be set back: set it to ${previous} in Dokploy.`
+  private failureText(reason: string, wrote: boolean, reverted: boolean, running: string, oldTag: string): string {
+    if (!wrote) return `${reason} Nothing was changed; ${running} is still running.`
+    if (reverted) return `${reason} DOOP_TAG is back at ${oldTag}, and ${running} is still running.`
+    return `${reason} DOOP_TAG could not be set back: set it to ${oldTag} in Dokploy.`
   }
 
   /** Put the previous tag back in the Environment: re-read it first so other edits survive. */
@@ -231,19 +254,19 @@ export class DokployUpdater {
   private async watch(tag: string, previous: string, known: Set<string | null>, startedAt: number): Promise<void> {
     const deadline = this.now() + this.watchMs
     let doneAt: number | null = null
-    while (this.now() < deadline) {
-      await this.sleep(this.pollMs)
+    /* one look at the deployment this update started; throws only when it ended badly */
+    const look = async (): Promise<void> => {
       let list
       try {
         list = await this.client.deployments()
       } catch {
-        /* Dokploy may be restarting itself; the next poll tries again */
-        continue
+        /* Dokploy may be restarting itself; the next look tries again */
+        return
       }
       const fresh = list
         .filter((d) => (d.id !== null ? !known.has(d.id) : d.createdAt !== null && d.createdAt >= startedAt - 60_000))
         .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0]
-      if (!fresh) continue
+      if (!fresh) return
       if (fresh.status === 'error' || fresh.status === 'cancelled') {
         throw new DokployError(
           `Dokploy could not install ${tag} (the deployment ${fresh.status === 'error' ? 'failed' : 'was cancelled'}).`,
@@ -256,7 +279,15 @@ export class DokployUpdater {
         }
       }
     }
-    throw new DokployError(`Dokploy did not finish installing ${tag} in ${Math.round(this.watchMs / 60_000)} minutes.`)
+    while (this.now() < deadline) {
+      await this.sleep(this.pollMs)
+      await look()
+    }
+    /* out of time: look once more, and unless it ended badly leave the tag where it is */
+    await look()
+    throw new StillInstalling(
+      `${STILL_INSTALLING} ${tag}; check its deployment log in Dokploy. DOOP_TAG was left at ${tag}.`,
+    )
   }
 }
 

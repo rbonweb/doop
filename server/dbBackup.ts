@@ -22,8 +22,11 @@ const PG_DUMP = '/usr/bin/pg_dump'
 const NIGHTLY = { hour: 3, minute: 17 }
 /* a backup this recent is as good as tonight's */
 const NIGHTLY_SKIP_MS = 20 * 3_600_000
-/* a lock older than this belongs to a process that died */
-const LOCK_STALE_MS = 30 * 60_000
+/* a dump is stopped after this long */
+const DUMP_LIMIT_MS = 30 * 60_000
+/* a running dump touches its lock every minute, so a lock this old belongs to a process that died */
+const LOCK_TOUCH_MS = 60_000
+const LOCK_STALE_MS = 45 * 60_000
 const DAY_MS = 86_400_000
 const BACKUP_FILE = /^doop-.+\.sql\.gz$/
 /* how much of pg_dump's own complaint is worth keeping */
@@ -42,6 +45,8 @@ export interface BackupOptions {
   /** the pg_dump binary; tests point it at a script */
   executable?: string
   now?: () => Date
+  /** how long a dump may run; tests shorten it */
+  limitMs?: number
 }
 
 export interface Connection {
@@ -75,8 +80,12 @@ export function dumpConnection(databaseUrl: string): Connection {
     childEnv.PGPASSWORD = decodeURIComponent(url.password)
     secrets.push(childEnv.PGPASSWORD, url.password)
   }
+  /* libpq knows six values; node-pg's `no-verify` is the closest to `require` */
   const sslmode = url.searchParams.get('sslmode')
-  if (sslmode && /^[a-z-]+$/.test(sslmode)) childEnv.PGSSLMODE = sslmode
+  if (sslmode === 'no-verify') childEnv.PGSSLMODE = 'require'
+  else if (sslmode && ['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'].includes(sslmode)) {
+    childEnv.PGSSLMODE = sslmode
+  }
   return { args, env: childEnv, secrets }
 }
 
@@ -95,12 +104,27 @@ export function stamp(at: Date): string {
     .replace('T', '-')
 }
 
-async function dump(file: string, connection: Connection, executable: string): Promise<void> {
+async function dump(file: string, connection: Connection, executable: string, limitMs: number): Promise<void> {
   const child = spawn(executable, connection.args, {
     /* a fixed environment: the dump gets its connection and nothing else the server holds */
     env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', ...connection.env },
     stdio: ['ignore', 'pipe', 'pipe'],
+    /* its own process group, so a stalled dump is killed with whatever it started */
+    detached: true,
   })
+  let timedOut = false
+  const stop = () => {
+    try {
+      if (child.pid) process.kill(-child.pid, 'SIGKILL')
+    } catch {
+      child.kill('SIGKILL')
+    }
+  }
+  const timer = setTimeout(() => {
+    timedOut = true
+    stop()
+    child.stdout.destroy(new Error('timed out'))
+  }, limitMs)
   let stderr = ''
   child.stderr.setEncoding('utf8')
   child.stderr.on('data', (chunk: string) => {
@@ -117,12 +141,19 @@ async function dump(file: string, connection: Connection, executable: string): P
     const code = await exit
     if (code !== 0) throw new Error(`pg_dump exited with ${code}`)
   } catch (e) {
-    child.kill('SIGKILL')
+    stop()
+    if (timedOut) {
+      throw new BackupFailed(
+        `The database backup took longer than ${limitMs >= 60_000 ? `${Math.round(limitMs / 60_000)} minutes` : `${Math.round(limitMs / 1000)} seconds`} and was stopped.`,
+      )
+    }
     const reason = e instanceof Error ? e.message : 'unknown error'
     const detail = scrub(stderr.trim(), connection.secrets)
     throw new BackupFailed(
       `The database backup failed (${scrub(reason, connection.secrets)}).${detail ? ` ${detail}` : ''}`,
     )
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -186,12 +217,19 @@ export async function runBackup(label: string, options: BackupOptions = {}): Pro
   } catch {
     throw new BackupFailed(`The backup folder ${dir} cannot be created.`)
   }
-  const release = await acquire(path.join(dir, '.backup.lock'), now().getTime())
+  const lock = path.join(dir, '.backup.lock')
+  const release = await acquire(lock, now().getTime())
+  /* a long legitimate dump keeps its lock fresh, so nothing takes it over */
+  const touch = setInterval(() => {
+    const at = now()
+    void fs.utimes(lock, at, at).catch(() => {})
+  }, LOCK_TOUCH_MS)
+  touch.unref()
   try {
     const final = path.join(dir, `doop-${stamp(now())}-${label}.sql.gz`)
     const temp = `${final}.tmp`
     try {
-      await dump(temp, connection, options.executable ?? PG_DUMP)
+      await dump(temp, connection, options.executable ?? PG_DUMP, options.limitMs ?? DUMP_LIMIT_MS)
       await fs.rename(temp, final)
     } catch (e) {
       await fs.rm(temp, { force: true })
@@ -205,6 +243,7 @@ export async function runBackup(label: string, options: BackupOptions = {}): Pro
     )
     return final
   } finally {
+    clearInterval(touch)
     await release()
   }
 }
@@ -242,7 +281,9 @@ export function startNightlyBackup(options: BackupOptions = {}): () => void {
     const wait = nextNightly(now()).getTime() - now().getTime()
     timer = setTimeout(
       () => {
-        void tonight().finally(arm)
+        /* armed again before tonight's run starts, so no outcome of it can stop the schedule */
+        arm()
+        void tonight()
       },
       /* setTimeout caps at 2^31 ms; a day is far under it */
       Math.max(1_000, wait),

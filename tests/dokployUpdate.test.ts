@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BackupFailed } from '../server/dbBackup.ts'
 import { DokployClient, DokployError, withTag } from '../server/dokploy.ts'
 import { DokployUpdater } from '../server/dokployUpdate.ts'
-import { reloadEnv } from '../server/env.ts'
+import { isPrivateHost, reloadEnv } from '../server/env.ts'
 import { stubEnv, unstubAllEnvs } from './envStub.ts'
 
 const KEY = 'dk_live_SUPER-SECRET-KEY-123'
@@ -144,6 +144,12 @@ describe('withTag', () => {
     expect(withTag('DOOP_TAG="v1"\n', 'v2')).toEqual({ env: 'DOOP_TAG=v2\n', previous: 'v1' })
   })
 
+  it('keeps a trailing comment and reads the old value around quotes and comments', () => {
+    expect(withTag('DOOP_TAG=v1 # pinned\nX=1\n', 'v2')).toEqual({ env: 'DOOP_TAG=v2 # pinned\nX=1\n', previous: 'v1' })
+    expect(withTag('DOOP_TAG="rel 1" # a\r\n', 'v2')).toEqual({ env: 'DOOP_TAG=v2 # a\r\n', previous: 'rel 1' })
+    expect(withTag('DOOP_TAG=\n', 'v2')).toEqual({ env: 'DOOP_TAG=v2\n', previous: '' })
+  })
+
   it('refuses no DOOP_TAG line and more than one', () => {
     expect(() => withTag('A=1\nB=2\n', 'v2')).toThrow(/no DOOP_TAG= line/)
     expect(() => withTag('', 'v2')).toThrow(DokployError)
@@ -166,6 +172,29 @@ describe('the Dokploy client', () => {
     await expect(client.composeEnv()).rejects.toThrow(DokployError)
     expect(panel.calls[0]?.key).toBe(KEY)
     expect(elsewhere.calls).toHaveLength(0)
+  })
+
+  it('stops reading an answer past 2 MB, declared or streamed', async () => {
+    const panel = await startPanel('')
+    const client = new DokployClient({ url: panel.url, apiKey: KEY, composeId: COMPOSE })
+    panel.override.set('compose.one', { status: 200, body: JSON.stringify({ env: 'x'.repeat(2 * 1024 * 1024 + 10) }) })
+    await expect(client.composeEnv()).rejects.toThrow(/more than 2 MB/)
+    const chunked = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.write('{"env":"')
+      const big = 'y'.repeat(256 * 1024)
+      for (let i = 0; i < 12; i++) res.write(big)
+      res.end('"}')
+    })
+    await new Promise<void>((resolve) => chunked.listen(0, '127.0.0.1', resolve))
+    const streamed = new DokployClient({
+      url: `http://127.0.0.1:${(chunked.address() as AddressInfo).port}`,
+      apiKey: KEY,
+      composeId: COMPOSE,
+    })
+    await expect(streamed.composeEnv()).rejects.toThrow(/more than 2 MB/)
+    chunked.closeAllConnections()
+    chunked.close()
   })
 
   it('gives up on a panel that does not answer', async () => {
@@ -263,8 +292,24 @@ describe('Update now through Dokploy', () => {
     expect(panel.env).toBe('A=1\nDOOP_TAG=v1\n')
     expect(writes(panel).map((c) => c.procedure)).toEqual(['compose.update', 'compose.redeploy', 'compose.update'])
     expect(record(dir)).toMatchObject({ state: 'failed', tag: 'v2', previous: 'v1' })
-    expect(record(dir).message).toMatch(/failed.*DOOP_TAG is back at v1, which is still running/)
+    expect(record(dir).message).toMatch(/failed.*DOOP_TAG is back at v1, and v1 is still running/)
     expect(up.busy).toBe(false)
+  })
+
+  it('puts back the old DOOP_TAG value, comment kept, not the running version', async () => {
+    const panel = await startPanel('A=1\nDOOP_TAG=release-1 # pinned\n')
+    panel.deployments = []
+    panel.onRedeploy = () => {
+      panel.deployments = [{ deploymentId: 'd2', status: 'error', createdAt: new Date().toISOString() }]
+    }
+    const dir = statusDir()
+    const up = updater(panel, dir)
+    up.reserve()
+    await up.start('v2')
+    await up.idle
+    expect(panel.env).toBe('A=1\nDOOP_TAG=release-1 # pinned\n')
+    expect(record(dir)).toMatchObject({ state: 'failed', previous: 'release-1' })
+    expect(record(dir).message).toMatch(/DOOP_TAG is back at release-1, and v1 is still running/)
   })
 
   it('ignores deployments that were there before the redeploy', async () => {
@@ -283,8 +328,13 @@ describe('Update now through Dokploy', () => {
     up.reserve()
     await up.start('v2')
     await up.idle
-    expect(record(dir).message).toMatch(/did not finish installing v2/)
-    expect(panel.env).toBe('DOOP_TAG=v1\n')
+    /* the deployment may still finish: the tag stays, and the boot that comes up as v2 marks it done */
+    expect(record(dir)).toMatchObject({ state: 'failed', previous: 'v1' })
+    expect(record(dir).message).toMatch(/Dokploy is still installing v2; check its deployment log/)
+    expect(panel.env).toBe('DOOP_TAG=v2\n')
+    expect(writes(panel).map((c) => c.procedure)).toEqual(['compose.update', 'compose.redeploy'])
+    const next = updater(panel, dir, { current: 'v2' })
+    expect(await next.status()).toMatchObject({ state: 'succeeded', tag: 'v2' })
   })
 
   it('stops before anything is written when the backup fails', async () => {
@@ -422,6 +472,7 @@ describe('settling a record at boot', () => {
 
 describe('the Dokploy environment variables', () => {
   it('want all three together', () => {
+    vi.stubEnv('DOOP_UPDATE_REPO', 'acme/doop')
     vi.stubEnv('DOOP_DOKPLOY_URL', 'https://dokploy.example.com')
     expect(() => reloadEnv()).toThrow(/DOOP_DOKPLOY_API_KEY, DOOP_DOKPLOY_COMPOSE_ID: missing/)
     unstubAllEnvs()
@@ -432,13 +483,55 @@ describe('the Dokploy environment variables', () => {
     vi.stubEnv('DOOP_DOKPLOY_URL', 'https://dokploy.example.com')
     vi.stubEnv('DOOP_DOKPLOY_API_KEY', KEY)
     vi.stubEnv('DOOP_DOKPLOY_COMPOSE_ID', COMPOSE)
+    vi.stubEnv('DOOP_UPDATE_REPO', 'acme/doop')
     vi.stubEnv('DOOP_UPDATE_DIR', '/opt/doop')
     expect(() => reloadEnv()).toThrow(/DOOP_UPDATE_DIR.*DOOP_DOKPLOY_URL/)
     vi.stubEnv('DOOP_UPDATE_DIR', '')
     expect(() => reloadEnv()).not.toThrow()
   })
 
+  it('need DOOP_UPDATE_REPO, and say so', () => {
+    vi.stubEnv('DOOP_DOKPLOY_URL', 'https://dokploy.example.com')
+    vi.stubEnv('DOOP_DOKPLOY_API_KEY', KEY)
+    vi.stubEnv('DOOP_DOKPLOY_COMPOSE_ID', COMPOSE)
+    expect(() => reloadEnv()).toThrow(/DOOP_UPDATE_REPO: missing/)
+    vi.stubEnv('DOOP_DOKPLOY_COMPOSE_ID', '')
+    expect(() => reloadEnv()).toThrow(/DOOP_DOKPLOY_COMPOSE_ID: missing/)
+  })
+
+  it('judge a private host by its parsed address, not its text', () => {
+    for (const host of [
+      '127.0.0.1',
+      '10.1.2.3',
+      '192.168.1.5',
+      '172.16.0.1',
+      '172.31.255.1',
+      '[::1]',
+      '[fd12:3456::1]',
+      '[fe80::1]',
+      'localhost',
+      'dokploy',
+    ]) {
+      expect(isPrivateHost(host), host).toBe(true)
+    }
+    for (const host of [
+      '[2606:4700::1111]',
+      '[::ffff:8.8.8.8]',
+      '[::ffff:127.0.0.1]',
+      '10.example.com',
+      '127.evil.com',
+      '192.168.1.evil.net',
+      '8.8.8.8',
+      '172.32.0.1',
+      '172.15.0.1',
+      'dokploy.example.com',
+    ]) {
+      expect(isPrivateHost(host), host).toBe(false)
+    }
+  })
+
   it('take an origin only: https, or http on a private network', () => {
+    vi.stubEnv('DOOP_UPDATE_REPO', 'acme/doop')
     vi.stubEnv('DOOP_DOKPLOY_API_KEY', KEY)
     vi.stubEnv('DOOP_DOKPLOY_COMPOSE_ID', COMPOSE)
     const accepted = [
@@ -453,6 +546,11 @@ describe('the Dokploy environment variables', () => {
     }
     const refused = [
       'http://dokploy.example.com',
+      'http://[2606:4700::1111]',
+      'http://[::ffff:8.8.8.8]',
+      'http://10.example.com',
+      'http://127.evil.com',
+      'http://192.168.1.evil.net',
       'https://dokploy.example.com/panel',
       'https://user:pw@dokploy.example.com',
       'https://dokploy.example.com/?x=1',

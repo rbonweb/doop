@@ -13,6 +13,8 @@ import { env } from './env.ts'
  */
 
 const TIMEOUT_MS = 15_000
+/* a real answer is a few KB; anything past this is not Dokploy answering */
+const MAX_BODY_BYTES = 2 * 1024 * 1024
 
 /** A Dokploy call that failed; the message is safe to show an admin. */
 export class DokployError extends Error {}
@@ -52,6 +54,35 @@ function timestamp(value: string | number | null | undefined): number | null {
   return Number.isFinite(ms) ? ms : null
 }
 
+async function readCapped(res: Response, procedure: string): Promise<string> {
+  const tooBig = () => new DokployError(`Dokploy sent more than 2 MB for ${procedure}; Doop stopped reading it.`)
+  const declared = Number(res.headers.get('content-length'))
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    await res.body?.cancel().catch(() => {})
+    throw tooBig()
+  }
+  if (!res.body) return ''
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => {})
+        throw tooBig()
+      }
+      chunks.push(value)
+    }
+  } catch (e) {
+    if (e instanceof DokployError) throw e
+    throw new DokployError(`Dokploy's answer to ${procedure} was cut short.`)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
 export class DokployClient {
   constructor(private readonly config: DokployConfig) {}
 
@@ -82,7 +113,7 @@ export class DokployClient {
     }
     if (res.status === 404) throw new DokployError(`Dokploy does not know that compose service (${procedure}).`)
     if (!res.ok) throw new DokployError(`Dokploy answered ${res.status} to ${procedure}.`)
-    const text = await res.text().catch(() => '')
+    const text = await readCapped(res, procedure)
     if (!text.trim()) return null
     try {
       return JSON.parse(text)
@@ -140,8 +171,11 @@ export function withTag(envText: string, tag: string): { env: string; previous: 
     throw new DokployError('The compose Environment has more than one DOOP_TAG= line; leave exactly one.')
   }
   const match = matches[0]!
-  const previous = match[2]!.trim().replace(/^(["'])(.*)\1$/, '$2')
+  /* the value, then an optional ` # comment` that stays where it is */
+  const value = /^\s*(?:"([^"]*)"|'([^']*)'|([^\s#]*))(\s+#.*)?\s*$/.exec(match[2]!)
+  const previous = value ? (value[1] ?? value[2] ?? value[3] ?? '') : ''
+  const comment = value?.[4] ?? ''
   const start = match.index ?? 0
-  const replaced = `${envText.slice(0, start)}${match[1]}${tag}${envText.slice(start + match[0].length)}`
+  const replaced = `${envText.slice(0, start)}${match[1]}${tag}${comment}${envText.slice(start + match[0].length)}`
   return { env: replaced, previous }
 }

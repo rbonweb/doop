@@ -179,7 +179,7 @@ Add `--remove` before the address to take the role away again. After this, invit
    DOOP_DOKPLOY_COMPOSE_ID=<the id>
    ```
 
-   `DOOP_DOKPLOY_URL` is Dokploy's own address, `https://` only (plain `http://` is accepted on a loopback or private address) and with no path.
+   `DOOP_DOKPLOY_URL` is Dokploy's own address, `https://` only, and with no path. Plain `http://` is accepted only when the address is this machine or a private network: `localhost`, a `127.x`, `10.x`, `172.16-31.x` or `192.168.x` address, an IPv6 `::1`, `fc00::/7` or `fe80::/10` address, or a bare service name such as `dokploy` (never a dotted name such as `10.example.com`).
 
 4. Press **Redeploy** once so Doop reads the new variables. Both containers restart, which takes about a minute.
 
@@ -192,11 +192,11 @@ The key can redeploy any service in Dokploy, so keep it private: it is as sensit
 3. asks Dokploy to redeploy the compose service and watches that deployment,
 4. reloads the page once the new version answers.
 
-If the backup fails, nothing is sent to Dokploy. If the deployment fails, Doop puts the previous tag back, and the version that was already running keeps running; the card then says the update failed.
+If the backup fails, nothing is sent to Dokploy. If the deployment fails, Doop puts the previous tag back, and the version that was already running keeps running; the card then says the update failed. If Dokploy is still deploying after 15 minutes, Doop stops watching and leaves the new tag in place: the card says Dokploy is still installing and to check its deployment log, and it shows the update as done once the new version is up.
 
 **The one limit.** A new release that starts and then crashes leaves nothing running to put the old one back by itself. The previous image is still on the server: set `DOOP_TAG` in the Environment tab back to the tag you were on and press **Redeploy**. The backup from just before the update is in `../files/data/backups`, if the database needs it too.
 
-**Backups.** Doop backs the database up before every update and every night at 03:17 server time, into `../files/data/backups` on the Dokploy host (`/app/data/backups` inside the container). A backup is named `doop-<UTC stamp>-before-<tag>.sql.gz`, and the nightly ones just `doop-<UTC stamp>.sql.gz`. They are kept for 14 days; add `DOOP_BACKUP_KEEP_DAYS` to the Environment tab to change that.
+**Backups.** Doop backs the database up before every update and every night at 03:17 server time, into `../files/data/backups` on the Dokploy host (`/app/data/backups` inside the container). A backup is named `doop-<UTC stamp>-before-<tag>.sql.gz`, and the nightly ones `doop-<UTC stamp>-nightly.sql.gz`. They are kept for 14 days; add `DOOP_BACKUP_KEEP_DAYS` to the Environment tab to change that.
 
 A backup holds accounts and canvases. Uploaded images, pending invites and the model names chosen on the Admin page are files under `../files/data` and are not part of it, so **copy the whole `files` folder off the server regularly**:
 
@@ -227,11 +227,11 @@ gunzip -c /tmp/doop-20261008-031700.sql.gz | psql -U doop -d doop
 
 **Troubleshooting.**
 
-| What you see                                          | What to do                                                                                                                                                      |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| No **Update now**, though a newer release exists      | All three `DOOP_DOKPLOY_*` variables and `DOOP_UPDATE_REPO` must be set in the Environment tab; check for a path or a typo in `DOOP_DOKPLOY_URL`, then redeploy |
-| "Dokploy refused the API key"                         | The key was deleted or copied incomplete: create a new one under **Settings**, **Profile**, **API/CLI Keys** and update `DOOP_DOKPLOY_API_KEY`                  |
-| An update failed and the old version is still running | Open the service's **Deployments** tab in Dokploy and read that deployment's log: it says why the new image did not start                                       |
+| What you see                                          | What to do                                                                                                                                                                                                                 |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No **Update now**, though a newer release exists      | All three `DOOP_DOKPLOY_*` variables must be set in the Environment tab (the compose already sets `DOOP_UPDATE_REPO`); check for a path, a plain `http://` to a public host or a typo in `DOOP_DOKPLOY_URL`, then redeploy |
+| "Dokploy refused the API key"                         | The key was deleted or copied incomplete: create a new one under **Settings**, **Profile**, **API/CLI Keys** and update `DOOP_DOKPLOY_API_KEY`                                                                             |
+| An update failed and the old version is still running | Open the service's **Deployments** tab in Dokploy and read that deployment's log: it says why the new image did not start                                                                                                  |
 
 ## 4. Admins
 
