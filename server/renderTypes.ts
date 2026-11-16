@@ -41,6 +41,8 @@ export interface CaptureRequest {
   clip?: Clip
   /** runs in the loaded, settled page before the capture (actions, target lookup); may return the region to capture */
   prepare?: (page: import('puppeteer-core').Page) => Promise<Clip | void>
+  /** `background` waits behind interactive renders for a browser slot (the warm-up and thumbnails); the default is `interactive` */
+  priority?: 'interactive' | 'background'
 }
 
 export interface CaptureResult {

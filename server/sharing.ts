@@ -24,7 +24,7 @@ import {
   verifyLinkPassword,
 } from './linkAccess.ts'
 import { clientIp, createRateLimiter } from './rateLimit.ts'
-import { mentionedRole } from '../shared/agents.ts'
+import { mentionedRole, type Roster } from '../shared/agents.ts'
 import { canvasPages } from '../shared/pages.ts'
 import {
   AGENT_REQUEST_NOTICE,
@@ -205,8 +205,8 @@ export async function validMentions(canvas: Canvas, text: string, claimed: unkno
 
 /** The notice for a comment that tried to ask an agent for something the
  *  author may not request, or undefined when nothing was held back. */
-export function agentNotice(text: string, role: CanvasRole | null): string | undefined {
-  return mentionedRole(text) && !roleAtLeast(role, 'edit') ? AGENT_REQUEST_NOTICE : undefined
+export function agentNotice(text: string, role: CanvasRole | null, roster: Roster): string | undefined {
+  return mentionedRole(text, roster) && !roleAtLeast(role, 'edit') ? AGENT_REQUEST_NOTICE : undefined
 }
 
 /* ---- the owner's link settings ---- */
@@ -581,8 +581,8 @@ function guestThrottle(req: express.Request, res: express.Response, canvasId: st
 
 const MAX_GUEST_COMMENT = 2000
 
-function withNotice(comment: ElementComment, text: string): ElementComment & { notice?: string } {
-  const notice = agentNotice(text, 'comment')
+function withNotice(comment: ElementComment, text: string, canvasId: string): ElementComment & { notice?: string } {
+  const notice = agentNotice(text, 'comment', actions.canvasRoster(canvasId))
   return notice ? { ...comment, notice } : comment
 }
 
@@ -615,7 +615,7 @@ publicRouter.post('/frames/:id/comments', async (req, res) => {
     { allowAgent: false },
   )
   if (!comment) return res.status(404).json({ error: 'frame not found or empty text' })
-  res.json(withNotice(comment, text))
+  res.json(withNotice(comment, text, frame.canvasId))
 })
 
 /* a guest's comment pinned to a point on the canvas rather than to an element: same gate, name, notice and rate limits as a frame comment */
@@ -642,7 +642,7 @@ publicRouter.post('/canvases/:id/comments', (req, res) => {
     { allowAgent: false },
   )
   if (!comment) return res.status(409).json({ error: 'page removed meanwhile' })
-  res.json(withNotice(comment, text))
+  res.json(withNotice(comment, text, canvas.id))
 })
 
 publicRouter.post('/comments/:id/replies', (req, res) => {
@@ -659,5 +659,5 @@ publicRouter.post('/comments/:id/replies', (req, res) => {
   if (!guestThrottle(req, res, found.canvasId)) return
   const reply = actions.replyToComment(req.params.id, text, name, undefined, 'user', { allowAgent: false })
   if (!reply) return res.status(409).json({ error: 'thread resolved meanwhile' })
-  res.json(withNotice(reply, text))
+  res.json(withNotice(reply, text, found.canvasId))
 })

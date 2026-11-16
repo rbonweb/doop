@@ -162,6 +162,7 @@ export const actions: Catalog['actions'] = {
   keyboardShortcuts: 'Atalhos de teclado',
   docs: 'Documentação',
   customerSupport: 'Suporte ao cliente',
+  upgradeToPro: 'Fazer upgrade para o Pro…',
   shortcutsSearch: 'Buscar atalhos',
   shortcutsEmpty: 'Nenhum atalho corresponde a “{query}”',
 

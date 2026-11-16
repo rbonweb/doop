@@ -25,6 +25,7 @@ import { strongerMark, type Mark } from '../../shared/marks'
 import { useMarks } from '../lib/marks'
 import { MarkDot } from './MarkDot'
 import { loadCollapsedPages, saveCollapsedPages } from '../lib/pageCollapse'
+import { copyPageLink } from '../lib/pageUrl'
 import { ApiError } from '../lib/api'
 import { Button } from './ui/button'
 import { ChevronRightIcon, PageIcon, PlusIcon } from './ui/icons'
@@ -386,7 +387,7 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
           : marksByPage[page.id]
         return (
           <ContextMenu key={page.id}>
-            <ContextMenuTrigger asChild disabled={!mayEdit}>
+            <ContextMenuTrigger asChild>
               <div
                 data-page-id={page.id}
                 role="treeitem"
@@ -510,46 +511,56 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                 if (renaming) e.preventDefault()
               }}
             >
-              <ContextMenuItem disabled={busy} onSelect={() => startRename(page)}>
-                {t('panels.pagesRename')}
-              </ContextMenuItem>
-              <ContextMenuItem
-                disabled={busy || pages.length + subtreeSize > MAX_PAGES}
-                title={pages.length + subtreeSize > MAX_PAGES ? t('panels.pagesLimit', { max: MAX_PAGES }) : undefined}
-                onSelect={() => void duplicate(page.id)}
-              >
-                {subtreeSize > 1 ? t('panels.pagesDuplicateWithSubpages') : t('panels.pagesDuplicate')}
-              </ContextMenuItem>
-              <ContextMenuItem
-                disabled={busy || atMaxDepth}
-                title={atMaxDepth ? t('panels.pagesTooDeepTitle', { max: MAX_PAGE_DEPTH }) : undefined}
-                onSelect={() => addSubpage(page)}
-              >
-                {t('panels.pagesNewSubpage')}
-                {atMaxDepth && <MenuHint>{t('panels.pagesTooDeep')}</MenuHint>}
-              </ContextMenuItem>
-              {page.parentId !== undefined && (
-                <ContextMenuItem disabled={busy} onSelect={() => nestPage(page.id, { type: 'top' })}>
-                  {t('panels.pagesMoveToTop')}
-                </ContextMenuItem>
+              {mayEdit && (
+                <>
+                  <ContextMenuItem disabled={busy} onSelect={() => startRename(page)}>
+                    {t('panels.pagesRename')}
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    disabled={busy || pages.length + subtreeSize > MAX_PAGES}
+                    title={
+                      pages.length + subtreeSize > MAX_PAGES ? t('panels.pagesLimit', { max: MAX_PAGES }) : undefined
+                    }
+                    onSelect={() => void duplicate(page.id)}
+                  >
+                    {subtreeSize > 1 ? t('panels.pagesDuplicateWithSubpages') : t('panels.pagesDuplicate')}
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    disabled={busy || atMaxDepth}
+                    title={atMaxDepth ? t('panels.pagesTooDeepTitle', { max: MAX_PAGE_DEPTH }) : undefined}
+                    onSelect={() => addSubpage(page)}
+                  >
+                    {t('panels.pagesNewSubpage')}
+                    {atMaxDepth && <MenuHint>{t('panels.pagesTooDeep')}</MenuHint>}
+                  </ContextMenuItem>
+                  {page.parentId !== undefined && (
+                    <ContextMenuItem disabled={busy} onSelect={() => nestPage(page.id, { type: 'top' })}>
+                      {t('panels.pagesMoveToTop')}
+                    </ContextMenuItem>
+                  )}
+                  {moveTargets.length > 0 && (
+                    <ContextMenuSub>
+                      <ContextMenuSubTrigger disabled={busy}>{t('panels.pagesMoveInto')}</ContextMenuSubTrigger>
+                      <ContextMenuSubContent>
+                        {moveTargets.map((target) => (
+                          <ContextMenuItem
+                            key={target.id}
+                            onSelect={() => nestPage(page.id, { type: 'into', targetId: target.id })}
+                          >
+                            <span className="truncate" style={{ paddingLeft: (pageDepth(pages, target.id) - 1) * 10 }}>
+                              {target.name}
+                            </span>
+                          </ContextMenuItem>
+                        ))}
+                      </ContextMenuSubContent>
+                    </ContextMenuSub>
+                  )}
+                </>
               )}
-              {moveTargets.length > 0 && (
-                <ContextMenuSub>
-                  <ContextMenuSubTrigger disabled={busy}>{t('panels.pagesMoveInto')}</ContextMenuSubTrigger>
-                  <ContextMenuSubContent>
-                    {moveTargets.map((target) => (
-                      <ContextMenuItem
-                        key={target.id}
-                        onSelect={() => nestPage(page.id, { type: 'into', targetId: target.id })}
-                      >
-                        <span className="truncate" style={{ paddingLeft: (pageDepth(pages, target.id) - 1) * 10 }}>
-                          {target.name}
-                        </span>
-                      </ContextMenuItem>
-                    ))}
-                  </ContextMenuSubContent>
-                </ContextMenuSub>
-              )}
+              {/* the one entry a viewer has too: a link changes nothing */}
+              <ContextMenuItem onSelect={() => void copyPageLink(canvasId!, page.id)}>
+                {t('panels.pagesCopyLink')}
+              </ContextMenuItem>
               {!guest && slideCount(page.id) > 0 && (
                 <>
                   <ContextMenuSeparator />
@@ -561,14 +572,18 @@ export function PagesPanel({ fill = false }: { fill?: boolean }) {
                   </ContextMenuItem>
                 </>
               )}
-              <ContextMenuSeparator />
-              <ContextMenuItem
-                tone="danger"
-                disabled={busy || pages.length === 1}
-                onSelect={() => void save((current) => (current.length > 1 ? removePage(current, page.id) : null))}
-              >
-                {t('panels.pagesDelete')}
-              </ContextMenuItem>
+              {mayEdit && (
+                <>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    tone="danger"
+                    disabled={busy || pages.length === 1}
+                    onSelect={() => void save((current) => (current.length > 1 ? removePage(current, page.id) : null))}
+                  >
+                    {t('panels.pagesDelete')}
+                  </ContextMenuItem>
+                </>
+              )}
             </ContextMenuContent>
           </ContextMenu>
         )

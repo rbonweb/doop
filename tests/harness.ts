@@ -98,6 +98,9 @@ async function boot(env: Record<string, string>, reuseDir: string | undefined, t
           VITE_POSTHOG_KEY: '',
           /* a test server never renders in the background; a test about the warm-up passes true */
           DOOP_RENDER_WARM: 'false',
+          /* a store write outside any write boundary is an error here (server/journal.ts),
+             so a path that escapes the all-or-nothing guarantee fails the test that takes it */
+          DOOP_WRITE_BOUNDARY: 'throw',
           ...env,
         },
         stdio: ['ignore', 'pipe', 'ignore'],

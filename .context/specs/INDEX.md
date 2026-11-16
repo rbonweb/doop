@@ -43,3 +43,4 @@ lists every file in this folder.
 - [workspaces-billing.md](workspaces-billing.md) - Shared workspaces (org-level canvas access with
   roles) and the per-seat Team plan on Stripe: data model, entitlement rules, API, webhook flow.
 - [sharing-roles.md](sharing-roles.md) - View, comment and edit roles on a canvas: the `canvasRole` resolver, per-surface enforcement (REST, WebSocket, MCP, resident agents), domain grants, access requests, people @mentions, and the anonymous and password-protected share links.
+- [workspace-component-library.md](workspace-component-library.md) - Workspace component libraries: published snapshots, linked definitions without a local main, resolve-on-write, updates pulled on request, the agent and editor surfaces, who may publish, the Team-plan upsell on canvases without a library and resuming after checkout.

@@ -1,13 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { DESIGN_BRIEF, DOOP_GUIDE } from '../server/guide.ts'
+import { DESIGN_BRIEF, DOOP_GUIDE, GUIDE_TOPICS, guideFor } from '../server/guide.ts'
 
-const headings = DOOP_GUIDE.split('\n')
+/* the main guide and every topic: a section such as Redesigns or Prototypes lives in the topic that covers it */
+const WHOLE_GUIDE = GUIDE_TOPICS.map((topic) => guideFor(topic)).join('\n')
+
+const headings = WHOLE_GUIDE.split('\n')
+  .filter((line) => /^#{1,2} /.test(line))
+  .map((line) => line.replace(/^#{1,2} /, '').trim())
+
+const mainHeadings = DOOP_GUIDE.split('\n')
   .filter((line) => line.startsWith('## '))
   .map((line) => line.slice(3).trim())
 
 describe('the agent guide', () => {
   it('has no duplicated section headings', () => {
-    expect(headings.filter((h, i) => headings.indexOf(h) !== i)).toEqual([])
+    expect(mainHeadings.filter((h, i) => mainHeadings.indexOf(h) !== i)).toEqual([])
   })
 
   it.each([
@@ -19,7 +26,7 @@ describe('the agent guide', () => {
     'Version history and access',
     'Redesigns — audit first, then two drafts',
     'Pages',
-    'Prototypes — screens that link',
+    'Prototypes — make frames clickable',
     'Decks — slides on a page',
     'Sticky notes — say why, not just what',
   ])('has the "%s" section', (heading) => {

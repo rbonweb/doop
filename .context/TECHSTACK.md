@@ -35,6 +35,21 @@
   back to frame details if nothing carries the id. Browser regressions in
   `tests/pageCanvasBrowser.test.ts` cover initial loading, cross-page links, stamping on copy,
   clipboard round trips, history and script-created or script-removed elements.
+- Page links are `/c/<canvasId>?page=<pageId>` (`src/lib/pageLink.ts`, pure). `openingPageId` is
+  the one rule for the page a canvas URL opens: the page of the frame it links, else the page it
+  names, else the default (the first page; on a library canvas its components page, see Workspace
+  component libraries). A frame or page that is not on the canvas counts as not named. The store's
+  `setCanvas` applies it when a canvas is first opened, so the first paint is that page; a rejoin
+  keeps the page the person is on. `followPageInUrl` (`src/lib/pageUrl.ts`, mounted by
+  `CanvasPage`) then keeps the address bar on the open page with `history.replaceState`, as
+  `?pane=` does on the Workspace page, so Back leaves the canvas rather than walking page
+  switches: `pageSearch` drops `page` on the default page, leaves a frame link on the open page
+  alone, drops a frame, element or comment link to another page, and keeps every other parameter.
+  A history entry that names a page opens it. The URL is this browser's view: a remote page-list
+  change moves nobody, except off a deleted page. "Copy link to page" is in the page row's menu
+  (`PagesPanel.tsx`, viewers too; the link always names its page). Agents get the form in the MCP
+  instructions, the guide's Pages bullet and the resident kickoff. Tests: `pageLink.test.ts`, the
+  "pages in the URL" cases in `tests/pageCanvasBrowser.test.ts`.
 - Radix UI primitives (`@radix-ui/react-*`, ^1.x-2.x) + shadcn 4.19.0 - accessible UI primitives
   generated into `src/components/ui`.
 - `@anthropic-ai/sdk` 0.115.0 and `@modelcontextprotocol/sdk` 1.12.0 - power the built-in Doop
@@ -46,6 +61,21 @@
   something matches; six-hour in-memory cache for the free plan's 1,000 requests a day. Every
   result credits One Page Love and the authors with the entry's link (their terms). Tests:
   `inspiration.test.ts`.
+- Icons and stock photos from Doop's origin (`server/hostedCopies.ts`, `server/iconProxy.ts`,
+  `server/photoProxy.ts`): `search_icons` hands out `/icons/iconify/<prefix>/<name>.svg` and `search_images`
+  `/photos/pexels/<id>.jpeg?w=&h=` (the provider in the path, so another source can sit beside it), which the server fetches from Iconify or Pexels the first time
+  anything loads them and keeps in the bucket (`iconify/` and `pexels/<sha256 of the source URL>.<ext>`)
+  and a small in-memory LRU. Only each source's known options pass (Iconify `color`, `width`,
+  `height`, `rotate`, `flip`, `box`; Pexels `w`, `h`, `dpr`, `fit`, an unsized photo getting the
+  940x650 search size, never the original), redirects are refused, and source fetches are capped
+  (icons 16 running and 64 waiting, photos 8 and 32; past that a 503 with `Retry-After`). Served
+  like an `/a/` asset (nosniff, open CORS, a script-free CSP on SVG; photos immutable). Hotlinks to
+  `api.iconify.design` rendered blank in screenshots on and off, since the hosted renderer fetched
+  them itself; the renderer (`loadFrameInto`) also points a frame's existing Iconify and Pexels
+  hotlinks at Doop before loading it; `hostedIconSvg` and `hostedPhoto` read both in-process,
+  since a private `BETTER_AUTH_URL` is refused by `fetchRemote`. Pexels' licence
+  allows rehosting; arbitrary hotlinked images are never copied. Tests: `iconProxy.test.ts`,
+  `photoProxy.test.ts`.
 - Where frame CSS goes (`FRAME_STYLES` in `server/guide.ts`): agents are asked to style an element
   in its own `style` attribute, which is what the editor reads and writes, and to keep a `<style>`
   block for what an attribute cannot say (keyframes, font faces, `:root` custom properties, states,
@@ -54,7 +84,32 @@
   inline value outranks every rule. Guidance
   only: nothing rejects or rewrites a stylesheet, and a frame already styled by classes keeps them.
   The MCP guide, `create_frame`'s description and the resident agent's system prompt carry the same
-  text. Tests: `frameStyleGuidance.test.ts`.
+  text. Tokens and components in the same guidance: the brief (`DESIGN_BRIEF`) creates the canvas's
+  tokens before the first frame and keeps `save_decision` for the why behind a choice (never a copy
+  of the values); `FRAME_STYLES` says to use `var(--…)` and never a frame's own `:root` palette;
+  `COMPONENTS` says mains nest `<doop-use>` and the repetition rule holds inside them; the review
+  checklist has a Reuse item. Tests: `frameStyleGuidance.test.ts`, `tokenComponentGuidance.test.ts`.
+- Agent teams (`shared/customAgents.ts`, `server/customAgents.ts`, `server/customAgentRoutes.ts`,
+  `src/components/CustomAgents.tsx`): the Doop Agent roster each workspace (Workspace → Agents) and
+  each person (Settings → Doop Agent, for their personal canvases) has, the way font libraries split.
+  The six built-in roles of `shared/agents.ts` can be switched off (Doop excepted: unaddressed work
+  goes to it) or edited (colour, one-liner, instructions, reviewer flag; Reset undoes the edits and
+  leaves on/off alone), stored per scope in `agent_overrides` with null for "as shipped". Custom
+  agents are `AgentRole`s with `custom: true`: a fixed handle (its role id and its only @mention
+  spelling) and name (its presence identity), editable colour, one-liner, instructions (up to 2,000
+  characters) and reviewer flag, at most 20 per scope, in `custom_agents`. `scope` is `ws:<id>` or
+  `user:<id>` in both tables (migration 0062), mirrored in memory. Instructions a team wrote (a
+  custom agent's, a rewritten built-in's: `briefByTeam`) sit in the resident's system prompt inside
+  `<role_instructions>`, under the shared rules. Every role lookup takes a `Roster`
+  (`actions.canvasRoster` / `rosterFor` on the server, `useRoster` / `useCanvasRoster` in the
+  browser): the canvas GET and room `init` carry `team` (every `brief` emptied, so view links never
+  read instructions) and a `team` room message updates open canvases, also when a canvas moves
+  between a workspace and its owner's personal space (`actions.announceTeam`). Comments, the composer (an
+  @mention there picks the card's pipeline), automation steps (the shared parser keeps the
+  candidate ids, `narrowStepRoles` picks the canvas's first real one on save, and the step's canvas
+  is checked again when it runs) and `get_canvas` (`customAgents`) read it. Work left for an agent
+  that is deleted or off goes to Doop. Routes: `/api/agents` and `/api/agents/builtin`
+  (`?workspace=`, members only). Tests: `customAgents.test.ts`, `customAgentsHttp.test.ts`.
 - Agent feedback (`server/agentFeedback.ts`, `shared/agentFeedback.ts`): agents talk to the Doop
   team through two MCP tools, which the resident agent has under the same names. `report_issue`
   (kind `issue`: `bug`, `tool_error`, `confusing`, `missing_capability`, `other`) is for where Doop
@@ -154,7 +209,7 @@
   `PATCH` and `DELETE`; `GET /api/model-account/models?kind=`) and every one answers with
   the whole view (`accountsView`: every account on or off, the default, the menus). The meter
   counts any connection that is on and names the default; image generation uses the enabled
-  account matching the image provider (ChatGPT before an OpenAI key), server keys only for
+  account matching the image provider (ChatGPT before an OpenAI key; the "GPT Image API" models (2.6, 2.5, chatgpt-image-latest, 1.5, 1 Mini) run on an OpenAI key only, through the Image API `/v1/images/generations`, since the ChatGPT backend ignores the image model id), server keys only for
   someone who connected none (switching every account off does not count). Tests: `anthropicAccount.test.ts` (end to end), `defaultRouting.test.ts`,
   `agentRunners.test.ts`, `chatgptProviderSwitch.test.tsx`, `localClaudeConnection.test.tsx`.
 - Which connection runs a task (`shared/agentRunner.ts`, `server/agentRunners.ts`):
@@ -170,23 +225,16 @@
   migration 0051, so a trimmed task history cannot move it). Tests: `agentRunner.test.ts`,
   `runnerQueue.test.ts`, `modelPickerRunners.test.tsx`, the pick cases in
   `localAgentRouting.test.ts`.
-- Pages over MCP (`server/mcp.ts`): `get_canvas` lists `pages` (id, name, `startFrameId`) and
-  every frame's `pageId`, and narrows to one page with `page_id`; `create_canvas_page` adds an
-  empty page at the end (`actions.createCanvasPage`, a server-minted id, `MAX_PAGES` enforced)
-  and returns it for `create_frame`'s `pageId`; `set_canvas_pages` stays the whole-list call for
-  rename, reorder and delete; `update_frame` moves a frame between pages (it keeps its x/y; an
-  unknown `pageId` is refused with the canvas's page list). The guide's "Frames and HTML" section says when a page beats a
-  frame. The resident agent has the same three tools under the same names; both surfaces run
-  `server/pageTools.ts`, its kickoff lists the pages and each frame's page and position, and a
-  run whose only work was arranging counts as delivered (`arrangeWrites`). Tests: the page cases
-  in `mcp-tools.test.ts`, `residentPageTools.test.ts`.
+- Pages over MCP (`server/mcp.ts`): `get_canvas` lists `pages` (id, name, `startFrameId`) and every frame's `pageId`, and narrows to one page with `page_id`; `create_canvas_page` adds an empty page at the end (`actions.createCanvasPage`, a server-minted id, `MAX_PAGES` enforced) and returns it for `create_frame`'s `pageId`; `set_canvas_pages` stays the whole-list call for rename, reorder and delete; `update_frame` moves a frame between pages (it keeps its x/y; an unknown `pageId` is refused with the canvas's page list). The guide's "Frames and HTML" section says when a page beats a frame. The resident agent has the same three tools under the same names; both surfaces run `server/pageTools.ts`, its kickoff lists the pages and each frame's page and position, and a run whose only work was arranging counts as delivered (`arrangeWrites`). Tests: the page cases in `mcp-tools.test.ts`, `residentPageTools.test.ts`.
 - Duplicating frames (`server/agentTools/canvasDuplicate.ts`, `actions.duplicateFrames`): MCP `duplicate_frames` (and the resident agent's twin) copies up to 50 frames of one canvas in one call, each the source's HTML byte for byte (element ids and prototype attributes kept) with its size, slide flag, speaker notes, hidden, locked and rotation, but not its approval, comments, versions or sticky notes; the whole call is validated first (every frame on the canvas, every page a page of it) and refused naming the item. Copies are placed with `freeSpotBeside` (`shared/arrange.ts`) clear of every frame on the target page and of earlier copies, links between frames copied in the same call follow the copies (`remapFrameTargets`, ids pre-minted through `store.createFrame`'s optional `id`), only a real component main (`data-doop-component="`) sends a copy through `prepareWrite` so the canvas keeps one main (`rewritten`), and peers get one `frame:created` per copy without a reveal plus one activity line. Tests: `duplicateFrames.test.ts`, `duplicateFramesMcp.test.ts`.
 - Layout tools (`server/agentTools/canvasLayout.ts`, `shared/arrange.ts`): MCP `arrange_frames` (edit role) lays frames out in rows through `arrangeRows`, by `frame_ids` (one page) or `page_id` (demo frames excepted), with `rows` (`min_width`, `max_width`, `name`, `order`), `gap` (default 300) and `origin` (default: the top-left of the frames arranged); default rows are desktops (900 px and wider) then the rest; locked frames never move (`skipped_locked`), frames already in place are not written, each move is one `actions.updateFrame` so attached sticky notes follow; `dry_run: true` answers with `planned` (`frame_id`, `from`, `to`) and writes nothing; `check_layout` (view role, read only) lists overlaps and gaps under `min_gap` (default 40) between a page's visible frames and sticky notes via `layoutIssues`, never reporting a note with its own frame; both have resident twins under the same names and the resident's arranging counts as delivered work (`arrangeWrites`). `shared/arrange.ts` holds the pure arrange geometry (align, distribute, pack, tidy up) plus the agent layout checks — `gapBetween`, `tooClose`, `freeSpotBeside`, `arrangeRows` with `RowRule`/`DEFAULT_ROWS` and `layoutIssues` — so frames and agent tools share one implementation; `src/lib/actions/arrange.ts` re-exports it. Tests: `arrangeFramesTools.test.ts`, `arrangeShared.test.ts`, `arrange.test.ts`.
 - Batches (`server/agentTools/canvasBatch.ts`, `server/toolLoads.ts`): MCP `run_batch` runs up to 50 `{ tool, args }` ops in order in one round trip; `loadToolTargets` records each registered tool's wrapped callback in a per-server registry (`registeredTool`, a WeakMap keyed by the `McpServer`, never global), and an op validates its arguments the way the SDK does and calls that same callback, so access roles, rate limits (`takeSlot` and the module limits in `mcp.ts`), canvas loads and version checks run per op exactly as for a direct call; unknown tools, nested `run_batch` and bad arguments fail that op only, `stop_on_error` (default true) skips the rest, the loop stops when the request is aborted, and the answer is a JSON summary followed by each op's own output. Ops inside `run_batch` never get the one-line Claude Code summary — an AsyncLocalStorage flag, `batchScope`, keeps them out of it. The resident agent has no twin (it already runs several calls per turn). Tests: `runBatch.test.ts`.
 - Response shaping (`server/responseShaping.ts`, `server/reviewNudge.ts`): `buildMcpServer` wraps `registerTool` right after `loadToolTargets`, keyed by the caller's credential (a hash of the bearer, else `user:<id>`). The review reminder (`REVIEW_NUDGE`, also the `Stream complete.` variant) is sent once per frame per session and dropped after (in memory: 2,000 sessions, 500 frames each, 2 h idle), and a read-only tool's JSON text becomes one summary line for clients in `STRUCTURED_CONTENT_CLIENTS` (`claude-code`), whose `structuredContent` carries the full payload; every other client keeps the full text. Tests: `responseShaping.test.ts`, `responseShapingMcp.test.ts`.
 - `get_canvas` paging (`server/canvasListing.ts`, `server/mcp.ts`): `limit`, `cursor`, `fields` and `frame_fields` page and trim large canvases, and the hosted font roster is stated once as `webFonts` data instead of being repeated in `note`. `page_id` narrows every part of the answer to that page: frames, notes, `claims` (only frames listed, so a `limit` never names a frame outside the answer), `flow` (only navigation between frames of that page) and the `structuredContent` copy. Tests: `canvasListing.test.ts`.
-- Guide sections (`server/guideSections.ts`): `get_guide({ section })` reads one `## ` section of the agent guide by slug or title, or `section: "index"` lists every section with its size; the full guide stays the default. Tests: `guideSections.test.ts`, `guide.test.ts`.
+- Guide sections (`server/guideSections.ts`): `get_guide({ topic, section })` reads one `## ` section of the loaded topic (the main guide by default; upstream's topics such as `doop-instructions`, images, components and prototypes each load their own text) by slug or title, or `section: "index"` lists every section of it with its size; the full topic stays the default, an unknown section answers `no guide section "x" in topic "y"`. The main guide is about 48.7k characters (the fork's sections plus the speed-tool guide), so its budget test allows 52,000. Tests: `guideSections.test.ts`, `guide.test.ts`.
+- MCP handshake and tool set after the 0.15 sync (`server/mcp.ts`, `server/guide.ts`): the `INSTRUCTIONS` the server sends on connect are upstream's short text (about 2,000 characters, capped at 2,048 by `mcpInstructions.test.ts`) and point at `get_guide({ topic: "doop-instructions" })`; the fork's handshake rules (fork rather than overwrite, questions go on the frame, report back, version history, show the work first, human sign-off) live in the guide's main topic instead. `get_canvas` keeps the fork's payload (paging, `page_id`, `claims`, `webFonts`) and adds upstream's `customAgents`, `deletedComponents`, `workspaceLibraries`, the `activeComponents` catalog with usage, `existingStyle` and the `NO_TOKENS_BRIEF`. Every upstream tool (`export_layer`, `upload_font`, `set_frame_approval`, `create_components`) is registered and has its resident twin; `find_component_candidates` and `/api/canvases/:id/component-candidates` are gone (upstream removed them), and `inspect_frame` stays resident-only. A comment-only reply to an agent mention stays plain text (the fork's rule, not upstream's refusal), and every mention check reads the canvas roster (`actions.canvasRoster`). Writes keep the fork's `expected_version` and claims beside upstream's inline-data refusal and compose check.
 - Note tombstones (`server/recentDeletions.ts`): the cause of a deleted note is kept for 24 h (at most 5,000 entries, in memory) so `delete_note`/`update_note` can say the note went with its frame or was already deleted. Tests: `noteTombstones.test.ts`.
+- Feature usage events: a feature an agent can reach reports from the server through `captureFeature` (`server/featureEvents.ts`) at the REST route, MCP tool and resident tool, on the signed-in user, the agent's connecting user or the resident run's requester, with `via` (`ui`, `mcp`, `resident`, `automation`): `tokens_changed`, `token_themes_set`, `page_background_changed`, `prototype_start_set`, `frame_version_restored`. Browser-only features capture with posthog-js: every export and Copy as PNG through `src/lib/exportEvents.ts` (`frames_exported` with `source` and `target`, `png_copied`), `prototype_played`, `prototype_interactions_saved`, `text_formatted`, `svg_imported`, `pdf_imported`.
 - `ws` 8.18.0 - WebSocket server for realtime multiplayer (cursors, presence, frame edits,
   activity feed) over one room per canvas.
 - Custom fonts (`shared/fonts.ts`, `server/fonts.ts`, `server/fontFile.ts`): font libraries, one
@@ -202,7 +250,9 @@
   (writes queue per library, so racing uploads of one face leave one row).
   A frame stays self-contained: `withFontFaces` adds the `@font-face` rules for the library
   families its CSS names to one `<style data-doop-fonts>` block in its own HTML (only adds, never
-  removes). `actions.createFrame` / `updateFrame` / the final append chunk run it on every write,
+  removes). `actions.createFrame` / `updateFrame` / every append chunk run it on every write
+  (`withCanvasFaces` in `server/canvasFaces.ts`; mid-stream once a complete `<head>` or `<body>`
+  tag has arrived, so the first section's screenshot already has its fonts and tokens),
   and `FrameView`'s save path runs it too, so a family picked from the Design panel's "Custom
   fonts" group renders at once. Every renderer that reads frame HTML (screenshots, PDF
   export, iOS) gets the font that way. Agents see the library as `fonts` plus a note in
@@ -210,12 +260,27 @@
   never load it from Google Fonts. Tests: `fonts.test.ts` (a real WOFF2 in `tests/fixtures/fonts`), `fontLibrary.test.ts`,
   `fontLibraryRace.test.ts`, `fontFrameWrites.test.ts` (faces on create, stream end and idle; an idle close sends viewers the
   healed document, so a cut-off script never runs).
+- No files inside frames (`server/inlineData.ts`, `LEAN_FRAMES` in `server/guide.ts`): an agent
+  write that adds a base64 `data:` URI of any kind is refused and nothing is written, with what to
+  do per kind (font, picture, SVG, media). Checked on what the call submits: MCP `create_frame`,
+  `set_frame_html`, `append_frame_html` chunks, `edit_frame_html`'s `new_str`, every component
+  tool's strings, and the resident's create / set / edit / rewrite chunks. A URI the frame already
+  holds may be carried over (a PDF import embeds its fonts), so such a frame stays editable.
+  Human saves, imports and ingest are not checked. `LEAN_FRAMES` (MCP guide and resident prompt)
+  covers the rest: big traced SVGs as uploaded `<img>`, libraries from a CDN, sample data, no icon
+  sprite sheets, a poster instead of video. Fonts go in with `upload_font` (MCP: `source_url`,
+  `local_file` ticket or `data`; resident: `source_url`; `server/canvasFontUpload.ts`): the file
+  joins the library the canvas designs with (its workspace's for members, the owner's own on a
+  personal canvas, refused for anyone else) through `addFont`, and the agent names the family.
+  A font ticket's URL ends in `/` so curl appends the file name (`PUT /u/:token/:name`, 10 MB cap).
+  Tests: `inlineData.test.ts`.
 - Design tokens (`shared/designTokens.ts`, spec `.context/specs/design-tokens.md`): a canvas's
   typed design values (Paper's eleven types: colour, opacity, radius, spacing, container,
   breakpoint, font family / weight / size, line height, letter spacing), each a CSS custom
   property frames use as `var(--name)`, with a value per theme (`canvas.tokenThemes`; a frame
   switches with `data-doop-theme="dark"` on its `<html>`). `withTokenBlock` writes the values a
-  frame names into its own `<style data-doop-tokens>` block wherever `withFontFaces` runs, and a
+  frame names into its own `<style data-doop-tokens>` block wherever `withFontFaces` runs (the
+  component preview sheet included), and a
   token change rewrites that block in every frame naming it as an annotation (sign-off stands, no
   version). Stored in `design_tokens` + `canvases.token_themes` (migration 0048); REST under
   `/api/canvases/:id/tokens`, `/token-themes` and `/styleguide.md` (tokens + guidelines as one
@@ -256,6 +321,7 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   load falls back to the initials); it rides `Presence` (set at `join`, re-announced to the person's
   rooms on a change), `/api/me`, the session, canvas `people`, the share list and workspace members.
   Tests: `avatar.test.ts`, `avatarFace.test.tsx`.
+- Plans and the way to Pro (`shared/billing.ts`, `server/entitlements.ts`, `src/lib/upgrade.ts`, `src/lib/planFeatures.ts`, `src/components/PlanCards.tsx`): the paid plan is sold as Pro (its id stays `team`: Stripe metadata, the workspaces table and `/api/me` carry it); plan copy lives in the `plans` catalog. Pro still lives in a workspace, and its perks follow the person (a member of a live paid workspace, `planFor`) or the canvas (in one): uploads to 100 MB instead of 5 (`uploadCap`, applied to browser uploads, the `/u/` ticket and MCP `upload_asset`; imports and generated images keep `MAX_ASSET_BYTES`), and font libraries past `FREE_FONT_FAMILIES` (2; a new family over it is a 402 `{ upgrade: 'fonts' }`, more faces of a family already there always pass). Billing is off without `STRIPE_SECRET_KEY` (`billingEnabled()`), so nothing is limited and `isProUser` is true: a fork instance has the 100 MB upload cap and unlimited font families, no Upgrade surfaces (`offersUpgrade` needs `me.billing`), and billing routes answer 400 "billing is not configured". `createAsset(buf, meta, options)` takes `{ stylesheets, bytes, message }`, so the plan cap (`uploadCap`) and the fork's stylesheet assets share one call. `/api/me` carries `billing`; with it on and the account on Free, the rail shows "Upgrade to Pro", the account menu an Upgrade item (Pro gets Priority support, `PRIORITY_SUPPORT`), Settings → Plan the current plan and the full comparison, the canvas Help menu and ⌘K an `upgrade` action, and `?upgrade` on any URL opens it. All of them call `openUpgrade({ source })` (`upgrade_opened` in PostHog), which the one `UpgradeHost` in `App` shows as `UpgradeModal` with no workspace: it pays for the person's unpaid workspace, or names a new one that checkout creates, or says which workspace they are on Pro through. Its name is a placeholder (`plans.defaultWorkspaceName`): when checkout comes back paid the Workspace page asks for the real one once (`NameWorkspaceModal`, a per-browser note from `noteNameAfterCheckout`). Seats are a minimum (`workspaces.seats_bought`, migration 0064): the owner picks them at checkout (`SeatStepper`) or on the billing pane (`PUT /api/workspaces/:id/billing/seats`), and Stripe bills `billedSeats` = the larger of seats bought and members, so invites fill bought seats first. "Team API keys for CLI and CI" is listed as Soon: not built. Tests: `planLimits.test.ts`, `upgradeModal.test.tsx`.
 - Outside a canvas room, `GET /api/me/events` (`server/userEvents.ts`, Server-Sent Events, one
   stream per tab) pings a user's open pages with `{ type: 'canvases' }` when a canvas or workspace
   membership adds or removes them (the workspace pings come from `addMember`, `removeMember`,
@@ -283,7 +349,14 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   `copyElementPng`): the frame is rendered whole and cut to the element's live box
   (`doop:inspect` rect, `clipToFrame`, the raster's `clip` option), so every style it inherits
   and whatever paints behind it stay in the picture; a server render is cropped here the same
-  way (`cropRaster`), and a frame off screen says so. Tests: `frameRaster.test.ts`,
+  way (`cropRaster`), and a frame off screen says so. The element panel's Design tab ends with the same
+  Export section (`LayerExportSection.tsx`: the shared scale and format, "Export <layer>", Copy as
+  PNG), as Figma ends a layer's properties. Agents export a layer with `export_layer` (MCP and the
+  resident, `server/layerExport.ts`), named by `element_id` (its `data-doop-id`) or a CSS
+  `selector`; it returns `/i/<frameId>.<ext>?scale=&element=` (or `&selector=`), which renders the
+  frame whole and screenshots the first match's box clipped to the frame (`layer` in
+  `renderFrame`; a missing, invalid or empty match is a 404). Tests: `layerExport.test.ts`, `layerExportHttp.test.ts`,
+  `layerExportSection.test.tsx`, `frameRaster.test.ts`,
   `frameRasterBrowser.test.ts` (pixels in Chromium, the live runtime included),
   `frameExport.test.ts`. Scale and format (`shared/exportScale.ts`, `src/lib/exportSettings.ts`,
   `ExportOptions.tsx`): the Inspector's Export group and the Export… dialog (frames, and elements
@@ -306,6 +379,7 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
 - Snapshots and asset metadata (`server/snapshots.ts`, `server/agentTools/render/snapshot.ts`, `assets.source` / `assets.tags` from migration 0057): `snapshot_frame` (a region or element to a permanent `/a/` asset with provenance), `list_assets`, `upload_asset` `source` and `tags`, `get_frame` `image_assets`. Tests: `snapshotFrame`, `snapshotTools`, `assetMetadata`.
 - Measuring and linting (`server/measure.ts`, `server/lint.ts`, `server/colorMath.ts`, `server/agentTools/render/measure.ts`): `measure_frame` measures each section's box and height, text line counts, overflow and clipping, the palette and each text's WCAG contrast at a given width; `lint_frame` checks section height, heading and text line counts, allowed colours, banned words, overflow and minimum contrast, naming offending element ids; `allowed_colors` matches through `isAllowedColor` in `colorMath.ts` (an allowed colour with any alpha, its tints and shades on the line to white or black within 3 per channel, pure white, black and transparent, and each flagged colour names the first element using it), and `exclude` (CSS selectors) removes subtrees from colour, contrast and banned-word rules in the page measurement, which never collects colours inside `img`, `video`, `canvas` or `svg` content (their own box styles still count) and refuses an invalid selector by name; both cost one unit of the per-user render budget `MCP_RENDERS_PER_MIN`. A `targets` entry that matches nothing is an error naming it (`assertTargetsMatch` in `server/renderTargets.ts`), never a section that quietly goes missing; labels resolve through `server/targetResolution.ts` (see the targeted screenshots bullet). Tests: `measureFrame`, `lint`, `colorMath`, `measureTools`.
 - Targeted screenshots and comparisons (`server/frameShots.ts`, `server/pageActions.ts`, `server/composite.ts`, `server/renderTargets.ts`): `get_frame_screenshot` with a `target` or `region`, webp and `actions` (10 steps, 5 s) renders one section at full size; `compare_frames` joins up to 8 items in a row or grid with sharp. One label rule serves `measure_frame`, `lint_frame`, `snapshot_frame`, `get_frame_screenshot` and `compare_frames` (`server/targetResolution.ts`, `resolveFrameTargets`): a `{ label }` is looked up on the server in the saved HTML through the outline's own labels (`frameOutline`: `data-doop-label`, first heading, `aria-label`, component name), then through `server/sectionTargets.ts` for nested blocks, and handed to the page as `{ element_id }` (stamped as an annotation through `actions.ensureElementId` when the caller has the edit role) or a positional selector; the page keeps only a `data-doop-label` lookup for script-made elements. A target that matches nothing, or several where one is needed, is a `TargetError` naming it in every tool. Tests: `frameShots`, `shotTools`, `pageActions`, `composite`, `renderTargets`, `targetLabels`.
+- Server-side renderer (`server/renderBrowser.ts`, used by `server/screenshot.ts`): every headless Chromium page (frame images, MCP screenshots, the resident's checks, PDF exports, website imports) goes through one gate of `RENDER_CONCURRENCY` pages (default 4; background thumbnails get at most 2, a waiting agent goes before a waiting thumbnail), a bounded queue that refuses with `RendererBusyError` (HTTP 503 + Retry-After) and a lease that closes a page held past 120s. A browser that cannot open a page within 15s is killed with its process group and the open retried once on a fresh launch; a render that fails like a browser failure runs a health probe outside the gate and is retried once if the probe kills the browser; a browser is recycled after 500 pages or an hour. DevTools commands time out at 60s, not 180s. Screenshots are capped at 50M device px (`server/renderLimits.ts`; MCP says when it cropped). `GET /healthz/renderer` reports the counters (`kills`, `lastOpenedAt`, `failedOpensInARow`, queue depth) for an uptime check. Context: the 2026-11-05 wedge, where one browser stopped making pages for two hours. Tests: `renderBrowser.test.ts`. `REMOTE_BROWSER_URL` (+ `REMOTE_BROWSER_TOKEN`, sent as a Bearer header) swaps the local launch for `puppeteer.connect` to a remote Chrome over CDP: Cloudflare Browser Run (`wss://api.cloudflare.com/client/v4/accounts/<id>/browser-run/devtools/browser`), browserless or a renderer service; everything past the connect is unchanged, so switching provider is an env change. A remote browser is closed 30s after its last page (`idleCloseMs`; providers bill open sessions), and one whose close stalls is disconnected, having no process to kill. Assets load from `BETTER_AUTH_URL`, which the remote browser must reach. `REMOTE_BROWSER_ISOLATED` declares the browser cannot reach our private network (a hosted provider): it then fetches public URLs itself instead of through `guardPublicPageRequests`' DNS-pinned proxy; never set it for a self-hosted renderer. The fork's persisted renders and warm-up ride on this renderer: `renderFrame` and `captureFrame` (`server/screenshot.ts`) run through `renderer.withPage`, so a remote or local browser serves `/i/`, `getRender`, strips and `server/renderWarm.ts` alike; warm renders run at the `background` priority (`CaptureRequest.priority`), behind a waiting agent. `/i/<id>.<ext>?element=` or `?selector=` (a layer export, png and jpg only, 400 for webp, 404 `LayerNotFoundError`, no ETag) is a separate in-memory path beside the persisted store.
 - `pdf-lib` 1.17.1 - joins the vector PDF export (`server/pdfExport.ts`): headless Chrome prints
   each frame onto a page of its own size (inside an iframe of the frame's size, as the canvas shows
   it, so content taller than the frame is clipped rather than paginated: bare, Chrome moved a block
@@ -322,10 +396,11 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
 
 - PostgreSQL 16 (`postgres:16-alpine` in `docker-compose.yml`) - primary database.
 - drizzle-orm 0.45.2 + drizzle-kit - schema in `server/db/schema.ts` and
-  `server/db/auth-schema.ts`; migrations generated via `npx drizzle-kit generate` into
+  `server/db/auth-schema.ts`; migrations (0000 to 0064; 0019 is reserved; upstream 0.15's library, work-reply, custom-agent, soft-delete and seat migrations are 0058 to 0064, idempotent so an existing fork database picks them up in order) generated via `npx drizzle-kit generate` into
   `server/db/migrations`, applied at boot by `server/db/index.ts` (never by drizzle-kit itself).
 - `@electric-sql/pglite` 0.5.4 - embedded Postgres so `bun run dev` works with zero external
   services.
+- Write boundary (`server/journal.ts`): every operation is one transaction over the in-memory state. `runOperation` opens it (an MCP tool call, detached from its HTTP request; a resident tool call; one frame of the propagation queue; an idle stream's settling), and the HTTP middleware opens one per request, committed as the response starts and undone by `undoRequest` when the handler threw. A write changes memory at once and records its undo (`recordUndo`); everything that leaves the process waits for the commit in order (`afterCommit`: `persist.*` rows, room broadcasts, activity, frame versions, canvas events, thumbnail purges, `propagation.enqueue` / `resumeFrame`, kicks to the resident agents), and `postCommit` runs follow-up work as a transaction of its own. A throw, a `WorkBudgetError` above all, undoes in reverse and drops the queue. Inside an open transaction `transaction` / `atomic` is a savepoint; the frame, token and component actions are `atomic`, so one called outside any operation (a job, a timer) is still all-or-nothing. `checkpoint()` is a sub-commit, for partial progress that is meant to stay (`replace_matching` per frame, a pulled component of an import, each canvas of `update_library_everywhere`) and before an await that depends on committed work (the element-id stamp's durable write). No isolation: an undo restores only what is still its own write (a frame's `updatedAt`, a definition's identity). Presence touches are never queued. `store.duplicateCanvas` / `duplicatePage` are durable first and not undone. The fork's writers run under the same boundary: note writes, `moveFrame`, link audience and password, domain grants and member roles are journaled in the store, `duplicateFrames`, `moveFrameToCanvas` and `restoreFrameVersion` are atomic, and `renderChanged` fires after commit so an undone write never warms a render. Every store write calls `requireBoundary`: outside a transaction and not marked with `outsideOperation(reason, …)` it does what `DOOP_WRITE_BOUNDARY` says (`warn` in development, `throw` in the integration harness, `off` in production). Tests: `journal.test.ts`, `storeJournal.test.ts`, the fault-injection sweep `workBudgetCommit.test.ts` (memory, a modelled database and a viewer's replayed copy, for every write operation) and `writeBoundaryHttp.test.ts` (the real server, rebooted on its database).
 - `pg` 8.22.0 - Postgres driver for the real-database path.
 - Frame HTML in memory (`server/store.ts`, `server/frameHtml.ts`): the store keeps every canvas
   and frame, but frame HTML (most of the data) loads per canvas. Boot reads `frames` without `html`;
@@ -452,6 +527,25 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   drag zooms onto the box it draws, filling the stage's open area. Z is the tool only while held:
   letting go returns to the previous tool, and the tool rail has no button for it.
   Tests: `zoomTool.test.ts`, the Zoom cases in `tools.test.ts`.
+- Layers placed by hand (`src/lib/groupLayout.ts`): a shape drawn into a frame is
+  `position:absolute; left; top; width; height`, and moving an absolute layer (drag, nudge, X/Y)
+  rewrites its `left`/`top` (`moveByOffsets` in the runtime) instead of adding a `translate`;
+  layers in flow still move by `translate`. ⌘G / ⌥⌘G / ⇧A on layers that all sit absolute make one
+  absolute group marked `data-doop-drawing="group"` where they were: a flex row or column
+  (`planGroup`: direction from the wider run, gap the mean space, `align-items` the shared edge,
+  children reordered to the flow and given `flex-shrink:0`) when they do not overlap along it, else
+  pinned (an absolute box of their bounds, children re-based). Layers in flow keep the
+  flow-carrying group. ⇧⌘G on an absolute group puts its layers back absolute where they show. A
+  click picks the outermost canvas group around the hit, a double-click on a picked group goes one
+  level in, and with a layer inside picked clicks pick its siblings (`groupLevel`); comments still
+  pin to the element under the pointer. Drops (`frameDropRuntime.ts`, canvas drags of layers and
+  of shapes on the frame, and Layers panel moves through `layerPlacement`): into a flex or grid box
+  an absolute layer becomes a flow item; into a box that places its layers by hand (`freeform`:
+  the body, a canvas group, or a box already holding absolute layers, with nothing else in flow)
+  it goes absolute where it was let go; a canvas group left empty is removed. A layer placed by its
+  own inline styles has them removed on a flow drop; only a stylesheet-placed one gets the
+  `position: relative !important` override. Tests: `groupLayout.test.ts`, `groupDrawnBrowser.test.ts`,
+  `layersMove.test.ts`.
 - `src/lib/drawing.ts` creates rectangles, circles, straight and cubic Bézier SVG paths, text and empty
   frames through the existing frame API. Drawing inside a frame appends a positioned HTML/SVG
   layer. Standalone elements use frame persistence with a `data-doop-canvas-element` body marker
@@ -471,6 +565,17 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   custom properties, as one `<style data-doop-carried>`, every rule scoped through a
   `data-doop-carried-scope` mark on the moved root so the destination's own layers keep their
   look); copy/paste across frames carries it the same way. Tests: `layerTransfer.test.ts`, `layersDragAcross.test.tsx`, `styleCarry.test.ts`.
+- A vector's stroke spills past its box, as in Figma (`src/lib/frameBleed.ts`, `bleed` in
+  `frameRuntime.ts`): a drawn path's `<svg>` paints its overflow (a runtime sheet), and a standalone
+  shape's iframe, which can paint nothing past its own edge, reaches a margin past the frame on every
+  side. The runtime asks for it (`doop:bleed-want`, half of the widest stroke past the box through the
+  shape's transform, a miter join or square cap further, in 16px steps up to 1024) and insets its body
+  once `FrameView` has grown the iframe (`doop:bleed`); the surface stops clipping a standalone, and the
+  margin takes no pointer events. Everything the runtime says or hears stays in the frame's design px:
+  only its viewport calls (`elementsFromPoint`, `caretRangeFromPoint`, `getBoundingClientRect`, event
+  `clientX`, `innerWidth`) see the margin, and editor code measuring the iframe element takes it off
+  (`documentRect`, `iframeBleed`). W/H stay the path's geometry. Server renders and exports still clip
+  at the frame. Tests: `vectorPaintBrowser.test.ts`, the thick-stroke case in `drawingShapesBrowser.test.ts`.
 - The pen snaps to the nearest anchor on its unfinished path within eight screen pixels,
   highlights the target, and previews a closed curve when approaching the first anchor.
   Alt bypasses snapping. Double-clicking a native path opens `PathEditor.tsx`: anchors and
@@ -534,11 +639,15 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   1×1 (`MIN_FRAME_SIZE`, also the Inspector's floor). `tests/frameResize.test.ts` covers the
   geometry, `tests/frameResizeBrowser.test.ts` drags the grips in Chromium.
   The frame Inspector's X / Y / W / H are the same `NumberField` the element panel uses
-  (`src/components/ui/property-field.tsx`): the `px` unit is the drag handle (`useValueScrub`,
-  Shift ×10, Alt ×0.1, Esc cancels) and ↑/↓ nudge. A drag previews every step through
-  `patchFrameLocal` and, through `PropertyScrubContext`, commits once on release as one discrete
-  undo step and one PATCH; Esc puts the frame's box back and saves nothing. Tests:
-  `inspectorScrub.test.tsx`.
+  (`src/components/ui/property-field.tsx`): the field's icon is the drag handle, the unit when it
+  has none (`useValueScrub`, `data-scrub`; Shift ×10, Alt ×0.1, Esc cancels) and ↑/↓ nudge. A drag
+  previews every step through `patchFrameLocal` and, through `PropertyScrubContext`, commits once
+  on release as one discrete undo step and one PATCH; Esc puts the frame's box back and saves
+  nothing. A field given `slider={[min, max]}` (element and fill opacity, corner radius) is also a
+  slider (`useValueSlide`): hover shows the value as a fill and thumb across the field, and a drag
+  anywhere else on it moves the value by the share of the width travelled (never jumping to the
+  pointer); a click still types, mouse and pen only. Tests: `inspectorScrub.test.tsx`,
+  `valueSlide.test.tsx`.
 - Frame rotation (`shared/frameRotation.ts`, `src/lib/frameRotate.ts`): a selected frame wears a
   zone just outside each corner (`data-frame-rotate-handle`, 18 screen px, clear of the corner
   grip) that shows Figma's curved double-arrow cursor, turned to curve around its corner and with
@@ -548,7 +657,7 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   discrete undo step. `Frame.rotation` is degrees clockwise about the centre, stored in
   `frames.rotation` (migration `0052_frame_rotation`) normalised to (-180, 180] with 0 unset;
   `x`/`y`/`width`/`height` stay the unrotated box and the wrapper carries `rotate()`, so the
-  frame's name, grips and pins turn with it. The Inspector's Layout group has the `∠` field, the
+  frame's name, grips and pins turn with it. The Inspector's Layout group has the rotation field (Lucide's `Angle` icon), the
   size badge sits under the turned bounds, and a press inside a turned frame
   is turned back into design px (`unrotatePoint`, `frameDesignPoint` for the element move hook and the
   path editor's `frameTurnMatrix`) before the runtime is probed; the frame's own grips pull along
@@ -686,6 +795,14 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   (`actions.handBackComment`: unclaimed, no longer an agent item in memory and in its row, the thread open), so the
   person's `@mention` answer queues fresh work carrying the whole conversation. MCP agents have
   had the same two tools all along. Tests: `residentComments.test.ts`, `agentToolParity.test.ts`.
+- Chat in the Agents tab (`src/components/AgentChat.tsx`, `src/lib/agentChat.ts`): under Recent
+  tasks, each composer prompt (a board card without a `kind`) and any feedback left on it is a
+  turn, oldest first, with the agent's answer under it: waiting, working, the run's closing words,
+  or the failure reason. A finished resident run keeps those words on the cards and feedback it
+  handled (`actions.recordWorkReply`, `reply` on `tasks` and `feedback`, migration 0061; a later
+  pipeline stage replaces an earlier one's), so the answer survives a reload. The line between
+  Recent tasks and the chat drags, ↑/↓ on focus, double-click resets (`src/lib/agentsSplit.ts`,
+  per browser under `doop:agents-split`). Tests: `agentChat.test.ts`.
 - Comment pins move by drag (`src/lib/commentMove.ts`, gesture in `CommentPin`): anyone who may
   comment drags a thread's root pin; a ghost rides the pointer in the world layer
   (`CanvasComments`), above every frame, since the pin itself sits inside a clipped frame surface.
@@ -705,11 +822,50 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   `<doop-use>` naming a library family gets its face. Agents read and write the short form
   (`get_frame`, `edit_frame_html`); tools live once in `server/componentTools.ts` for MCP and the
   resident agent. `src/lib/components.ts` and `ComponentsPanel.tsx` (the Layers panel's Components
-  tab, beside Tokens) / `ComponentSection.tsx` are the editor's side. A component is renamed from its card's menu
-  or a double-click on its name in that tab, or from its main's Layers row (`renameComponent`; instances are
-  linked by id, so they follow); an instance's row is not renamed on its own. Stored in `components`
-  (migration `0056_components`). Tests: `components.test.ts`, `componentsEdgeCases.test.ts`,
-  `componentTools.test.ts`, `componentsRoutes.test.ts`, `componentsBrowser.test.ts`.
+  tab, beside Tokens) / `ComponentSection.tsx` are the editor's side. A component is renamed from its card's menu or a double-click on its name in that tab, or from its main's Layers row (`renameComponent`; instances are linked by id, so they follow). As in Figma, renaming an instance's row names that layer alone (`data-doop-name`, kept as an override of that instance, still linked). Stored in `components` (migration `0056_components`; soft delete, migration `0063_component_soft_delete`, see `.context/specs/components.md`). A bare `data-doop-prop="name"` binds an element's text, except where there is none: on `img`, `source`, `video`, `audio`, `iframe` and `embed` it binds `src`, on `input` its `value` (`parseBindings` takes the tag). A `<doop-use>` that renders nothing is reported, never dropped quietly: a main with no markup (`empty_template`), and on a whole write one never closed (`unclosed_use`), which is placed with no slot content so the ones after it still expand (mid-stream it waits for its end). Tests: `components.test.ts`, `componentsEdgeCases.test.ts`, `componentTools.test.ts`, `componentsRoutes.test.ts`, `componentsBrowser.test.ts`, `componentDrops.test.ts`.
+- Component system first (`SYSTEM_FIRST`, `COMPOSE_CHECK` in `server/guide.ts`): the guide opens with a must-do list (tokens, then a component system set up the way a designer sets up a Figma file, then screens composed from it; themes are tokens, never a copied frame), the brief creates the kit after the tokens, and `COMPONENTS` asks for components by judgment (primitives and the patterns a product reuses, from the first copy) instead of after a third copy. `create_frame`, `append_frame_html` and `set_frame_html` (and the resident's create, set and rewrite tools) end their descriptions with the check. `create_components` (`server/componentTools.ts`, MCP and resident) makes up to 12 components from markup in one call, in order so a later one nests an earlier one, each entry its own unit (a refused one is reported, the rest are made). The `COMPONENT SYSTEM` notes (`componentSystemPlan`, `componentSystemNotes`): an empty `create_frame` hears to set up the system or compose from it; a product screen (8+ elements with a control, link, nav or form; never a main, a Components-page frame, a canvas shape or a demo) written with no instance hears that the canvas has no system, or which components it ignored. Mid-stream it is said once per stream (`streamChunkNotes`), on the first chunk that shows a screen. Notes go right after a result's data, ahead of the generic nudges. Tests: `reuseNotes.test.ts`, the `create_components` cases in `componentTools.test.ts`, `tokenComponentGuidance.test.ts`.
+- Reuse notes (`server/reuseNotes.ts`): a whole-frame write (MCP `create_frame`, `set_frame_html`, the
+  `done` chunk of a stream; the resident's `create_frame`, `set_frame_html`, `commit_frame_rewrite`)
+  gets `componentWriteNotes(frame, { review: true })`, which adds what the frame should have reused:
+  a block written out three or more times (`REUSE`, with the `create_component` + `replace_matching`
+  call), colours the canvas has as tokens (`TOKENS`, `#hex → var(--name)`, aliases resolved), a
+  colour palette declared on `:root` or tokens redefined there, and on a canvas with no tokens a frame
+  hardcoding four or more colours. Doop's own blocks (tokens, fonts, component CSS) are not counted;
+  `edit_frame_html` stays quiet. `create_component` / `update_component` name rows a main repeats by
+  hand (make one a component, `<doop-use>` it in the main) and what `auto_props=false` costs.
+  `get_canvas` and the resident kickoff say a canvas has no tokens yet (`NO_TOKENS_BRIEF`).
+  `upload_asset` states its per-minute limit and its refusal says when to retry. Tests:
+  `reuseNotes.test.ts`.
+- Adding to an established canvas (`server/existingStyle.ts`): on a canvas with two or more of the
+  user's frames (demo frames and the Components page left out), `get_canvas` carries `existingStyle`
+  and the resident kickoff an "Existing style" block: with no tokens, the colours and fonts the
+  frames share (by how many frames name each). The brief (`existingStyleBrief`, replacing
+  `NO_TOKENS_BRIEF` there) asks for tokens from those values before the first new frame, and says to leave the existing
+  frames alone (no `replace_matching`) unless asked, offering the clean-up at the end;
+  `DESIGN_BRIEF` and `COMPONENTS` say the same. Tests: `existingStyle.test.ts`.
+- Workspace component libraries (`.context/specs/workspace-component-library.md`,
+  `server/componentLibrary.ts`): a workspace canvas publishes snapshots of its components
+  (`library_components`, migration `0053_library_components`, mirrored in memory) and every other
+  canvas of the workspace can use them. Using one adds a linked definition with no main
+  (`source.library`), by `import_component`, by a click in the Components panel, or by a write
+  naming it (`contextFor`'s `LibraryAdoption` in `prepareFrameHtml` / `prepareChunk`); the tokens it
+  names come along (`actions.announceAdopted`). Updates wait until `sync_component` pulls them.
+  `update_library_everywhere` (`updateLibraryConsumers`) is the one explicit push: it loads each canvas
+  that is behind and pulls there. `workspaces.library_publish` (migration `0054_library_publish_policy`)
+  can keep publishing, and that push, to the owner and admins.
+  `libraryBlock` is the entitlement (a canvas in an active workspace; every workspace with billing
+  off), refused as a 402 the panel turns into `LibraryUpgradeFlow`, which resumes after Stripe
+  Checkout from a per-browser note (`src/lib/libraryResume.ts`). A workspace can keep publishing
+  to its owner and admins (`workspaces.library_publish`, migration `0054_library_publish_policy`,
+  set in the Workspace page's General pane; `requireLibraryPublisher`, a 403). Agents: `publish_library`,
+  `workspaceLibraries` in `get_canvas`. Editor: `LibrarySection.tsx`, and the Workspace page's Libraries pane
+  (`WorkspaceLibraries.tsx`). A library canvas opens on its components: the canvas GET and the
+  room's `init` carry `landingPageId` (`landingPageOf`; `libraryLandingPageId` in
+  `shared/pages.ts`: the page holding the most published components' mains, a tie to the page
+  named "Components", then page order; unset when the canvas has published nothing or no
+  published main is on a page), which the editor uses as the default page of a link naming none. Tests:
+  `workspaceLibrary.test.ts`, `libraryTools.test.ts`, `librarySection.test.tsx`,
+  `workspaceLibraries.test.tsx`, `libraryResume.test.ts`.
 - Prototypes (`.context/specs/prototyping.md`): interactions are `data-doop-on` /
   `data-doop-action` (or the JSON `data-doop-interactions`) attributes in frame HTML, parsed by
   `shared/prototype.ts`, whose parser the frame runtime inlines by source. `PrototypePlayer.tsx`
@@ -829,6 +985,19 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   `workers/gemini/Dockerfile` builds the worker. Setup and limitations: `docs/gemini-cloud-pilot.md`.
   `DOOP_GEMINI_CLOUD_WORKERS` enables operator-managed routing and BYO metering; unset by default.
 
+- Stall watchdog (`server/stallWatchdog.ts`, watcher thread `server/stallWatcher.mjs`): every
+  operation (`server/workBudget.ts` opens one per HTTP request, MCP or resident tool call and queued
+  frame) is written into a `SharedArrayBuffer` when it begins and cleared when it ends, and the main
+  thread stamps a heartbeat there every 500 ms. A `worker_threads` watcher logs one `[stall]` line
+  naming the operations in flight once the heartbeat is older than `STALL_LOG_MS` (5 s), and past
+  `STALL_EXIT_MS` (60 s in production, off elsewhere) logs them again and sends the process
+  `SIGKILL`, since a hung process is never restarted by Railway and a blocked one cannot exit by
+  itself (`process.exit` in a worker ends only the worker). It writes with `fs.writeSync(2)`: a
+  worker's console goes through the blocked main thread. Debounced frame writes cannot be flushed
+  in that exit. `[slow-op]` lines file any operation over `SLOW_OP_LOG_MS` (2 s) with the worst
+  event-loop delay (`monitorEventLoopDelay`) while it ran; event streams are left out. Tests:
+  `stallWatchdog.test.ts`.
+
 - Docker - `Dockerfile` + `docker-compose.yml`; `docker compose up` runs the app container
   (port 4400) and a `postgres:16-alpine` db container for self-hosting.
 - Deck PDF export (`server/deckPdf.ts`, route in `server/deckRoutes.ts`) renders a page's slide frames through the same `puppeteer-core` Chromium as screenshots, one PDF page per slide at the slide's own size, behind the canvas view gate and a per-account rate limit.
@@ -880,8 +1049,7 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   the ⌘K search palette (`CanvasSearchModal.tsx`), the connect-an-agent modal, the collapsed
   narrow state (remembered in `localStorage` under `doop-rail`) and the account face at the bottom.
   From another page the rail sends scope picks home as `/?scope=` and new workspaces as
-  `/?workspace=new`. The workspace in view opens under its row: All canvases, People, Fonts, and
-  for its owner and admins Plan & billing and Settings (`workspacePanesFor`); on the Workspace page
+  `/?workspace=new`. The workspace in view opens under its row: All canvases, People, Fonts, Libraries, and for its owner and admins Plan & billing and Settings (`workspacePanesFor`); on the Workspace page
   they switch its pane in place, elsewhere they go to `/w/<id>?pane=…`, and the page keeps the
   pane in its URL. The rail keeps the last lists it drew (`lastLists`), so a page change does not
   blink its rows out, and fades only when collapsed or expanded. Home warms the Workspace page's
@@ -921,5 +1089,6 @@ The shared font library serves public font assets with CORS so sandboxed frames 
 - Board view: the page's frames as a board of cards, opened from View → Board in the main menu and the "Board" action in the ⌘K palette (no switch in the top bar).
 - Keyboard: one registry (`src/lib/actions/registry.ts`), with N / ⇧N stepping frames and ⌥N toggling sticky notes; see section 4.
 - Inspiration: `search_inspiration` uses One Page Love (`ONEPAGELOVE_API_KEY`); when the key is unset or a call fails, the fork's `inspirationFallback` points the agent at `view_website` in both `server/mcp.ts` and `server/resident.ts`.
+- Billing is inert: no `STRIPE_SECRET_KEY` means `billingEnabled()` is false, so upstream's Pro plan, seat sync, upgrade modal and Free limits never apply and every fork instance is unlimited (see section 2, Plans and the way to Pro).
 - Credentials encryption is upstream's code; the fork ships with `SECRETS_ENCRYPTION_KEYS` unset (model keys stay in the environment, no stored integrations).
 - Canvas performance: transform-only zoom with `cameraLayer`, frames that sleep at rest and mount progressively, and `chrome-layer` on all floating UI (section 4 and 10); a stylesheet replace remounts a frame only when it is not being edited, moved, rotated or resized.

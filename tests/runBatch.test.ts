@@ -54,7 +54,7 @@ function seed(): Canvas {
 }
 
 async function connect(userId: string, clientName?: string) {
-  const server = buildMcpServer('Someone', userId, undefined, clientName ? async () => clientName : undefined)
+  const server = buildMcpServer('Someone', userId, undefined, clientName)
   const client = new Client({ name: 'batch-test', version: '1.0.0' })
   const [a, b] = InMemoryTransport.createLinkedPair()
   await server.connect(b)

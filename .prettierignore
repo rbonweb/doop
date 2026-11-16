@@ -20,3 +20,7 @@ storybook-static/
 
 # agent worktrees (full repo copies made by Claude Code subagents)
 .claude/
+# Android build outputs (nested .gitignore entries that Prettier does not read)
+android/.gradle/
+android/.kotlin/
+android/**/build/

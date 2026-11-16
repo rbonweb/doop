@@ -2,10 +2,17 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it, vi } from 'vitest'
 import { buildMcpServer } from '../server/mcp.ts'
-import { DOOP_GUIDE } from '../server/guide.ts'
+import { DOOP_GUIDE, guideFor } from '../server/guide.ts'
+import { extensions } from '../server/extensions.ts'
 import { findGuideSection, guideIndex, guideSections, slugify } from '../server/guideSections.ts'
 
 vi.mock('../server/db/persist.ts', () => ({ saveCanvas: () => {}, saveFrame: () => {}, saveActivity: () => {} }))
+
+/** The main guide as get_guide serves it: with the integrations this server has. */
+const MAIN_GUIDE = guideFor(
+  'doop-instructions',
+  extensions.flatMap((extension) => extension.mcpGuideLines ?? []),
+)
 
 const FIXTURE = `Intro before any heading.
 
@@ -110,7 +117,7 @@ describe('get_guide sections over MCP', () => {
     const client = await guideClient()
     try {
       const result = await client.callTool({ name: 'get_guide', arguments: { topic: 'doop-instructions' } })
-      expect(textOf(result)).toBe(DOOP_GUIDE)
+      expect(textOf(result)).toBe(MAIN_GUIDE)
     } finally {
       await client.close()
     }
@@ -123,7 +130,7 @@ describe('get_guide sections over MCP', () => {
         name: 'get_guide',
         arguments: { topic: 'doop-instructions', section: 'index' },
       })
-      expect(textOf(result)).toBe(guideIndex(DOOP_GUIDE))
+      expect(textOf(result)).toBe(guideIndex(MAIN_GUIDE))
       expect(textOf(result)).toContain('Sections of the Doop guide (pass one as section):')
     } finally {
       await client.close()
@@ -133,7 +140,7 @@ describe('get_guide sections over MCP', () => {
   it('returns one section by slug', async () => {
     const client = await guideClient()
     try {
-      const section = guideSections(DOOP_GUIDE)[0]!
+      const section = guideSections(MAIN_GUIDE)[0]!
       const result = await client.callTool({
         name: 'get_guide',
         arguments: { topic: 'doop-instructions', section: section.slug },
@@ -153,7 +160,7 @@ describe('get_guide sections over MCP', () => {
       })
       expect(result.isError).toBe(true)
       expect(textOf(result)).toContain('no guide section "no-such-section"')
-      expect(textOf(result)).toContain(guideSections(DOOP_GUIDE)[0]!.slug)
+      expect(textOf(result)).toContain(guideSections(MAIN_GUIDE)[0]!.slug)
     } finally {
       await client.close()
     }

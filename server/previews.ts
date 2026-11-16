@@ -52,6 +52,8 @@ export interface ImageRequest {
    *  meaningful for jpg — a png?preview would serve jpeg bytes under an
    *  image/png content-type, so the flag is ignored there. */
   preview: boolean
+  /** a layer export: the CSS selector of the element to cut the render to */
+  layer?: string
   ip: string
   /** consulted only when the render budget is exhausted */
   isAuthenticated: () => Promise<boolean>
@@ -64,7 +66,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
   const preview = req.preview && req.ext === 'jpg'
   /* the callers fit the scale already; fitting again changes nothing for them and keeps any other caller inside the render limits */
   const scale = fitExportScale(frame, req.scale)
-  const key = imageKey(frame.id, req.ext, scale, req.ext === 'jpg' ? req.quality : '', preview)
+  const key = imageKey(frame.id, req.ext, scale, req.ext === 'jpg' ? req.quality : '', preview, req.layer)
   /* an invalidation while a render is in flight makes its result stale: it is served to the request that asked, never cached */
   const generation = thumbs.generation(frame.id)
   const cached = imgCache.get(key)
@@ -92,6 +94,7 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
           renderFrame(await store.renderSource(frame), scale, {
             type: req.ext === 'jpg' ? 'jpeg' : 'png',
             quality: req.quality,
+            layer: req.layer,
           }),
         )
     remember(key, pending, frame.updatedAt, () => thumbs.generation(frame.id) === started)
@@ -100,8 +103,15 @@ export async function getImage(frame: Frame, req: ImageRequest): Promise<ImageRe
   return { status: 'ok', buf: await pending }
 }
 
-function imageKey(id: string, ext: 'png' | 'jpg', scale: number, quality: number | '', preview: boolean): string {
-  return `${id}:${ext}:${scale}:${quality}:${preview ? 'p' : ''}`
+function imageKey(
+  id: string,
+  ext: 'png' | 'jpg',
+  scale: number,
+  quality: number | '',
+  preview: boolean,
+  layer = '',
+): string {
+  return `${id}:${ext}:${scale}:${quality}:${preview ? 'p' : ''}:${layer}`
 }
 
 export interface RenderRequest {

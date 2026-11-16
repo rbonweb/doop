@@ -24,6 +24,7 @@ import { ImportIcon } from './ui/icons'
 import { Modal, ModalActions, ModalLede, ModalTitle } from './ui/modal'
 import { SelectionBar, SelectionBarAction } from './ui/selection-bar'
 import { useT } from '@/lib/i18n'
+import { trackExport } from '../lib/exportEvents'
 
 type BatchState =
   | { phase: 'choose' }
@@ -77,6 +78,7 @@ export function FrameExportModal({
   const [first] = targets
   const running = state.phase === 'running'
   const overPdfLimit = pdfFrames.length > MAX_PDF_FRAMES
+  const exportSource = element ? 'element_menu' : pageFrames ? 'export_modal' : 'frame_menu'
   const many = !element && (pageFrames !== undefined || targets.length > 1)
 
   function toggle(frameId: string) {
@@ -92,6 +94,7 @@ export function FrameExportModal({
      starts from it too */
   function download(format: FrameExportFormat) {
     setExportSettings({ format })
+    trackExport(format, element ? 1 : targets.length, exportSource, element ? 'element' : 'frame')
     if (element) {
       void downloadElementExport(frame, element, format, settings.scale)
       onClose()
@@ -116,6 +119,7 @@ export function FrameExportModal({
 
   function downloadPdf() {
     if (overPdfLimit || !first) return
+    trackExport('pdf', pdfFrames.length, exportSource)
     void downloadFramesPdf(first.canvasId, pdfFrames)
     onClose()
   }
