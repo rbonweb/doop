@@ -267,3 +267,35 @@ describe('a stalled dump', () => {
     }
   })
 })
+
+describe('the nightly schedule', () => {
+  it('schedules the next run for tomorrow even when the timer fires a little early', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      vi.setSystemTime(new Date(2026, 10, 16, 2, 0, 0))
+      const { root, dir } = tempDir()
+      const ok = pgDump(root, 'echo dump')
+      const delays: number[] = []
+      const realSetTimeout = globalThis.setTimeout
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+        delays.push(ms ?? 0)
+        return realSetTimeout(fn, ms)
+      }) as typeof setTimeout)
+      /* a clock that runs 5 ms behind the timers, so the run fires "early" by its own reading */
+      const now = () => new Date(Date.now() - 5)
+      const stop = startNightlyBackup({ databaseUrl: DATABASE_URL, dir, keepDays: 14, executable: ok, now })
+      const first = delays[0] ?? 0
+      expect(first).toBe(77 * 60_000 + 5)
+      /* fires when the clock still reads 5 ms before 03:17, as a timer may */
+      vi.advanceTimersByTime(first)
+      expect(vi.getTimerCount()).toBe(1)
+      const second = delays[1] ?? 0
+      /* tomorrow's 03:17, a day from today's, not a second away */
+      expect(second).toBeGreaterThan(23 * 3_600_000)
+      stop()
+    } finally {
+      vi.restoreAllMocks()
+      vi.useRealTimers()
+    }
+  })
+})

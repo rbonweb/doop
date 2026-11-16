@@ -277,12 +277,14 @@ export function nextNightly(from: Date): Date {
 export function startNightlyBackup(options: BackupOptions = {}): () => void {
   let timer: NodeJS.Timeout | undefined
   const now = options.now ?? (() => new Date())
-  const arm = () => {
-    const wait = nextNightly(now()).getTime() - now().getTime()
+  /* the next run is counted from the one that just fired, not from the clock: a timer that fires a few ms early must not find today's 03:17 still ahead */
+  const arm = (after: Date) => {
+    const target = nextNightly(after)
+    const wait = target.getTime() - now().getTime()
     timer = setTimeout(
       () => {
         /* armed again before tonight's run starts, so no outcome of it can stop the schedule */
-        arm()
+        arm(new Date(target.getTime() + 60_000))
         void tonight()
       },
       /* setTimeout caps at 2^31 ms; a day is far under it */
@@ -301,6 +303,6 @@ export function startNightlyBackup(options: BackupOptions = {}): () => void {
       console.error('[backup] nightly backup failed:', e instanceof Error ? e.message : 'unknown error')
     }
   }
-  arm()
+  arm(now())
   return () => clearTimeout(timer)
 }
