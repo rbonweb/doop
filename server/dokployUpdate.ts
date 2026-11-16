@@ -24,6 +24,8 @@ import { DokployError, dokployWebhookUrl, triggerDeploy } from './dokploy.ts'
 const STATUS_DIR = path.join(process.cwd(), 'data', 'updates')
 /* a running record this old, with another version running, belongs to an install that never happened */
 const STALE_MS = 20 * 60_000
+/* a failed record may still turn out to have installed, for this long after it was written */
+const FAILED_GRACE_MS = 60 * 60_000
 
 interface StatusRecord {
   state: 'running' | 'succeeded' | 'failed'
@@ -106,18 +108,29 @@ export class DokployUpdater {
   }
 
   /**
-   * The status as the version card shows it. A running record is settled here rather than only at
-   * boot: it succeeded once this process is the tag it names, and it failed once it is older than
-   * 20 minutes with another version still running.
+   * The status as the version card shows it. A record is settled here rather than only at boot.
+   * It succeeded once this process runs the tag it names, or any other release than the one that
+   * was running when the update was asked for (the compose follows `latest`, so a newer release
+   * may have landed between the click and the pull). That also rescues a `failed` record written
+   * after Dokploy had already queued the deploy (a timeout, a 5xx), for an hour. A `running` one
+   * older than 20 minutes with the same version still running failed.
    */
   async status(): Promise<UpdateStatus> {
     let record = await this.read()
     if (!record) return { state: 'idle' }
-    if (record.state === 'running' && !this.inFlight) {
-      if (record.tag === this.options.current) {
-        record = { ...record, state: 'succeeded', message: `Updated to ${record.tag}.`, at: this.now() }
-        await this.write(record).catch(() => {})
-      } else if (this.now() - record.at > STALE_MS) {
+    const installed = record.tag === this.options.current || record.previous !== this.options.current
+    const recent = this.now() - record.at < FAILED_GRACE_MS
+    if (!this.inFlight && installed && (record.state === 'running' || (record.state === 'failed' && recent))) {
+      record = {
+        ...record,
+        state: 'succeeded',
+        tag: this.options.current,
+        message: `Updated to ${this.options.current}.`,
+        at: this.now(),
+      }
+      await this.write(record).catch(() => {})
+    } else if (record.state === 'running' && !this.inFlight) {
+      if (this.now() - record.at > STALE_MS) {
         record = {
           ...record,
           state: 'failed',

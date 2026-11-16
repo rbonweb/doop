@@ -75,7 +75,26 @@ export async function triggerDeploy(webhookUrl: string, options: WebhookOptions 
     )
   }
   const body = await readCapped(res)
-  if (res.status >= 200 && res.status < 300) return
+  /* a redirect that names a place to go: never followed, never printed */
+  if ([301, 302, 307, 308].includes(res.status) && res.headers.get('location')) {
+    throw new DokployError('Dokploy redirected the webhook; use its final https address.')
+  }
+  if (res.status >= 200 && res.status < 300) {
+    /* only Dokploy's own success counts: a login page or proxy answering 200 is not a deploy */
+    let message = ''
+    try {
+      const parsed: unknown = JSON.parse(body)
+      if (parsed && typeof parsed === 'object' && typeof (parsed as { message?: unknown }).message === 'string') {
+        message = (parsed as { message: string }).message
+      }
+    } catch {
+      /* not JSON */
+    }
+    if (/deployed successfully/i.test(message)) return
+    throw new DokployError(
+      `Something other than Dokploy answered the webhook (status ${res.status}); check the address and any login page in front of Dokploy.`,
+    )
+  }
   if (res.status === 400 && /automatic deployments are disabled/i.test(body)) {
     throw new DokployError('Turn on Autodeploy for this service in Dokploy (General tab).')
   }

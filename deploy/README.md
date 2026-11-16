@@ -170,7 +170,7 @@ Add `--remove` before the address to take the role away again. After this, invit
 
 1. In Dokploy, on the service's **General** tab, switch **Autodeploy** on.
 2. On the **Advanced** tab, switch **Pull latest images on deploy** on, so a redeploy downloads the newest image.
-3. On the **Deployments** tab, copy the **Webhook URL**. It looks like `https://dokploy.yourbrand.com/api/deploy/compose/<token>`.
+3. On the Deployments tab (where Dokploy shows the webhook URL), copy the **Webhook URL**. It looks like `https://dokploy.yourbrand.com/api/deploy/compose/<token>`.
 4. Add it to the Environment tab and press **Redeploy** once so Doop reads it:
 
    ```sh
@@ -179,7 +179,9 @@ Add `--remove` before the address to take the role away again. After this, invit
 
    It must be exactly that shape: `https://`, the path `/api/deploy/compose/<token>`, no query. Plain `http://` is accepted only when the address is this machine or a private network: `localhost`, a `127.x`, `10.x`, `172.16-31.x` or `192.168.x` address, an IPv6 `::1`, `fc00::/7` or `fe80::/10` address, or a bare service name such as `dokploy` (never a dotted name such as `10.example.com`). The service must be a **Raw** compose: a service that deploys from git is refused.
 
-The webhook can only redeploy this one service, and anyone who has it can trigger a redeploy, so keep it private. Doop never shows it in a page or writes it to its log, and it never holds a Dokploy API key. If it leaks, regenerate it in Dokploy (the refresh icon next to the webhook on the **Deployments** tab), then put the new one in the Environment tab and redeploy.
+If you installed v0.15.0-fork.2, which used a Dokploy API key, remove `DOOP_DOKPLOY_URL`, `DOOP_DOKPLOY_API_KEY` and `DOOP_DOKPLOY_COMPOSE_ID` from the Environment tab, and delete the API key in Dokploy (**Settings**, **Profile**, **API/CLI Keys**): Doop no longer uses any of them.
+
+The webhook can only redeploy this one service, and anyone who has it can trigger a redeploy, so keep it private. Doop never shows it in a page or writes it to its log, and it never holds a Dokploy API key. If it leaks, regenerate it in Dokploy (the refresh icon next to the webhook, on the Deployments tab where Dokploy shows the webhook URL), then put the new one in the Environment tab and redeploy.
 
 **What Update now does.** Pressing it on the Admin page:
 
@@ -188,7 +190,7 @@ The webhook can only redeploy this one service, and anyone who has it can trigge
 3. Dokploy pulls the latest release and restarts Doop,
 4. the page reloads once the new version answers.
 
-If the backup fails, nothing is sent to Dokploy. With **Pull latest images on deploy** on, any redeploy installs the latest release, whether it came from Update now, the **Deploy** button or Dokploy itself. If the new version has not come up after 20 minutes, the card says so and points at the service's deployment log in Dokploy.
+If the backup fails, nothing is sent to Dokploy. With **Pull latest images on deploy** on, any redeploy installs the latest release (and also pulls `postgres:16-alpine`, so a redeploy may move Postgres to a newer 16.x patch release: safe, the major version stays 16), whether it came from Update now, the **Deploy** button or Dokploy itself. If the new version has not come up after 20 minutes, the card says so and points at the service's deployment log in Dokploy.
 
 **Going back to a previous release by hand.** A new release that starts and then crashes leaves nothing running to put the old one back by itself. In the Environment tab set `DOOP_TAG` to the previous release (the tag on the fork's **Releases** page, for example `v0.7.0-fork.1`) and press **Redeploy**. The backup from just before the update is in `../files/data/backups`, if the database needs it too. Clear `DOOP_TAG` later (and redeploy) to follow the latest release again.
 
@@ -227,9 +229,9 @@ gunzip -c /tmp/doop-20261008-031700.sql.gz | psql -U doop -d doop
 | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | No **Update now**, though a newer release exists                                              | `DOOP_DOKPLOY_WEBHOOK_URL` must be set in the Environment tab, in the shape `https://<dokploy>/api/deploy/compose/<token>` (the compose already sets `DOOP_UPDATE_REPO`); a plain `http://` to a public host or a query on the URL stops Doop at boot with a message, then redeploy |
 | "Turn on Autodeploy for this service in Dokploy (General tab)."                               | Dokploy refuses the webhook while Autodeploy is off: switch it on in the service's **General** tab, then press Update now again                                                                                                                                                     |
-| "Dokploy does not know this webhook; copy it again from the service's Deployments tab."       | The webhook was regenerated or copied incomplete: copy it again from the **Deployments** tab into `DOOP_DOKPLOY_WEBHOOK_URL` and redeploy                                                                                                                                           |
+| "Dokploy does not know this webhook; copy it again from the service's Deployments tab."       | The webhook was regenerated or copied incomplete: copy it again from the Deployments tab (where Dokploy shows the webhook URL) into `DOOP_DOKPLOY_WEBHOOK_URL` and redeploy                                                                                                         |
 | "Dokploy refused the webhook: this service deploys from git; Update now needs a Raw compose." | Update now only works on a service whose **Provider** is **Raw** (step 2); recreate it that way                                                                                                                                                                                     |
-| "Dokploy answered the webhook with 500." (or another number)                                  | Open the service's **Deployments** tab and the Dokploy logs; the number is Dokploy's own answer                                                                                                                                                                                     |
+| "Dokploy answered the webhook with 500." (or another number)                                  | Open the service's Deployments tab (where Dokploy shows the deployment log) and the Dokploy logs; the number is Dokploy's own answer                                                                                                                                                |
 | "Dokploy has not installed ... after 20 minutes"                                              | Check the service's deployment log in Dokploy. If `DOOP_TAG` is set in its Environment tab, clear it so the service follows the latest release; also check **Pull latest images on deploy** is on                                                                                   |
 
 ## 4. Admins

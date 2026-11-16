@@ -136,9 +136,11 @@ describe('the webhook call', () => {
     )
     const git = 'Dokploy refused the webhook: this service deploys from git; Update now needs a Raw compose.'
     expect(await ask(301, JSON.stringify({ message: 'Branch Not Match' }))).toBe(git)
-    /* a 301 that also names a Location is still not followed */
+    /* a 301 that also names a Location is not followed, and says so */
     const elsewhere = await startPanel()
-    expect(await ask(301, '{}', { location: `${elsewhere.origin}/somewhere` })).toBe(git)
+    expect(await ask(301, '{}', { location: `${elsewhere.origin}/somewhere` })).toBe(
+      'Dokploy redirected the webhook; use its final https address.',
+    )
     expect(elsewhere.calls).toHaveLength(0)
     expect(await ask(500, 'boom')).toBe('Dokploy answered the webhook with 500.')
     expect(await ask(400, JSON.stringify({ message: 'Error deploying Compose' }))).toBe(
@@ -164,6 +166,38 @@ describe('the webhook call', () => {
     hang.closeAllConnections()
     hang.close()
     for (const error of [unreachable, silent]) expect(error.message).not.toContain(TOKEN)
+  })
+
+  it('counts a 2xx only when it is Dokploy saying the deploy worked', async () => {
+    const panel = await startPanel()
+    const other = (status: number) =>
+      `Something other than Dokploy answered the webhook (status ${status}); check the address and any login page in front of Dokploy.`
+    for (const [status, body] of [
+      [200, '<html>Sign in</html>'],
+      [200, '{}'],
+      [200, '{"message":"queued"}'],
+      [204, ''],
+    ] as const) {
+      panel.answer = { status, body }
+      await expect(triggerDeploy(panel.url)).rejects.toThrow(other(status))
+    }
+    panel.answer = { status: 200, body: '{"message":"Compose deployed successfully"}' }
+    await expect(triggerDeploy(panel.url)).resolves.toBeUndefined()
+  })
+
+  it('refuses a redirect that names a place to go, without printing it', async () => {
+    const panel = await startPanel()
+    const elsewhere = await startPanel()
+    for (const status of [301, 302, 307, 308]) {
+      panel.answer = { status, body: '', headers: { location: `${elsewhere.origin}/secret-landing` } }
+      const error = (await triggerDeploy(panel.url).catch((e: unknown) => e)) as Error
+      expect(error.message).toBe('Dokploy redirected the webhook; use its final https address.')
+      expect(error.message).not.toContain('secret-landing')
+    }
+    expect(elsewhere.calls).toHaveLength(0)
+    /* a bare 301 is still Dokploy's git-source answer */
+    panel.answer = { status: 301, body: '{"message":"Branch Not Match"}' }
+    await expect(triggerDeploy(panel.url)).rejects.toThrow('needs a Raw compose')
   })
 
   it('stops reading an answer past 2 MB', async () => {
@@ -318,6 +352,38 @@ describe('settling a record at boot', () => {
     expect(record(dir).message).toBe(
       "Dokploy has not installed v2 after 20 minutes. Check the service's deployment log in Dokploy. If DOOP_TAG is set in its Environment, clear it so the service follows the latest release.",
     )
+  })
+
+  it('promotes a failed record when the tag is the running version, within the hour', async () => {
+    const dir = statusDir()
+    seed(dir, {
+      ...base,
+      state: 'failed',
+      message: 'Dokploy answered the webhook with 502.',
+      at: Date.now() - 5 * 60_000,
+    })
+    expect(await idle(dir, 'v2').status()).toMatchObject({ state: 'succeeded', tag: 'v2', message: 'Updated to v2.' })
+    expect(record(dir).state).toBe('succeeded')
+    /* an old failure is left alone, as is one where nothing changed */
+    const old = statusDir()
+    seed(old, { ...base, state: 'failed', message: 'x', at: Date.now() - 61 * 60_000 })
+    expect((await idle(old, 'v2').status()).state).toBe('failed')
+    const same = statusDir()
+    seed(same, { ...base, state: 'failed', message: 'x', at: Date.now() - 60_000 })
+    expect((await idle(same, 'v1').status()).state).toBe('failed')
+  })
+
+  it('counts a newer release than the target as installed, naming what runs', async () => {
+    const dir = statusDir()
+    seed(dir, { ...base, state: 'running', at: Date.now() - 60_000 })
+    expect(await idle(dir, 'v3').status()).toMatchObject({ state: 'succeeded', tag: 'v3', message: 'Updated to v3.' })
+    const failed = statusDir()
+    seed(failed, { ...base, state: 'failed', message: 'Dokploy did not answer', at: Date.now() - 60_000 })
+    expect(await idle(failed, 'v3').status()).toMatchObject({ state: 'succeeded', message: 'Updated to v3.' })
+    /* still the previous version: the 20-minute failure holds */
+    const stale = statusDir()
+    seed(stale, { ...base, state: 'running', at: Date.now() - 21 * 60_000 })
+    expect((await idle(stale, 'v1').status()).state).toBe('failed')
   })
 
   it('leaves a recent running record alone, and reads no file as idle', async () => {
