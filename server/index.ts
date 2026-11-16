@@ -1,6 +1,6 @@
 import { startNightlyBackup } from './dbBackup.ts'
 import { dokployUpdater } from './dokployUpdate.ts'
-import { env } from './env.ts'
+import { env, retiredDokployVars } from './env.ts'
 import {
   changeInstances,
   componentDetail,
@@ -3860,6 +3860,12 @@ server.listen(PORT, () => {
   /* persisted renders of a frame's old versions are removed in the background */
   startRenderSweep((id) => store.getFrame(id)?.updatedAt)
   /* a Dokploy install: finish the record of the update this process came from, and back the database up every night */
+  const retired = retiredDokployVars()
+  if (retired.length > 0) {
+    console.warn(
+      `[update] ${retired.join(', ')} ${retired.length > 1 ? 'are' : 'is'} no longer used: Doop holds no Dokploy API key. Set DOOP_DOKPLOY_WEBHOOK_URL (the service's deploy webhook) instead.`,
+    )
+  }
   const dokploy = dokployUpdater(env.DOOP_VERSION)
   if (dokploy) {
     dokploy

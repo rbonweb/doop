@@ -66,26 +66,24 @@ export function isPrivateHost(hostname: string): boolean {
   return host === 'localhost' || (!host.includes(':') && !host.includes('.') && !/^\d+$/.test(host))
 }
 
-/** A Dokploy panel's origin: https, or http where the panel is on this machine or a private network
- *  (loopback, a private address, a single-label name such as a compose service). No path, query or
- *  credentials, so the API key can only ever be sent to the host the operator named. */
-const dokployOrigin = makeExactValidator<string>((input) => {
+/** A Dokploy compose deploy webhook: `https://<panel>/api/deploy/compose/<token>`, https, or http only on a private host.
+ *  The token is the whole credential, so nothing here ever puts the value in a message. */
+const dokployWebhook = makeExactValidator<string>((input) => {
+  const invalid = () =>
+    new TypeError("Invalid webhook URL (expected the compose service's deploy webhook from the Deployments tab)")
   let parsed: URL
   try {
     parsed = new URL(input)
   } catch {
-    throw new TypeError('Invalid URL (expected https://dokploy.example.com)')
+    throw invalid()
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new TypeError('Invalid URL (expected https://dokploy.example.com)')
-  }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash || !['', '/'].includes(parsed.pathname)) {
-    throw new TypeError('Give the origin only: no path, query or credentials')
-  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw invalid()
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) throw invalid()
+  if (!/^\/api\/deploy\/compose\/[A-Za-z0-9_-]{8,}$/.test(parsed.pathname)) throw invalid()
   if (parsed.protocol === 'http:' && !isPrivateHost(parsed.hostname)) {
     throw new TypeError('http is only accepted for a panel on this machine or a private network; use https')
   }
-  return parsed.origin
+  return parsed.href
 })
 
 /** Comma-separated values, trimmed, empties dropped. */
@@ -379,12 +377,8 @@ const schema = {
   /* the compose project directory the updater pulls and restarts */
   DOOP_UPDATE_DIR: str({ default: undefined }),
   DOOP_UPDATE_API: origin({ default: 'https://api.github.com' }),
-  /* Update now through a Dokploy panel: all three are set together, with DOOP_UPDATE_REPO, and never beside DOOP_UPDATE_DIR */
-  DOOP_DOKPLOY_URL: dokployOrigin({ default: undefined }),
-  /* a Dokploy API key, sent as x-api-key to DOOP_DOKPLOY_URL and nowhere else; never logged or returned */
-  DOOP_DOKPLOY_API_KEY: str({ default: undefined }),
-  /* the compose service's id, from its page URL in Dokploy */
-  DOOP_DOKPLOY_COMPOSE_ID: str({ default: undefined }),
+  /* Update now through Dokploy: the compose service's deploy webhook (Deployments tab), set with DOOP_UPDATE_REPO and never beside DOOP_UPDATE_DIR. A secret: anyone holding it can redeploy that one service; never logged or returned */
+  DOOP_DOKPLOY_WEBHOOK_URL: dokployWebhook({ default: undefined }),
   /* where database backups are written, and how long they are kept */
   DOOP_BACKUP_DIR: str({ default: '/app/data/backups' }),
   DOOP_BACKUP_KEEP_DAYS: int(1)({ default: 14 }),
@@ -433,26 +427,18 @@ function parse() {
     throw new Error(
       `Invalid environment configuration:\n  STALL_LOG_MS: ${parsed.STALL_LOG_MS} is greater than STALL_EXIT_MS (${parsed.STALL_EXIT_MS}); the log threshold must come first`,
     )
-  const dokploy = (['DOOP_DOKPLOY_URL', 'DOOP_DOKPLOY_API_KEY', 'DOOP_DOKPLOY_COMPOSE_ID'] as const).filter(
-    (key) => parsed[key] !== undefined,
-  )
-  if (dokploy.length > 0 && dokploy.length < 3) {
-    const missing = ['DOOP_DOKPLOY_URL', 'DOOP_DOKPLOY_API_KEY', 'DOOP_DOKPLOY_COMPOSE_ID'].filter(
-      (key) => !dokploy.includes(key as (typeof dokploy)[number]),
-    )
-    throw new Error(
-      `Invalid environment configuration:\n  ${missing.join(', ')}: missing (Update now through Dokploy needs DOOP_DOKPLOY_URL, DOOP_DOKPLOY_API_KEY and DOOP_DOKPLOY_COMPOSE_ID together)`,
-    )
+  if (parsed.DOOP_DOKPLOY_WEBHOOK_URL !== undefined) {
+    if (parsed.DOOP_UPDATE_REPO === undefined) {
+      throw new Error(
+        'Invalid environment configuration:\n  DOOP_UPDATE_REPO: missing (Update now through Dokploy follows the releases of this owner/repo, and needs it set beside DOOP_DOKPLOY_WEBHOOK_URL)',
+      )
+    }
+    if (parsed.DOOP_UPDATE_DIR !== undefined) {
+      throw new Error(
+        'Invalid environment configuration:\n  DOOP_UPDATE_DIR: set together with DOOP_DOKPLOY_WEBHOOK_URL; an install updates through its host folder or through Dokploy, not both',
+      )
+    }
   }
-  if (dokploy.length > 0 && parsed.DOOP_UPDATE_REPO === undefined) {
-    throw new Error(
-      'Invalid environment configuration:\n  DOOP_UPDATE_REPO: missing (Update now through Dokploy follows the releases of this owner/repo, and needs it set beside DOOP_DOKPLOY_*)',
-    )
-  }
-  if (dokploy.length === 3 && parsed.DOOP_UPDATE_DIR !== undefined)
-    throw new Error(
-      'Invalid environment configuration:\n  DOOP_UPDATE_DIR: set together with DOOP_DOKPLOY_URL; an install updates through its host folder or through Dokploy, not both',
-    )
   return parsed
 }
 
@@ -473,4 +459,11 @@ export function windowsBrowserDirectories(): string[] {
  *  the server itself parses once at boot. */
 export function reloadEnv(): void {
   env = parse()
+}
+
+/** The Dokploy API variables an earlier release read. They are ignored now, since a key that can control every app on a panel is not Doop's to hold; the boot says so once. */
+export function retiredDokployVars(): string[] {
+  return ['DOOP_DOKPLOY_URL', 'DOOP_DOKPLOY_API_KEY', 'DOOP_DOKPLOY_COMPOSE_ID'].filter(
+    (key) => (process.env[key] ?? '').trim() !== '',
+  )
 }

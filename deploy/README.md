@@ -119,7 +119,7 @@ With a key, also set `DOOP_ANTHROPIC_BASE_URL` (empty for Anthropic itself), `DO
 [Dokploy](https://dokploy.com) is a panel that runs Docker services on your own server. You get what [section 3](#3-install) installs: your own address with HTTPS, no public sign-up, an admin account, model names you can change on the Admin page, and no search engine indexing. Doop runs there with three differences:
 
 - Dokploy's Traefik answers on ports 80 and 443 and gets the HTTPS certificate, so Doop's Caddy is left out.
-- **Update now** works through Dokploy's API instead of the `doop-update` service on the host.
+- **Update now** works through the service's deploy webhook instead of the `doop-update` service on the host.
 - Backups are made by Doop itself, before every update and every night, because Dokploy has no host cron to run `doop.sh backup`.
 
 Everything else is the same: no public sign-up, an admin account, no search engine indexing, model names you can change on the Admin page. You manage the server from Dokploy's dashboard instead of with `doop.sh`, so the commands in [section 13](#13-all-commands) do not apply here.
@@ -131,7 +131,6 @@ Everything else is the same: no public sign-up, an admin account, no search engi
 **3. Fill the Environment tab.** Paste this and replace the values:
 
 ```sh
-DOOP_TAG=v0.7.0-fork.1
 BETTER_AUTH_URL=https://doop.yourbrand.com
 BETTER_AUTH_SECRET=<openssl rand -base64 32>
 POSTGRES_PASSWORD=<openssl rand -hex 24>
@@ -143,7 +142,7 @@ DOOP_AGENT_MODEL=
 DOOP_DISTILL_MODEL=
 ```
 
-- `DOOP_TAG` is the release to run: the latest tag on the fork's **Releases** page on GitHub, for example `v0.7.0-fork.1`. **Update now** changes it for you later.
+- The service follows the newest release (the image's `latest` tag). Add `DOOP_TAG=v0.7.0-fork.1` only to pin one release: a pinned service never moves until you change or clear it.
 - `BETTER_AUTH_URL` is the address people will open, starting with `https://`. It must match the domain you add next.
 - `BETTER_AUTH_SECRET` signs people in. Run `openssl rand -base64 32` on any machine and paste the output.
 - `POSTGRES_PASSWORD` is the database password. Run `openssl rand -hex 24` and paste the output. Never change either secret after the first deploy: the first signs everyone out, the second stops Doop from opening its database.
@@ -167,34 +166,31 @@ node_modules/.bin/tsx server/instanceCli.ts admin you@example.com
 
 Add `--remove` before the address to take the role away again. After this, invite people from the Admin page, **Accounts**, **Invite someone** (see [section 5](#5-people)).
 
-**7. Turn on Update now.** With three more variables, the Admin page's version card installs the latest release through Dokploy:
+**7. Turn on Update now.** With one webhook, the Admin page's version card installs the latest release through Dokploy:
 
-1. In Dokploy, open **Settings**, **Profile**, **API/CLI Keys** and press **Create API Key**. Copy it: it is shown once.
-2. Copy the compose service's id: it is the last part of the service page's address in your browser.
-3. Add these to the Environment tab:
+1. In Dokploy, on the service's **General** tab, switch **Autodeploy** on.
+2. On the **Advanced** tab, switch **Pull latest images on deploy** on, so a redeploy downloads the newest image.
+3. On the **Deployments** tab, copy the **Webhook URL**. It looks like `https://dokploy.yourbrand.com/api/deploy/compose/<token>`.
+4. Add it to the Environment tab and press **Redeploy** once so Doop reads it:
 
    ```sh
-   DOOP_DOKPLOY_URL=https://dokploy.yourbrand.com
-   DOOP_DOKPLOY_API_KEY=<the key>
-   DOOP_DOKPLOY_COMPOSE_ID=<the id>
+   DOOP_DOKPLOY_WEBHOOK_URL=https://dokploy.yourbrand.com/api/deploy/compose/<token>
    ```
 
-   `DOOP_DOKPLOY_URL` is Dokploy's own address, `https://` only, and with no path. Plain `http://` is accepted only when the address is this machine or a private network: `localhost`, a `127.x`, `10.x`, `172.16-31.x` or `192.168.x` address, an IPv6 `::1`, `fc00::/7` or `fe80::/10` address, or a bare service name such as `dokploy` (never a dotted name such as `10.example.com`).
+   It must be exactly that shape: `https://`, the path `/api/deploy/compose/<token>`, no query. Plain `http://` is accepted only when the address is this machine or a private network: `localhost`, a `127.x`, `10.x`, `172.16-31.x` or `192.168.x` address, an IPv6 `::1`, `fc00::/7` or `fe80::/10` address, or a bare service name such as `dokploy` (never a dotted name such as `10.example.com`). The service must be a **Raw** compose: a service that deploys from git is refused.
 
-4. Press **Redeploy** once so Doop reads the new variables. Both containers restart, which takes about a minute.
-
-The key can redeploy any service in Dokploy, so keep it private: it is as sensitive as the panel's own login. Doop never shows it in a page or writes it to its log. If it leaks, delete it in Dokploy and add a new one the same way.
+The webhook can only redeploy this one service, and anyone who has it can trigger a redeploy, so keep it private. Doop never shows it in a page or writes it to its log, and it never holds a Dokploy API key. If it leaks, regenerate it in Dokploy (the refresh icon next to the webhook on the **Deployments** tab), then put the new one in the Environment tab and redeploy.
 
 **What Update now does.** Pressing it on the Admin page:
 
 1. backs the database up into `../files/data/backups`,
-2. sets `DOOP_TAG` in the service's Environment to the newest release,
-3. asks Dokploy to redeploy the compose service and watches that deployment,
-4. reloads the page once the new version answers.
+2. calls the webhook once, and nothing else in Dokploy is touched,
+3. Dokploy pulls the latest release and restarts Doop,
+4. the page reloads once the new version answers.
 
-If the backup fails, nothing is sent to Dokploy. If the deployment fails, Doop puts the previous tag back, and the version that was already running keeps running; the card then says the update failed. If Dokploy is still deploying after 15 minutes, Doop stops watching and leaves the new tag in place: the card says Dokploy is still installing and to check its deployment log, and it shows the update as done once the new version is up.
+If the backup fails, nothing is sent to Dokploy. With **Pull latest images on deploy** on, any redeploy installs the latest release, whether it came from Update now, the **Deploy** button or Dokploy itself. If the new version has not come up after 20 minutes, the card says so and points at the service's deployment log in Dokploy.
 
-**The one limit.** A new release that starts and then crashes leaves nothing running to put the old one back by itself. The previous image is still on the server: set `DOOP_TAG` in the Environment tab back to the tag you were on and press **Redeploy**. The backup from just before the update is in `../files/data/backups`, if the database needs it too.
+**Going back to a previous release by hand.** A new release that starts and then crashes leaves nothing running to put the old one back by itself. In the Environment tab set `DOOP_TAG` to the previous release (the tag on the fork's **Releases** page, for example `v0.7.0-fork.1`) and press **Redeploy**. The backup from just before the update is in `../files/data/backups`, if the database needs it too. Clear `DOOP_TAG` later (and redeploy) to follow the latest release again.
 
 **Backups.** Doop backs the database up before every update and every night at 03:17 server time, into `../files/data/backups` on the Dokploy host (`/app/data/backups` inside the container). A backup is named `doop-<UTC stamp>-before-<tag>.sql.gz`, and the nightly ones `doop-<UTC stamp>-nightly.sql.gz`. They are kept for 14 days; add `DOOP_BACKUP_KEEP_DAYS` to the Environment tab to change that.
 
@@ -227,11 +223,14 @@ gunzip -c /tmp/doop-20261008-031700.sql.gz | psql -U doop -d doop
 
 **Troubleshooting.**
 
-| What you see                                          | What to do                                                                                                                                                                                                                 |
-| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| No **Update now**, though a newer release exists      | All three `DOOP_DOKPLOY_*` variables must be set in the Environment tab (the compose already sets `DOOP_UPDATE_REPO`); check for a path, a plain `http://` to a public host or a typo in `DOOP_DOKPLOY_URL`, then redeploy |
-| "Dokploy refused the API key"                         | The key was deleted or copied incomplete: create a new one under **Settings**, **Profile**, **API/CLI Keys** and update `DOOP_DOKPLOY_API_KEY`                                                                             |
-| An update failed and the old version is still running | Open the service's **Deployments** tab in Dokploy and read that deployment's log: it says why the new image did not start                                                                                                  |
+| What you see                                                                                  | What to do                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No **Update now**, though a newer release exists                                              | `DOOP_DOKPLOY_WEBHOOK_URL` must be set in the Environment tab, in the shape `https://<dokploy>/api/deploy/compose/<token>` (the compose already sets `DOOP_UPDATE_REPO`); a plain `http://` to a public host or a query on the URL stops Doop at boot with a message, then redeploy |
+| "Turn on Autodeploy for this service in Dokploy (General tab)."                               | Dokploy refuses the webhook while Autodeploy is off: switch it on in the service's **General** tab, then press Update now again                                                                                                                                                     |
+| "Dokploy does not know this webhook; copy it again from the service's Deployments tab."       | The webhook was regenerated or copied incomplete: copy it again from the **Deployments** tab into `DOOP_DOKPLOY_WEBHOOK_URL` and redeploy                                                                                                                                           |
+| "Dokploy refused the webhook: this service deploys from git; Update now needs a Raw compose." | Update now only works on a service whose **Provider** is **Raw** (step 2); recreate it that way                                                                                                                                                                                     |
+| "Dokploy answered the webhook with 500." (or another number)                                  | Open the service's **Deployments** tab and the Dokploy logs; the number is Dokploy's own answer                                                                                                                                                                                     |
+| "Dokploy has not installed ... after 20 minutes"                                              | Check the service's deployment log in Dokploy. If `DOOP_TAG` is set in its Environment tab, clear it so the service follows the latest release; also check **Pull latest images on deploy** is on                                                                                   |
 
 ## 4. Admins
 

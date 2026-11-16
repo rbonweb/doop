@@ -1,11 +1,11 @@
 # Paste this into a Dokploy Compose service (Raw), not into deploy/doop.sh:
-# Dokploy's Traefik does HTTPS and Update now goes through Dokploy's API.
+# Dokploy's Traefik does HTTPS and Update now goes through the service's deploy webhook.
 # deploy/README.md, section "Install on Dokploy", explains every step.
 name: doop
 
 services:
   doop:
-    image: ghcr.io/rbonweb/doop:${DOOP_TAG:?set DOOP_TAG in the Dokploy Environment tab}
+    image: ghcr.io/rbonweb/doop:${DOOP_TAG:-latest}
     restart: unless-stopped
     environment:
       NODE_ENV: production
@@ -15,9 +15,7 @@ services:
       DOOP_INVITE_ONLY: '1'
       DOOP_NOINDEX: '1'
       DOOP_UPDATE_REPO: rbonweb/doop
-      DOOP_DOKPLOY_URL: ${DOOP_DOKPLOY_URL:-}
-      DOOP_DOKPLOY_API_KEY: ${DOOP_DOKPLOY_API_KEY:-}
-      DOOP_DOKPLOY_COMPOSE_ID: ${DOOP_DOKPLOY_COMPOSE_ID:-}
+      DOOP_DOKPLOY_WEBHOOK_URL: ${DOOP_DOKPLOY_WEBHOOK_URL:-}
       DOOP_BACKUP_KEEP_DAYS: ${DOOP_BACKUP_KEEP_DAYS:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}

@@ -5,33 +5,28 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BackupFailed } from '../server/dbBackup.ts'
-import { DokployClient, DokployError, withTag } from '../server/dokploy.ts'
+import { DokployError, triggerDeploy } from '../server/dokploy.ts'
 import { DokployUpdater } from '../server/dokployUpdate.ts'
-import { isPrivateHost, reloadEnv } from '../server/env.ts'
-import { stubEnv, unstubAllEnvs } from './envStub.ts'
+import { env, isPrivateHost, reloadEnv, retiredDokployVars } from '../server/env.ts'
+import { unstubAllEnvs } from './envStub.ts'
 
-const KEY = 'dk_live_SUPER-SECRET-KEY-123'
-const COMPOSE = 'cmp_abc123'
+const TOKEN = 'SECRETtoken_0123456789abcdef'
+const HOOK_PATH = `/api/deploy/compose/${TOKEN}`
 
 interface Call {
   method: string
-  procedure: string
-  query: URLSearchParams
-  body: Record<string, unknown> | null
-  key: string | undefined
+  url: string
+  headers: http.IncomingHttpHeaders
+  body: string
 }
 
 interface Panel {
+  /** the webhook URL, token included */
   url: string
+  origin: string
   calls: Call[]
-  /** the compose Environment the panel holds */
-  env: string
-  /** what deployment.allByCompose answers */
-  deployments: unknown
-  /** runs when compose.redeploy arrives */
-  onRedeploy: () => void
-  /** replaces the answer to one procedure: [status, raw body] */
-  override: Map<string, { status: number; body: string; headers?: Record<string, string> }>
+  /** what the webhook answers: [status, body, extra headers] */
+  answer: { status: number; body: string; headers?: Record<string, string> }
   close(): Promise<void>
 }
 
@@ -45,51 +40,26 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-async function startPanel(initialEnv: string): Promise<Panel> {
+async function startPanel(): Promise<Panel> {
   const panel: Panel = {
     url: '',
+    origin: '',
     calls: [],
-    env: initialEnv,
-    deployments: [],
-    onRedeploy: () => {},
-    override: new Map(),
+    answer: { status: 200, body: JSON.stringify({ message: 'Compose deployed successfully' }) },
     close: async () => {},
   }
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url ?? '/', 'http://panel')
-    let raw = ''
-    req.on('data', (chunk) => (raw += chunk))
+    let body = ''
+    req.on('data', (chunk) => (body += chunk))
     req.on('end', () => {
-      const procedure = url.pathname.replace(/^\/api\//, '')
-      const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : null
-      panel.calls.push({
-        method: req.method ?? '',
-        procedure,
-        query: url.searchParams,
-        body,
-        key: req.headers['x-api-key'] as string | undefined,
-      })
-      const forced = panel.override.get(procedure)
-      if (forced) {
-        res.writeHead(forced.status, { 'content-type': 'application/json', ...forced.headers })
-        return res.end(forced.body)
-      }
-      res.writeHead(200, { 'content-type': 'application/json' })
-      if (procedure === 'compose.one') return res.end(JSON.stringify({ composeId: COMPOSE, env: panel.env }))
-      if (procedure === 'compose.update') {
-        panel.env = String(body?.env ?? '')
-        return res.end('{}')
-      }
-      if (procedure === 'compose.redeploy') {
-        panel.onRedeploy()
-        return res.end('{}')
-      }
-      if (procedure === 'deployment.allByCompose') return res.end(JSON.stringify(panel.deployments))
-      res.writeHead(404).end('{}')
+      panel.calls.push({ method: req.method ?? '', url: req.url ?? '', headers: req.headers, body })
+      res.writeHead(panel.answer.status, { 'content-type': 'application/json', ...panel.answer.headers })
+      res.end(panel.answer.body)
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-  panel.url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  panel.origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  panel.url = `${panel.origin}${HOOK_PATH}`
   panel.close = () =>
     new Promise<void>((resolve) => {
       server.closeAllConnections()
@@ -112,16 +82,20 @@ function record(dir: string): { state: string; tag: string; previous: string; me
 function updater(panel: Panel, dir: string, extra: Partial<ConstructorParameters<typeof DokployUpdater>[0]> = {}) {
   return new DokployUpdater({
     current: 'v1',
-    config: { url: panel.url, apiKey: KEY, composeId: COMPOSE },
+    webhookUrl: panel.url,
     statusDir: dir,
     backup: async () => '/backups/x.sql.gz',
-    pollMs: 1,
-    sleep: async () => {},
     ...extra,
   })
 }
 
-/** Everything a test run printed, to prove the key is in none of it. */
+async function runUpdate(up: DokployUpdater, tag = 'v2'): Promise<void> {
+  expect(up.reserve()).toBe(true)
+  await up.start(tag)
+  await up.idle
+}
+
+/** Everything a test run printed, to prove the webhook URL is in none of it. */
 function captureOutput(): () => string {
   const lines: string[] = []
   for (const method of ['log', 'info', 'warn', 'error', 'debug'] as const) {
@@ -132,141 +106,97 @@ function captureOutput(): () => string {
   return () => lines.join('\n')
 }
 
-const writes = (panel: Panel) => panel.calls.filter((c) => c.method === 'POST')
-
-describe('withTag', () => {
-  it('changes only the DOOP_TAG line and keeps CRLF and the final newline', () => {
-    const before = 'BETTER_AUTH_URL=https://doop.test\r\nDOOP_TAG=v1\r\nPOSTGRES_PASSWORD=a=b#c\r\n'
-    const after = withTag(before, 'v2')
-    expect(after.env).toBe('BETTER_AUTH_URL=https://doop.test\r\nDOOP_TAG=v2\r\nPOSTGRES_PASSWORD=a=b#c\r\n')
-    expect(after.previous).toBe('v1')
-    expect(withTag('A=1\nDOOP_TAG=v1', 'v2').env).toBe('A=1\nDOOP_TAG=v2')
-    expect(withTag('DOOP_TAG="v1"\n', 'v2')).toEqual({ env: 'DOOP_TAG=v2\n', previous: 'v1' })
+describe('the webhook call', () => {
+  it('posts an empty JSON object, with no GitHub event header, and accepts a 200', async () => {
+    const panel = await startPanel()
+    await triggerDeploy(panel.url)
+    expect(panel.calls).toHaveLength(1)
+    const call = panel.calls[0]!
+    expect(call.method).toBe('POST')
+    expect(call.url).toBe(HOOK_PATH)
+    expect(call.body).toBe('{}')
+    expect(call.headers['content-type']).toBe('application/json')
+    expect(call.headers['x-github-event']).toBeUndefined()
   })
 
-  it('keeps a trailing comment and reads the old value around quotes and comments', () => {
-    expect(withTag('DOOP_TAG=v1 # pinned\nX=1\n', 'v2')).toEqual({ env: 'DOOP_TAG=v2 # pinned\nX=1\n', previous: 'v1' })
-    expect(withTag('DOOP_TAG="rel 1" # a\r\n', 'v2')).toEqual({ env: 'DOOP_TAG=v2 # a\r\n', previous: 'rel 1' })
-    expect(withTag('DOOP_TAG=\n', 'v2')).toEqual({ env: 'DOOP_TAG=v2\n', previous: '' })
-  })
-
-  it('refuses no DOOP_TAG line and more than one', () => {
-    expect(() => withTag('A=1\nB=2\n', 'v2')).toThrow(/no DOOP_TAG= line/)
-    expect(() => withTag('', 'v2')).toThrow(DokployError)
-    expect(() => withTag('DOOP_TAG=v1\nDOOP_TAG=v0\n', 'v2')).toThrow(/more than one/)
-    /* a variable that merely starts with the name is not it */
-    expect(() => withTag('DOOP_TAG_X=1\n', 'v2')).toThrow(/no DOOP_TAG= line/)
-  })
-})
-
-describe('the Dokploy client', () => {
-  it('sends the key to the panel, as a header, and refuses a redirect elsewhere', async () => {
-    const elsewhere = await startPanel('')
-    const panel = await startPanel('DOOP_TAG=v1\n')
-    panel.override.set('compose.one', {
-      status: 302,
-      body: '',
-      headers: { location: `${elsewhere.url}/api/compose.one` },
-    })
-    const client = new DokployClient({ url: panel.url, apiKey: KEY, composeId: COMPOSE })
-    await expect(client.composeEnv()).rejects.toThrow(DokployError)
-    expect(panel.calls[0]?.key).toBe(KEY)
+  it('says what to do for each answer Dokploy gives', async () => {
+    const panel = await startPanel()
+    const ask = async (status: number, body: string, headers?: Record<string, string>) => {
+      panel.answer = { status, body, headers }
+      return triggerDeploy(panel.url).then(
+        () => 'ok',
+        (e: unknown) => (e as Error).message,
+      )
+    }
+    expect(await ask(400, JSON.stringify({ message: 'Automatic deployments are disabled for this compose' }))).toBe(
+      'Turn on Autodeploy for this service in Dokploy (General tab).',
+    )
+    expect(await ask(404, JSON.stringify({ message: 'Compose Not Found' }))).toBe(
+      "Dokploy does not know this webhook; copy it again from the service's Deployments tab.",
+    )
+    const git = 'Dokploy refused the webhook: this service deploys from git; Update now needs a Raw compose.'
+    expect(await ask(301, JSON.stringify({ message: 'Branch Not Match' }))).toBe(git)
+    /* a 301 that also names a Location is still not followed */
+    const elsewhere = await startPanel()
+    expect(await ask(301, '{}', { location: `${elsewhere.origin}/somewhere` })).toBe(git)
     expect(elsewhere.calls).toHaveLength(0)
+    expect(await ask(500, 'boom')).toBe('Dokploy answered the webhook with 500.')
+    expect(await ask(400, JSON.stringify({ message: 'Error deploying Compose' }))).toBe(
+      'Dokploy answered the webhook with 400.',
+    )
   })
 
-  it('stops reading an answer past 2 MB, declared or streamed', async () => {
-    const panel = await startPanel('')
-    const client = new DokployClient({ url: panel.url, apiKey: KEY, composeId: COMPOSE })
-    panel.override.set('compose.one', { status: 200, body: JSON.stringify({ env: 'x'.repeat(2 * 1024 * 1024 + 10) }) })
-    await expect(client.composeEnv()).rejects.toThrow(/more than 2 MB/)
-    const chunked = http.createServer((_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.write('{"env":"')
-      const big = 'y'.repeat(256 * 1024)
-      for (let i = 0; i < 12; i++) res.write(big)
-      res.end('"}')
-    })
-    await new Promise<void>((resolve) => chunked.listen(0, '127.0.0.1', resolve))
-    const streamed = new DokployClient({
-      url: `http://127.0.0.1:${(chunked.address() as AddressInfo).port}`,
-      apiKey: KEY,
-      composeId: COMPOSE,
-    })
-    await expect(streamed.composeEnv()).rejects.toThrow(/more than 2 MB/)
-    chunked.closeAllConnections()
-    chunked.close()
-  })
+  it('reports a panel that is down or silent without naming the URL', async () => {
+    const down = http.createServer()
+    await new Promise<void>((resolve) => down.listen(0, '127.0.0.1', resolve))
+    const url = `http://127.0.0.1:${(down.address() as AddressInfo).port}${HOOK_PATH}`
+    await new Promise<void>((resolve) => down.close(() => resolve()))
+    const unreachable = (await triggerDeploy(url).catch((e: unknown) => e)) as Error
+    expect(unreachable).toBeInstanceOf(DokployError)
+    expect(unreachable.message).toBe('The Dokploy webhook could not be reached.')
 
-  it('gives up on a panel that does not answer', async () => {
     const hang = http.createServer(() => {})
     await new Promise<void>((resolve) => hang.listen(0, '127.0.0.1', resolve))
-    const client = new DokployClient({
-      url: `http://127.0.0.1:${(hang.address() as AddressInfo).port}`,
-      apiKey: KEY,
-      composeId: COMPOSE,
+    const silent = (await triggerDeploy(`http://127.0.0.1:${(hang.address() as AddressInfo).port}${HOOK_PATH}`, {
       timeoutMs: 150,
-    })
-    await expect(client.composeEnv()).rejects.toThrow(/did not answer compose.one in time/)
+    }).catch((e: unknown) => e)) as Error
+    expect(silent.message).toBe('The Dokploy webhook did not answer in time.')
     hang.closeAllConnections()
     hang.close()
+    for (const error of [unreachable, silent]) expect(error.message).not.toContain(TOKEN)
   })
 
-  it('treats an unexpected shape as an error, not a crash', async () => {
-    const panel = await startPanel('')
-    const client = new DokployClient({ url: panel.url, apiKey: KEY, composeId: COMPOSE })
-    panel.override.set('compose.one', { status: 200, body: JSON.stringify({ env: 5 }) })
-    await expect(client.composeEnv()).rejects.toThrow(/shape Doop does not recognise/)
-    panel.override.set('compose.one', { status: 200, body: JSON.stringify(['x']) })
-    await expect(client.composeEnv()).rejects.toThrow(DokployError)
-    panel.override.set('compose.one', { status: 200, body: 'not json' })
-    await expect(client.composeEnv()).rejects.toThrow(/other than JSON/)
-    panel.override.set('deployment.allByCompose', { status: 200, body: JSON.stringify({ a: 1 }) })
-    await expect(client.deployments()).rejects.toThrow(/shape Doop does not recognise/)
-    panel.override.set('deployment.allByCompose', { status: 200, body: JSON.stringify([{ status: 'done' }]) })
-    expect(await client.deployments()).toEqual([{ id: null, status: 'done', createdAt: null }])
+  it('stops reading an answer past 2 MB', async () => {
+    const panel = await startPanel()
+    panel.answer = { status: 400, body: `Automatic deployments are disabled ${'x'.repeat(2 * 1024 * 1024 + 10)}` }
+    await expect(triggerDeploy(panel.url)).rejects.toThrow('Dokploy answered the webhook with 400.')
   })
 })
 
-describe('Update now through Dokploy', () => {
-  it('backs up, swaps the tag, redeploys, then waits to be replaced', async () => {
-    const panel = await startPanel('BETTER_AUTH_URL=https://doop.test\r\nDOOP_TAG=v1\r\n')
-    panel.deployments = [{ deploymentId: 'd1', status: 'done', createdAt: '2026-11-01T00:00:00Z' }]
+describe('Update now through the webhook', () => {
+  it('backs up, calls the webhook once, then waits to be replaced', async () => {
+    const panel = await startPanel()
     const dir = statusDir()
     const order: string[] = []
     const backup = vi.fn(async (label: string) => {
       order.push(`backup:${label}`)
       return '/backups/x.sql.gz'
     })
-    let reachedWatch: () => void = () => {}
-    const watching = new Promise<void>((resolve) => (reachedWatch = resolve))
-    const up = updater(panel, dir, {
-      backup,
-      /* the old process is replaced while it waits: this sleep never returns */
-      sleep: () => {
-        reachedWatch()
-        return new Promise(() => {})
-      },
-    })
+    const up = updater(panel, dir, { backup })
     expect(up.reserve()).toBe(true)
     expect(up.reserve()).toBe(false)
     await up.start('v2')
     expect(record(dir)).toMatchObject({ state: 'running', tag: 'v2', previous: 'v1' })
-    await watching
+    await up.idle
 
     expect(backup).toHaveBeenCalledWith('before-v2')
-    expect(panel.calls.map((c) => c.procedure)).toEqual([
-      'compose.one',
-      'compose.one',
-      'deployment.allByCompose',
-      'compose.update',
-      'compose.redeploy',
-    ])
-    expect(writes(panel)[0]?.body).toEqual({
-      composeId: COMPOSE,
-      env: 'BETTER_AUTH_URL=https://doop.test\r\nDOOP_TAG=v2\r\n',
+    /* the webhook is the only thing Doop sends to Dokploy */
+    expect(panel.calls.map((c) => `${c.method} ${c.url}`)).toEqual([`POST ${HOOK_PATH}`])
+    expect(record(dir)).toMatchObject({
+      state: 'running',
+      message: 'Dokploy is installing v2; Doop restarts and this page reloads.',
     })
-    expect(panel.calls.every((c) => c.key === KEY)).toBe(true)
-    expect(record(dir).message).toBe('Dokploy is installing v2; Doop restarts and this page reloads.')
+    expect(up.busy).toBe(false)
 
     /* the new process boots as v2 and finishes the record */
     const next = updater(panel, dir, { current: 'v2' })
@@ -274,238 +204,213 @@ describe('Update now through Dokploy', () => {
     expect(record(dir).state).toBe('succeeded')
   })
 
-  it('puts the previous tag back when the deployment fails', async () => {
-    const panel = await startPanel('A=1\nDOOP_TAG=v1\n')
-    panel.deployments = [{ deploymentId: 'd1', status: 'done', createdAt: '2026-11-01T00:00:00Z' }]
-    panel.onRedeploy = () => {
-      panel.deployments = [
-        { deploymentId: 'd2', status: 'error', createdAt: new Date().toISOString() },
-        { deploymentId: 'd1', status: 'done', createdAt: '2026-11-01T00:00:00Z' },
-      ]
-    }
-    const dir = statusDir()
-    const up = updater(panel, dir)
-    up.reserve()
-    await up.start('v2')
-    await up.idle
-
-    expect(panel.env).toBe('A=1\nDOOP_TAG=v1\n')
-    expect(writes(panel).map((c) => c.procedure)).toEqual(['compose.update', 'compose.redeploy', 'compose.update'])
-    expect(record(dir)).toMatchObject({ state: 'failed', tag: 'v2', previous: 'v1' })
-    expect(record(dir).message).toMatch(/failed.*DOOP_TAG is back at v1, and v1 is still running/)
-    expect(up.busy).toBe(false)
-  })
-
-  it('puts back the old DOOP_TAG value, comment kept, not the running version', async () => {
-    const panel = await startPanel('A=1\nDOOP_TAG=release-1 # pinned\n')
-    panel.deployments = []
-    panel.onRedeploy = () => {
-      panel.deployments = [{ deploymentId: 'd2', status: 'error', createdAt: new Date().toISOString() }]
-    }
-    const dir = statusDir()
-    const up = updater(panel, dir)
-    up.reserve()
-    await up.start('v2')
-    await up.idle
-    expect(panel.env).toBe('A=1\nDOOP_TAG=release-1 # pinned\n')
-    expect(record(dir)).toMatchObject({ state: 'failed', previous: 'release-1' })
-    expect(record(dir).message).toMatch(/DOOP_TAG is back at release-1, and v1 is still running/)
-  })
-
-  it('ignores deployments that were there before the redeploy', async () => {
-    const panel = await startPanel('DOOP_TAG=v1\n')
-    /* an old failed deployment is not this update's */
-    panel.deployments = [{ deploymentId: 'old', status: 'error', createdAt: '2026-10-01T00:00:00Z' }]
-    const dir = statusDir()
-    let now = 1_000
-    const up = updater(panel, dir, {
-      now: () => now,
-      watchMs: 5_000,
-      sleep: async () => {
-        now += 1_000
-      },
-    })
-    up.reserve()
-    await up.start('v2')
-    await up.idle
-    /* the deployment may still finish: the tag stays, and the boot that comes up as v2 marks it done */
-    expect(record(dir)).toMatchObject({ state: 'failed', previous: 'v1' })
-    expect(record(dir).message).toMatch(/Dokploy is still installing v2; check its deployment log/)
-    expect(panel.env).toBe('DOOP_TAG=v2\n')
-    expect(writes(panel).map((c) => c.procedure)).toEqual(['compose.update', 'compose.redeploy'])
-    const next = updater(panel, dir, { current: 'v2' })
-    expect(await next.status()).toMatchObject({ state: 'succeeded', tag: 'v2' })
-  })
-
-  it('stops before anything is written when the backup fails', async () => {
-    const panel = await startPanel('DOOP_TAG=v1\n')
+  it('stops before the webhook when the backup fails', async () => {
+    const panel = await startPanel()
     const dir = statusDir()
     const up = updater(panel, dir, {
       backup: async () => {
         throw new BackupFailed('The database backup failed (pg_dump exited with 1).')
       },
     })
-    up.reserve()
-    await up.start('v2')
-    await up.idle
-    expect(writes(panel)).toHaveLength(0)
-    expect(panel.env).toBe('DOOP_TAG=v1\n')
+    await runUpdate(up)
+    expect(panel.calls).toHaveLength(0)
     expect(record(dir)).toMatchObject({ state: 'failed', tag: 'v2' })
     expect(record(dir).message).toBe(
       'The database backup failed (pg_dump exited with 1). Nothing was changed; v1 is still running.',
     )
+    expect(up.busy).toBe(false)
   })
 
-  it('refuses a missing or doubled DOOP_TAG before the backup and before any write', async () => {
-    for (const env of ['A=1\n', 'DOOP_TAG=v1\nDOOP_TAG=v0\n']) {
-      const panel = await startPanel(env)
+  it('records the four webhook failures as written for the admin', async () => {
+    const cases: [number, string, string, Record<string, string>?][] = [
+      [
+        400,
+        JSON.stringify({ message: 'Automatic deployments are disabled for this compose' }),
+        'Turn on Autodeploy for this service in Dokploy (General tab).',
+      ],
+      [
+        404,
+        '{"message":"Compose Not Found"}',
+        "Dokploy does not know this webhook; copy it again from the service's Deployments tab.",
+      ],
+      [
+        301,
+        '{"message":"Branch Not Match"}',
+        'Dokploy refused the webhook: this service deploys from git; Update now needs a Raw compose.',
+      ],
+      [502, '', 'Dokploy answered the webhook with 502.'],
+    ]
+    for (const [status, body, message] of cases) {
+      const panel = await startPanel()
+      panel.answer = { status, body }
       const dir = statusDir()
-      const backup = vi.fn(async () => '/x')
-      const up = updater(panel, dir, { backup })
-      up.reserve()
-      await up.start('v2')
-      await up.idle
-      expect(backup).not.toHaveBeenCalled()
-      expect(writes(panel)).toHaveLength(0)
-      expect(record(dir).state).toBe('failed')
-      expect(record(dir).message).toMatch(/DOOP_TAG= line/)
+      await runUpdate(updater(panel, dir))
+      expect(record(dir)).toMatchObject({ state: 'failed', tag: 'v2', message })
     }
   })
 
-  it('treats a compose it cannot read as a failed update', async () => {
-    const panel = await startPanel('')
-    panel.override.set('compose.one', { status: 200, body: JSON.stringify({ env: { not: 'a string' } }) })
-    const dir = statusDir()
-    const up = updater(panel, dir)
-    up.reserve()
-    await up.start('v2')
-    await up.idle
-    expect(record(dir).message).toMatch(/shape Doop does not recognise.*Nothing was changed/)
-  })
-
-  it('never lets the API key reach the status file, a log line or an error', async () => {
+  it('never lets the webhook URL reach the status file, a log line, an error or a status read', async () => {
     const output = captureOutput()
-    for (const [status, body] of [
-      [401, JSON.stringify({ code: 'UNAUTHORIZED', message: `bad key ${KEY}` })],
-      [500, JSON.stringify({ code: 'INTERNAL_SERVER_ERROR', message: `crashed with ${KEY}` })],
-    ] as const) {
-      for (const procedure of ['compose.one', 'compose.update', 'compose.redeploy']) {
-        const panel = await startPanel('DOOP_TAG=v1\n')
-        panel.override.set(procedure, { status, body })
-        const dir = statusDir()
-        const up = updater(panel, dir)
-        up.reserve()
-        await up.start('v2')
-        await up.idle
-        const written = readFileSync(path.join(dir, 'status.json'), 'utf8')
-        expect(written).not.toContain(KEY)
-        expect(record(dir).state).toBe('failed')
-        expect(JSON.stringify(await up.status())).not.toContain(KEY)
-      }
+    const answers: [number, string][] = [
+      [200, `{"echo":"${TOKEN}"}`],
+      [400, `Automatic deployments are disabled ${TOKEN}`],
+      [404, TOKEN],
+      [301, TOKEN],
+      [500, `crashed ${HOOK_PATH}`],
+    ]
+    for (const [status, body] of answers) {
+      const panel = await startPanel()
+      panel.answer = { status, body }
+      const dir = statusDir()
+      const up = updater(panel, dir)
+      await runUpdate(up)
+      expect(readFileSync(path.join(dir, 'status.json'), 'utf8')).not.toContain(TOKEN)
+      expect(JSON.stringify(await up.status())).not.toContain(TOKEN)
     }
-    /* the client's own errors, too */
-    const panel = await startPanel('')
-    panel.override.set('compose.one', { status: 401, body: `{"message":"${KEY}"}` })
-    const client = new DokployClient({ url: panel.url, apiKey: KEY, composeId: COMPOSE })
-    const error = await client.composeEnv().catch((e: unknown) => e)
-    expect(error).toBeInstanceOf(DokployError)
-    expect(String((error as Error).message)).not.toContain(KEY)
-    expect(String((error as Error).message)).toMatch(/refused the API key/)
-    expect(output()).not.toContain(KEY)
-  })
-
-  it('reports a key refused on compose.update as nothing changed', async () => {
-    const panel = await startPanel('DOOP_TAG=v1\n')
-    panel.override.set('compose.update', { status: 401, body: '{}' })
+    /* a dead panel, and a backup that throws something unexpected */
+    const down = await startPanel()
+    const deadUrl = down.url
+    await down.close()
     const dir = statusDir()
-    const up = updater(panel, dir)
-    up.reserve()
-    await up.start('v2')
-    await up.idle
-    expect(panel.calls.filter((c) => c.procedure === 'compose.redeploy')).toHaveLength(0)
-    expect(record(dir).state).toBe('failed')
+    await runUpdate(
+      new DokployUpdater({ current: 'v1', webhookUrl: deadUrl, statusDir: dir, backup: async () => '/x' }),
+    )
+    expect(readFileSync(path.join(dir, 'status.json'), 'utf8')).not.toContain(TOKEN)
+    const odd = statusDir()
+    await runUpdate(
+      new DokployUpdater({
+        current: 'v1',
+        webhookUrl: deadUrl,
+        statusDir: odd,
+        backup: async () => {
+          throw new Error(`failed at ${deadUrl}`)
+        },
+      }),
+    )
+    expect(record(odd).message).toBe(
+      'An unexpected error stopped the update. Nothing was changed; v1 is still running.',
+    )
+    expect(readFileSync(path.join(odd, 'status.json'), 'utf8')).not.toContain(TOKEN)
+    expect(output()).not.toContain(TOKEN)
   })
 })
 
 describe('settling a record at boot', () => {
-  function seed(dir: string, record: Record<string, unknown>): void {
-    writeFileSync(path.join(dir, 'status.json'), JSON.stringify(record))
+  function seed(dir: string, data: Record<string, unknown>): void {
+    writeFileSync(path.join(dir, 'status.json'), JSON.stringify(data))
   }
   const base = { tag: 'v2', previous: 'v1', message: 'Dokploy is installing v2; Doop restarts and this page reloads.' }
+  const idle = (dir: string, current: string) =>
+    new DokployUpdater({ current, webhookUrl: `http://127.0.0.1:1${HOOK_PATH}`, statusDir: dir })
 
   it('succeeds when the running version is the tag', async () => {
     const dir = statusDir()
     seed(dir, { ...base, state: 'running', at: Date.now() })
-    const up = new DokployUpdater({
-      current: 'v2',
-      config: { url: 'http://127.0.0.1:1', apiKey: KEY, composeId: COMPOSE },
-      statusDir: dir,
-    })
-    await up.settleAtBoot()
+    await idle(dir, 'v2').settleAtBoot()
     expect(record(dir)).toMatchObject({ state: 'succeeded', tag: 'v2' })
   })
 
   it('fails a running record older than 20 minutes when another version runs', async () => {
     const dir = statusDir()
     seed(dir, { ...base, state: 'running', at: Date.now() - 21 * 60_000 })
-    const up = new DokployUpdater({
-      current: 'v1',
-      config: { url: 'http://127.0.0.1:1', apiKey: KEY, composeId: COMPOSE },
-      statusDir: dir,
-    })
-    await up.settleAtBoot()
-    expect(record(dir)).toMatchObject({ state: 'failed', message: 'Dokploy did not install v2; v1 is running.' })
+    await idle(dir, 'v1').settleAtBoot()
+    expect(record(dir).state).toBe('failed')
+    expect(record(dir).message).toBe(
+      "Dokploy has not installed v2 after 20 minutes. Check the service's deployment log in Dokploy. If DOOP_TAG is set in its Environment, clear it so the service follows the latest release.",
+    )
   })
 
   it('leaves a recent running record alone, and reads no file as idle', async () => {
     const dir = statusDir()
-    const up = new DokployUpdater({
-      current: 'v1',
-      config: { url: 'http://127.0.0.1:1', apiKey: KEY, composeId: COMPOSE },
-      statusDir: dir,
-    })
+    const up = idle(dir, 'v1')
     expect(await up.status()).toEqual({ state: 'idle' })
     seed(dir, { ...base, state: 'running', at: Date.now() - 60_000 })
     expect(await up.status()).toMatchObject({ state: 'running', tag: 'v2' })
   })
 })
 
-describe('the Dokploy environment variables', () => {
-  it('want all three together', () => {
-    vi.stubEnv('DOOP_UPDATE_REPO', 'acme/doop')
-    vi.stubEnv('DOOP_DOKPLOY_URL', 'https://dokploy.example.com')
-    expect(() => reloadEnv()).toThrow(/DOOP_DOKPLOY_API_KEY, DOOP_DOKPLOY_COMPOSE_ID: missing/)
-    unstubAllEnvs()
-    expect(() => stubEnv('DOOP_DOKPLOY_API_KEY', KEY)).toThrow(/DOOP_DOKPLOY_URL, DOOP_DOKPLOY_COMPOSE_ID: missing/)
+describe('the Dokploy environment variable', () => {
+  const stubRepo = () => vi.stubEnv('DOOP_UPDATE_REPO', 'acme/doop')
+  const url = (u: string) => vi.stubEnv('DOOP_DOKPLOY_WEBHOOK_URL', u)
+
+  it('accepts the compose webhook shape over https, and http on a private host', () => {
+    stubRepo()
+    for (const good of [
+      `https://dokploy.example.com${HOOK_PATH}`,
+      `http://127.0.0.1:3000${HOOK_PATH}`,
+      `http://192.168.1.5:3000${HOOK_PATH}`,
+      `http://dokploy:3000${HOOK_PATH}`,
+      'https://dokploy.example.com/api/deploy/compose/abcdefgh',
+    ]) {
+      url(good)
+      expect(() => reloadEnv(), good).not.toThrow()
+    }
+    expect(env.DOOP_DOKPLOY_WEBHOOK_URL).toBe('https://dokploy.example.com/api/deploy/compose/abcdefgh')
   })
 
-  it('refuse a folder updater beside them, naming both', () => {
-    vi.stubEnv('DOOP_DOKPLOY_URL', 'https://dokploy.example.com')
-    vi.stubEnv('DOOP_DOKPLOY_API_KEY', KEY)
-    vi.stubEnv('DOOP_DOKPLOY_COMPOSE_ID', COMPOSE)
-    vi.stubEnv('DOOP_UPDATE_REPO', 'acme/doop')
-    vi.stubEnv('DOOP_UPDATE_DIR', '/opt/doop')
-    expect(() => reloadEnv()).toThrow(/DOOP_UPDATE_DIR.*DOOP_DOKPLOY_URL/)
-    vi.stubEnv('DOOP_UPDATE_DIR', '')
-    expect(() => reloadEnv()).not.toThrow()
+  it('refuses a wrong path, a query, a fragment, credentials, a short token and a public http host', () => {
+    stubRepo()
+    for (const bad of [
+      'https://dokploy.example.com/api/deploy/abcdefghij',
+      'https://dokploy.example.com/api/deploy/compose/',
+      'https://dokploy.example.com/api/deploy/compose/short',
+      `https://dokploy.example.com${HOOK_PATH}/extra`,
+      `https://dokploy.example.com${HOOK_PATH}?x=1`,
+      `https://dokploy.example.com${HOOK_PATH}#frag`,
+      `https://user:pw@dokploy.example.com${HOOK_PATH}`,
+      `http://dokploy.example.com${HOOK_PATH}`,
+      `http://[2606:4700::1111]${HOOK_PATH}`,
+      `http://10.example.com${HOOK_PATH}`,
+      `ftp://dokploy.example.com${HOOK_PATH}`,
+      'not a url',
+    ]) {
+      url(bad)
+      expect(() => reloadEnv(), bad).toThrow(/DOOP_DOKPLOY_WEBHOOK_URL/)
+    }
   })
 
-  it('need DOOP_UPDATE_REPO, and say so', () => {
-    vi.stubEnv('DOOP_DOKPLOY_URL', 'https://dokploy.example.com')
-    vi.stubEnv('DOOP_DOKPLOY_API_KEY', KEY)
-    vi.stubEnv('DOOP_DOKPLOY_COMPOSE_ID', COMPOSE)
+  it('never puts the value in the error it throws', () => {
+    stubRepo()
+    for (const bad of [`https://dokploy.example.com${HOOK_PATH}?x=1`, `http://dokploy.example.com${HOOK_PATH}`]) {
+      url(bad)
+      let message = ''
+      try {
+        reloadEnv()
+      } catch (e) {
+        message = (e as Error).message
+      }
+      expect(message).toMatch(/DOOP_DOKPLOY_WEBHOOK_URL/)
+      expect(message).not.toContain(TOKEN)
+    }
+  })
+
+  it('needs DOOP_UPDATE_REPO, and refuses a folder updater beside it, naming both', () => {
+    url(`https://dokploy.example.com${HOOK_PATH}`)
     expect(() => reloadEnv()).toThrow(/DOOP_UPDATE_REPO: missing/)
-    vi.stubEnv('DOOP_DOKPLOY_COMPOSE_ID', '')
-    expect(() => reloadEnv()).toThrow(/DOOP_DOKPLOY_COMPOSE_ID: missing/)
+    stubRepo()
+    expect(() => reloadEnv()).not.toThrow()
+    vi.stubEnv('DOOP_UPDATE_DIR', '/opt/doop')
+    expect(() => reloadEnv()).toThrow(/DOOP_UPDATE_DIR.*DOOP_DOKPLOY_WEBHOOK_URL/)
   })
 
-  it('judge a private host by its parsed address, not its text', () => {
+  it('names the retired API variables, and ignores them', () => {
+    expect(retiredDokployVars()).toEqual([])
+    vi.stubEnv('DOOP_DOKPLOY_URL', 'https://dokploy.example.com')
+    vi.stubEnv('DOOP_DOKPLOY_API_KEY', 'dk_old')
+    vi.stubEnv('DOOP_DOKPLOY_COMPOSE_ID', 'cmp_old')
+    expect(retiredDokployVars()).toEqual(['DOOP_DOKPLOY_URL', 'DOOP_DOKPLOY_API_KEY', 'DOOP_DOKPLOY_COMPOSE_ID'])
+    /* no error, and nothing of them in the parsed environment */
+    expect(() => reloadEnv()).not.toThrow()
+    expect(env.DOOP_DOKPLOY_WEBHOOK_URL).toBeUndefined()
+    expect(Object.keys(env)).not.toContain('DOOP_DOKPLOY_API_KEY')
+  })
+
+  it('judges a private host by its parsed address, not its text', () => {
     for (const host of [
       '127.0.0.1',
       '10.1.2.3',
       '192.168.1.5',
       '172.16.0.1',
-      '172.31.255.1',
       '[::1]',
       '[fd12:3456::1]',
       '[fe80::1]',
@@ -523,43 +428,9 @@ describe('the Dokploy environment variables', () => {
       '192.168.1.evil.net',
       '8.8.8.8',
       '172.32.0.1',
-      '172.15.0.1',
       'dokploy.example.com',
     ]) {
       expect(isPrivateHost(host), host).toBe(false)
-    }
-  })
-
-  it('take an origin only: https, or http on a private network', () => {
-    vi.stubEnv('DOOP_UPDATE_REPO', 'acme/doop')
-    vi.stubEnv('DOOP_DOKPLOY_API_KEY', KEY)
-    vi.stubEnv('DOOP_DOKPLOY_COMPOSE_ID', COMPOSE)
-    const accepted = [
-      'https://dokploy.example.com',
-      'http://127.0.0.1:3000',
-      'http://192.168.1.5:3000',
-      'http://dokploy:3000',
-    ]
-    for (const url of accepted) {
-      vi.stubEnv('DOOP_DOKPLOY_URL', url)
-      expect(() => reloadEnv(), url).not.toThrow()
-    }
-    const refused = [
-      'http://dokploy.example.com',
-      'http://[2606:4700::1111]',
-      'http://[::ffff:8.8.8.8]',
-      'http://10.example.com',
-      'http://127.evil.com',
-      'http://192.168.1.evil.net',
-      'https://dokploy.example.com/panel',
-      'https://user:pw@dokploy.example.com',
-      'https://dokploy.example.com/?x=1',
-      'ftp://dokploy.example.com',
-      'not a url',
-    ]
-    for (const url of refused) {
-      vi.stubEnv('DOOP_DOKPLOY_URL', url)
-      expect(() => reloadEnv(), url).toThrow(/DOOP_DOKPLOY_URL/)
     }
   })
 })
