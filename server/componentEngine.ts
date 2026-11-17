@@ -1043,7 +1043,7 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
     }
     const prop = def.props.find((candidate) => candidate.name === name)
     if (prop) {
-      const problem = propValueProblem(prop, attr.value)
+      const problem = propValueProblem(prop, attr.value, ctx.find)
       if (problem) {
         ctx.issues.push({
           code: 'invalid_prop_value',
