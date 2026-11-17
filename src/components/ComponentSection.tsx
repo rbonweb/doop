@@ -437,14 +437,14 @@ function MainControls({ frame, context }: { frame: Frame; context: Extract<Compo
         onChange={(event) => setDescription(event.target.value)}
         onBlur={save}
       />
-      <InstanceList def={def} />
+      <InstanceList key={def.id} def={def} />
       {def.props.length > 0 && (
         <p className="text-caption text-ink-soft">
           {t('components.propsLabel')}{' '}
           <span className="font-mono text-ink">{def.props.map((prop) => prop.name).join(', ')}</span>
         </p>
       )}
-      <ComponentCodeSection def={def} />
+      <ComponentCodeSection key={def.id} def={def} />
       {!isRoot && (
         <div className="flex flex-wrap gap-1.5">
           <Button size="sm" disabled={locked} onClick={() => exposeOnMain(frame, selector, BIND_ATTR)}>

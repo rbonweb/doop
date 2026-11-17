@@ -860,7 +860,13 @@ export const updateComponent = atomic(function updateComponent(
   if (input.code !== undefined && input.code !== null) {
     const current = requireComponent(canvasId, def.id)
     const code = validCode(input.code, current)
-    if (code) store.saveComponent(canvasId, { ...current, code })
+    if (code) {
+      const mapped = { ...current, code }
+      store.saveComponent(canvasId, mapped)
+      /* the broadcasts above went out before the mapping was checked, so the room (this editor's
+         panel included) would keep the definition without it until a reload */
+      actions.broadcastComponent(canvasId, mapped, actor)
+    }
   }
   /* new defaults change what instances render even when the main's markup did not move */
   if (propsChanged) actions.queuePropagation(canvasId, [requireComponent(canvasId, def.id)], actor)

@@ -15,6 +15,7 @@ vi.mock('../server/db/persist.ts', () => ({
 import { buildMcpServer } from '../server/mcp.ts'
 import { store } from '../server/store.ts'
 import * as propagation from '../server/propagation.ts'
+import * as actions from '../server/actions.ts'
 import { activeComponents, type ComponentDef } from '../shared/components.ts'
 import { MAX_CODE_BYTES } from '../shared/componentCode.ts'
 import { validCode } from '../server/componentCodeMap.ts'
@@ -277,5 +278,30 @@ describe('validCode checks that the tool schema cannot reach', () => {
       new RegExp(`code is \\d+ characters; at most ${MAX_CODE_BYTES}`),
     )
     expect(validCode(undefined, DEF)).toBeUndefined()
+  })
+})
+
+describe('what the room is told when a mapping is saved', () => {
+  it('is the definition with the new mapping, so an open panel shows it without a reload', async () => {
+    const canvas = newCanvas()
+    await card(canvas.id)
+    const sent: { type: string; component?: ComponentDef | null }[] = []
+    actions.wire(
+      (_canvasId, msg) => sent.push(msg as (typeof sent)[number]),
+      () => {},
+    )
+    try {
+      const code = { importFrom: '@acme/ui', exportName: 'Card' }
+      expect((await call('update_component', { canvas_id: canvas.id, component: 'Card', code })).isError).toBe(false)
+      const heard = sent.filter((msg) => msg.type === 'component')
+      expect(heard.length).toBeGreaterThan(0)
+      /* a client applies each message in order, so the last one is what its panel keeps */
+      expect(heard.at(-1)?.component?.code).toEqual(code)
+    } finally {
+      actions.wire(
+        () => {},
+        () => {},
+      )
+    }
   })
 })

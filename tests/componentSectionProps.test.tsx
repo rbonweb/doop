@@ -17,25 +17,41 @@ const mocks = vi.hoisted(() => ({
   frames: [] as unknown[],
   tokens: [] as unknown[],
   canEdit: true,
+  listeners: new Set<() => void>(),
 }))
 vi.mock('../src/lib/api', () => ({
   api: { changeInstances: mocks.changeInstances, updateComponent: mocks.updateComponent },
   errorMessage: (_error: unknown, fallback: string) => fallback,
 }))
 vi.mock('../src/lib/history', () => ({ recordCreate: () => {}, recordUpdate: () => {}, recordUpdates: () => {} }))
-vi.mock('../src/lib/store', () => {
+vi.mock('../src/lib/store', async () => {
+  const { useSyncExternalStore } = await import('react')
   const state = {
     get canvas() {
       return { id: 'canvas1', components: mocks.components, frames: mocks.frames, tokens: mocks.tokens }
     },
     pushNotice: (text: string) => mocks.notices.push(text),
-    setComponentLocal: () => {},
+    /* like the real store: replace the definition, and every subscribed panel redraws */
+    setComponentLocal: (id: string, component: { id: string } | null) => {
+      mocks.components = [
+        ...(mocks.components as { id: string }[]).filter((def) => def.id !== id),
+        ...(component ? [component] : []),
+      ]
+      mocks.listeners.forEach((listener) => listener())
+    },
     upsertFrame: () => {},
     select: mocks.select,
     requestFlyTo: mocks.requestFlyTo,
     setSelectedElement: mocks.setSelectedElement,
   }
-  const useStore = Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state })
+  const subscribe = (listener: () => void) => {
+    mocks.listeners.add(listener)
+    return () => void mocks.listeners.delete(listener)
+  }
+  const useStore = Object.assign(
+    (select: (s: typeof state) => unknown) => useSyncExternalStore(subscribe, () => select(state)),
+    { getState: () => state },
+  )
   return { useStore, canEditOpenCanvas: () => mocks.canEdit, pickedSelectors: () => [] }
 })
 import { ComponentSection } from '../src/components/ComponentSection'
@@ -127,6 +143,7 @@ beforeEach(() => {
   root = createRoot(container)
   mocks.canEdit = true
   mocks.tokens = []
+  mocks.listeners.clear()
   mocks.notices.length = 0
   for (const fn of [
     mocks.changeInstances,
@@ -349,4 +366,70 @@ it('leaves the code mapping read-only for someone who can only look', () => {
   mocks.canEdit = false
   showMain({ code: { importFrom: '@acme/ui', exportName: 'Button' } })
   expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent === 'Edit')).toBe(false)
+})
+
+it('shows the new mapping as soon as it is saved, and the edited one after a second save, without a reload', async () => {
+  const saved = (code: object) => def({ code })
+  mocks.updateComponent.mockImplementation(async (_canvas: string, _id: string, body: { code: object }) => ({
+    component: saved(body.code),
+  }))
+  showMain()
+  const press = (label: string) =>
+    Array.from(container.querySelectorAll('button')).find((b) => b.textContent === label)!
+  const edit = async (pkg: string, name: string, open: string) => {
+    act(() => press(open).click())
+    type(byLabel<HTMLInputElement>('Package to import from'), pkg)
+    type(byLabel<HTMLInputElement>('Export name'), name)
+    await act(async () => press('Save').click())
+  }
+  await edit('@acme/ui', 'Meter', 'Map to code')
+  expect(container.querySelector('[data-slot="import-line"]')?.textContent).toBe("import { Meter } from '@acme/ui'")
+  expect(container.textContent).not.toContain('Not mapped to code yet.')
+
+  await edit('@acme/ui', 'MeterX', 'Edit')
+  expect(container.querySelector('[data-slot="import-line"]')?.textContent).toBe("import { MeterX } from '@acme/ui'")
+})
+
+it('starts another component’s code form fresh, never with the last one’s half-typed values', () => {
+  const other = def({ id: 'cother', name: 'Other', mainFrameId: 'main2' })
+  const otherMain = {
+    id: 'main2',
+    canvasId: 'canvas1',
+    name: 'More',
+    html: '<!doctype html><html><head></head><body><i data-doop-component="cother" data-doop-part="r" data-doop-id="main02"></i></body></html>',
+  } as unknown as Frame
+  mocks.frames = [mainFrame, otherMain]
+  mocks.components = [def({ code: { importFrom: '@acme/ui', exportName: 'Button' } }), other]
+  act(() => root.render(<ComponentSection frame={mainFrame} selector="[data-doop-id='main01']" />))
+  act(() =>
+    Array.from(container.querySelectorAll('button'))
+      .find((b) => b.textContent === 'Edit')!
+      .click(),
+  )
+  type(byLabel<HTMLInputElement>('Export name'), 'Typed')
+
+  act(() => root.render(<ComponentSection frame={otherMain} selector="[data-doop-id='main02']" />))
+  expect(container.querySelector('[data-slot="code-form"]')).toBeNull()
+  act(() =>
+    Array.from(container.querySelectorAll('button'))
+      .find((b) => b.textContent === 'Map to code')!
+      .click(),
+  )
+  expect(byLabel<HTMLInputElement>('Export name').value).toBe('')
+})
+
+it('keeps the value when an arrow key would step out of the range', async () => {
+  showInstance([{ name: 'count', type: 'number', min: 0, max: 10, step: 4, default: '8' }])
+  const key = (name: string) =>
+    act(() => {
+      byLabel<HTMLInputElement>('count').dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true }))
+    })
+  /* 8 + 4 snaps to 12, past the top: nothing is saved and the field still reads 8 */
+  key('ArrowUp')
+  await act(async () => {})
+  expect(mocks.changeInstances).not.toHaveBeenCalled()
+  expect(byLabel<HTMLInputElement>('count').value).toBe('8')
+  key('ArrowDown')
+  await act(async () => {})
+  expect(mocks.changeInstances.mock.calls.at(-1)?.[1]).toEqual([{ instanceId: 'inst01', props: { count: '4' } }])
 })

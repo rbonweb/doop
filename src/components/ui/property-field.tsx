@@ -174,12 +174,17 @@ export function NumberField({
   const input = useRef<HTMLInputElement>(null)
   const shown = value === null ? '' : String(value)
   const gridBase = Number.isFinite(min) ? min : 0
-  /* what a step-bound field lands on: the nearest multiple, kept inside the range */
+  /* the nearest multiple of the step, which may lie outside the range */
+  const snap = (n: number) =>
+    !step || step <= 0 ? n : Number((gridBase + Math.round((n - gridBase) / step) * step).toFixed(10))
+  /* what a drag lands on: the nearest multiple, a step back in when that is past the range */
   const onGrid = (n: number) => {
-    if (!step || step <= 0) return n
-    const snapped = gridBase + Math.round((n - gridBase) / step) * step
-    const clamped = snapped > max ? snapped - step : snapped < min ? snapped + step : snapped
-    return Number(clamped.toFixed(10))
+    const snapped = snap(n)
+    return step && step > 0 && snapped > max
+      ? snapped - step
+      : step && step > 0 && snapped < min
+        ? snapped + step
+        : snapped
   }
   const [draft, setDraft] = useState(shown)
   const [seen, setSeen] = useState({ value: shown, scrubbing: false })
@@ -308,11 +313,14 @@ export function NumberField({
                 e.preventDefault()
                 const n = Number(draft) || 0
                 const stepBy = (step ?? 1) * (e.shiftKey ? 10 : 1) * (e.key === 'ArrowUp' ? 1 : -1)
-                const next = step
-                  ? onGrid(Math.min(max, Math.max(min, n + stepBy)))
-                  : Math.min(max, Math.max(min, n + stepBy))
-                setDraft(String(next))
-                onCommit(next)
+                /* snap first, then clamp: a key press that would leave the range keeps the value */
+                const snapped = snap(n + stepBy)
+                const next =
+                  snapped >= min && snapped <= max ? snapped : step ? n : Math.min(max, Math.max(min, n + stepBy))
+                if (next !== n) {
+                  setDraft(String(next))
+                  onCommit(next)
+                }
               }
             }}
           />

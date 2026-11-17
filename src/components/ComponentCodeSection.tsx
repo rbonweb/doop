@@ -27,6 +27,12 @@ export function ComponentCodeSection({ def }: { def: ComponentDef }) {
   const t = useT()
   const canEdit = useStore(canEditOpenCanvas)
   const [editing, setEditing] = useState(false)
+  /* another component taking this place starts from its own state, never the last one's half-typed form */
+  const [seenId, setSeenId] = useState(def.id)
+  if (seenId !== def.id) {
+    setSeenId(def.id)
+    setEditing(false)
+  }
   const [copied, setCopied] = useState(false)
   const code = def.code
   const line = importLine(code)
@@ -53,7 +59,7 @@ export function ComponentCodeSection({ def }: { def: ComponentDef }) {
       contentClassName="mt-1.5 flex flex-col gap-2"
     >
       {editing ? (
-        <CodeForm def={def} onDone={() => setEditing(false)} />
+        <CodeForm key={def.id} def={def} onDone={() => setEditing(false)} />
       ) : (
         <>
           {line ? (
