@@ -51,6 +51,8 @@ import { createImportTicket, ImportTicketError, ticketAnswer } from './component
 
 export { codeSchema, propSchema }
 
+export { codeSchema, propSchema }
+
 /**
  * The component tools every agent gets, over MCP (server/mcp.ts) or in the server
  * (server/resident.ts): one schema and one handler each, so the two cannot drift.
