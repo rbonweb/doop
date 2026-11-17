@@ -152,7 +152,7 @@ it('gives a number prop a field that honours its range and step, and refuses a b
   expect(input.value).toBe('4')
 
   type(input, '3')
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain('steps of 2')
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Use a number')
   expect(mocks.changeInstances).not.toHaveBeenCalled()
 
   type(input, 'abc')
@@ -281,7 +281,7 @@ it('shows no reset to someone who cannot edit the frame', () => {
 it('lists a main’s instances per frame and jumps to one', async () => {
   showMain()
   const list = container.querySelector('[data-slot="instance-list"]')!
-  expect(list.textContent).toContain('2 instances')
+  expect(list.textContent).toContain('Instances2')
   const rows = Array.from(list.querySelectorAll<HTMLButtonElement>('button[data-frame]'))
   expect(rows.map((row) => row.dataset.frame)).toEqual(['frame1', 'frame2'])
   expect(rows[1]!.textContent).toContain('Home')

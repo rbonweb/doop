@@ -261,7 +261,7 @@ function PropField({
   /* what a typed or picked value must pass before it is saved: the same check the server runs */
   const commit = (next: string) => {
     const problem = next === '' ? undefined : propValueProblem(prop, next, lookup)
-    setError(problem)
+    setError(problem && problem.charAt(0).toUpperCase() + problem.slice(1))
     if (!problem) onChange(next)
   }
   return (

@@ -147,7 +147,7 @@ export const components: Catalog['components'] = {
   swappedTo: 'Trocado por {name}',
   resetPart: 'Redefinir {name}',
   instanceNone: 'Escolha um componente',
-  instancesHeading: { one: '{count} instância', other: '{count} instâncias' },
+  instancesHeading: 'Instâncias',
   jumpToInstance: 'Selecionar uma instância em {name}',
   codeHeading: 'Código',
   codeNone: 'Ainda não mapeado para código.',

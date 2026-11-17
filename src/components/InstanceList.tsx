@@ -19,7 +19,13 @@ export function InstanceList({ def }: { def: ComponentDef }) {
   return (
     <Disclosure
       data-slot="instance-list"
-      label={<span className="text-label text-ink-soft">{t('components.instancesHeading', { count: total })}</span>}
+      label={
+        <>
+          <span className="text-label text-ink-soft">{t('components.instancesHeading')}</span>
+          <span className="font-mono text-micro text-ink-faint">{total}</span>
+        </>
+      }
+      triggerClassName="gap-1.5"
       contentClassName="mt-1"
     >
       <ul className="flex flex-col">

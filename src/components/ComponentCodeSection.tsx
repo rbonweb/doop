@@ -137,6 +137,7 @@ function CodeForm({ def, onDone }: { def: ComponentDef; onDone: () => void }) {
           value={importFrom}
           placeholder="@acme/ui"
           onCommit={setImportFrom}
+          onDraft={setImportFrom}
         />
       </PropertyRow>
       <PropertyRow label={t('components.codeExport')}>
@@ -145,6 +146,7 @@ function CodeForm({ def, onDone }: { def: ComponentDef; onDone: () => void }) {
           value={exportName}
           placeholder="Button"
           onCommit={setExportName}
+          onDraft={setExportName}
         />
       </PropertyRow>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">

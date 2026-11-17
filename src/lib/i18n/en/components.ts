@@ -139,7 +139,7 @@ export const components = {
   swappedTo: 'Swapped to {name}',
   resetPart: 'Reset {name}',
   instanceNone: 'Choose a component',
-  instancesHeading: { one: '{count} instance', other: '{count} instances' },
+  instancesHeading: 'Instances',
   jumpToInstance: 'Select an instance in {name}',
   codeHeading: 'Code',
   codeNone: 'Not mapped to code yet.',

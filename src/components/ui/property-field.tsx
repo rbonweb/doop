@@ -340,6 +340,7 @@ export function TextField({
   placeholder,
   className,
   onCommit,
+  onDraft,
   scrub: scrubbable = false,
   min,
   disabled,
@@ -351,6 +352,8 @@ export function TextField({
   /** `font-sans` on a field holding prose rather than a value */
   className?: string
   onCommit: (v: string) => void
+  /** every keystroke, for a form that needs to know what is typed before the field blurs */
+  onDraft?: (v: string) => void
   scrub?: boolean
   min?: number
   disabled?: boolean
@@ -381,7 +384,10 @@ export function TextField({
         value={draft}
         disabled={disabled}
         placeholder={placeholder}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => {
+          setDraft(e.target.value)
+          onDraft?.(e.target.value)
+        }}
         onBlur={() => !scrub.scrubbing && draft !== value && onCommit(draft)}
         onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
       />
