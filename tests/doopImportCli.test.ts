@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process'
-import { request } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import { createServer, request, type Server as HttpServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -7,6 +9,8 @@ import { gunzipSync } from 'node:zlib'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { BrowserNotFoundError, findBrowser, installedBrowserPaths } from '../packages/doop-import/src/browser.ts'
 import { main } from '../packages/doop-import/src/cli.ts'
+import { blockedRequest, isLoopbackHost, isPrivateAddress } from '../packages/doop-import/src/guard.ts'
+import { renderStorybook } from '../packages/doop-import/src/render.ts'
 import { resolveRequestPath, serveDirectory, type StaticServer } from '../packages/doop-import/src/serve.ts'
 import { ticketUrl, UploadError, uploadBundle } from '../packages/doop-import/src/upload.ts'
 import { findBrowserPath } from '../server/screenshot.ts'
@@ -121,6 +125,16 @@ describe('the browser lookup', () => {
     expect(windows.some((file) => file.startsWith('C:\\Users\\a\\AppData\\Local'))).toBe(true)
   })
 
+  it('makes a named path absolute and wants a file, not a directory', () => {
+    const seen: string[] = []
+    const record = { isExecutable: (file: string) => (seen.push(file), true) }
+    expect(findBrowser({ flag: 'bin/browser', env: {}, platform: 'linux', ...record }).path).toBe(
+      path.resolve('bin/browser'),
+    )
+    expect(path.isAbsolute(seen[0]!)).toBe(true)
+    expect(() => findBrowser({ flag: fixture, env: {}, platform: 'linux' })).toThrow(/not an executable file/)
+  })
+
   it('names the fix when nothing is found, and never falls past a path that was named', () => {
     expect(() => findBrowser({ env: {}, platform: 'linux', ...only() })).toThrow(
       /--browser <path>.*DOOP_IMPORT_BROWSER/,
@@ -133,6 +147,113 @@ describe('the browser lookup', () => {
   })
 })
 
+describe("the request guard for a Storybook on someone else's server", () => {
+  const origin = 'https://sb.example.com'
+  const publicDns = async () => ['93.184.216.34']
+
+  it('knows loopback and private addresses', () => {
+    for (const host of ['localhost', 'app.localhost', '127.0.0.1', '127.9.9.9', '[::1]'])
+      expect(isLoopbackHost(host), host).toBe(true)
+    for (const host of ['example.com', '10.0.0.1', '192.168.1.1']) expect(isLoopbackHost(host), host).toBe(false)
+    for (const ip of [
+      '10.1.2.3',
+      '127.0.0.1',
+      '169.254.169.254',
+      '172.16.0.1',
+      '172.31.255.1',
+      '192.168.0.9',
+      '100.64.0.1',
+      '0.0.0.0',
+      '::1',
+      'fd00::1',
+      'fe80::1',
+      '::ffff:10.0.0.1',
+    ]) {
+      expect(isPrivateAddress(ip), ip).toBe(true)
+    }
+    for (const ip of ['93.184.216.34', '8.8.8.8', '172.32.0.1', '2606:4700::1111'])
+      expect(isPrivateAddress(ip), ip).toBe(false)
+  })
+
+  it('blocks the machine and its network, lets the Storybook and the public internet through', async () => {
+    for (const url of [
+      'http://127.0.0.1:3000/x',
+      'http://localhost:8080/',
+      'http://192.168.1.1/admin',
+      'http://169.254.169.254/latest/meta-data/',
+      'http://[::1]/',
+      'http://2130706433/',
+      'http://printer.local/',
+      'ws://10.0.0.5/socket',
+    ]) {
+      expect(await blockedRequest(url, origin, publicDns), url).toBeTruthy()
+    }
+    expect(await blockedRequest('https://cdn.example.org/font.woff2', origin, publicDns)).toBeUndefined()
+    expect(await blockedRequest('https://sb.example.com/iframe.html', origin, async () => ['10.0.0.1'])).toBeUndefined()
+    expect(await blockedRequest('data:image/png;base64,AAAA', origin, publicDns)).toBeUndefined()
+    expect(await blockedRequest('blob:https://sb.example.com/1', origin, publicDns)).toBeUndefined()
+  })
+
+  it('blocks a name that resolves to a private address', async () => {
+    expect(await blockedRequest('https://rebind.example.net/x', origin, async () => ['10.0.0.8'])).toMatch(
+      /private address/,
+    )
+    expect(
+      await blockedRequest('https://rebind.example.net/x', origin, async () => ['93.184.216.34', '127.0.0.1']),
+    ).toMatch(/private/)
+  })
+
+  describe.skipIf(!browserPath)('in the browser', { timeout: 60_000 }, () => {
+    let leak: HttpServer
+    let leaked = 0
+    let storybook: HttpServer
+
+    beforeAll(async () => {
+      leak = createServer((_req, res) => {
+        leaked++
+        res.end('x')
+      })
+      await new Promise<void>((resolve) => leak.listen(0, '127.0.0.1', resolve))
+      const leakUrl = `http://127.0.0.1:${(leak.address() as AddressInfo).port}/leak.png`
+      const iframe = (await readFile(path.join(fixture, 'iframe.html'), 'utf8')).replace(
+        '<div id="storybook-root"></div>',
+        `<div id="storybook-root"></div><img src="${leakUrl}" alt="">`,
+      )
+      const index = await readFile(path.join(fixture, 'index.json'), 'utf8')
+      storybook = createServer((req, res) => {
+        const file = (req.url ?? '').startsWith('/iframe.html')
+          ? iframe
+          : (req.url ?? '').startsWith('/index.json')
+            ? index
+            : undefined
+        res.writeHead(file === undefined ? 404 : 200, {
+          'content-type': file === iframe ? 'text/html' : 'application/json',
+        })
+        res.end(file ?? '')
+      })
+      await new Promise<void>((resolve) => storybook.listen(0, '127.0.0.1', resolve))
+    })
+    afterAll(async () => {
+      await Promise.all([leak, storybook].map((server) => new Promise((resolve) => server.close(resolve))))
+    })
+
+    const render = (guardRequests: boolean) =>
+      renderStorybook({
+        url: new URL(`http://127.0.0.1:${(storybook.address() as AddressInfo).port}/`),
+        browserPath: browserPath!,
+        guardRequests,
+      })
+
+    it('stops the story page reaching another local address when the guard is on, and not when it is off', async () => {
+      const guarded = await render(true)
+      expect(guarded.bundle.components.length).toBe(2)
+      expect(leaked).toBe(0)
+      await render(false)
+      expect(leaked).toBeGreaterThan(0)
+    })
+  })
+})
+
 describe('the ticket and the upload', () => {
   it('reads a ticket URL and adds dry_run for a dry run', () => {
     const token = 'A'.repeat(43)
@@ -140,6 +261,12 @@ describe('the ticket and the upload', () => {
     expect(ticketUrl(`https://doop.test/import/${token}`, true).searchParams.get('dry_run')).toBe('1')
     expect(() => ticketUrl('not a url', false)).toThrow(UploadError)
     expect(() => ticketUrl('ftp://doop.test/import/' + token, false)).toThrow(/http/)
+    /* plain http only to this machine */
+    expect(() => ticketUrl(`http://doop.example.com/import/${token}`, false)).toThrow(/plain http/)
+    expect(() => ticketUrl(`http://192.168.1.5:4400/import/${token}`, false)).toThrow(/plain http/)
+    for (const host of ['localhost:4400', '127.0.0.1:4400', '127.1.2.3', '[::1]:4400', 'doop.localhost']) {
+      expect(ticketUrl(`http://${host}/import/${token}`, false).protocol).toBe('http:')
+    }
     expect(() => ticketUrl('https://doop.test/u/' + token, false)).toThrow(/import ticket/)
   })
 

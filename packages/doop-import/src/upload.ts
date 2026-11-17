@@ -1,4 +1,5 @@
 import { gzipSync } from 'node:zlib'
+import { isLoopbackHost } from './guard.ts'
 import { MAX_BUNDLE_BYTES, type ComponentBundle } from '../../../shared/componentBundle.ts'
 
 /** The bundle to the ticket: gzipped JSON, `PUT /import/<token>`. Nothing but the bundle is sent, and no cookie or credential. */
@@ -24,7 +25,7 @@ export interface ImportResult {
   dry_run?: boolean
 }
 
-/** A ticket address: http or https, the token as the last path segment. A dry run adds `?dry_run=1`, which leaves the ticket usable. */
+/** A ticket address: https (http only to this machine), the token as the last path segment. A dry run adds `?dry_run=1`, which leaves the ticket usable. */
 export function ticketUrl(raw: string, dryRun: boolean): URL {
   let url: URL
   try {
@@ -33,18 +34,16 @@ export function ticketUrl(raw: string, dryRun: boolean): URL {
     throw new UploadError('--ticket is not a URL. Copy the whole upload URL from the Doop import picker.')
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new UploadError('--ticket must be an http(s) URL')
+  if (url.protocol === 'http:' && !isLoopbackHost(url.hostname)) {
+    throw new UploadError(
+      `--ticket is plain http to ${url.hostname}: the ticket and your components would cross the network unencrypted. Use the https address, or run Doop on this machine.`,
+    )
+  }
   if (!/^\/(?:.*\/)?import\/[A-Za-z0-9_-]{16,}\/?$/.test(url.pathname)) {
     throw new UploadError('--ticket does not look like a Doop import ticket (…/import/<token>)')
   }
   if (dryRun) url.searchParams.set('dry_run', '1')
   return url
-}
-
-const loopback = (host: string) => host === 'localhost' || host === '127.0.0.1' || host === '[::1]'
-
-/** Whether sending the ticket here would cross a network in the clear. */
-export function isInsecureTicket(url: URL): boolean {
-  return url.protocol === 'http:' && !loopback(url.hostname)
 }
 
 /** Uploads `bundle` (already checked against the schema) and returns the importer's answer. */

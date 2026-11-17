@@ -13,7 +13,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3"
   },
   "dependencies": {
     "puppeteer-core": "^25.5.0"

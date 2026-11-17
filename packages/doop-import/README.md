@@ -10,6 +10,8 @@ This package is not published to npm yet. Build it from the Doop repository with
 
 Open the import picker on a canvas in Doop and choose the CLI, or ask your agent to call `create_import_ticket`. Either gives you an upload URL that works once, for 15 minutes, and a command to run.
 
+Use only a ticket URL you copied from Doop: whoever answers at that address receives your components. A ticket must be `https` (plain `http` is accepted only for this machine, such as a local Doop). It is single use, and because it sits on the command line it shows in the process list of a shared machine, so treat it like a short-lived password.
+
 ## Commands
 
 A `storybook build` directory (it is served on `127.0.0.1` at a random port while the import runs):
@@ -47,13 +49,17 @@ The first of these that is set:
 1. `--browser <path>`
 2. the `DOOP_IMPORT_BROWSER` environment variable
 3. the `CHROME_PATH` environment variable
-4. a Chromium, Edge or Brave found at its usual install path for your system
+4. a browser found at one of these usual install paths:
+   - macOS: Chromium, Microsoft Edge, Brave
+   - Linux: `chromium`, `chromium-browser` (also the snap), `microsoft-edge`, `brave-browser` in `/usr/bin` and `/snap/bin`
+   - Windows: Microsoft Edge and Chromium under `Program Files`, `Program Files (x86)` and `%LOCALAPPDATA%`
 
-A path you name that is not an executable is an error; it never falls back to a different browser. If none is found, the error says how to point at one. Any Chrome, Chromium or Edge executable works, headless shell builds included.
+Google Chrome users pass `--browser` or set `CHROME_PATH` to Chrome's executable; it is not looked for automatically. A path you name is made absolute and must be an executable file; if it is not, that is an error and it never falls back to a different browser. If none is found, the error says how to point at one. Any Chromium-based executable works, headless shell builds included.
 
 ## What it does and does not do
 
 - It renders each component's default story, then one render per enum option and boolean to capture variants, inside Doop's limits: 60 components, 400 renders, 20 seconds a render, 10 minutes in all.
 - A Storybook that asks for a sign-in is refused: no cookies or credentials are sent.
+- Each story renders in a fresh browser context. When `--storybook` is a URL on someone else's server, story pages are stopped from reaching this machine and its network (private, loopback and link-local addresses); a directory or a `localhost` dev server is your own and is left alone.
 - It sends the bundle gzipped to the ticket and prints what was created, updated or skipped, and anything that could not be captured.
 - Run as root (in a container) it starts the browser without its sandbox, as Chromium requires there.

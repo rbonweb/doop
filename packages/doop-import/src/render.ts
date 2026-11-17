@@ -4,6 +4,7 @@ import { buildComponentBundle, type StoryPage } from '../../../shared/storybook/
 import { parseStorybookIndex, type StoryEntry, type StorybookIssue } from '../../../shared/storybook/index.ts'
 import { probeAttribute } from '../../../shared/storybook/probe.ts'
 import { STORYBOOK_LIMITS, storybookBasePath } from '../../../shared/storybook/plan.ts'
+import { blockedRequest, isLoopbackHost } from './guard.ts'
 
 /**
  * Renders a Storybook in a browser on this machine and builds the ComponentBundle with the same capture code the Doop server runs (shared/storybook). The Storybook is the team's own and runs here, so a local address is fine; what leaves the machine is the bundle, nothing else. Everything read from a page is plain data that the bundle schema validates again.
@@ -136,11 +137,22 @@ async function openStoryPage(
   browser: Browser,
   origin: string,
   denied: (error: StorybookError) => void,
+  guardRequests: boolean,
 ): Promise<{ page: StoryPage; close: () => Promise<void> }> {
   const context = await browser.createBrowserContext()
   try {
     const raw: Page = await context.newPage()
     await raw.setViewport(VIEWPORT)
+    if (guardRequests) {
+      /* a Storybook on someone else's server must not reach this machine or its network: its own origin and the public internet only */
+      await raw.setRequestInterception(true)
+      raw.on('request', (request) => {
+        void blockedRequest(request.url(), origin).then(
+          (reason) => (reason ? request.abort('blockedbyclient') : request.continue()),
+          () => request.abort('blockedbyclient'),
+        )
+      })
+    }
     const deadline = Date.now() + STORYBOOK_LIMITS.renderMs
     const left = () => Math.max(MIN_STEP_MS, deadline - Date.now())
     const bounded = async <T>(work: Promise<T>): Promise<T> => {
@@ -210,6 +222,8 @@ export interface RenderOptions {
   signal?: AbortSignal
   /** the CLI is run as root in containers, where Chromium's sandbox cannot start */
   noSandbox?: boolean
+  /** stop story pages reaching private and loopback addresses; by default on for a Storybook that is not on this machine */
+  guardRequests?: boolean
   onProgress?: (done: number, total: number) => void
 }
 
@@ -250,6 +264,7 @@ export async function renderStorybook(options: RenderOptions): Promise<RenderedS
       ],
     })
     const live = browser
+    const guardRequests = options.guardRequests ?? !isLoopbackHost(index.base.hostname)
     const result = await buildComponentBundle({
       entries: index.entries,
       source: { kind: 'cli', url: index.base.href },
@@ -260,7 +275,7 @@ export async function renderStorybook(options: RenderOptions): Promise<RenderedS
       concurrency: 2,
       onProgress: options.onProgress,
       withPage: async (use) => {
-        const opened = await openStoryPage(live, index.base.origin, (error) => controller.abort(error))
+        const opened = await openStoryPage(live, index.base.origin, (error) => controller.abort(error), guardRequests)
         try {
           return await use(opened.page)
         } finally {

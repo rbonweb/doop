@@ -4,7 +4,7 @@ import { parseArgs } from 'node:util'
 import { BrowserNotFoundError, findBrowser } from './browser.ts'
 import { renderStorybook, StorybookError } from './render.ts'
 import { serveDirectory, type StaticServer } from './serve.ts'
-import { isInsecureTicket, ticketUrl, UploadError, uploadBundle, type ImportResult } from './upload.ts'
+import { ticketUrl, UploadError, uploadBundle, type ImportResult } from './upload.ts'
 
 export const USAGE = `doop-import: import a React team's Storybook into a Doop canvas as components.
 
@@ -160,9 +160,6 @@ export async function main(argv: string[], partial: Partial<Io> = {}): Promise<n
       return 0
     }
     const ticket = options.ticket ? ticketUrl(options.ticket, options.dryRun) : undefined
-    if (ticket && isInsecureTicket(ticket)) {
-      io.stderr(`Warning: ${ticket.origin} is plain http, so the upload and its ticket cross the network unencrypted.`)
-    }
     const browser = findBrowser({ flag: options.browser, env: io.env, platform: io.platform })
     io.stderr(`Browser: ${browser.path} (${browser.source})`)
 

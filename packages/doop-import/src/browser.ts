@@ -1,4 +1,4 @@
-import { accessSync, constants } from 'node:fs'
+import { accessSync, constants, statSync } from 'node:fs'
 import path from 'node:path'
 
 /** Which browser renders the Storybook: the one the person names, else one found on this machine. */
@@ -27,6 +27,7 @@ export interface BrowserLookup {
 
 function executable(file: string): boolean {
   try {
+    if (!statSync(file).isFile()) return false
     accessSync(file, constants.X_OK)
     return true
   } catch {
@@ -76,9 +77,11 @@ export function findBrowser(lookup: BrowserLookup): FoundBrowser {
   ]
   for (const [source, value] of named) {
     if (!value?.trim()) continue
-    const file = value.trim()
+    const file = path.resolve(value.trim())
     if (!runnable(file)) {
-      throw new BrowserNotFoundError(`${source} is "${file}", which is not an executable file. ${HOW_TO_POINT}`)
+      throw new BrowserNotFoundError(
+        `${source} is "${file}", which is not an executable file (a relative path is taken from the current directory). ${HOW_TO_POINT}`,
+      )
     }
     return { path: file, source }
   }
