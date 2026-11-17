@@ -20,7 +20,7 @@ A `storybook build` directory (it is served on `127.0.0.1` at a random port whil
 npx doop-import --storybook ./storybook-static --ticket <upload url>
 ```
 
-A running dev server (a local address is fine, since this runs on your machine):
+A Storybook dev server running on this machine (`localhost`, `127.0.0.1` or `[::1]`):
 
 ```bash
 npx doop-import --storybook http://localhost:6006 --ticket <upload url> --package @acme/ui
@@ -34,7 +34,7 @@ npx doop-import --storybook ./storybook-static --ticket <upload url> --dry-run
 
 ## Flags
 
-- `--storybook <dir|url>` a `storybook build` directory or the URL of a running Storybook. Required.
+- `--storybook <dir|url>` a `storybook build` directory or the URL of a Storybook dev server on this machine. Required. Any other address is refused before a browser starts: a published Storybook goes through the Storybook URL import in Doop's import picker (or an agent's `import_storybook`) instead, where Doop renders it in its own hardened renderer.
 - `--ticket <url>` the upload URL. Required unless you only want a file with `--out`.
 - `--package <name>` the npm package the components are imported from in code, for example `@acme/ui`. It lets Doop's React export import the real component instead of regenerating it.
 - `--include <title prefix>` only components whose Storybook title starts with this. Repeat it for several.
@@ -62,6 +62,6 @@ With no browser to point at, install a standalone one: `npx @puppeteer/browsers 
 
 - It renders each component's default story, then one render per enum option and boolean to capture variants, inside Doop's limits: 60 components, 400 renders, 20 seconds a render, 10 minutes in all.
 - A Storybook that asks for a sign-in is refused: no cookies or credentials are sent.
-- Each story renders in a fresh browser context. When `--storybook` is a URL on someone else's server, story pages are stopped from reaching this machine and its network (private, loopback and link-local addresses); a directory or a `localhost` dev server is your own and is left alone.
+- Each story renders in a fresh browser context with no cookies. The Storybook is your own code and runs on your machine with your network access, so doop-import is not a sandbox for untrusted code: only point it at a Storybook you trust. (The request guard in the source, which stops story pages reaching private and loopback addresses, is best-effort and off for local Storybooks.)
 - It sends the bundle gzipped to the ticket and prints what was created, updated or skipped, and anything that could not be captured.
 - Run as root (in a container) it starts the browser without its sandbox, as Chromium requires there.

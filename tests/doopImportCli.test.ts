@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 import { gunzipSync } from 'node:zlib'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { BrowserNotFoundError, findBrowser, installedBrowserPaths } from '../packages/doop-import/src/browser.ts'
-import { main } from '../packages/doop-import/src/cli.ts'
+import { checkStorybookUrl, main } from '../packages/doop-import/src/cli.ts'
 import { blockedRequest, isLoopbackHost, isPrivateAddress } from '../packages/doop-import/src/guard.ts'
 import { renderStorybook } from '../packages/doop-import/src/render.ts'
 import { resolveRequestPath, serveDirectory, type StaticServer } from '../packages/doop-import/src/serve.ts'
@@ -88,6 +88,47 @@ describe('the static server', () => {
       expect((await fetch(`${server.origin}/index.json`, { method: 'POST', body: 'x' })).status).toBe(405)
       expect((await raw(server.origin, '/index.json', { host: 'evil.example' })).status).toBe(403)
     })
+  })
+})
+
+describe('--storybook addresses', () => {
+  it('takes a dev server on this machine and nothing else', () => {
+    for (const url of [
+      'http://localhost:6006',
+      'http://127.0.0.1:6006/',
+      'http://[::1]:6006',
+      'http://sb.localhost:6006',
+      'http://127.3.4.5:6006',
+    ]) {
+      expect(checkStorybookUrl(url).href, url).toBeTruthy()
+    }
+    for (const url of [
+      'https://sb.example.com',
+      'http://example.com:6006',
+      'http://192.168.1.10:6006',
+      'http://10.0.0.2:6006',
+      'http://[2606:4700::1111]:6006',
+      'http://[::ffff:7f00:1]:6006',
+      'http://127.evil.com:6006',
+    ]) {
+      expect(() => checkStorybookUrl(url), url).toThrow(/Storybook URL import in Doop \(or import_storybook\)/)
+    }
+  })
+
+  it('refuses a remote address before any browser starts', async () => {
+    const err: string[] = []
+    /* node itself stands in for a browser, so nothing would launch Chrome even if the check failed */
+    const code = await main(
+      ['--storybook', 'https://sb.example.com', '--out', '/dev/null', '--browser', process.execPath],
+      {
+        stdout: () => {},
+        stderr: (text) => err.push(text),
+        env: {},
+      },
+    )
+    expect(code).toBe(1)
+    expect(err.join('\n')).toContain('import_storybook')
+    expect(err.join('\n')).not.toContain('Rendering')
   })
 })
 
@@ -206,6 +247,39 @@ describe("the request guard for a Storybook on someone else's server", () => {
     expect(await blockedRequest('https://sb.example.com/iframe.html', origin, async () => ['10.0.0.1'])).toBeUndefined()
     expect(await blockedRequest('data:image/png;base64,AAAA', origin, publicDns)).toBeUndefined()
     expect(await blockedRequest('blob:https://sb.example.com/1', origin, publicDns)).toBeUndefined()
+  })
+
+  it('judges the IPv4 address an IPv6 one carries, as URL hostnames spell them', async () => {
+    const hostname = (url: string) => new URL(url).hostname
+    for (const url of [
+      'http://[::ffff:127.0.0.1]/',
+      'http://[::ffff:7f00:1]/',
+      'http://[::127.0.0.1]/',
+      'http://[::10.0.0.1]/',
+      'http://[::ffff:a9fe:a9fe]/',
+      'http://[64:ff9b::7f00:1]/',
+      'http://[64:ff9b::a00:1]/',
+      'http://[64:ff9b:1::1]/',
+      'http://[2002:7f00:1::]/',
+      'http://[2002:c0a8:101::1]/',
+      'http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/',
+      'http://[fc00::1]/',
+      'http://[fe80::1]/',
+      'http://[fec0::1]/',
+      'http://[ff02::1]/',
+    ]) {
+      expect(isPrivateAddress(hostname(url)), url).toBe(true)
+      expect(await blockedRequest(url, origin, publicDns), url).toBeTruthy()
+    }
+    for (const url of [
+      'http://[::ffff:5db8:d822]/',
+      'http://[64:ff9b::5db8:d822]/',
+      'http://[2002:5db8:d822::1]/',
+      'http://[2606:4700::1111]/',
+    ]) {
+      expect(isPrivateAddress(hostname(url)), url).toBe(false)
+      expect(await blockedRequest(url, origin, publicDns), url).toBeUndefined()
+    }
   })
 
   it('blocks a name that resolves to a private address', async () => {

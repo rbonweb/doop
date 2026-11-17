@@ -2,6 +2,7 @@ import { stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 import { BrowserNotFoundError, findBrowser } from './browser.ts'
+import { isLoopbackHost } from './guard.ts'
 import { renderStorybook, StorybookError } from './render.ts'
 import { serveDirectory, type StaticServer } from './serve.ts'
 import { ticketUrl, UploadError, uploadBundle, type ImportResult } from './upload.ts'
@@ -92,15 +93,26 @@ function parseOptions(argv: string[]): Options | 'help' {
   }
 }
 
-/** A directory to serve, or a URL to use as it is. */
+/** The only addresses `--storybook` takes: a directory, or the URL of a dev server on this machine. A published Storybook is imported by Doop itself, from its own hardened renderer. */
+export function checkStorybookUrl(value: string): URL {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new UsageError(`--storybook "${value}" is not a valid URL`)
+  }
+  if (!isLoopbackHost(url.hostname)) {
+    throw new StorybookError(
+      `--storybook takes a storybook-static directory or a dev server on this machine (localhost, 127.0.0.1 or [::1]), not ${url.hostname}. Use the Storybook URL import in Doop (or import_storybook) for a published Storybook.`,
+    )
+  }
+  return url
+}
+
+/** A directory to serve, or the URL of a local dev server to use as it is. */
 async function storybookSource(value: string, io: Io): Promise<{ url: URL; server?: StaticServer; label: string }> {
   if (/^https?:\/\//i.test(value)) {
-    let url: URL
-    try {
-      url = new URL(value)
-    } catch {
-      throw new UsageError(`--storybook "${value}" is not a valid URL`)
-    }
+    const url = checkStorybookUrl(value)
     return { url, label: url.href }
   }
   const directory = path.resolve(value)
@@ -160,6 +172,7 @@ export async function main(argv: string[], partial: Partial<Io> = {}): Promise<n
       return 0
     }
     const ticket = options.ticket ? ticketUrl(options.ticket, options.dryRun) : undefined
+    if (/^https?:\/\//i.test(options.storybook)) checkStorybookUrl(options.storybook)
     const browser = findBrowser({ flag: options.browser, env: io.env, platform: io.platform })
     io.stderr(`Browser: ${browser.path} (${browser.source})`)
 
