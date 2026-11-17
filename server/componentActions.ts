@@ -30,6 +30,7 @@ import {
   type InstanceOverrides,
   type LibraryComponent,
   type PartOverride,
+  styleText,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR } from '../shared/elementId.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
@@ -592,7 +593,7 @@ function mainFrameDoc(def: ComponentDef, root: string, rawCss: string): string {
 <head>
 ${def.head.join('\n')}
 <style ${SOURCE_CSS_ATTR}="${def.id}">
-${rawCss}
+${styleText(rawCss)}
 </style>
 </head>
 <body style="margin:0;padding:24px;background:transparent">
@@ -630,6 +631,8 @@ export interface CreateFromHtml {
   width?: number
   height?: number
   autoProps?: boolean
+  /** where the main goes when it is not the Components page's next free spot (the component importer's own page) */
+  place?: { pageId: string; x: number; y: number }
 }
 
 /** A new design with nowhere to live yet: its main goes on the Components page, as a frame of its own. */
@@ -652,7 +655,7 @@ export const createComponentFromHtml = atomic(function createComponentFromHtml(
   const root = singleRoot(input.html)
   const inferred = input.autoProps !== false && !hasBindings(root) ? inferBindings(root) : []
   setAttr(root, COMPONENT_ATTR, def.id)
-  writeNewMain(canvasId, def, serializeOuter(root), input.css ?? '', actor, input.width, input.height)
+  writeNewMain(canvasId, def, serializeOuter(root), input.css ?? '', actor, input.width, input.height, input.place)
   /* the main's write derived the props and slots: the mapping is checked against those */
   const made = requireComponent(canvasId, def.id)
   const code = validCode(input.code, made)
@@ -958,7 +961,7 @@ function withHeadTags(html: string, previous: string[], next: string[]): string 
 }
 
 function withSourceCss(html: string, id: string, css: string): string {
-  const block = `<style ${SOURCE_CSS_ATTR}="${id}">\n${css}\n</style>`
+  const block = `<style ${SOURCE_CSS_ATTR}="${id}">\n${styleText(css)}\n</style>`
   const existing = new RegExp(`<style[^>]*\\b${SOURCE_CSS_ATTR}="${id}"[^>]*>[\\s\\S]*?</style>`, 'i')
   if (existing.test(html)) return html.replace(existing, () => block)
   const head = /<\/head\s*>/i.exec(html)

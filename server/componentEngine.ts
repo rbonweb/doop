@@ -43,6 +43,7 @@ import {
   type ComponentSlot,
   type InstanceOverrides,
   type PartOverride,
+  styleText,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR, isElementId, newElementId } from '../shared/elementId.ts'
 
@@ -1670,7 +1671,7 @@ export function withDetachedCss(html: string, def: Pick<ComponentDef, 'id' | 're
   const css = def.css
     .replaceAll(`[${INSTANCE_ATTR}="${def.id}"]`, `[${DETACHED_ATTR}="${key}"]`)
     .replaceAll(`__${def.id}`, `__${def.id}-${def.rev}`)
-  return insertIntoHead(html, `<style ${DETACHED_CSS_ATTR}="${key}">\n${css}\n</style>`)
+  return insertIntoHead(html, `<style ${DETACHED_CSS_ATTR}="${key}">\n${styleText(css)}\n</style>`)
 }
 
 export function splice(html: string, edits: { start: number; end: number; text: string }[]): string {
@@ -1767,7 +1768,7 @@ export function syncComponentHead(html: string, defs: ComponentDef[]): string {
       const marked = markedHeadTag(tag)
       if (!stripped.includes(tag) && !blocks.includes(marked)) blocks.push(marked)
     }
-    if (def.css.trim()) blocks.push(`<style ${CSS_ATTR}="${def.id}">\n${def.css}\n</style>`)
+    if (def.css.trim()) blocks.push(`<style ${CSS_ATTR}="${def.id}">\n${styleText(def.css)}\n</style>`)
   }
   if (!blocks.length) return stripped === html ? html : stripped
   const next = insertIntoHead(stripped, blocks.join('\n'))
