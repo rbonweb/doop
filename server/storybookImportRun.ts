@@ -33,7 +33,9 @@ export const storybookInput = {
     .array(z.string().min(1).max(200))
     .max(50)
     .optional()
-    .describe('Only components whose Storybook title starts with one of these, e.g. ["Inputs", "Layout/Card"]'),
+    .describe(
+      'Only components whose Storybook title is one of these or sits under one of these folders (matched up to a /, so "Inputs" is not "InputsLegacy"), e.g. ["Inputs", "Layout/Card"]',
+    ),
 }
 
 export interface StorybookRun {

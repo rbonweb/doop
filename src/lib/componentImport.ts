@@ -33,7 +33,7 @@ export type StorybookEvent =
 export interface StorybookImportInput {
   url: string
   package?: string
-  /** only components whose Storybook title starts with one of these (the server takes at most 50) */
+  /** only components whose Storybook title is one of these or sits under one of them, matched up to a `/` (the server takes at most 50) */
   include?: string[]
   dryRun?: boolean
 }

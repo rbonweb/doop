@@ -78,7 +78,7 @@ export interface StorybookImportOptions {
   onRender?: (event: { rendered: number; total: number; component: string }) => void
   /** the npm package the components are imported from in code, "@acme/ui" */
   package?: string
-  /** only components whose Storybook title starts with one of these */
+  /** only components whose Storybook title is one of these or sits under one of them, matched up to a `/` */
   include?: string[]
   signal?: AbortSignal
 }

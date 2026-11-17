@@ -86,10 +86,14 @@ function collectionOwner(title: string): string | undefined {
 function matchesInclude(title: string, include: string[] | undefined): boolean {
   if (!include?.length) return true
   const lower = title.toLowerCase()
-  return include.some((prefix) => prefix.trim() && lower.startsWith(prefix.trim().toLowerCase()))
+  return include.some((entry) => {
+    const wanted = entry.trim().replace(/\/+$/, '').toLowerCase()
+    /* a whole title, or the folders above it: "Components/Button" is not "Components/ButtonGroup" */
+    return wanted !== '' && (lower === wanted || lower.startsWith(`${wanted}/`))
+  })
 }
 
-/** Stories to components by title, in index order, limited to `include` (title prefixes) and to STORYBOOK_LIMITS.components. */
+/** Stories to components by title, in index order, limited to `include` (a title, or the folders above it, up to a `/`) and to STORYBOOK_LIMITS.components. */
 export function groupStories(entries: StoryEntry[], options: { include?: string[] } = {}): GroupedStories {
   const issues: StorybookIssue[] = []
   const byTitle = new Map<string, StoryEntry[]>()

@@ -101,6 +101,21 @@ describe('groupStories', () => {
     expect(groupStories(entries, { include: ['Components/ActionMenu/Features'] }).issues[0]?.code).toBe('no_components')
   })
 
+  it('matches include on a whole title or up to a slash, in any case, never part of a name', () => {
+    const entries = [
+      story('Components/Button', 'Default'),
+      story('Components/ButtonGroup', 'Default'),
+      story('Components/Button/Features', 'Wide'),
+      story('Components/Forms/Input', 'Default'),
+    ]
+    const titles = (include: string[]) => groupStories(entries, { include }).groups.map((group) => group.title)
+    expect(titles(['Components/Button'])).toEqual(['Components/Button'])
+    expect(titles(['components/button/'])).toEqual(['Components/Button'])
+    expect(titles(['Components'])).toEqual(['Components/Button', 'Components/ButtonGroup', 'Components/Forms/Input'])
+    expect(titles(['Components/Forms'])).toEqual(['Components/Forms/Input'])
+    expect(titles(['Components/But'])).toEqual([])
+  })
+
   it('keeps a first segment that is a collection word and matches the words in any case', () => {
     const { groups } = groupStories([story('Examples', 'A'), story('Kit/Card/EXAMPLES', 'B'), story('Kit/Card', 'C')])
     expect(groups.map((group) => [group.name, group.stories.length])).toEqual([
