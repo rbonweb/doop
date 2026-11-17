@@ -89,7 +89,7 @@ const FILE_SEPARATORS = /[^A-Za-z0-9]+/g
 const LOWER_THEN_UPPER = /([a-z0-9])([A-Z])/g
 const ACRONYM_BOUNDARY = /([A-Z]+)([A-Z][a-z])/g
 const LEADING_DIGIT = /^[0-9]/
-const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\..*)?$/i
 const MAX_FILE_BASE = 64
 
 /** A valid JS binding name: ASCII letters, digits, `_` and `$`, not starting with a digit, and not a reserved word or global. */
@@ -196,11 +196,11 @@ export function fileBase(raw: string, names: NameAllocator): string {
 }
 
 function allocateFileBase(base: string, names: NameAllocator): string {
-  if (!names.has(base)) return names.take(base)
+  if (!WINDOWS_DEVICE.test(base) && !names.has(base)) return names.take(base)
   for (let suffix = 2; suffix < 100_000; suffix += 1) {
     const tail = String(suffix)
     const candidate = `${base.slice(0, MAX_FILE_BASE - tail.length).replace(/[-_]+$/, '')}${tail}`
-    if (!names.has(candidate)) return names.take(candidate)
+    if (!WINDOWS_DEVICE.test(candidate) && !names.has(candidate)) return names.take(candidate)
   }
   throw new Error(`fileBase could not find a free name for ${base}`)
 }
