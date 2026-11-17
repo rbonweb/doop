@@ -43,6 +43,10 @@ function stylingStrategy(styling: ReactStyling): ReactStyling {
   return styling
 }
 
+/** Tailwind without Preflight: frames are designed under the browser's own defaults, so the reset would change how they look. */
+const TAILWIND_IMPORTS =
+  '@import "tailwindcss/theme.css" layer(theme);\n@import "tailwindcss/utilities.css" layer(utilities);'
+
 const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 
 const CX_TS = `export function cx(...names: Array<string | false | null | undefined>): string {
@@ -90,7 +94,7 @@ function readme(styling: ReactStyling, hasTokens: boolean): string {
       : '- `src/pages/` has one `.tsx` and `.css` per exported frame. The page `.css` is global and scoped by the page root class.',
     hasTokens
       ? tailwind
-        ? '- `src/tokens.css` starts with `@import "tailwindcss";`, then the canvas tokens as a Tailwind `@theme` block and as CSS custom properties. `src/tokens.json` has the same tokens as W3C design tokens.'
+        ? "- `src/tokens.css` imports Tailwind's theme and utilities (no Preflight reset: the canvas was designed under browser defaults), then holds the canvas tokens as a Tailwind `@theme` block and as CSS custom properties. `src/tokens.json` has the same tokens as W3C design tokens."
         : '- `src/tokens.css` holds the canvas design tokens as CSS custom properties (import it once in your app) and `src/tokens.json` the same tokens as W3C design tokens.'
       : '- Design tokens were not exported.',
     '- `src/cx.ts` joins class names, `src/css-modules.d.ts` types CSS Modules imports.',
@@ -102,7 +106,7 @@ function readme(styling: ReactStyling, hasTokens: boolean): string {
           '',
           '1. Copy `src` into your app. Tailwind v4 needs `tailwindcss` and its Vite plugin (`@tailwindcss/vite`) or PostCSS plugin (`@tailwindcss/postcss`) installed.',
           hasTokens
-            ? '2. Import `src/tokens.css` once from your entry (`import "./tokens.css"`) in place of your own `@import "tailwindcss";`. If you already have a Tailwind stylesheet, copy the `@theme` block and the `:root` block from `src/tokens.css` into it instead.'
+            ? '2. Import `src/tokens.css` once from your entry (`import "./tokens.css"`) in place of your own `@import "tailwindcss";`. If you already have a Tailwind stylesheet, copy the `@theme` block and the `:root` block from `src/tokens.css` into it instead. To add Preflight back (a reset that restyles headings, lists, images and buttons), add `@import "tailwindcss/preflight.css" layer(base);` after the theme import.'
             : '2. Import your Tailwind stylesheet (`@import "tailwindcss";`) once from your entry.',
           '3. The Vite plugin scans your source files for classes by itself. With the Tailwind CLI or PostCSS add `@source "./src";` to that stylesheet so the `.tsx` files are scanned.',
           '',
@@ -245,11 +249,7 @@ export function buildReactExport(input: ReactExportInput): ReactExportResult {
   if (includeTokens) {
     const tokens =
       input.styling === 'tailwind'
-        ? [
-            '@import "tailwindcss";',
-            tokensTailwind(input.tokens, input.themeOrder),
-            tokensCss(input.tokens, input.themeOrder),
-          ]
+        ? [TAILWIND_IMPORTS, tokensTailwind(input.tokens, input.themeOrder), tokensCss(input.tokens, input.themeOrder)]
             .filter(Boolean)
             .join('\n\n')
         : tokensCss(input.tokens, input.themeOrder)

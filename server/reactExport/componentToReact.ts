@@ -124,6 +124,12 @@ export interface MappedImport {
   exportName: string
   defaultExport: boolean
   code: ComponentCode
+  /** Doop prop -> the prop it is passed as; `children` for the JSX children, null when omitted or refused */
+  propTargets: Map<string, string | null>
+  /** Doop slot -> `children` or the prop that receives it, null when refused */
+  slotTargets: Map<string, string | null>
+  /** Doop prop -> value map, own keys only */
+  values: Map<string, Map<string, string | number | boolean>>
 }
 
 export interface ComponentPlan {
@@ -134,6 +140,8 @@ export interface ComponentPlan {
   /** `src/components/<name>.tsx`, absent for a mapped component */
   file?: string
   mapped?: MappedImport
+  /** what was wrong with the component's code mapping: reported where the component is used (or in its own file when it falls back to being generated) */
+  mappingIssues: ExportIssue[]
   props: PropPlan[]
   propByName: Map<string, PropPlan>
   slots: SlotPlan[]
@@ -203,6 +211,7 @@ export class ExportSession {
   private readonly defs: readonly ComponentDef[]
   private readonly plans = new Map<string, ComponentPlan>()
   private readonly urlMemo = new Map<string, boolean>()
+  private readonly droppedDefaults = new Set<string>()
 
   constructor(options: SessionOptions) {
     this.defs = options.components
@@ -267,8 +276,34 @@ export class ExportSession {
     return result
   }
 
+  /** Does rendering `from` end up rendering the component `targetId`: through nested uses and instance-prop defaults still in force? */
+  reaches(from: ComponentDef, targetId: string): boolean {
+    const seen = new Set<string>()
+    const stack = [from]
+    for (let def = stack.pop(); def; def = stack.pop()) {
+      if (def.id === targetId) return true
+      if (seen.has(def.id)) continue
+      seen.add(def.id)
+      for (const match of def.template.matchAll(/\scomponent="([^"]+)"/g)) {
+        const next = this.find(match[1] ?? '')
+        if (next) stack.push(next)
+      }
+      for (const prop of def.props) {
+        if (prop.type !== 'instance' || !prop.default || this.droppedDefaults.has(`${def.id}\u0000${prop.name}`))
+          continue
+        const next = this.find(prop.default)
+        if (next) stack.push(next)
+      }
+    }
+    return false
+  }
+
+  dropDefault(id: string, prop: string): void {
+    this.droppedDefaults.add(`${id}\u0000${prop}`)
+  }
+
   private makePlan(def: ComponentDef): ComponentPlan {
-    const mapped = mappedImport(def)
+    const { mapped, issues: mappingIssues } = resolveMapping(def)
     const name = componentName(mapped ? mapped.exportName : def.name, this.names)
     const propsName = mapped ? '' : this.names.take(`${name}Props`)
     const locals = new NameAllocator({ reserved: LOCAL_NAMES })
@@ -313,6 +348,7 @@ export class ExportSession {
       name,
       propsName,
       ...(mapped ? { mapped } : { file: `src/components/${name}.tsx` }),
+      mappingIssues,
       props,
       propByName: new Map(props.map((entry) => [entry.prop.name, entry])),
       slots,
@@ -320,7 +356,7 @@ export class ExportSession {
       split,
       ...(tw ? { tw } : {}),
       cssIssues,
-      moduleClasses: new Set(split.classes),
+      moduleClasses: new Set(split.classes.filter((name) => name !== '__proto__')),
       rootClass,
       stylesIdent: mapped ? '' : this.names.take(`${name}Styles`),
       directUrlProps,
@@ -330,10 +366,95 @@ export class ExportSession {
   }
 }
 
-function mappedImport(def: ComponentDef): MappedImport | undefined {
+/** A bare package specifier (`@scope/name`, `name`, either with a subpath): never a relative or absolute path or a URL. */
+const SPECIFIER = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*(?:\/[A-Za-z0-9._~@-]+)*$/
+const isBareSpecifier = (value: string): boolean =>
+  value.length <= 214 && SPECIFIER.test(value) && !value.split('/').some((part) => part === '.' || part === '..')
+const TARGET_NAME = /^[A-Za-z_$][\w$]*$/
+const REACT_OWNED = new Set(['key', 'ref', 'dangerouslysetinnerhtml'])
+
+const own = <T>(record: Record<string, T> | undefined, key: string): T | undefined =>
+  record && Object.hasOwn(record, key) ? record[key] : undefined
+
+/** The code mapping of a definition as the export uses it, with every part that cannot be honoured refused and reported. A mapping that cannot be imported at all is ignored and the component generated. */
+function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: ExportIssue[] } {
   const code = def.code
-  if (!code?.importFrom || !code.exportName || !isIdentifier(code.exportName)) return undefined
-  return { importFrom: code.importFrom, exportName: code.exportName, defaultExport: code.defaultExport === true, code }
+  const issues: ExportIssue[] = []
+  if (!code?.importFrom || !code.exportName) return { issues }
+  const refuse = (detail: string) => issues.push({ kind: 'dropped-attribute', detail })
+  if (!isIdentifier(code.exportName)) {
+    refuse('code mapping ignored: its export name is not a valid identifier, so the component is generated')
+    return { issues }
+  }
+  if (!isBareSpecifier(code.importFrom)) {
+    refuse(
+      'code mapping ignored: it must import from a package name such as @scope/name, so the component is generated',
+    )
+    return { issues }
+  }
+  const used = new Set<string>()
+  const propTargets = new Map<string, string | null>()
+  const slotTargets = new Map<string, string | null>()
+  const values = new Map<string, Map<string, string | number | boolean>>()
+  const claim = (label: string, wanted: string, renamed: boolean): string | null => {
+    const lower = wanted.toLowerCase()
+    if (REACT_OWNED.has(lower)) {
+      refuse(`${label} is passed as ${jsString(wanted)}, which React reserves: it was left out`)
+      return null
+    }
+    if (renamed ? !TARGET_NAME.test(wanted) : !/^[a-z][a-z0-9-]*$/.test(wanted)) {
+      refuse(`${label} is passed as ${jsString(wanted)}, which is not a prop name: it was left out`)
+      return null
+    }
+    if (wanted !== 'children') {
+      if (used.has(wanted)) {
+        refuse(`${label} is passed as ${jsString(wanted)}, which another prop or slot already uses: it was left out`)
+        return null
+      }
+      used.add(wanted)
+    }
+    return wanted
+  }
+  for (const prop of def.props) {
+    if (!isPropName(prop.name)) continue
+    const rule = own(code.props, prop.name)
+    if (rule?.omit) {
+      propTargets.set(prop.name, null)
+      continue
+    }
+    propTargets.set(prop.name, claim(`prop ${jsString(prop.name)}`, rule?.name ?? prop.name, rule?.name !== undefined))
+    if (rule?.values) {
+      const map = new Map<string, string | number | boolean>()
+      const allowed =
+        prop.type === 'boolean' ? ['true', 'false'] : prop.type === 'enum' ? (prop.options ?? []) : undefined
+      for (const [key, value] of Object.entries(rule.values)) {
+        if (allowed && !allowed.includes(key)) {
+          refuse(
+            `value map of ${jsString(prop.name)} names ${jsString(key)}, which is not one of its values: it was left out`,
+          )
+          continue
+        }
+        map.set(key, value)
+      }
+      values.set(prop.name, map)
+    }
+  }
+  for (const slot of def.slots) {
+    const wanted = own(code.slots, slot.name) ?? slot.name
+    slotTargets.set(slot.name, claim(`slot ${jsString(slot.name)}`, wanted, own(code.slots, slot.name) !== undefined))
+  }
+  return {
+    mapped: {
+      importFrom: code.importFrom,
+      exportName: code.exportName,
+      defaultExport: code.defaultExport === true,
+      code,
+      propTargets,
+      slotTargets,
+      values,
+    },
+    issues,
+  }
 }
 
 /** A declared default as the TypeScript expression it becomes, or undefined when there is none or it does not fit the prop. */
@@ -435,6 +556,7 @@ export class FileCtx {
   ) {}
 
   use(plan: ComponentPlan): void {
+    if (plan.mapped && !this.mapped.has(plan)) this.issues.push(...plan.mappingIssues)
     ;(plan.mapped ? this.mapped : this.generated).add(plan)
   }
 
@@ -476,8 +598,6 @@ export interface UseCall {
   /** inner slot name -> a JSX expression */
   slots: Map<string, string>
 }
-
-const JS_NAME = /^[A-Za-z_$][\w$]*$/
 
 /** One literal Doop value as an expression of the target prop's kind; null when it does not fit (the engine ignores such a value too). */
 export function literalValue(fc: FileCtx, plan: ComponentPlan, name: string, raw: string): CallValue | null {
@@ -570,23 +690,18 @@ export function renderUseCall(fc: FileCtx, call: UseCall): string {
       if (value !== undefined) addValue(slot.ts, value, false)
     }
   } else {
-    const code = mapped.code
     for (const entry of plan.props) {
       const value = call.values.get(entry.prop.name)
-      if (!value) continue
-      const rule = code.props?.[entry.prop.name]
-      if (rule?.omit) continue
-      const target = rule?.name && JS_NAME.test(rule.name) ? rule.name : entry.prop.name
-      if (!JS_NAME.test(target) && !/^[a-z][a-z0-9-]*$/.test(target)) continue
-      const mappedValue = mapValue(entry, rule?.values, value)
+      const target = mapped.propTargets.get(entry.prop.name)
+      if (!value || !target) continue
+      const mappedValue = mapValue(entry, mapped.values.get(entry.prop.name), value)
       addValue(target, mappedValue, mappedValue === 'true')
     }
     for (const slot of plan.slots) {
       const value = call.slots.get(slot.name)
-      if (value === undefined) continue
-      const target = code.slots?.[slot.name] ?? slot.name
-      if (target === 'children') children.push(`{${value}}`)
-      else if (JS_NAME.test(target)) attrs.push(`${target}={${value}}`)
+      const target = mapped.slotTargets.get(slot.name)
+      if (value === undefined || !target) continue
+      addValue(target, value, false)
     }
   }
   const open = [plan.name, ...attrs]
@@ -599,28 +714,26 @@ export function renderUseCall(fc: FileCtx, call: UseCall): string {
 /** The expression passed for a value a mapping may rewrite: literals go through the map directly, a runtime value through a lookup that covers every option. */
 function mapValue(
   entry: PropPlan,
-  values: Record<string, string | number | boolean> | undefined,
+  values: Map<string, string | number | boolean> | undefined,
   value: CallValue,
 ): string {
   if (!values) return value.expr
   const asJs = (mapped: string | number | boolean): string =>
     typeof mapped === 'string' ? jsString(mapped) : String(mapped)
   if (value.literal !== undefined) {
-    const mapped = values[value.literal]
+    const mapped = values.get(value.literal)
     return mapped === undefined ? value.expr : asJs(mapped)
   }
   if (entry.kind.k === 'enum') {
     const table = entry.kind.options
-      .map((option) => `${jsString(option)}: ${asJs(values[option] ?? option)}`)
+      .map((option) => `${jsString(option)}: ${asJs(values.get(option) ?? option)}`)
       .join(', ')
     return entry.hasDefault
       ? `({ ${table} } as const)[${value.expr}]`
       : `${value.expr} === undefined ? undefined : ({ ${table} } as const)[${value.expr}]`
   }
   if (entry.kind.k === 'boolean') {
-    const on = values.true ?? true
-    const off = values.false ?? false
-    return `(${value.expr}) ? ${asJs(on)} : ${asJs(off)}`
+    return `(${value.expr}) ? ${asJs(values.get('true') ?? true)} : ${asJs(values.get('false') ?? false)}`
   }
   return value.expr
 }
@@ -744,7 +857,10 @@ function acceptsAttr(el: Element, lower: string): boolean {
   if (el.namespaceURI === 'http://www.w3.org/2000/svg')
     return SVG_ATTRS.has(lower.toLowerCase()) || SVG_ATTRS.has(lower)
   if (el.tagName.includes('-')) return true
-  return GLOBAL_ATTRS.has(lower) || (TAG_ATTRS[el.tagName] ?? '').split(' ').includes(lower)
+  return (
+    GLOBAL_ATTRS.has(lower) ||
+    (Object.hasOwn(TAG_ATTRS, el.tagName) ? (TAG_ATTRS[el.tagName] ?? '') : '').split(' ').includes(lower)
+  )
 }
 
 export interface Spread {
@@ -779,7 +895,7 @@ export function staticSpread(fc: FileCtx, el: Element): Spread {
     )
       continue
     if (acceptsAttr(el, lower)) continue
-    if (!/^[a-z_][a-z0-9_-]*$/i.test(attr.name)) continue
+    if (!/^[a-z][a-z0-9_-]*$/i.test(attr.name)) continue
     if (
       /^(href|src|action|formaction|poster|data|cite|background|ping|xlink:href)$/.test(lower) &&
       isUnsafeUrl(attr.value)
@@ -1022,6 +1138,14 @@ function defaultExpr(fc: FileCtx, plan: ComponentPlan, entry: PropPlan): string 
   if (prop.type === 'instance') {
     const def = prop.default ? fc.session.find(prop.default) : undefined
     if (!def) return undefined
+    if (fc.session.reaches(def, plan.def.id)) {
+      fc.session.dropDefault(plan.def.id, prop.name)
+      fc.note(
+        'dropped-attribute',
+        `default of ${jsString(prop.name)} dropped: it would render ${jsString(def.name)}, which renders this component again`,
+      )
+      return undefined
+    }
     return renderUseCall(fc, { plan: fc.session.plan(def), values: new Map(), slots: new Map() })
   }
   if (kind.k !== 'string') return declaredDefault(prop, kind)
@@ -1040,7 +1164,7 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
   const file = plan.file ?? `src/components/${plan.name}.tsx`
   const fc = new FileCtx(session, file)
   const root = parseTemplateRoot(def.template)
-  fc.issues.push(...plan.cssIssues)
+  fc.issues.push(...plan.mappingIssues, ...plan.cssIssues)
   let body = 'null'
   const marker = markerFor(def.template)
   if (root) {
