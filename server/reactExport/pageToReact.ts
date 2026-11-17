@@ -11,6 +11,8 @@ import {
 import {
   FileCtx,
   customPropertyStyle,
+  staticSpread,
+  withSpread,
   deepReasons,
   importLines,
   literalValue,
@@ -21,6 +23,7 @@ import {
   type ExportSession,
 } from './componentToReact.ts'
 import { splitComponentCss } from './cssSplit.ts'
+import { cssToTailwind, type TailwindSplit } from './tailwind.ts'
 import { htmlToJsx, nodeToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
 import { jsString, type ExportIssue } from './issues.ts'
 
@@ -100,10 +103,14 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
   walk(doc)
 
   const body = findBody(doc)
-  session.urls.tree(body)
-  const split = splitComponentCss(scopeDocumentSelectors(session.urls.css(styles.join('\n')), rootClass), { rootClass })
-  fc.issues.push(...split.issues)
-  const css = [split.globalCss, split.moduleCss].filter(Boolean).join('\n') || '/* no styles */\n'
+  const scoped = scopeDocumentSelectors(styles.join('\n'), rootClass)
+  const rewriteUrl = session.urls.url
+  const tw = session.styling === 'tailwind' ? cssToTailwind(scoped, { rootClass, rewriteUrl }) : undefined
+  const split = tw ? tw.leftover : splitComponentCss(scoped, { rootClass, rewriteUrl })
+  fc.issues.push(...(tw ? [...tw.issues, ...tw.leftover.issues] : split.issues))
+  fc.pageTw = tw
+  const joined = [split.globalCss, split.moduleCss].filter(Boolean).join('\n')
+  const css = joined || (tw ? '' : '/* no styles */\n')
 
   const options = pageOptions(fc, session)
   const fragment = { nodeName: '#document-fragment', childNodes: body.childNodes } as unknown as Tree.DocumentFragment
@@ -111,7 +118,7 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
   fc.issues.push(...result.issues)
 
   const bodyClasses = (attrOf(body, 'class') ?? '').split(/[ \t\n\f\r]+/).filter(Boolean)
-  const wrapperAttrs = [`className={${jsString([rootClass, ...bodyClasses].join(' '))}}`]
+  const wrapperAttrs = [`className=${globalClassName(fc.pageTw, [rootClass, ...bodyClasses])}`]
   const bodyStyle = attrOf(body, 'style')
   if (bodyStyle) {
     const issues: ExportIssue[] = []
@@ -123,7 +130,7 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
   const open = `<div ${wrapperAttrs.join(' ')}`
   const jsx = inner ? `${open}>\n${inner.replace(/^(?=.)/gm, '  ')}\n</div>` : `${open} />`
 
-  const lines = [`import './${base}.css'`]
+  const lines = css ? [`import './${base}.css'`] : []
   lines.push(...importLines(fc, null, 'page'))
   lines.push('')
   lines.push(`export function ${fn}() {`)
@@ -197,7 +204,6 @@ function visitUse(fc: FileCtx, session: ExportSession, use: Element, ctx: JsxCon
       const fragment = parseFragment(markup)
       const root = fragment.childNodes.find(isElement)
       if (!root) return ''
-      session.urls.tree(fragment)
       const inner = nodeToJsx(root, pageOptions(fc, session))
       ctx.issues.push(...inner.issues)
       return inner.jsx === 'null' ? '' : inner.jsx
@@ -247,17 +253,20 @@ function instanceJsx(
 /** The htmlToJsx hooks for page markup. `slotOwner` is the component whose slot a fragment fills: template-made elements in it still take that component's classes. */
 function pageOptions(fc: FileCtx, session: ExportSession, slotOwner?: ComponentPlan): HtmlToJsxOptions {
   const options: HtmlToJsxOptions = {
+    rewriteUrl: session.urls.url,
     className: (classes, el) => {
       const owner = ownerOf(session, el, slotOwner)
       if (owner) return fc.className(owner, classes, false, attrOf(el, INSTANCE_ATTR) !== undefined)
-      return `{${jsString(classes.join(' '))}}`
+      return globalClassName(fc.pageTw, classes)
     },
     visit: (el, ctx) => {
       if (isCustomTag(el)) session.customElements.add(el.tagName)
       if (el.tagName === USE_TAG) return visitUse(fc, session, el, ctx)
       if (attrOf(el, INSTANCE_ATTR) !== undefined) return visitInstance(fc, session, el, ctx)
       const styled = customPropertyStyle(fc, el)
-      return styled ? ctx.element(styled) : undefined
+      const loose = staticSpread(fc, el)
+      if (!styled && !loose.entries.length) return undefined
+      return withSpread(ctx.element({ ...styled, ...loose.drop }), loose.entries)
     },
   }
   return options
@@ -310,4 +319,16 @@ function signature(nodes: Tree.ChildNode[]): string {
 /** `html` and `body` rules would restyle the app the page is dropped into: they apply to the page's root element instead. */
 function scopeDocumentSelectors(css: string, rootClass: string): string {
   return css.replace(/(^|[}\s,;{])(?:html|body)(?=\s*[{,])/g, (_all, lead: string) => `${lead}.${rootClass}`)
+}
+
+/** The className for a page's own (global) classes: in Tailwind mode the utilities they became, plus the class itself while rules for it remain or nothing replaced it. */
+function globalClassName(tw: TailwindSplit | undefined, classes: string[]): string {
+  if (!tw) return `{${jsString(classes.join(' '))}}`
+  const out: string[] = []
+  for (const name of new Set(classes)) {
+    const utilities = tw.utilities.get(name)
+    if (utilities) out.push(...utilities)
+    if (!utilities || tw.leftover.classes.includes(name)) out.push(name)
+  }
+  return `{${jsString([...new Set(out)].join(' '))}}`
 }

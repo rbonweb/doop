@@ -1,5 +1,5 @@
 import type { ComponentDef } from '../../shared/components.ts'
-import { tokensCss, tokensDtcg, type DesignToken } from '../../shared/designTokens.ts'
+import { tokensCss, tokensDtcg, tokensTailwind, type DesignToken } from '../../shared/designTokens.ts'
 import { usedComponentIds } from '../componentEngine.ts'
 import { ExportSession, emitComponent, type ComponentFiles } from './componentToReact.ts'
 import { emitPage } from './pageToReact.ts'
@@ -37,10 +37,10 @@ export interface ReactExportResult {
   report: ExportReport
 }
 
-/** The one place a styling mode is turned into what the files use. S9 adds the Tailwind branch here. */
-function stylingStrategy(styling: ReactStyling): 'modules' {
-  if (styling === 'tailwind') throw new Error('tailwind styling lands with S9')
-  return 'modules'
+/** The one place a styling mode is checked: both modes are built. */
+function stylingStrategy(styling: ReactStyling): ReactStyling {
+  if (styling !== 'modules' && styling !== 'tailwind') throw new Error('styling must be "modules" or "tailwind"')
+  return styling
 }
 
 const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
@@ -76,20 +76,39 @@ function customElementsDts(tags: readonly string[]): string {
 }
 
 function readme(styling: ReactStyling, hasTokens: boolean): string {
+  const tailwind = styling === 'tailwind'
   return [
     '# Doop export',
     '',
     'React components and pages exported from a Doop canvas.',
     '',
-    '- `src/components/` has one `.tsx` per component and its `.module.css`. Components the canvas maps to your own package are imported from it and have no file here.',
-    '- `src/pages/` has one `.tsx` and `.css` per exported frame. The page `.css` is global and scoped by the page root class.',
+    tailwind
+      ? '- `src/components/` has one `.tsx` per component, styled with Tailwind utility classes. A `.module.css` sits beside a component only when some of its CSS (keyframes, complex selectors, `url()` images) has no utility. Components the canvas maps to your own package are imported from it and have no file here.'
+      : '- `src/components/` has one `.tsx` per component and its `.module.css`. Components the canvas maps to your own package are imported from it and have no file here.',
+    tailwind
+      ? '- `src/pages/` has one `.tsx` per exported frame, and a `.css` only for rules that have no utility. A page `.css` is global and scoped by the page root class.'
+      : '- `src/pages/` has one `.tsx` and `.css` per exported frame. The page `.css` is global and scoped by the page root class.',
     hasTokens
-      ? '- `src/tokens.css` holds the canvas design tokens as CSS custom properties (import it once in your app) and `src/tokens.json` the same tokens as W3C design tokens.'
+      ? tailwind
+        ? '- `src/tokens.css` starts with `@import "tailwindcss";`, then the canvas tokens as a Tailwind `@theme` block and as CSS custom properties. `src/tokens.json` has the same tokens as W3C design tokens.'
+        : '- `src/tokens.css` holds the canvas design tokens as CSS custom properties (import it once in your app) and `src/tokens.json` the same tokens as W3C design tokens.'
       : '- Design tokens were not exported.',
     '- `src/cx.ts` joins class names, `src/css-modules.d.ts` types CSS Modules imports.',
     '- `export-report.json` lists everything the export dropped or changed, and the instances whose markup was inlined.',
     '',
-    `Styling: ${styling === 'modules' ? 'CSS Modules' : 'Tailwind'}. The code is generated and deterministic: exporting the same canvas again gives the same files.`,
+    ...(tailwind
+      ? [
+          '## Adding it to a Tailwind v4 app',
+          '',
+          '1. Copy `src` into your app. Tailwind v4 needs `tailwindcss` and its Vite plugin (`@tailwindcss/vite`) or PostCSS plugin (`@tailwindcss/postcss`) installed.',
+          hasTokens
+            ? '2. Import `src/tokens.css` once from your entry (`import "./tokens.css"`) in place of your own `@import "tailwindcss";`. If you already have a Tailwind stylesheet, copy the `@theme` block and the `:root` block from `src/tokens.css` into it instead.'
+            : '2. Import your Tailwind stylesheet (`@import "tailwindcss";`) once from your entry.',
+          '3. The Vite plugin scans your source files for classes by itself. With the Tailwind CLI or PostCSS add `@source "./src";` to that stylesheet so the `.tsx` files are scanned.',
+          '',
+        ]
+      : []),
+    `Styling: ${tailwind ? 'Tailwind v4' : 'CSS Modules'}. The code is generated and deterministic: exporting the same canvas again gives the same files.`,
     '',
   ].join('\n')
 }
@@ -148,7 +167,7 @@ function run(input: ReactExportInput, seedIds: readonly string[]): Built {
   stylingStrategy(input.styling)
   const urls = makeUrlRewriter(input.assetOrigin)
   const sorted = [...input.components].sort((a, b) => byText(a.name, b.name) || byText(a.id, b.id))
-  const session = new ExportSession({ components: sorted, urls })
+  const session = new ExportSession({ components: sorted, urls, styling: input.styling })
   const report = emptyReport(input.styling)
 
   const seeds = seedIds
@@ -205,7 +224,7 @@ export function buildReactExport(input: ReactExportInput): ReactExportResult {
     const generated = built.componentFiles.get(plan.def.id)
     if (!generated || !plan.file) continue
     files.push({ path: plan.file, content: generated.tsx })
-    files.push({ path: `src/components/${plan.name}.module.css`, content: generated.css })
+    if (generated.css) files.push({ path: `src/components/${plan.name}.module.css`, content: generated.css })
   }
   const exported = session.order.filter((plan) => plan.file).sort((a, b) => byText(a.name, b.name))
   files.push({
@@ -216,7 +235,7 @@ export function buildReactExport(input: ReactExportInput): ReactExportResult {
   })
   for (const page of built.pages) {
     files.push({ path: page.path, content: page.tsx })
-    files.push({ path: page.cssPath, content: page.css })
+    if (page.css) files.push({ path: page.cssPath, content: page.css })
   }
   files.push({ path: 'src/cx.ts', content: CX_TS })
   files.push({ path: 'src/css-modules.d.ts', content: CSS_MODULES_D_TS })
@@ -224,7 +243,17 @@ export function buildReactExport(input: ReactExportInput): ReactExportResult {
     files.push({ path: 'src/custom-elements.d.ts', content: customElementsDts([...session.customElements].sort()) })
   }
   if (includeTokens) {
-    files.push({ path: 'src/tokens.css', content: tokensCss(input.tokens, input.themeOrder) })
+    const tokens =
+      input.styling === 'tailwind'
+        ? [
+            '@import "tailwindcss";',
+            tokensTailwind(input.tokens, input.themeOrder),
+            tokensCss(input.tokens, input.themeOrder),
+          ]
+            .filter(Boolean)
+            .join('\n\n')
+        : tokensCss(input.tokens, input.themeOrder)
+    files.push({ path: 'src/tokens.css', content: tokens.endsWith('\n') ? tokens : `${tokens}\n` })
     files.push({ path: 'src/tokens.json', content: tokensDtcg(input.tokens, input.themeOrder) })
   }
   files.push({ path: 'README.md', content: readme(input.styling, includeTokens) })
@@ -244,7 +273,7 @@ export function componentReactFiles(input: ReactExportInput & { componentId: str
     const generated = built.componentFiles.get(plan.def.id)
     if (generated && plan.file) {
       files.push({ path: plan.file, content: generated.tsx })
-      files.push({ path: `src/components/${plan.name}.module.css`, content: generated.css })
+      if (generated.css) files.push({ path: `src/components/${plan.name}.module.css`, content: generated.css })
       if (generated.fc.usesCx) files.push({ path: 'src/cx.ts', content: CX_TS })
       report.components.push({ id: plan.def.id, name: plan.def.name, file: plan.file })
       for (const issue of generated.fc.issues) report.issues.push({ ...issue, file: plan.file })

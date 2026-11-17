@@ -29,6 +29,8 @@ import { moduleClassName, splitComponentCss, type CssModuleSplit } from './cssSp
 import { nodeToJsx, htmlToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
 import { isUnsafeUrl, jsString, type ExportIssue } from './issues.ts'
 import { NameAllocator, componentName, isIdentifier, propName } from './names.ts'
+import { cssToTailwind, tailwindClassName, type TailwindSplit } from './tailwind.ts'
+import type { ReactStyling } from './report.ts'
 import type { UrlRewriter } from './urls.ts'
 
 type Element = Tree.Element
@@ -136,7 +138,13 @@ export interface ComponentPlan {
   propByName: Map<string, PropPlan>
   slots: SlotPlan[]
   slotByName: Map<string, SlotPlan>
+  /** the component's own stylesheet: the CSS Modules split, or in Tailwind mode what did not convert */
   split: CssModuleSplit
+  /** Tailwind mode: the utilities each class became */
+  tw?: TailwindSplit
+  /** issues found turning the CSS into `split` */
+  cssIssues: ExportIssue[]
+  /** classes the module sheet defines (what `styles["x"]` may look up) */
   moduleClasses: Set<string>
   rootClass: string
   /** the identifier a file other than the component's own imports its module as */
@@ -181,12 +189,14 @@ const LOCAL_NAMES = [
 export interface SessionOptions {
   components: readonly ComponentDef[]
   urls: UrlRewriter
+  styling: ReactStyling
 }
 
 /** One export's shared state: which components exist, the names handed out, the plans made on demand and the files they need. */
 export class ExportSession {
   readonly names = new NameAllocator({ caseInsensitive: true, reserved: ['index', ...LOCAL_NAMES] })
   readonly urls: UrlRewriter
+  readonly styling: ReactStyling
   readonly customElements = new Set<string>()
   /** components in the order they were first needed: files are emitted in this order */
   readonly order: ComponentPlan[] = []
@@ -197,6 +207,7 @@ export class ExportSession {
   constructor(options: SessionOptions) {
     this.defs = options.components
     this.urls = options.urls
+    this.styling = options.styling
   }
 
   /** A component by id, then by name (exact, then case-insensitive): how the canvas resolves a reference. */
@@ -293,7 +304,10 @@ export class ExportSession {
     }
 
     const rootClass = /root/i.test(def.rawCss) || /root/i.test(def.template) ? 'doop-root' : 'root'
-    const split = splitComponentCss(def.rawCss ? this.urls.css(def.rawCss) : '', { rootClass })
+    const rewriteUrl = this.urls.url
+    const tw = this.styling === 'tailwind' ? cssToTailwind(def.rawCss, { rootClass, rewriteUrl }) : undefined
+    const split = tw ? tw.leftover : splitComponentCss(def.rawCss, { rootClass, rewriteUrl })
+    const cssIssues = tw ? [...tw.issues, ...tw.leftover.issues] : split.issues
     const plan: ComponentPlan = {
       def,
       name,
@@ -304,6 +318,8 @@ export class ExportSession {
       slots,
       slotByName: new Map(slots.map((entry) => [entry.name, entry])),
       split,
+      ...(tw ? { tw } : {}),
+      cssIssues,
       moduleClasses: new Set(split.classes),
       rootClass,
       stylesIdent: mapped ? '' : this.names.take(`${name}Styles`),
@@ -408,6 +424,8 @@ export class FileCtx {
   usesCx = false
   usesNode = false
   usesCssProps = false
+  /** a page file in Tailwind mode: the utilities its own global classes became */
+  pageTw?: TailwindSplit
   readonly issues: ExportIssue[] = []
   readonly inlined: FileInlined[] = []
 
@@ -426,9 +444,14 @@ export class FileCtx {
 
   /** the className value for classes inside `plan`'s own markup */
   className(plan: ComponentPlan, classes: string[], own: boolean, withRoot: boolean): string {
-    const list = withRoot && plan.moduleClasses.has(plan.rootClass) ? [plan.rootClass, ...classes] : classes
+    const rootUsed = plan.tw
+      ? plan.tw.utilities.has(plan.rootClass) || plan.moduleClasses.has(plan.rootClass)
+      : plan.moduleClasses.has(plan.rootClass)
+    const list = withRoot && rootUsed ? [plan.rootClass, ...classes] : classes
     const ident = own ? 'styles' : plan.stylesIdent
-    const value = moduleClassName(list, plan.moduleClasses, { styles: ident, cx: 'cx' })
+    const value = plan.tw
+      ? tailwindClassName(list, plan.tw, { styles: ident, cx: 'cx' })
+      : moduleClassName(list, plan.moduleClasses, { styles: ident, cx: 'cx' })
     if (value.startsWith('{cx(')) this.usesCx = true
     if (value.includes(`${ident}[`)) this.styleUses.add(plan)
     return value
@@ -650,11 +673,134 @@ export function condExpr(plan: ComponentPlan, condition: Condition): string {
 export function customPropertyStyle(fc: FileCtx, el: Element): Record<string, string> | undefined {
   const style = attrOf(el, 'style')
   if (!style || !style.includes('--')) return undefined
-  const object = styleToJsx(style, [])
+  const object = styleToJsx(style, [], fc.session.urls.url)
   if (!object || !object.includes('"--')) return undefined
   fc.usesCssProps = true
   return { style: `{${object.slice(1, -1)} as CSSProperties}` }
 }
+
+/* ------------------------------------------------------------------ */
+/* Attributes the element's intrinsic type does not accept             */
+/* ------------------------------------------------------------------ */
+
+/* React types an element's attributes per tag, so `size` on an `<i>` fails strict type-checking even though it is fine at
+   runtime. Such attributes are written as a spread of an object literal, which the type checker accepts anywhere. */
+const GLOBAL_ATTRS = new Set(
+  'id title lang dir role tabindex hidden slot draggable contenteditable spellcheck translate accesskey inputmode autofocus itemprop itemscope itemtype itemid itemref nonce is part exportparts enterkeyhint autocapitalize'.split(
+    ' ',
+  ),
+)
+const TAG_ATTRS: Record<string, string> = {
+  a: 'href target rel download hreflang type referrerpolicy ping media',
+  img: 'src srcset alt width height loading decoding crossorigin sizes usemap referrerpolicy fetchpriority ismap',
+  input:
+    'type value checked name placeholder disabled readonly required min max step minlength maxlength pattern size multiple accept autocomplete list form formaction formmethod formtarget formenctype formnovalidate src alt width height capture',
+  textarea: 'name placeholder disabled readonly required rows cols minlength maxlength wrap form autocomplete',
+  select: 'name disabled required multiple size form autocomplete',
+  option: 'value selected disabled label',
+  optgroup: 'disabled label',
+  button: 'type name value disabled form formaction formmethod formtarget formenctype formnovalidate',
+  label: 'for form',
+  form: 'action method target enctype autocomplete novalidate accept-charset',
+  fieldset: 'disabled form name',
+  video: 'src poster controls autoplay loop muted preload playsinline width height crossorigin',
+  audio: 'src controls autoplay loop muted preload crossorigin',
+  source: 'src srcset type media sizes width height',
+  track: 'src kind srclang label default',
+  iframe: 'src name allow allowfullscreen width height loading referrerpolicy sandbox srcdoc',
+  canvas: 'width height',
+  td: 'colspan rowspan headers scope',
+  th: 'colspan rowspan headers scope abbr',
+  col: 'span',
+  colgroup: 'span',
+  ol: 'start reversed type',
+  li: 'value',
+  blockquote: 'cite',
+  q: 'cite',
+  time: 'datetime',
+  details: 'open',
+  dialog: 'open',
+  progress: 'value max',
+  meter: 'value min max low high optimum',
+  output: 'for form name',
+  object: 'data type width height name',
+  embed: 'src type width height',
+  map: 'name',
+  area: 'href alt coords shape target rel download',
+  del: 'cite datetime',
+  ins: 'cite datetime',
+  data: 'value',
+  svg: '',
+}
+const SVG_ATTRS = new Set(
+  'viewbox d fill stroke stroke-width stroke-linecap stroke-linejoin stroke-dasharray stroke-dashoffset stroke-miterlimit stroke-opacity fill-opacity fill-rule clip-rule clip-path cx cy r rx ry x y x1 x2 y1 y2 width height points transform xmlns opacity offset stop-color stop-opacity gradientunits gradienttransform preserveaspectratio id role focusable xlink:href href mask filter fx fy dx dy font-size font-family font-weight text-anchor dominant-baseline letter-spacing version overflow vector-effect'.split(
+    ' ',
+  ),
+)
+
+/** the attribute names React's types accept on this element, lower-cased; null when anything may pass (a custom element) */
+function acceptsAttr(el: Element, lower: string): boolean {
+  if (lower.startsWith('data-') || lower.startsWith('aria-') || lower === 'class' || lower === 'style') return true
+  if (el.namespaceURI === 'http://www.w3.org/2000/svg')
+    return SVG_ATTRS.has(lower.toLowerCase()) || SVG_ATTRS.has(lower)
+  if (el.tagName.includes('-')) return true
+  return GLOBAL_ATTRS.has(lower) || (TAG_ATTRS[el.tagName] ?? '').split(' ').includes(lower)
+}
+
+export interface Spread {
+  /** `"size": expr` entries for the spread object */
+  entries: string[]
+  /** JSX attribute names the converter would also write, to drop */
+  drop: Record<string, null>
+}
+
+/** The element's static attributes that React's types would reject, as spread entries (dropped from the default rendering). */
+export function staticSpread(fc: FileCtx, el: Element): Spread {
+  const spread: Spread = { entries: [], drop: {} }
+  for (const attr of el.attrs) {
+    const lower = attr.name.toLowerCase()
+    if (
+      lower.startsWith('data-doop-') ||
+      /^on/.test(lower) ||
+      lower === 'srcdoc' ||
+      lower === 'class' ||
+      lower === 'style'
+    )
+      continue
+    if (
+      [
+        'key',
+        'ref',
+        'children',
+        'dangerouslysetinnerhtml',
+        'suppresshydrationwarning',
+        'suppresscontenteditablewarning',
+      ].includes(lower)
+    )
+      continue
+    if (acceptsAttr(el, lower)) continue
+    if (!/^[a-z_][a-z0-9_-]*$/i.test(attr.name)) continue
+    if (
+      /^(href|src|action|formaction|poster|data|cite|background|ping|xlink:href)$/.test(lower) &&
+      isUnsafeUrl(attr.value)
+    )
+      continue
+    const name = ATTR_RENAMES.get(lower) ?? attr.name
+    const value = /^(href|src|poster)$/.test(lower) ? fc.session.urls.url(attr.value) : attr.value
+    spread.entries.push(`${jsString(name)}: ${jsString(value)}`)
+    spread.drop[name] = null
+  }
+  return spread
+}
+
+/** Puts a spread right after the opening tag name of a rendered element. */
+export function withSpread(rendered: string, entries: readonly string[]): string {
+  if (!entries.length) return rendered
+  return rendered.replace(/^<[^\s/>]+/, (tag) => `${tag} {...{ ${entries.join(', ')} }}`)
+}
+
+/** whether a bound attribute must go through the spread for this element */
+export const needsSpread = (el: Element, target: string): boolean => !acceptsAttr(el, target.toLowerCase())
 
 /** a JSX child written as an expression: `{x}` becomes `x`, an element stays */
 export const exprOf = (rendered: string): string =>
@@ -749,6 +895,8 @@ function attrValueExpr(entry: PropPlan, literal: string | undefined, boolAttr: b
 
 export interface BoundElement {
   attrs: Record<string, string | null>
+  /** `"name": expr` entries for attributes the element's type does not accept */
+  spread: string[]
   /** set when the element's text is bound: the marker that stands in the converted text, and the JSX it becomes */
   text?: { marker: string; jsx: string }
 }
@@ -761,7 +909,7 @@ export function bindElement(
   markerBase: string,
   reportPath: string,
 ): BoundElement {
-  const result: BoundElement = { attrs: {} }
+  const result: BoundElement = { attrs: {}, spread: [] }
   const raw = attrOf(el, BIND_ATTR)
   if (raw === undefined) return result
   const bindings: Binding[] = parseBindings(raw, el.tagName)
@@ -810,13 +958,18 @@ export function bindElement(
     const literal = attrOf(el, target)
     const expr = attrValueExpr(entry, boolAttr ? (literal === undefined ? undefined : '') : literal, boolAttr)
     if (!expr) continue
+    if (needsSpread(el, target)) {
+      result.spread.push(`${jsString(name)}: ${expr}`)
+      result.attrs[name] = null
+      continue
+    }
     result.attrs[name] = `{${expr}}`
   }
   if (styleEntries.length) {
     const rest = parseStyle(attrOf(el, 'style'))
     for (const { name } of styleEntries) rest.delete(name)
     const issues: ExportIssue[] = []
-    const staticStyle = rest.size ? styleToJsx(serializeStyle(rest), issues) : null
+    const staticStyle = rest.size ? styleToJsx(serializeStyle(rest), issues, fc.session.urls.url) : null
     fc.issues.push(...issues)
     const dynamic = styleEntries.map(({ key, expr }) => `${key}: ${expr}`).join(', ')
     fc.usesCssProps = true
@@ -887,11 +1040,10 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
   const file = plan.file ?? `src/components/${plan.name}.tsx`
   const fc = new FileCtx(session, file)
   const root = parseTemplateRoot(def.template)
-  fc.issues.push(...plan.split.issues)
+  fc.issues.push(...plan.cssIssues)
   let body = 'null'
   const marker = markerFor(def.template)
   if (root) {
-    session.urls.tree({ childNodes: [root], nodeName: '#document-fragment' } as unknown as Tree.ParentNode)
     const options = componentOptions(fc, plan, root, marker)
     const result = nodeToJsx(root, options)
     fc.issues.push(...result.issues)
@@ -924,8 +1076,14 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
   lines.push(`export function ${plan.name}(${signature}) {`)
   lines.push(body === 'null' ? '  return null' : `  return (\n${indentText(body, '    ')}\n  )`)
   lines.push('}')
-  const css = [plan.split.moduleCss, plan.split.globalCss].filter(Boolean).join('\n') || '/* no styles */\n'
+  const css = componentCss(plan)
   return { tsx: `${lines.join('\n')}\n`, css, fc }
+}
+
+/** The component's `.module.css`: empty in Tailwind mode when everything converted, a placeholder comment in CSS Modules mode. */
+export function componentCss(plan: ComponentPlan): string {
+  const css = [plan.split.moduleCss, plan.split.globalCss].filter(Boolean).join('\n')
+  return css || (plan.tw ? '' : '/* no styles */\n')
 }
 
 /** The import block of a generated file, sorted so two runs agree. `from` says where the file lives. */
@@ -936,7 +1094,7 @@ export function importLines(fc: FileCtx, self: ComponentPlan | null, from: 'comp
   const rel = from === 'component' ? '.' : '../components'
   const sheets = [...fc.styleUses].sort((a, b) => (a.name < b.name ? -1 : 1))
   if (self && fc.styleUses.has(self)) lines.push(`import styles from './${self.name}.module.css'`)
-  else if (self && self.split.moduleCss) lines.push(`import './${self.name}.module.css'`)
+  else if (self && (self.split.moduleCss || self.split.globalCss)) lines.push(`import './${self.name}.module.css'`)
   for (const plan of sheets)
     if (plan !== self) lines.push(`import ${plan.stylesIdent} from '${rel}/${plan.name}.module.css'`)
   if (fc.usesCx) lines.push(`import { cx } from '../cx'`)
@@ -966,6 +1124,7 @@ export function importLines(fc: FileCtx, self: ComponentPlan | null, from: 'comp
 function componentOptions(fc: FileCtx, plan: ComponentPlan, root: Element, marker: string): HtmlToJsxOptions {
   const own = (classes: string[]) => fc.className(plan, classes, true, false)
   const options: HtmlToJsxOptions = {
+    rewriteUrl: fc.session.urls.url,
     className: (classes) => own(classes),
     visit: (el, ctx) => {
       if (isCustomTag(el)) fc.session.customElements.add(el.tagName)
@@ -975,10 +1134,12 @@ function componentOptions(fc: FileCtx, plan: ComponentPlan, root: Element, marke
       const slotName = attrOf(el, SLOT_ATTR)
       const special = isRoot || attrOf(el, BIND_ATTR) !== undefined || slotName !== undefined
       const styled = customPropertyStyle(fc, el)
-      if (!special && condRaw === undefined && !styled) return undefined
-      let rendered = special
-        ? renderCustomized(fc, plan, el, ctx, options, isRoot, slotName, marker)
-        : ctx.element(styled)
+      const loose = staticSpread(fc, el)
+      const plain = !special && !loose.entries.length
+      if (plain && condRaw === undefined && !styled) return undefined
+      let rendered = plain
+        ? ctx.element(styled)
+        : renderCustomized(fc, plan, el, ctx, options, isRoot, slotName, marker)
       const condition = condRaw === undefined ? undefined : parseCondition(condRaw)
       if (condition) rendered = wrapCondition(rendered, condExpr(plan, condition))
       return rendered
@@ -997,9 +1158,12 @@ function renderCustomized(
   slotName: string | undefined,
   marker: string,
 ): string {
-  const bound =
-    slotName === undefined ? bindElement(fc, plan, el, marker, '') : { attrs: {} as Record<string, string | null> }
-  const attrs = { ...customPropertyStyle(fc, el), ...bound.attrs }
+  const bound: BoundElement =
+    slotName === undefined
+      ? bindElement(fc, plan, el, marker, '')
+      : { attrs: {} as Record<string, string | null>, spread: [] }
+  const loose = staticSpread(fc, el)
+  const attrs = { ...customPropertyStyle(fc, el), ...loose.drop, ...bound.attrs }
   if (isRoot) {
     for (const entry of plan.props) {
       const reflects = entry.prop.type === 'enum' || (entry.prop.type === 'boolean' && entry.prop.reflect === true)
@@ -1026,7 +1190,12 @@ function renderCustomized(
       children = inner.jsx === 'null' ? `{${slot.ts}}` : `{${slot.ts} ?? (\n${indentText(inner.jsx)}\n)}`
     }
   }
-  let rendered = ctx.element(attrs, children)
+  const boundKeys = new Set(bound.spread.map((entry) => entry.slice(0, entry.indexOf(':'))))
+  const spreadEntries = [
+    ...loose.entries.filter((entry) => !boundKeys.has(entry.slice(0, entry.indexOf(':')))),
+    ...bound.spread,
+  ]
+  let rendered = withSpread(ctx.element(attrs, children), spreadEntries)
   if (bound.text) rendered = rendered.replace(`{${jsString(bound.text.marker)}}`, bound.text.jsx)
   return rendered
 }
