@@ -451,7 +451,7 @@ it('storybook starting: the bar is indeterminate until the first plan line, and 
   answerWith(() => run.response)
   await click(button(dialog, /^Import$/))
   expect(dialog.querySelector('[role="progressbar"]')?.getAttribute('data-state')).toBe('indeterminate')
-  expect(dialog.querySelector('[data-slot="import-screen"]')?.className).toContain('min-h-[440px]')
+  expect(dialog.querySelector('[data-slot="import-screen"]')?.className ?? '').not.toContain('min-h')
   await run.send({ type: 'progress', rendered: 1, total: 12, component: 'Button' })
   expect(dialog.querySelector('[role="progressbar"]')?.getAttribute('data-state')).toBe('loading')
 })
@@ -491,4 +491,173 @@ it('cli: New command is there while the command is still good', async () => {
   const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
   await click(button(dialog, /New command/))
   expect(fetchMock).toHaveBeenCalledTimes(2)
+})
+
+it('storybook rate limit: the hourly 429 shows the server message and the wait, not the busy copy', async () => {
+  answerWith(() =>
+    Response.json(
+      { code: 'too_many', error: 'At most 3 Storybook imports an hour.' },
+      { status: 429, headers: { 'Retry-After': '1800' } },
+    ),
+  )
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  const alert = dialog.querySelector('[role="alert"]')!
+  expect(alert.textContent).toContain('At most 3 Storybook imports an hour.')
+  expect(alert.textContent).toContain('You can try again in 30 minutes.')
+  expect(alert.textContent).not.toContain('busy')
+})
+
+it('storybook busy: a real busy code keeps the busy copy', async () => {
+  const run = stream()
+  answerWith(() => run.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  await run.send({ type: 'error', code: 'busy', message: 'renderer busy' })
+  await run.end()
+  expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('Doop is busy with other imports')
+})
+
+it('storybook choose: the counts and renders in the header follow what is ticked', async () => {
+  const dialog = await previewOf(PLAN)
+  const preview = () => dialog.querySelector('[data-slot="storybook-preview"]')!.textContent ?? ''
+  expect(preview()).toContain('12 renders to read')
+  expect(preview()).toContain('1 component would be created')
+  expect(preview()).toContain('1 component would be updated')
+  const boxes = checkboxes(dialog)
+  await click(boxes[0]!) // Inputs/Button: the one that would be created
+  expect(preview()).toContain('6 renders to read')
+  expect(preview()).not.toContain('component would be created')
+  expect(preview()).toContain('1 component would be updated')
+  await click(boxes[2]!) // Layout/Card: the one that would be updated
+  expect(preview()).not.toContain('would be updated')
+  expect(preview()).toContain('Nothing to import')
+  expect(button(dialog, /^Import$/).disabled).toBe(true)
+})
+
+const BIG_PLAN = Array.from({ length: 70 }, (_, i) => ({
+  name: `Part${i}`,
+  group: `Kit/Part${i}`,
+  stories: 1,
+  renders: 2,
+}))
+
+async function bigPreview() {
+  const dry = stream()
+  answerWith(() => dry.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  await dry.send({ type: 'plan', components: BIG_PLAN, renders: 140, total: 211, capped: true })
+  await dry.send({
+    type: 'result',
+    result: { ...RESULT, created: BIG_PLAN.map((c) => ({ name: c.name, id: c.name })) },
+  })
+  await dry.end()
+  return dialog
+}
+
+it('storybook large plan: says how many were found, preselects the first 60, and stops at 60', async () => {
+  const dialog = await bigPreview()
+  expect(dialog.querySelector('[data-slot="storybook-found"]')?.textContent).toBe(
+    '211 components found. Pick up to 60.',
+  )
+  expect(dialog.querySelector('[data-slot="selection-bar"]')?.textContent).toContain('60 of 70 selected')
+  const boxes = checkboxes(dialog)
+  expect(boxes.slice(0, 60).every((b) => b.checked)).toBe(true)
+  expect(boxes.slice(60).every((b) => !b.checked && b.disabled)).toBe(true)
+  expect(dialog.querySelector('[data-slot="selection-bar"]')?.textContent).toContain('most one import takes')
+  // freeing one lets another be picked
+  await click(boxes[0]!)
+  expect(checkboxes(dialog)[60]!.disabled).toBe(false)
+  await click(checkboxes(dialog)[60]!)
+  expect(dialog.querySelector('[data-slot="selection-bar"]')?.textContent).toContain('60 of 70 selected')
+  // the import names the ticked titles
+  const real = stream()
+  answerWith(() => real.response)
+  await click(button(dialog, /^Import$/))
+  const include = sentBody().include as string[]
+  expect(include).toHaveLength(60)
+  expect(include).toContain('Kit/Part60')
+  expect(include).not.toContain('Kit/Part0')
+})
+
+it('storybook large plan: a filter field narrows the list, and Select all takes what it shows', async () => {
+  const dialog = await bigPreview()
+  await click(button(dialog, /^Clear$/))
+  await type(dialog.querySelector('[data-slot="search-field"] input')!, 'Part6')
+  const rows = Array.from(dialog.querySelectorAll('[data-slot="storybook-choose"] label')).filter((l) =>
+    l.querySelector('input[type="checkbox"]'),
+  )
+  expect(rows.map((r) => r.textContent)).toEqual([
+    'Kit/Part6',
+    'Kit/Part60',
+    'Kit/Part61',
+    'Kit/Part62',
+    'Kit/Part63',
+    'Kit/Part64',
+    'Kit/Part65',
+    'Kit/Part66',
+    'Kit/Part67',
+    'Kit/Part68',
+    'Kit/Part69',
+  ])
+  await click(button(dialog, /^Select all$/))
+  expect(dialog.querySelector('[data-slot="selection-bar"]')?.textContent).toContain('11 of 70 selected')
+})
+
+it('storybook done: notes are grouped by kind in plain words, with the raw lines folded away', async () => {
+  const run = stream()
+  answerWith(() => run.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  await run.send({
+    type: 'result',
+    result: {
+      ...RESULT,
+      issues: [
+        ...['as', 'size', 'variant'].map((prop) => ({
+          component: 'Button',
+          code: 'argtypes_dropped',
+          message: `${prop}: it has no control Doop can read`,
+        })),
+        { component: 'Card', code: 'unsafe_css', message: 'a rule with url(javascript:) was removed' },
+        { component: 'Card', code: 'something_new', message: 'a future note' },
+      ],
+    },
+  })
+  await run.end()
+  // a dry run ends on the preview: run the real import to reach the result
+  const real = stream()
+  answerWith(() => real.response)
+  await click(button(dialog, /^Import$/))
+  await real.send({
+    type: 'result',
+    result: {
+      ...RESULT,
+      issues: [
+        ...['as', 'size', 'variant'].map((prop) => ({
+          component: 'Button',
+          code: 'argtypes_dropped',
+          message: `${prop}: it has no control Doop can read`,
+        })),
+        { component: 'Card', code: 'unsafe_css', message: 'a rule with url(javascript:) was removed' },
+        { component: 'Card', code: 'something_new', message: 'a future note' },
+      ],
+    },
+  })
+  await real.end()
+  const issues = dialog.querySelector('[data-slot="storybook-issues"]')!
+  const summary = issues.querySelector('ul')!.textContent ?? ''
+  expect(summary).toContain('3 props skipped because Storybook has no control for them')
+  expect(summary).toContain('1 style rule or import was left out')
+  expect(summary).toContain('1 other note')
+  expect(summary).toContain('1 component was skipped')
+  expect(summary).not.toContain('it has no control Doop can read')
+  expect(issues.querySelector('[data-slot="disclosure"]')?.textContent).toContain(
+    'Button: as: it has no control Doop can read',
+  )
 })

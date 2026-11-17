@@ -25,7 +25,7 @@ export interface PlannedComponent {
 export type StorybookErrorCode = 'private' | 'unreachable' | 'too_many' | 'busy' | 'invalid'
 
 export type StorybookEvent =
-  | { type: 'plan'; components: PlannedComponent[]; renders: number }
+  | { type: 'plan'; components: PlannedComponent[]; renders: number; total?: number; capped?: boolean }
   | { type: 'progress'; rendered: number; total: number; component?: string }
   | { type: 'result'; result: ImportResult; issues?: ImportResult['issues'] }
   | { type: 'error'; code: StorybookErrorCode; message: string }
@@ -61,6 +61,8 @@ export function parseStorybookEvent(line: string): StorybookEvent | null {
         renders: Number(c.renders) || 0,
       })),
       renders: Number(value.renders) || 0,
+      total: typeof value.total === 'number' ? value.total : undefined,
+      capped: value.capped === true ? true : undefined,
     }
   }
   if (value.type === 'progress') {
@@ -98,6 +100,16 @@ export function parseStorybookEvent(line: string): StorybookEvent | null {
   return null
 }
 
+/** A refusal before the stream starts: the status and body as everywhere, and the seconds a 429 says to wait. */
+export class StorybookRequestError extends ApiError {
+  retryAfterSeconds: number | null
+  constructor(status: number, text: string, retryAfter: string | null) {
+    super(status, text)
+    const seconds = Number(retryAfter)
+    this.retryAfterSeconds = retryAfter && Number.isFinite(seconds) && seconds > 0 ? seconds : null
+  }
+}
+
 /**
  * Runs a Storybook import and hands every NDJSON line to `onEvent` as it arrives.
  * Resolves with the last event (a result or an error); aborting `signal` closes the
@@ -121,7 +133,7 @@ export async function streamStorybookImport(
     }),
     signal,
   })
-  if (!res.ok) throw new ApiError(res.status, await res.text())
+  if (!res.ok) throw new StorybookRequestError(res.status, await res.text(), res.headers.get('Retry-After'))
   if (!res.body) return null
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
@@ -206,7 +218,59 @@ export function openImportedComponents(canvasId: string, pageId?: string | null)
 
 /** "in 12 minutes", "in 40 seconds", from now to `at` (ms). */
 export function relativeIn(at: number, now: number, locale: string = getLocale()): string {
-  const seconds = Math.max(0, Math.round((at - now) / 1000))
+  return relativeInSeconds(Math.max(0, Math.round((at - now) / 1000)), locale)
+}
+
+/** "in 12 minutes", "in 40 seconds": a wait of `seconds`. */
+export function relativeInSeconds(seconds: number, locale: string = getLocale()): string {
   const format = new Intl.RelativeTimeFormat(locale, { numeric: 'always', style: 'long' })
   return seconds >= 60 ? format.format(Math.round(seconds / 60), 'minute') : format.format(seconds, 'second')
+}
+
+/** What a kind of import note is about, in the words the card uses for it. */
+export type IssueGroupKey =
+  'props' | 'noProps' | 'styles' | 'variants' | 'markup' | 'files' | 'unsafe' | 'limits' | 'other'
+
+const ISSUE_GROUP: Record<string, IssueGroupKey> = {
+  argtypes_dropped: 'props',
+  text_arg_ambiguous: 'props',
+  unsafe_prop_value: 'unsafe',
+  argtypes_unavailable: 'noProps',
+  css_cross_origin: 'styles',
+  css_import_dropped: 'styles',
+  css_rules_dropped: 'styles',
+  css_rules_oversize: 'styles',
+  css_scan_capped: 'styles',
+  shared_css_capped: 'styles',
+  unsafe_css: 'styles',
+  variant_css_at_rule: 'variants',
+  variant_html_unsupported: 'variants',
+  variants_not_diffable: 'variants',
+  dropped_element: 'markup',
+  multiple_roots: 'markup',
+  too_deep: 'markup',
+  too_large: 'markup',
+  inline_data: 'files',
+  unsafe_url: 'unsafe',
+  unsafe_token: 'unsafe',
+  components_capped: 'limits',
+  renders_capped: 'limits',
+  more_issues: 'limits',
+}
+
+export interface IssueGroup {
+  key: IssueGroupKey
+  items: { component?: string; message: string }[]
+}
+
+/** The import's notes grouped by what they are about, biggest first, each keeping its raw lines for the details. */
+export function groupImportIssues(issues: ImportResult['issues']): IssueGroup[] {
+  const groups = new Map<IssueGroupKey, IssueGroup>()
+  for (const issue of issues) {
+    const key = ISSUE_GROUP[issue.code] ?? 'other'
+    const group = groups.get(key) ?? { key, items: [] }
+    group.items.push({ component: issue.component, message: issue.message })
+    groups.set(key, group)
+  }
+  return [...groups.values()].sort((a, b) => b.items.length - a.items.length)
 }

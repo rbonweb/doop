@@ -21,7 +21,14 @@ const RESULT: ImportResult = {
   skipped: [{ name: 'Tooltip', reason: 'it only renders inside a portal' }],
   tokens: { created: ['--brand', '--radius'], skipped: [] },
   pageId: 'imported',
-  issues: [{ component: 'Tabs', code: 'css', message: 'a :has() rule was dropped' }],
+  issues: [
+    ...['as', 'size', 'asChild'].map((prop) => ({
+      component: 'Tabs',
+      code: 'argtypes_dropped',
+      message: `${prop}: it has no control Doop can read`,
+    })),
+    { component: 'Tabs', code: 'css_rules_dropped', message: 'a :has() rule was dropped' },
+  ],
 }
 
 function Storybook({ phase, url = 'https://storybook.acme.com' }: { phase: StorybookPhase; url?: string }) {
@@ -50,6 +57,38 @@ export const StorybookPreview: Story = {
 }
 
 /** One component: nothing to narrow, so the preview has no checklist. */
+/** 211 components found: the first 60 are ticked, the rest wait behind the cap, and a filter narrows the list. */
+export const StorybookLargePlan: Story = {
+  render: () => (
+    <Storybook
+      phase={{
+        kind: 'preview',
+        found: 211,
+        plan: Array.from({ length: 80 }, (_, i) => ({
+          name: `Part${i}`,
+          group: `${['Inputs', 'Layout', 'Feedback', 'Data'][i % 4]}/Part${i}`,
+          stories: 2,
+          renders: 5,
+        })),
+        result: { ...RESULT, created: Array.from({ length: 80 }, (_, i) => ({ name: `Part${i}`, id: `p${i}` })) },
+      }}
+    />
+  ),
+}
+
+export const StorybookRateLimited: Story = {
+  render: () => (
+    <Storybook
+      phase={{
+        kind: 'refused',
+        code: 'rate_limited',
+        message: 'At most 3 Storybook imports an hour.',
+        retryAfter: 1800,
+      }}
+    />
+  ),
+}
+
 export const StorybookPreviewSingle: Story = {
   render: () => <Storybook phase={{ kind: 'preview', plan: PLAN.slice(0, 1), result: RESULT }} />,
 }
