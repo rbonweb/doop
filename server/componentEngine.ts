@@ -9,6 +9,7 @@ import {
 } from 'parse5'
 import { parse, parseFragment } from './workBudget.ts'
 import {
+  ATTR_IF_ATTR,
   BIND_ATTR,
   COMPONENT_ATTR,
   CSS_ATTR,
@@ -30,6 +31,8 @@ import {
   isDeleted,
   isHollow,
   isPropName,
+  attrsToRemove,
+  parseAttrConditions,
   parseBindings,
   parseCondition,
   parseStyle,
@@ -369,6 +372,21 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides,
   }
 }
 
+/** `data-doop-attr-if`: drop the template's literal attributes whose conditions do not hold for this instance's props, then the marker itself. */
+function applyAttrConditions(el: Element, def: Revision, overrides: InstanceOverrides) {
+  const raw = attrOf(el, ATTR_IF_ATTR)
+  if (raw === undefined) return
+  setAttr(el, ATTR_IF_ATTR, null)
+  const gone = new Set(attrsToRemove(raw, (prop) => propValue(def, overrides, prop)).map((name) => name.toLowerCase()))
+  if (gone.size) el.attrs = el.attrs.filter((attr) => !gone.has(attr.name.toLowerCase()))
+}
+
+/** The attributes a part's template conditions on its props: what an instance's markup shows for them follows the props, so a read-back never takes them as edits. */
+function conditionedAttrs(el: Element | undefined): Set<string> {
+  const raw = el ? attrOf(el, ATTR_IF_ATTR) : undefined
+  return new Set(raw === undefined ? [] : parseAttrConditions(raw).map((entry) => entry.attr.toLowerCase()))
+}
+
 const TAG_NAME = /^[a-z][a-z0-9-]*$/
 
 function applyPartOverride(el: Element, part: PartOverride) {
@@ -430,6 +448,7 @@ function renderPart(
   options: RenderOptions,
 ) {
   applyBindings(el, def, overrides, options.ctx)
+  applyAttrConditions(el, def, overrides)
   setAttr(el, SLOT_SUGGEST_ATTR, null)
   if (part) applyPartOverride(el, part)
   const isSlot = attrOf(el, SLOT_ATTR) !== undefined
@@ -935,8 +954,9 @@ function diffAttrs(
   into: PartOverride,
 ) {
   const names = new Set([...base.attrs, ...incoming.attrs].map((attr) => attr.name))
+  const conditioned = conditionedAttrs(info?.el)
   for (const name of names) {
-    if (!isTracked(name) || name === 'style') continue
+    if (!isTracked(name) || name === 'style' || conditioned.has(name.toLowerCase())) continue
     if (isRoot && name === ELEMENT_ID_ATTR) continue
     const before = attrOf(base, name)
     const after = attrOf(incoming, name)
@@ -1981,8 +2001,12 @@ export function derivePropsAndSlots(
         ...descriptionOf(known),
       })
     }
-    const condition = parseCondition(attrOf(el, IF_ATTR) ?? '')
-    if (condition && isPropName(condition.prop) && !props.has(condition.prop)) {
+    const conditions = [
+      parseCondition(attrOf(el, IF_ATTR) ?? ''),
+      ...parseAttrConditions(attrOf(el, ATTR_IF_ATTR) ?? '').flatMap((entry) => entry.conditions),
+    ]
+    for (const condition of conditions) {
+      if (!condition || !isPropName(condition.prop) || props.has(condition.prop)) continue
       const known = declaredOf(declared, condition.prop)
       props.set(condition.prop, {
         name: condition.prop,
