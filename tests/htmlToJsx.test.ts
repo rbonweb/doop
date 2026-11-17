@@ -616,3 +616,94 @@ describe('security review regressions', () => {
     expectParses(jsx)
   })
 })
+
+describe('rewriteUrl and custom element for', () => {
+  const absolute = (url: string) => (url.startsWith('/') ? `https://cdn.test${url}` : url)
+
+  it('keeps for as for on custom elements and htmlFor elsewhere', () => {
+    expect(convert('<my-label for="a">x</my-label>').jsx).toContain('<my-label for="a">')
+    expect(convert('<label for="a">x</label>').jsx).toContain('htmlFor="a"')
+  })
+
+  it('rewrites href, src, poster, action, formaction and xlink:href after the safety check', () => {
+    const seen: string[] = []
+    const { jsx, issues } = convert(
+      '<a href="/a/x.pdf">l</a><img src="/photos/p.jpeg"><video poster="/i/f.png"></video><form action="/submit"><button formaction="/other"></button></form><svg><use xlink:href="/icons/s.svg#a"/></svg><a href="https://keep.test/">k</a>',
+      {
+        rewriteUrl: (url, attr, el) => {
+          seen.push(`${el.tagName}:${attr}:${url}`)
+          return absolute(url)
+        },
+      },
+    )
+    expect(issues).toEqual([])
+    expect(jsx).toContain('href="https://cdn.test/a/x.pdf"')
+    expect(jsx).toContain('src="https://cdn.test/photos/p.jpeg"')
+    expect(jsx).toContain('poster="https://cdn.test/i/f.png"')
+    expect(jsx).toContain('action="https://cdn.test/submit"')
+    expect(jsx).toContain('formAction="https://cdn.test/other"')
+    expect(jsx).toContain('xlinkHref="https://cdn.test/icons/s.svg#a"')
+    expect(jsx).toContain('href="https://keep.test/"')
+    expect(seen).toContain('a:href:/a/x.pdf')
+    expect(seen).toContain('use:xlink:href:/icons/s.svg#a')
+    expectParses(jsx)
+  })
+
+  it('rewrites each kept srcset entry and not the dropped ones', () => {
+    const seen: string[] = []
+    const { jsx } = convert('<img srcset="/a.png 1x, javascript:alert(1) 2x, /b.png 3x">', {
+      rewriteUrl: (url) => {
+        seen.push(url)
+        return absolute(url)
+      },
+    })
+    expect(seen).toEqual(['/a.png', '/b.png'])
+    expect(jsx).toContain('srcSet="https://cdn.test/a.png 1x, https://cdn.test/b.png 3x"')
+  })
+
+  it('rewrites url() in style attributes and leaves other values alone', () => {
+    const { jsx, issues } = convert(
+      `<div style="background: url('/a/bg.png') no-repeat, url(/a/two.png); color: red; mask: url(https://x.test/m.svg)"></div>`,
+      { rewriteUrl: (url, attr) => (attr === 'style' ? absolute(url) : url) },
+    )
+    expect(issues).toEqual([])
+    expect(jsx).toContain(
+      'background: "url(\\"https://cdn.test/a/bg.png\\") no-repeat, url(\\"https://cdn.test/a/two.png\\")"',
+    )
+    expect(jsx).toContain('color: "red"')
+    expect(jsx).toContain('mask: "url(https://x.test/m.svg)"')
+    expectParses(jsx)
+    expect(render(jsx)).toContain('https://cdn.test/a/bg.png')
+  })
+
+  it('checks the rewritten URL again and drops an unsafe result with an issue', () => {
+    const evil = () => 'javascript:alert(1)'
+    const { jsx, issues } = convert(
+      '<a href="/a">x</a><img srcset="/a.png 1x, /b.png 2x"><iframe src="/f"></iframe><div style="background: url(/a/x.png); color: red"></div>',
+      { rewriteUrl: (url, _attr, el) => (el.tagName === 'iframe' ? 'data:text/html,x' : evil()) },
+    )
+    expect(jsx).not.toMatch(/javascript|alert|data:|href=|srcSet|src=|background/)
+    expect(jsx).toContain('color: "red"')
+    expect(kinds(issues).every((kind) => kind === 'unsafe-url' || kind === 'style')).toBe(true)
+    expect(issues.length).toBeGreaterThanOrEqual(4)
+    expectParses(jsx)
+  })
+
+  it('escapes a rewritten value as data', () => {
+    const payload = '/x"}<script>alert(1)</script>`${1}'
+    const { jsx } = convert('<a href="/a" title="t"><div style="background: url(/b)"></div></a>', {
+      rewriteUrl: () => payload,
+    })
+    expectParses(jsx)
+    expect(jsx).not.toMatch(/<\/script/i)
+    const el = firstElement(render(jsx))
+    expect(attrOf(el, 'href')).toBe(payload)
+  })
+
+  it('exposes rewriteUrl through styleToJsx', () => {
+    const issues: ExportIssue[] = []
+    expect(styleToJsx('background: url(/a.png)', issues, absolute)).toBe(
+      '{{ background: "url(\\"https://cdn.test/a.png\\")" }}',
+    )
+  })
+})
