@@ -544,7 +544,7 @@ automatically once addressed — but feedback your human gives YOU in
 conversation is invisible to the canvas unless you report it. After you
 address design feedback from your own chat ("rounder corners", "more white
 and blue"), call save_decision with the human's words and the reason. The same goes
-for a direction you choose yourself: the decision and why, never a list of values. Save one decision and its
+for a direction you choose yourself: the decision and why, never a list of values (those are tokens). Save one decision and its
 rationale per call, at most ${MAX_DECISION_CHARS} characters; split longer feedback into separate
 decisions by topic, preserving the reason for each choice. Design taste only —
 never one-off content edits like typos or copy tweaks.
@@ -902,7 +902,7 @@ Call import_components({ canvas_id, bundle, dry_run: true }) first, then for rea
           "primary": { "css": ".btn { background: #111; color: #fff; }" },
           "ghost": { "css": ".btn { background: transparent; border: 1px solid #111; }" }
         } },
-        "code": { "importFrom": "@acme/ui", "exportName": "Button", "props": { "tone": { "values": { "ghost": "secondary" } } }, "slots": { "label": "children" } }
+        "code": { "importFrom": "@acme/ui", "exportName": "Button", "props": { "label": { "name": "children" }, "tone": { "values": { "ghost": "secondary" } } } }
       }]
     }
 
