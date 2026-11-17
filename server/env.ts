@@ -387,6 +387,8 @@ const schema = {
   DOOP_UPDATE_API: origin({ default: 'https://api.github.com' }),
   /* Update now through Dokploy: the compose service's deploy webhook (Deployments tab), set with DOOP_UPDATE_REPO and never beside DOOP_UPDATE_DIR. A secret: anyone holding it can redeploy that one service; never logged or returned */
   DOOP_DOKPLOY_WEBHOOK_URL: dokployWebhook({ default: undefined }),
+  /* the directory holding the packed doop-import CLI (scripts/pack-doop-import.mjs, server/cliDownload.ts); default dist/cli next to server/ */
+  DOOP_CLI_DIR: str({ default: undefined }),
   /* where database backups are written, and how long they are kept */
   DOOP_BACKUP_DIR: str({ default: '/app/data/backups' }),
   DOOP_BACKUP_KEEP_DAYS: int(1)({ default: 14 }),

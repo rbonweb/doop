@@ -118,7 +118,7 @@ describe('the ticket and the upload', () => {
     expect(answer.upload_url).toMatch(/\/import\/[A-Za-z0-9_-]{43,}$/)
     expect(answer.command).toMatch(
       new RegExp(
-        `^npx --yes --allow-remote=all ${server.base}/cli/doop-import(-[\\d.]+)?\\.tgz --storybook ./storybook-static --ticket ${answer.upload_url}$`,
+        `^npx --yes --allow-remote=root --package=${server.base}/cli/doop-import(-[\\d.]+-[0-9a-f]{12})?\\.tgz doop-import --storybook ./storybook-static --ticket ${answer.upload_url}$`,
       ),
     )
     expect(answer.curl).toBe(`curl -T bundle.json ${answer.upload_url}`)

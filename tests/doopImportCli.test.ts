@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer, request, type Server as HttpServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import path from 'node:path'
@@ -535,21 +535,18 @@ describe.skipIf(!browserPath)(
     })
 
     it('the esbuild output runs end to end under node', async () => {
-      await execFileAsync('node', [path.join(root, 'scripts', 'build-doop-import.mjs')], { cwd: root })
+      /* a build of its own (inside the repo, so puppeteer-core resolves), never the file another run or the app build writes */
+      await mkdir(path.join(root, 'node_modules', '.cache'), { recursive: true })
+      const built = await mkdtemp(path.join(root, 'node_modules', '.cache', 'doop-import-cli-'))
+      const file = path.join(built, 'cli.mjs')
+      await execFileAsync('node', [path.join(root, 'scripts', 'build-doop-import.mjs'), '--out', file], { cwd: root })
       const url = await ticket(otherCanvasId)
       const { stdout } = await execFileAsync(
         'node',
-        [
-          path.join(root, 'packages', 'doop-import', 'dist', 'cli.mjs'),
-          '--storybook',
-          fixture,
-          '--ticket',
-          url,
-          '--browser',
-          browserPath!,
-        ],
+        [file, '--storybook', fixture, '--ticket', url, '--browser', browserPath!],
         { cwd: root, timeout: 90_000, env: { ...process.env, CHROME_PATH: browserPath! } },
       )
+      await rm(built, { recursive: true, force: true })
       expect(stdout).toMatch(/Created 2: /)
       expect((await components(otherCanvasId)).map((component) => component.name).sort()).toEqual(['Badge', 'Button'])
     })

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -33,19 +33,26 @@ function readTar(tar: Buffer): Map<string, string> {
 let server: Server
 let version: string
 let tarName: string
+/* this file's own output: it never writes where another test file (or the app build) does */
+let packed: string
+
+const pack = (...args: string[]) =>
+  run('node', [path.join(root, 'scripts', 'pack-doop-import.mjs'), ...args], { cwd: root })
 
 beforeAll(async () => {
-  /* the build step the app's `bun run build` runs; the server finds dist/cli next to server/ */
-  await run('node', [path.join(root, 'scripts', 'pack-doop-import.mjs')], { cwd: root })
-  const cli = currentCli()
+  packed = await mkdtemp(path.join(tmpdir(), 'doop-cli-pack-'))
+  /* the build step the app's `bun run build` runs, into a directory of its own that the server is pointed at */
+  await pack('--out', packed)
+  const cli = currentCli(packed)
   expect(cli).not.toBeNull()
   version = cli!.version
   tarName = cli!.name
-  server = await startServer()
+  server = await startServer({ DOOP_CLI_DIR: packed })
 }, 120_000)
 
-afterAll(() => {
+afterAll(async () => {
   server?.stop()
+  await rm(packed, { recursive: true, force: true })
 })
 
 describe('the helper', () => {
@@ -54,14 +61,16 @@ describe('the helper', () => {
     try {
       expect(currentCli(directory)).toBeNull()
       expect(importCommand('https://doop.test/import/tok', 'https://doop.test/', directory)).toBe(
-        'npx --yes --allow-remote=all https://doop.test/cli/doop-import.tgz --storybook ./storybook-static --ticket https://doop.test/import/tok',
+        'npx --yes --allow-remote=root --package=https://doop.test/cli/doop-import.tgz doop-import --storybook ./storybook-static --ticket https://doop.test/import/tok',
       )
+      await writeFile(path.join(directory, 'doop-import-1.2.3-0123456789ab.tgz'), 'x')
       await writeFile(path.join(directory, 'doop-import-1.2.3.tgz'), 'x')
+      await writeFile(path.join(directory, 'doop-import-1.2.3-xyz.tgz'), 'x')
       await writeFile(path.join(directory, 'notes.txt'), 'x')
-      await mkdir(path.join(directory, 'doop-import-9.9.9.tgz'))
+      await mkdir(path.join(directory, 'doop-import-9.9.9-ffffffffffff.tgz'))
       expect(currentCli(directory)?.version).toBe('1.2.3')
       expect(importCommand('https://doop.test/import/tok', 'https://doop.test', directory)).toBe(
-        'npx --yes --allow-remote=all https://doop.test/cli/doop-import-1.2.3.tgz --storybook ./storybook-static --ticket https://doop.test/import/tok',
+        'npx --yes --allow-remote=root --package=https://doop.test/cli/doop-import-1.2.3-0123456789ab.tgz doop-import --storybook ./storybook-static --ticket https://doop.test/import/tok',
       )
     } finally {
       await rm(directory, { recursive: true, force: true })
@@ -101,6 +110,9 @@ describe('GET /cli', () => {
     for (const name of [
       'other.tgz',
       'doop-import-9.9.9.tgz',
+      'doop-import-9.9.9-0123456789ab.tgz',
+      tarName.replace(/-[0-9a-f]{12}\.tgz$/, '.tgz'),
+      tarName.replace(/[0-9a-f]\.tgz$/, (m) => (m[0] === '0' ? '1' : '0') + '.tgz'),
       `${tarName}.map`,
       '..%2Fpackage.json',
       '%2e%2e%2f%2e%2e%2fpackage.json',
@@ -136,11 +148,41 @@ describe('GET /cli', () => {
     expect(files.get('package/README.md')).toContain('doop-import')
   })
 
-  it('packs the same bytes twice', async () => {
+  it('packs the same bytes and name twice, and a changed source byte gives a new name', async () => {
     const before = Buffer.from(await (await fetch(`${server.base}/cli/${tarName}`)).arrayBuffer())
-    await run('node', [path.join(root, 'scripts', 'pack-doop-import.mjs')], { cwd: root })
-    const after = Buffer.from(await (await fetch(`${server.base}/cli/${tarName}`)).arrayBuffer())
-    expect(after.equals(before)).toBe(true)
+    const again = await mkdtemp(path.join(tmpdir(), 'doop-cli-pack-'))
+    /* a copy of the package two levels under the repo root, as packages/doop-import is, so its imports of shared/ resolve */
+    const copy = path.join(root, 'packages', `.tmp-pack-${process.pid}-${Date.now()}`)
+    try {
+      await pack('--out', again)
+      const same = currentCli(again)!
+      expect(same.name).toBe(tarName)
+      expect((await readFile(same.path)).equals(before)).toBe(true)
+      expect(tarName).toMatch(new RegExp(`^doop-import-${version.replace(/\./g, '\\.')}-[0-9a-f]{12}\\.tgz$`))
+
+      await cp(path.join(root, 'packages', 'doop-import', 'src'), path.join(copy, 'src'), { recursive: true })
+      for (const file of ['package.json', 'README.md'])
+        await cp(path.join(root, 'packages', 'doop-import', file), path.join(copy, file))
+      await pack('--package', copy, '--out', again)
+      /* the bundle's own path comments name the directory, so a copy has a name of its own; what matters is that it is stable */
+      const unchanged = currentCli(again)!.name
+      await pack('--package', copy, '--out', again)
+      expect(currentCli(again)!.name).toBe(unchanged)
+      /* a byte of the code that ships (a comment would not survive the bundle) */
+      const upload = path.join(copy, 'src', 'upload.ts')
+      await writeFile(
+        upload,
+        (await readFile(upload, 'utf8')).replace('not with an import result', 'not with an import results'),
+      )
+      await pack('--package', copy, '--out', again)
+      const changed = currentCli(again)!
+      expect(changed.version).toBe(version)
+      expect(changed.name).not.toBe(unchanged)
+      expect(changed.name).toMatch(/-[0-9a-f]{12}\.tgz$/)
+    } finally {
+      await rm(again, { recursive: true, force: true })
+      await rm(copy, { recursive: true, force: true })
+    }
   })
 })
 
@@ -153,7 +195,7 @@ describe('the ticket command', () => {
       upload_url: string
     }
     expect(answer.command).toBe(
-      `npx --yes --allow-remote=all ${server.base}/cli/${tarName} --storybook ./storybook-static --ticket ${answer.upload_url}`,
+      `npx --yes --allow-remote=root --package=${server.base}/cli/${tarName} doop-import --storybook ./storybook-static --ticket ${answer.upload_url}`,
     )
   })
 })

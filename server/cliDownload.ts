@@ -5,27 +5,28 @@ import type express from 'express'
 import { env } from './env.ts'
 
 /**
- * The doop-import CLI, served by the instance itself (no npm): `bun run build` packs it as dist/cli/doop-import-<version>.tgz
+ * The doop-import CLI, served by the instance itself (no npm): `bun run build` packs it as dist/cli/doop-import-<version>-<hash>.tgz
  * (scripts/pack-doop-import.mjs) and `bun run dev` packs it once at start. Two public routes, no session:
- *   GET /cli/doop-import-<version>.tgz   the file, immutable
+ *   GET /cli/doop-import-<version>-<hash>.tgz   the file, immutable
  *   GET /cli/doop-import.tgz             a 302 to the current versioned name, never cached
  * and nothing else under /cli/: the name is matched against the one file that is there, never joined into a path.
  */
 
 /* next to server/ in the image and in the repo: dist/cli */
 const CLI_DIRECTORY = fileURLToPath(new URL('../dist/cli/', import.meta.url))
-const TARBALL = /^doop-import-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\.tgz$/
+/* doop-import-<version>-<first 12 hex of the tarball's sha256>.tgz: the name changes whenever a byte of the CLI does, so the immutable URL never serves stale code */
+const TARBALL = /^doop-import-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-([0-9a-f]{12})\.tgz$/
 
 export interface CliTarball {
   version: string
-  /** `doop-import-<version>.tgz` */
+  /** `doop-import-<version>-<hash>.tgz` */
   name: string
   path: string
   bytes: number
 }
 
 /** The packed CLI this instance holds, or null when the build did not make one. */
-export function currentCli(directory: string = CLI_DIRECTORY): CliTarball | null {
+export function currentCli(directory: string = env.DOOP_CLI_DIR ?? CLI_DIRECTORY): CliTarball | null {
   let names: string[]
   try {
     names = readdirSync(directory)
@@ -54,9 +55,9 @@ export function cliUrl(origin: string, directory?: string): string {
   return `${origin.replace(/\/+$/, '')}/cli/${cli ? cli.name : 'doop-import.tgz'}`
 }
 
-/** The one command everywhere (the ticket answer, the import picker, the agent guide). `--allow-remote=all` because npm 12 refuses to fetch a package from a URL unless told to (EALLOWREMOTE); older npm only warns that it does not know the flag. */
+/** The one command everywhere (the ticket answer, the import picker, the agent guide). `--allow-remote=root` because npm 12 refuses to fetch a package from a URL unless told to (EALLOWREMOTE; `root` is the narrowest value that admits it, and it still refuses URLs inside the package's own dependencies); npm 10 and 11 ignore the unknown flag. `--package=<url> doop-import` rather than the URL as the command, so every npm reads the arguments after it as the CLI's. */
 export function importCommand(uploadUrl: string, origin: string = env.BETTER_AUTH_URL, directory?: string): string {
-  return `npx --yes --allow-remote=all ${cliUrl(origin, directory)} --storybook ./storybook-static --ticket ${uploadUrl}`
+  return `npx --yes --allow-remote=root --package=${cliUrl(origin, directory)} doop-import --storybook ./storybook-static --ticket ${uploadUrl}`
 }
 
 const NOT_FOUND = (res: express.Response) => res.status(404).type('text/plain').send('not found')

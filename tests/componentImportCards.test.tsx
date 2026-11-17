@@ -259,7 +259,7 @@ const TICKET = {
   upload_url: 'https://doop.test/import/tok',
   expires_at: '',
   command:
-    'npx --yes --allow-remote=all https://doop.test/cli/doop-import-0.1.0.tgz --storybook ./storybook-static --ticket https://doop.test/import/tok',
+    'npx --yes --allow-remote=root --package=https://doop.test/cli/doop-import-0.1.0-0123456789ab.tgz doop-import --storybook ./storybook-static --ticket https://doop.test/import/tok',
   curl: 'curl -T bundle.json https://doop.test/import/tok',
 }
 
