@@ -27,6 +27,8 @@ chatgpt-plugin/dist/
 
 # the built component catalogue
 storybook-static/
+# the tiny build the doop-import CLI test renders
+!/tests/fixtures/storybook-static/
 *storybook.log
 
 # agent and sync worktrees

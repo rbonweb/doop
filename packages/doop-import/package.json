@@ -1,0 +1,21 @@
+{
+  "name": "doop-import",
+  "version": "0.1.0",
+  "description": "Import a React team's Storybook into a Doop canvas as components. Renders on your machine; uploads only the rendered HTML and CSS.",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "doop-import": "dist/cli.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.5.0"
+  }
+}

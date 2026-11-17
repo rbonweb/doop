@@ -8,6 +8,7 @@
     "dev": "bun run build:claude-extension && concurrently -n server,web -c yellow,cyan \"tsx watch --env-file-if-exists=.env server/index.ts\" \"vite\"",
     "build": "bun run build:claude-extension && vite build",
     "build:claude-extension": "node scripts/build-claude-extension.mjs",
+    "build:doop-import": "node scripts/build-doop-import.mjs",
     "start": "NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsgo --noEmit",
     "test": "vitest run",
