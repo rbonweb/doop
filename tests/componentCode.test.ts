@@ -15,6 +15,7 @@ vi.mock('../server/db/persist.ts', () => ({
 import { buildMcpServer } from '../server/mcp.ts'
 import { store } from '../server/store.ts'
 import * as propagation from '../server/propagation.ts'
+import * as actions from '../server/actions.ts'
 import { activeComponents, type ComponentDef } from '../shared/components.ts'
 import { MAX_CODE_BYTES } from '../shared/componentCode.ts'
 import { validCode } from '../server/componentCodeMap.ts'
@@ -277,5 +278,118 @@ describe('validCode checks that the tool schema cannot reach', () => {
       new RegExp(`code is \\d+ characters; at most ${MAX_CODE_BYTES}`),
     )
     expect(validCode(undefined, DEF)).toBeUndefined()
+  })
+})
+
+describe('what the room is told when a mapping is saved', () => {
+  const CODE = { importFrom: '@acme/ui', exportName: 'Card' }
+
+  /** Every component message the room hears while `run` works, in order. */
+  async function heardDuring(run: () => Promise<unknown>) {
+    const sent: { type: string; component?: ComponentDef | null }[] = []
+    actions.wire(
+      (_canvasId, msg) => sent.push(msg as (typeof sent)[number]),
+      () => {},
+    )
+    try {
+      await run()
+    } finally {
+      actions.wire(
+        () => {},
+        () => {},
+      )
+    }
+    return sent.filter((msg) => msg.type === 'component')
+  }
+
+  it('is the definition with the new mapping on update, so an open panel shows it without a reload', async () => {
+    const canvas = newCanvas()
+    await card(canvas.id)
+    const heard = await heardDuring(async () => {
+      const done = await call('update_component', { canvas_id: canvas.id, component: 'Card', code: CODE })
+      expect(done.isError).toBe(false)
+    })
+    expect(heard.length).toBeGreaterThan(0)
+    /* a client applies each message in order, so the last one is what its panel keeps */
+    expect(heard.at(-1)?.component?.code).toEqual(CODE)
+  })
+
+  it('carries the mapping when a component is made from html', async () => {
+    const canvas = newCanvas()
+    const heard = await heardDuring(async () => {
+      expect((await card(canvas.id, CODE)).isError).toBe(false)
+    })
+    expect(heard.at(-1)?.component?.code).toEqual(CODE)
+  })
+
+  it('carries the mapping when a component is made from an element', async () => {
+    const canvas = newCanvas()
+    const frame = actions.createFrame(
+      canvas.id,
+      {
+        name: 'Page',
+        html: '<!doctype html><html><body><article class="card" data-doop-id="el1"><h3>Title</h3></article></body></html>',
+      },
+      { name: 'Tester', kind: 'user', color: '#000000' },
+    )!
+    const heard = await heardDuring(async () => {
+      const made = await call('create_component', {
+        canvas_id: canvas.id,
+        name: 'Card',
+        frame_id: frame.id,
+        element: 'el1',
+        code: CODE,
+      })
+      expect(made.isError).toBe(false)
+    })
+    expect(heard.at(-1)?.component?.code).toEqual(CODE)
+  })
+
+  it('says so when a mapping is cleared, also when nothing else of the definition moved', async () => {
+    const canvas = newCanvas()
+    await card(canvas.id, CODE)
+    const alone = await heardDuring(async () => {
+      expect((await call('update_component', { canvas_id: canvas.id, component: 'Card', code: null })).isError).toBe(
+        false,
+      )
+    })
+    expect(alone.length).toBeGreaterThan(0)
+    expect(alone.at(-1)?.component?.code).toBeUndefined()
+
+    /* with the props sent again unchanged the main is rewritten, and that path must say it too */
+    await call('update_component', { canvas_id: canvas.id, component: 'Card', code: CODE })
+    const withMain = await heardDuring(async () => {
+      const done = await call('update_component', {
+        canvas_id: canvas.id,
+        component: 'Card',
+        props: CARD_PROPS,
+        code: null,
+      })
+      expect(done.isError).toBe(false)
+    })
+    expect(withMain.at(-1)?.component?.code).toBeUndefined()
+    expect((await read(canvas.id)).code).toBeUndefined()
+  })
+
+  it('adds no message when the mapping saved is the one already there', async () => {
+    const canvas = newCanvas()
+    await card(canvas.id, CODE)
+    const baseline = await heardDuring(async () => {
+      await call('update_component', { canvas_id: canvas.id, component: 'Card', description: 'same' })
+    })
+    const same = await heardDuring(async () => {
+      await call('update_component', { canvas_id: canvas.id, component: 'Card', description: 'same', code: CODE })
+    })
+    expect(same.length).toBe(baseline.length)
+  })
+
+  it('carries the mapping when a component is duplicated', async () => {
+    const canvas = newCanvas()
+    await card(canvas.id, CODE)
+    const heard = await heardDuring(async () => {
+      expect((await call('duplicate_component', { canvas_id: canvas.id, component: 'Card' })).isError).toBe(false)
+    })
+    expect(heard.at(-1)?.component?.name).toBe('Card copy')
+    expect(heard.at(-1)?.component?.code).toEqual(CODE)
   })
 })
