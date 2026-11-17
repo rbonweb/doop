@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ArgProp } from '../shared/storybook/argTypes.ts'
-import { bindHtml, findBindings } from '../shared/storybook/bindings.ts'
+import { bindHtml, findBindings, isFollowableAttribute } from '../shared/storybook/bindings.ts'
+import { capturedStorySchema } from '../shared/storybook/schemas.ts'
 import type { CapturedStory } from '../shared/storybook/capture.ts'
 
 const story = (attrs: Record<string, string>[], shape = '0div,1span'): CapturedStory => ({
@@ -94,5 +95,56 @@ describe('bindHtml', () => {
 
   it('does nothing without a marker', () => {
     expect(bindHtml('<b>x</b>', undefined, new Map([[0, ['a:b']]]))).toBe('<b>x</b>')
+  })
+})
+
+describe('attributes a prop may follow', () => {
+  it.each([
+    'class',
+    'style',
+    'id',
+    'onclick',
+    'onmouseover',
+    'data-doop-id',
+    'data-doop-m-ab',
+    'href',
+    'src',
+    'action',
+    'formaction',
+    'poster',
+    'data',
+    'srcset',
+    'Data-X',
+    'a b',
+    'x:y',
+    '',
+    '9a',
+  ])('refuses %j', (name) => expect(isFollowableAttribute(name)).toBe(false))
+
+  it.each(['data-variant', 'aria-pressed', 'role', 'disabled', 'data-size', 'type'])('allows %s', (name) =>
+    expect(isFollowableAttribute(name)).toBe(true),
+  )
+
+  const captured = (attrs: Record<string, string>[]) => ({
+    ...story([{}]),
+    paths: ['x'],
+    attrs,
+  })
+
+  it('refuses a forged capture that carries one, on the server', () => {
+    expect(capturedStorySchema.safeParse(captured([{ 'data-variant': 'a' }])).success).toBe(true)
+    for (const name of ['onclick', 'href', 'class', 'data-doop-prop', 'src'])
+      expect(capturedStorySchema.safeParse(captured([{ [name]: 'x' }])).success, name).toBe(false)
+  })
+
+  it('never binds one, whatever the attrs say', () => {
+    const forged = (value: string) => story([{ onclick: value, href: value, 'data-doop-prop': value }])
+    const { bindings, bound } = findBindings(
+      forged('a'),
+      [{ prop: 'variant', value: 'danger', shot: forged('danger') }],
+      [variant],
+    )
+    expect(bindings.size).toBe(0)
+    expect(bound.size).toBe(0)
   })
 })

@@ -1,3 +1,4 @@
+import { isFollowableAttribute } from './bindings.ts'
 import { z } from 'zod'
 import { STYLE_PROPERTIES } from './capture.ts'
 
@@ -25,7 +26,12 @@ export const capturedStorySchema = z
       .nullable(),
     marker: z.string().max(100).optional(),
     attrs: z
-      .array(z.record(z.string().max(100), z.string().max(MAX_CELL)))
+      .array(
+        z.record(
+          z.string().refine(isFollowableAttribute, 'not an attribute a prop may follow'),
+          z.string().max(MAX_CELL),
+        ),
+      )
       .max(MAX_ELEMENTS)
       .nullable()
       .optional(),

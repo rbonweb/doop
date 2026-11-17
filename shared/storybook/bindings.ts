@@ -17,6 +17,21 @@ const PRESENCE = new Set([
   'inert',
 ])
 
+const ATTRIBUTE_NAME = /^[a-z][a-z0-9-]*$/
+/** Attributes no prop may follow: they style or address the element, run script, or carry a URL. */
+const DENIED = new Set(['class', 'style', 'id', 'href', 'src', 'action', 'formaction', 'poster', 'data', 'srcset'])
+
+/** Whether a prop may follow this attribute: a plain lowercase name, and none the capture never reads (the isolated world applies the same rule when it reads them; the server applies it again, since the answer is text a page produced). */
+export function isFollowableAttribute(name: string): boolean {
+  return (
+    name.length <= 100 &&
+    ATTRIBUTE_NAME.test(name) &&
+    !DENIED.has(name) &&
+    !name.startsWith('on') &&
+    !name.startsWith('data-doop-')
+  )
+}
+
 /** At most this many elements follow one prop. */
 const MAX_BOUND_ELEMENTS = 3
 
@@ -71,7 +86,8 @@ export function findBindings(
         const after = shot.attrs?.[index]
         if (!after) return
         for (const name of new Set([...Object.keys(before), ...Object.keys(after)])) {
-          if (changes(before, after, name, prop, value)) found.add(`${index}\u0000${name}`)
+          if (isFollowableAttribute(name) && changes(before, after, name, prop, value))
+            found.add(`${index}\u0000${name}`)
         }
       })
       candidates = candidates ? new Set([...candidates].filter((key) => found.has(key))) : found
