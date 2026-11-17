@@ -561,7 +561,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     name: 'update_instances',
     title: 'Change instances',
     description:
-      "Change instances in one frame in a single undo step: set props, override one element (keyed by part, from get_component), reset overrides back to the main, or detach. Instance ids come from get_frame's instances list. An override is sparse: everything else keeps following the main. Detaching keeps the look and cuts the link, for that instance only (instances nested inside it stay linked).",
+      "Change instances in one frame in a single undo step: set props, override one element (keyed by part, from get_component), swap the component nested at a part for another on this instance only (swap: { part, component }; component null undoes it), reset overrides back to the main, or detach. Instance ids come from get_frame's instances list. An override is sparse: everything else keeps following the main. Detaching keeps the look and cuts the link, for that instance only (instances nested inside it stay linked).",
     readOnly: false,
     shape: {
       frame_id: FRAME_ID,
@@ -579,6 +579,18 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
               .optional()
               .describe('true = everything, or these part keys'),
             detach: z.boolean().optional(),
+            swap: z
+              .object({
+                part: z.string().describe("The nested component's part key, from get_component"),
+                component: z
+                  .string()
+                  .nullable()
+                  .describe("Name or id of the component to show there instead; null puts the main's own back"),
+              })
+              .optional()
+              .describe(
+                "Show another component in one nested <doop-use> of this instance only; props the new one lacks are dropped, same-named props carry over. Content inside a slot is the instance's own markup: edit it in the frame, there is no swap for it.",
+              ),
           }),
         )
         .min(1),
@@ -590,6 +602,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
         overrides?: Record<string, never>
         reset?: boolean | string[]
         detach?: boolean
+        swap?: { part: string; component: string | null }
       }[]
       const { frame, missing } = changeInstances(
         canvas.id,
@@ -600,6 +613,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           overrides: entry.overrides,
           reset: entry.reset,
           detach: entry.detach,
+          swap: entry.swap,
         })),
         actor,
       )

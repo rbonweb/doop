@@ -45,11 +45,13 @@ import {
   elementCount,
   findAllMarked,
   findMarked,
+  fittingState,
   inferBindings,
   innermost,
   isElement,
   kidsOf,
   measureTree,
+  nestsComponent,
   parseTemplateRoot,
   fitsIn,
   isTableContext,
@@ -1037,6 +1039,59 @@ export interface InstanceChange {
   /** true clears everything; a list clears those parts */
   reset?: boolean | string[]
   detach?: boolean
+  /** show another component at one nested part of this instance; `component: null` puts the template's back */
+  swap?: { part: string; component: string | null }
+}
+
+/** One instance's swap of a nested component for another (or back): checked here, stored as `parts[part].swap`. */
+function applySwap(
+  state: InstanceOverrides,
+  def: ComponentDef,
+  swap: NonNullable<InstanceChange['swap']>,
+  canvasId: string,
+): InstanceOverrides {
+  const parts = partsOf(def.template)
+  const info = parts.get(swap.part)
+  if (!info?.isUse) {
+    const nestedParts = [...parts]
+      .filter(([, part]) => part.isUse)
+      .map(([key, part]) => `${key} (${contextFor(canvasId).find(attrOf(part.el, 'component') ?? '')?.name ?? '?'})`)
+    fail(
+      `“${swap.part}” is not a nested component of “${def.name}”, so there is nothing to swap there. ${nestedParts.length ? `Its nested parts: ${nestedParts.join(', ')}.` : `“${def.name}” nests no other component. Slot content is the instance's own markup: edit it in the frame.`}`,
+    )
+  }
+  const current = state.parts?.[swap.part]
+  const next: PartOverride = { ...current }
+  if (swap.component === null) {
+    /* what the instance kept for the swapped-in component is not the template's component's */
+    if (next.swap !== undefined) delete next.use
+    delete next.swap
+  } else {
+    const target = requireComponent(canvasId, swap.component)
+    if (nestsComponent(contextFor(canvasId), target.id, def.id))
+      fail(
+        `nesting_cycle: “${def.name}” cannot contain itself, and “${target.name}” would put it inside itself, so the swap was refused`,
+      )
+    const template = contextFor(canvasId).find(attrOf(info.el, 'component') ?? '')
+    if (template?.id === target.id) {
+      if (next.swap !== undefined) delete next.use
+      delete next.swap
+    } else {
+      next.swap = target.id
+      if (next.use) {
+        const fitting = fittingState(next.use, target)
+        if (Object.keys(fitting).length) next.use = fitting
+        else delete next.use
+      }
+    }
+  }
+  const all = { ...state.parts }
+  if (Object.keys(next).length) all[swap.part] = next
+  else delete all[swap.part]
+  return {
+    ...(state.props ? { props: state.props } : {}),
+    ...(Object.keys(all).length ? { parts: all } : {}),
+  }
 }
 
 function applyChange(state: InstanceOverrides, change: InstanceChange): InstanceOverrides {
@@ -1094,7 +1149,9 @@ export const changeInstances = atomic(function changeInstances(
       const state = readInstance(located.el, ctx.atRev(def.id, Number(attrOf(located.el, REV_ATTR))) ?? def, ctx)
       if (!state) continue
       validateProps(def, change.props, ctx.find)
-      const rendered = renderInstance(def, def, applyChange(state.overrides, change), id, { ctx, stack: [] })
+      const changed = applyChange(state.overrides, change)
+      const next = change.swap ? applySwap(changed, def, change.swap, canvasId) : changed
+      const rendered = renderInstance(def, def, next, id, { ctx, stack: [] })
       if (!rendered) continue
       /* below another instance, this root is that instance's part */
       const part = attrOf(located.el, PART_ATTR)

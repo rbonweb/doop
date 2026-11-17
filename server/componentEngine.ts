@@ -283,7 +283,14 @@ function asStringRecord(value: Record<string, unknown>): Record<string, string> 
 function asPartRecord(value: Record<string, unknown>): Record<string, PartOverride> {
   const record: Record<string, PartOverride> = {}
   for (const [key, entry] of Object.entries(value))
-    if (entry && typeof entry === 'object' && !Array.isArray(entry)) record[key] = entry as PartOverride
+    if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+      const part = entry as PartOverride
+      /* a swap is a component id: anything else in the marker is no swap */
+      if (part.swap !== undefined && (typeof part.swap !== 'string' || !part.swap)) {
+        const { swap: _swap, ...rest } = part
+        record[key] = rest
+      } else record[key] = part
+    }
   return record
 }
 
@@ -437,20 +444,53 @@ function renderUseElement(
   const { ctx } = options
   const forward = outer ? forwardingOf(use, outer.def, outer.overrides.props, ctx, true) : undefined
   const literalRef = attrOf(use, 'component') ?? ''
-  const ref = forward?.component ?? literalRef
+  /* the instance's own swap, then the outer prop's pick, then what the template wrote */
+  const swap = typeof part?.swap === 'string' ? swapTarget(part.swap, outer?.def, ctx) : undefined
+  const ref = swap?.id ?? forward?.component ?? literalRef
   const nested = ctx.find(ref)
   if (!nested) {
     ctx.issues.push({ code: 'unknown_component', message: `no component “${ref}” on this canvas` })
     return undefined
   }
   /* a use that forwards nothing renders exactly as it always has: the nested instance's own state, else the literal */
+  const literalNested = ctx.find(literalRef)
+  const swapped = literalNested?.id !== nested.id
+  const own = swap && part?.use ? fittingState(part.use, nested) : part?.use
   const state = forward?.bindings.length
-    ? forwardedState(use, nested, part?.use, forward, options, ctx.find(literalRef)?.id !== nested.id)
-    : (part?.use ?? stateFromUseAttrs(use, nested, ctx, true).overrides)
+    ? forwardedState(use, nested, own, forward, options, swapped)
+    : (own ?? literalState(use, nested, ctx, swapped))
   const id = attrOf(use, ELEMENT_ID_ATTR) ?? nestedInstanceId(options.ownerId, outerKey)
   const rendered = renderInstance(nested, nested, state, id, options)
   if (rendered && outerKey) setAttr(rendered, PART_ATTR, outerKey)
   return rendered
+}
+
+/** The nested use's attributes read against `nested`, which an instance's swap may have made another
+ *  component than the one they were written for: then only what it has carries over, and quietly. */
+function literalState(use: Element, nested: ComponentDef, ctx: EngineContext, swapped: boolean): InstanceOverrides {
+  if (!swapped) return stateFromUseAttrs(use, nested, ctx, true).overrides
+  return fittingState(stateFromUseAttrs(use, nested, silent(ctx), true).overrides, nested)
+}
+
+/** The component an instance's swap names, when it can stand in: one that is gone, or that would put
+ *  the outer component inside itself, is reported and the template's own component renders instead. */
+function swapTarget(ref: string, outer: Revision | undefined, ctx: EngineContext): ComponentDef | undefined {
+  const target = ctx.find(ref)
+  if (!target) {
+    ctx.issues.push({
+      code: 'unknown_component',
+      message: `the swap names no component “${ref}” on this canvas, so the nested component the template names renders`,
+    })
+    return undefined
+  }
+  if (outer && nestsComponent(ctx, target.id, outer.id)) {
+    ctx.issues.push({
+      code: 'nesting_cycle',
+      message: `component “${outer.name}” cannot contain itself: swapping in “${target.name}” would, so that swap was ignored`,
+    })
+    return undefined
+  }
+  return target
 }
 
 /** What a nested `<doop-use>` takes from the component that holds it. `bindings` are the live ones
@@ -526,7 +566,7 @@ function forwardingOf(
 }
 
 /** Does this component, or one it is built from, hold the component `targetId`? */
-function nestsComponent(ctx: EngineContext, ref: string, targetId: string): boolean {
+export function nestsComponent(ctx: EngineContext, ref: string, targetId: string): boolean {
   const seen = new Set<string>()
   const stack = [ref]
   for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
@@ -584,7 +624,7 @@ function forwardedState(
 }
 
 /** State read from one component, handed to another the outer instance swapped in: only what that one has. */
-function fittingState(own: InstanceOverrides, nested: ComponentDef): InstanceOverrides {
+export function fittingState(own: InstanceOverrides, nested: ComponentDef): InstanceOverrides {
   const names = new Set(nested.props.map((prop) => prop.name))
   const keys = new Set(partsOf(nested.template).keys())
   return clean({
@@ -999,13 +1039,18 @@ function diffNested(
   if (!reconciled || !use) return
   const nested = ctx.find(reconciled.componentId)
   const forward = forwardingOf(use, outer, origin, ctx, false)
+  /* the component the template (and what the outer instance forwards) would put here: another one is a swap */
+  const expected = ctx.find(forward.component ?? attrOf(use, 'component') ?? '')
+  const swap = nested && expected && nested.id !== expected.id ? nested.id : undefined
   if (forward.bindings.length) {
     diffForwarding(incoming, key, use, nested, reconciled, forward, state, ctx)
-    return
+  } else {
+    const swapped = !!nested && ctx.find(attrOf(use, 'component') ?? '')?.id !== nested.id
+    const defaults = nested ? literalState(use, nested, ctx, swapped) : {}
+    const same = stableJson(defaults) === stableJson(reconciled.overrides)
+    mergeInto(state, key, {}, { use: same ? undefined : reconciled.overrides })
   }
-  const defaults = nested ? stateFromUseAttrs(use, nested, ctx, true).overrides : {}
-  const same = stableJson(defaults) === stableJson(reconciled.overrides)
-  mergeInto(state, key, {}, { use: same ? undefined : reconciled.overrides })
+  mergeInto(state, key, {}, { swap })
 }
 
 /** A nested instance that takes props from the one holding it. What it shows of a forwarded value is
@@ -1047,7 +1092,7 @@ function mergeInto(
   state: InstanceOverrides,
   key: string,
   part: PartOverride,
-  extra: { slot?: string | undefined; use?: InstanceOverrides | undefined } = {},
+  extra: { slot?: string | undefined; use?: InstanceOverrides | undefined; swap?: string | undefined } = {},
 ) {
   const parts = (state.parts ??= {})
   const merged: PartOverride = { ...parts[key] }
@@ -1068,12 +1113,21 @@ function mergeInto(
     if (extra.use === undefined) delete merged.use
     else merged.use = extra.use
   }
+  if ('swap' in extra) {
+    if (extra.swap === undefined) delete merged.swap
+    else merged.swap = extra.swap
+  }
   if (Object.keys(merged).length) parts[key] = merged
   else delete parts[key]
 }
 
 /** An override set back to the template's own value is no override at all. */
-function pruneOverrides(overrides: InstanceOverrides, parts: Map<string, PartInfo>, def: Revision): InstanceOverrides {
+function pruneOverrides(
+  overrides: InstanceOverrides,
+  parts: Map<string, PartInfo>,
+  def: Revision,
+  ctx: EngineContext,
+): InstanceOverrides {
   const out: InstanceOverrides = {}
   const props: Record<string, string> = {}
   for (const [name, value] of Object.entries(overrides.props ?? {})) {
@@ -1111,6 +1165,9 @@ function pruneOverrides(overrides: InstanceOverrides, parts: Map<string, PartInf
       if (next.text !== undefined && next.text === directText(info.el)) delete next.text
       if (next.tag !== undefined && next.tag === info.el.tagName) delete next.tag
       if (next.hidden === false) delete next.hidden
+      /* a swap to the component the template already names is no swap */
+      if (next.swap !== undefined && ctx.find(next.swap)?.id === ctx.find(attrOf(info.el, 'component') ?? '')?.id)
+        delete next.swap
     }
     if (Object.keys(next).length) kept[key] = next
   }
@@ -1172,7 +1229,7 @@ export function reconcileInstance(el: Element, ctx: EngineContext, inMain = fals
     setAttr(base, PART_ATTR, key)
     diffPart(base, el, key, parts, revision, true, state, ctx, marker.overrides.props)
   }
-  return { ...read, overrides: pruneOverrides(state, parts, revision) }
+  return { ...read, overrides: pruneOverrides(state, parts, revision, ctx) }
 }
 
 /* ------------------------------------------------------------------ */
