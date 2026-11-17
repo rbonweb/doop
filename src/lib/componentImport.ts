@@ -11,7 +11,7 @@ export interface ImportResult {
   skipped: { name: string; reason: string }[]
   tokens: { created: string[]; skipped: string[] }
   pageId: string | null
-  issues: { component?: string; code: string; message: string }[]
+  issues: { component?: string; code: string; message: string; detail?: { from: string; to: string } }[]
 }
 
 export interface PlannedComponent {

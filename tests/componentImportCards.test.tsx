@@ -753,8 +753,8 @@ it('storybook done: a renamed component is told in the result, and a note does n
       {
         component: 'Button',
         code: 'renamed',
-        message:
-          'a component named “Button” is already on this canvas, so this one was imported as “Button (Primer)” (its code export is still Button)',
+        message: 'a component named “Button” is already on this canvas, so this one was imported under another name',
+        detail: { from: 'Button', to: 'Button (Primer)' },
       },
       { component: 'Button', code: 'argtypes_dropped', message: 'Button: the default story has no controls' },
     ],
@@ -782,4 +782,18 @@ it('storybook error: needs_worker explains it and offers the command line', asyn
   expect(button(dialog, /^Try again$/)).toBeTruthy()
   await click(button(dialog, /Use the command line instead/))
   expect(onUseCli).toHaveBeenCalledTimes(1)
+})
+
+it('storybook done: a renamed note from an older server still names the new name from its message', async () => {
+  const dialog = await importToResult({
+    ...RESULT,
+    issues: [
+      {
+        component: 'Card',
+        code: 'renamed',
+        message: 'a component named “Card” is already on this canvas, so this one was imported as “Card (Acme)”',
+      },
+    ],
+  })
+  expect(dialog.querySelector('[data-slot="storybook-renamed"]')?.textContent).toContain('Card is now “Card (Acme)”')
 })

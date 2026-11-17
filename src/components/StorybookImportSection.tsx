@@ -345,11 +345,12 @@ export function StorybookImportSection({
       result.tokens.created.length && t('componentImport.tokensAdded', { count: result.tokens.created.length }),
     ].filter(Boolean)
     /* a component imported under another name is told apart from the other notes, as the preview did */
-    const renamed = result.issues.filter((i) => i.code === 'renamed' && i.component)
+    const renamed = result.issues.filter((i) => i.code === 'renamed' && (i.detail || i.component))
     const renamedLines = renamed.map((i) =>
       t('componentImport.renamedLine', {
-        name: i.component as string,
-        to: /imported as “([^”]+)”/.exec(i.message)?.[1] ?? i.component ?? '',
+        name: i.detail?.from ?? (i.component as string),
+        /* an older server names the new name only in the message */
+        to: i.detail?.to ?? /imported as “([^”]+)”/.exec(i.message)?.[1] ?? i.component ?? '',
       }),
     )
     const groups = groupImportIssues(result.issues.filter((i) => i.code !== 'renamed'))
