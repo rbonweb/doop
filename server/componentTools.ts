@@ -1,16 +1,20 @@
 import { z } from 'zod'
 import { activeComponents, PROP_TYPES, USE_TAG, type ComponentDef } from '../shared/components.ts'
+import { CODE_ORIGINS } from '../shared/componentCode.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
 import {
   catalog,
   catalogEntry,
   changeInstances,
+  codeSummary,
   componentDetail,
   ComponentError,
   createComponentFromElement,
   createComponentFromHtml,
   deleteComponent,
   detachAllInstances,
+  detachFromLibrary,
+  duplicateComponent,
   findComponent,
   findDeletedComponent,
   importableEntry,
@@ -47,12 +51,30 @@ import { transaction } from './journal.ts'
 
 export const propSchema = z.object({
   name: z.string().describe('Lowercase, it becomes an attribute: "label", "tone", "show-icon"'),
-  type: z.enum(PROP_TYPES).optional().describe('text (default), image, link, boolean, or enum with options'),
-  default: z.string().optional().describe('enum and boolean only; text-like defaults are the template content'),
+  type: z
+    .enum(PROP_TYPES)
+    .optional()
+    .describe('text (default), image, link, boolean, number, color, instance, or enum with options'),
+  default: z
+    .string()
+    .optional()
+    .describe('enum, boolean, number, color and instance only; text-like defaults are the template content'),
   options: z
     .array(z.string())
     .optional()
     .describe('enum values. An enum sets data-<name> on the root, for CSS to key on'),
+  min: z.number().optional().describe('number only: smallest value'),
+  max: z.number().optional().describe('number only: largest value'),
+  step: z.number().positive().optional().describe('number only: values sit on this step, counted from min (else 0)'),
+  accepts: z
+    .array(z.string())
+    .max(20)
+    .optional()
+    .describe('instance only: component names or ids that may be chosen; leave out for any'),
+  reflect: z
+    .boolean()
+    .optional()
+    .describe('boolean only: put data-<name>="true"|"false" on the root, for CSS to key on like an enum'),
   description: z.string().optional().describe('When to use it, in a line'),
 })
 
@@ -61,8 +83,38 @@ export const codeSchema = z
     path: z.string().max(500).optional().describe('Source file or package, e.g. "src/components/ui/button.tsx"'),
     name: z.string().max(200).optional().describe('Export name, e.g. "Button"'),
     snippet: z.string().max(4000).optional().describe('How it is used in code, or how props map to it'),
+    importFrom: z.string().max(300).optional().describe('Package to import from, e.g. "@acme/ui"'),
+    exportName: z.string().max(200).optional().describe('The export to import, a JavaScript identifier: "Button"'),
+    defaultExport: z.boolean().optional().describe('The export is the package default, not a named one'),
+    props: z
+      .record(
+        z
+          .object({
+            name: z.string().optional().describe('The export prop that receives this one, if named differently'),
+            values: z
+              .record(z.union([z.string(), z.number(), z.boolean()]))
+              .optional()
+              .describe('Enum or boolean value -> what the export receives, e.g. { "ghost": "secondary" }'),
+            omit: z.literal(true).optional().describe('The export has no such prop: do not pass it'),
+          })
+          .partial(),
+      )
+      .optional()
+      .describe('Doop prop -> its mapping on the export, keyed by prop name'),
+    slots: z
+      .record(z.string())
+      .optional()
+      .describe('Doop slot -> "children" or the export prop that receives it, e.g. { "actions": "footer" }'),
+    origin: z
+      .object({
+        kind: z.enum([...CODE_ORIGINS]).describe('manual, storybook, cli or agent'),
+        storyId: z.string().optional().describe('Storybook story id, for a storybook mapping'),
+        url: z.string().optional().describe('The page the mapping was read from, http(s)'),
+      })
+      .optional()
+      .describe('Where this mapping came from'),
   })
-  .describe('Where this lives in code, read by whoever implements a design that uses it')
+  .describe('Where this lives in code: the package export it is, and how its props and slots map onto it')
 
 export interface ToolContext {
   canvas: Canvas
@@ -164,7 +216,9 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
       const wanted = typeof query === 'string' ? query.toLowerCase() : ''
       const matches = (def: ComponentDef) =>
         !wanted || def.name.toLowerCase().includes(wanted) || def.description.toLowerCase().includes(wanted)
-      const components = catalog(canvas, activeComponents(canvas.components).filter(matches))
+      const components = catalog(canvas, activeComponents(canvas.components).filter(matches)).map(
+        ({ code, ...entry }) => ({ ...entry, ...codeSummary({ code }) }),
+      )
       const shared = libraryCatalog(canvas)
         .map((library) => ({
           ...library,
@@ -425,7 +479,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
       name: z.string().optional(),
       description: z.string().optional(),
       props: z.array(propSchema).optional().describe('Full replacement of the prop metadata'),
-      code: codeSchema.optional(),
+      code: codeSchema.nullable().optional().describe('Full replacement of the code mapping; null clears it'),
       expected_rev: z.number().optional().describe('Refuse if the component has moved past this revision'),
       dry_run: z.boolean().optional().describe('Report the impact and change nothing'),
     },
@@ -509,7 +563,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     name: 'update_instances',
     title: 'Change instances',
     description:
-      "Change instances in one frame in a single undo step: set props, override one element (keyed by part, from get_component), reset overrides back to the main, or detach. Instance ids come from get_frame's instances list. An override is sparse: everything else keeps following the main. Detaching keeps the look and cuts the link, for that instance only (instances nested inside it stay linked).",
+      "Change instances in one frame in a single undo step: set props, override one element (keyed by part, from get_component), swap the component nested at a part for another on this instance only (swap: { part, component }; component null undoes it), reset overrides back to the main, or detach. Instance ids come from get_frame's instances list. An override is sparse: everything else keeps following the main. Detaching keeps the look and cuts the link, for that instance only (instances nested inside it stay linked).",
     readOnly: false,
     shape: {
       frame_id: FRAME_ID,
@@ -527,6 +581,18 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
               .optional()
               .describe('true = everything, or these part keys'),
             detach: z.boolean().optional(),
+            swap: z
+              .object({
+                part: z.string().describe("The nested component's part key, from get_component"),
+                component: z
+                  .string()
+                  .nullable()
+                  .describe("Name or id of the component to show there instead; null puts the main's own back"),
+              })
+              .optional()
+              .describe(
+                "Show another component in one nested <doop-use> of this instance only; props the new one lacks are dropped, same-named props carry over. Content inside a slot is the instance's own markup: edit it in the frame, there is no swap for it.",
+              ),
           }),
         )
         .min(1),
@@ -538,6 +604,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
         overrides?: Record<string, never>
         reset?: boolean | string[]
         detach?: boolean
+        swap?: { part: string; component: string | null }
       }[]
       const { frame, missing } = changeInstances(
         canvas.id,
@@ -548,6 +615,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           overrides: entry.overrides,
           reset: entry.reset,
           detach: entry.detach,
+          swap: entry.swap,
         })),
         actor,
       )
@@ -610,6 +678,39 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           main === 'written'
             ? 'Its old main was gone, so a new one was written on the Components page (main_frame_id).'
             : 'Its instances follow it again.',
+        frames: outcomeFrames({ canvas } as ToolContext, def),
+      }
+    },
+  },
+  {
+    name: 'duplicate_component',
+    title: 'Duplicate a component',
+    description:
+      'Make a second component from an existing one: the same design, props, slots and code mapping, named "<name> copy" ("copy 2", … when taken), with a main of its own beside the original\'s (or on the Components page when the original has none). Use it to start a variant or a divergent version without disturbing the original: the original and every instance of it stay exactly as they are, and the copy has no instances yet. A component linked from a workspace library is duplicated into a plain local one, which you can edit here. The copy starts at revision 1 with no history. Rename it with update_component.',
+    readOnly: false,
+    shape: { component: COMPONENT_REF },
+    run({ component }, { canvas, actor }) {
+      const { component: def, source } = duplicateComponent(canvas.id, String(component), actor)
+      return {
+        data: { ok: true, component: summary(canvas, def), source: source.name, main_frame_id: def.mainFrameId },
+        note: `“${source.name}” is unchanged. The copy's main is frame main_frame_id on the Components page. No instance was placed: use it with ${usageExample(def)}, and rename it with update_component.`,
+        frames: outcomeFrames({ canvas } as ToolContext, def),
+      }
+    },
+  },
+  {
+    name: 'detach_from_library',
+    title: 'Detach a component from its workspace library',
+    description:
+      "Make a component linked from a workspace library this canvas's own. It keeps its id, so every instance stays linked and none of them changes; the link to the library is dropped, a main is written on the Components page from the design it has now, and from then on it is edited here with update_component and sync_component no longer applies. Use it only when the human wants this canvas to diverge from the shared library: later library updates will not reach it. Refused for a component that is already local. For a separate copy that leaves the linked one alone, use duplicate_component.",
+    readOnly: false,
+    destructive: true,
+    shape: { component: COMPONENT_REF },
+    run({ component }, { canvas, actor }) {
+      const { component: def } = detachFromLibrary(canvas.id, String(component), actor)
+      return {
+        data: { ok: true, component: summary(canvas, def), main_frame_id: def.mainFrameId },
+        note: 'It is local now: its main is frame main_frame_id on the Components page, and every instance still follows it. Later library publications will not reach it.',
         frames: outcomeFrames({ canvas } as ToolContext, def),
       }
     },

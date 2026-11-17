@@ -281,15 +281,24 @@ needs a reusable piece the system lacks, add it, then use it.
   with <doop-use> in a frame, or insert_instance. Its result lists the props it inferred; name
   your own with data-doop-prop. create_components does the same for up to 12 at once, in order,
   so a later one can nest an earlier one; an entry that is refused does not stop the others.
-- A component inside a component: write <doop-use> in the template and give it fixed props. One
-  component cannot pass its props on to another (data-doop-prop on a <doop-use> is dropped, with
-  a COMPONENT note); where each instance should choose, make that spot a data-doop-slot. Its CSS
-  may restyle the nested one from its own element (.card .btn { width: 100% }), inside it only.
-- Write a description saying when to use it. Set code (file and export name) when the component
-  exists in the human's repo: that is what makes the design implementable with their real code.
+- A component inside a component: write <doop-use> in the template. Its CSS may restyle the nested one from its own element (.card .btn { width: 100% }), inside it only. Fixed values are plain attributes (label="Go"). To let each instance of the outer component choose, forward its props: data-doop-prop="inner:outer" on the <doop-use>, the same target:prop order as any binding. The outer prop is made for you, typed like the inner one (an enum keeps its options, a number its limits). An instance's own override of the nested part beats the forwarded value, which beats the attribute you wrote; with no value the attribute stands. Editing the nested label inside a Card instance sets the Card's prop. data-doop-prop="component:icon" lets an instance prop pick which component renders there (accepts defaults to the one you wrote). data-doop-if="showCta" on the <doop-use> shows or hides it. data-doop-slot is not for a <doop-use>: wrap it in an element that carries the slot.
+      <article>
+        <h3 data-doop-prop="title">Pro</h3>
+        <doop-use component="Button" label="Start" data-doop-prop="label:cta"></doop-use>
+      </article>
+      <doop-use component="Card" title="Team" cta="Buy"></doop-use>
+- Write a description saying when to use it. Set code to map it to the human's package: importFrom,
+  exportName, and a props and slots mapping; React export imports that export instead.
 - Vary with props, not copies. An enum prop sets data-<name> on the root, so a variant is plain
   CSS: .btn[data-tone="ghost"] { … }. Hover and focus are ordinary CSS too. You do not need a
   component per state, or per size.
+- Prop types: text, image, link, enum, boolean, plus number (min, max, step), color (#hex, rgb(), hsl(),
+  oklch() or var(--token)) and instance (accepts: the components that may be chosen). A value that does
+  not fit comes back as a COMPONENT note naming what does. A boolean bound to an HTML boolean attribute
+  (data-doop-prop="disabled:disabled", also checked, hidden, required, open, selected, muted…) writes the
+  bare attribute when on and removes it when off. Set reflect=true on a boolean to put
+  data-<name>="true"|"false" on the root, so CSS can key on it like an enum. A text binding on an element
+  with children (<a><svg/>Label</a>) changes only the element's own text and keeps the children.
 - For one instance that must differ: use update_instances, or just edit it; edits inside an instance
   are captured as overrides on that element alone and survive every later change to the main. Do
   not detach to make a small change.
@@ -307,6 +316,9 @@ needs a reusable piece the system lacks, add it, then use it.
   deletedComponents while any remain. Leave those instances alone unless asked. A new
   <doop-use> of a deleted component is refused: restore_component brings it back, instances
   linked again. delete_component with detach_instances=true turns them into plain markup for good.
+- update_instances takes swap: { part, component } to show another component in one nested <doop-use> of that instance only (component: null resets it); a slot's content is the instance's own markup, edited in the frame, with no swap for it.
+- duplicate_component makes a local copy ("<name> copy") with a main of its own beside the original's, for a variant or a divergent version; the original and its instances are untouched.
+- detach_from_library makes a linked library component this canvas's own (same id, instances stay linked, a main is written on the Components page); only when the human wants it to diverge, since library updates stop reaching it.
 - To reuse components from another canvas: list_components with libraries=true, import_component, and sync_component
   when list_components says library_update_available.
 - Workspace libraries: get_canvas lists workspaceLibraries, the components the canvas's workspace

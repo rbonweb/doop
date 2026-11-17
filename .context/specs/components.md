@@ -33,6 +33,12 @@ component loses nothing visually: deleting writes no frame at all (see Deleting 
 - **Definition** (`components` table, mirrored on `canvas.components`, keyed per canvas so a copied
   canvas's markers stay valid): `template`, scoped `css`, `rawCss`, `head`, `props`, `slots`, `rev`,
   `mainFrameId`, `code`, `source`, and the last 20 revisions inline.
+- **Prop types** (`PROP_TYPES`): `text`, `image`, `link`, `enum`, `boolean`, `number` (`min`, `max`, `step`), `color` (hex, `rgb()`/`hsl()`/`hwb()`/`lab()`/`lch()`/`oklab()`/`oklch()`, named colours, `transparent`, `currentColor`, `var(--token)` with an optional fallback, `color-mix()`; anything holding `url(` is refused) and `instance` (a component named in `accepts`, any component when empty). Values are strings; `propValueProblem` in `shared/components.ts` checks them for the engine, `update_instances`, `insert_instance` and the Design tab, and a bad value on a `<doop-use>` is an `invalid_prop_value` naming what is allowed. Booleans stay lenient (any value but `"false"` is on), so old compact frames round-trip unchanged.
+- **Booleans on attributes**: a `boolean` prop bound to an HTML boolean attribute (`disabled`, `checked`, `hidden`, `open`, …) writes `attr=""` when on and removes it when off; reconcile reads a removed attribute or a stored `"false"` as off. Other attributes (`aria-pressed`) keep the value string. `reflect: true` also puts `data-<name>` on the root, a variant for CSS like an enum's (`variantAttrs`). The fix needs the prop declared `type: boolean`; an undeclared `disabled:disabled` binding stays a text prop.
+- **Text bindings keep siblings**: a bound text prop replaces only the element's own text nodes, so `<a><svg/>Label</a>` keeps its icon. An old instance whose earlier render had wiped such a sibling re-saves with that sibling as a `hidden` override, since old data cannot be told from a deliberate delete.
+- **Swap** (`PartOverride.swap`, a component id): one instance renders a nested `<doop-use>` part as another component. Which component renders: the part's `swap`, then a forwarded `component:` prop, then the template's literal; props the new component lacks are dropped, same-named ones carry over. Reconcile records a swap when the nested rendered component differs from that and drops it when it matches again; a cycle or unknown target renders the template's component with an issue. `update_instances` takes `swap: { part, component | null }`. Slot content is the instance's own markup, so it needs no swap.
+- **Duplicate and detach**: `duplicate_component` copies a definition under a new id and a unique `<name> copy` name, history reset to rev 1, `code` kept, a new main beside the source's (else on the Components page); a linked library component duplicates into a local one. `detach_from_library` keeps the id, so every instance stays linked, drops `source.library` and writes a local main; library updates stop arriving.
+- **Code mapping** (`ComponentCode`, `shared/componentCode.ts`, checked by `validCode` in `server/componentCodeMap.ts` on create and update against the component's real props and slots): the legacy `path`, `name`, `snippet`, plus `importFrom`, `exportName`, `defaultExport`, a `props` map (code name, enum and boolean value maps, `omit`), a `slots` map (`children` or a code prop) and `origin` (`manual`, `storybook`, `cli`, `agent`). `get_component` and writes return it whole; `list_components` shows only `importFrom` and `exportName`. Library publish, pull and restore copy it as stored.
 - **Instance**: root attributes `data-doop-instance`, `data-doop-rev`, `data-doop-id`, and when needed
   `data-doop-props` / `data-doop-overrides` as JSON. Every element keeps its `data-doop-part` key.
   Slot content and nested instances are read from the DOM, not repeated in the marker.
@@ -42,8 +48,7 @@ component loses nothing visually: deleting writes no frame at all (see Deleting 
 - **Template markup**: `data-doop-prop` binds text, attributes, styles and custom properties;
   `data-doop-if` makes elements conditional; `data-doop-slot` / `data-doop-slot-suggest` declare slots.
   Enum props exist only in the definition and set `data-<name>` on the root. Nested components are
-  `<doop-use>` by id, so a rename cannot break them. The template attributes mean nothing on a
-  `<doop-use>`: they are dropped with an `ignored_attribute` issue that says what to write instead.
+  `<doop-use>` by id, so a rename cannot break them. Prop forwarding: `data-doop-prop="inner:outer"` on a nested `<doop-use>` hands the outer component's prop `outer` to the nested prop `inner` (`component:icon` lets an `instance` prop pick which component renders). It is live only when the outer prop is declared or derived (derivation copies the nested prop's type, options, limits or `accepts`; `component:` makes an `instance` prop accepting the literal). Precedence: the outer instance's own override of that nested part, then the forwarded value (its override, else the prop's default), then the attribute the template wrote; with no forwarded value the nested instance renders as it always did. Reading an instance subtracts forwarded and literal values from the nested state, and retyping a forwarded value inside an instance sets the outer prop. `data-doop-if` on a `<doop-use>` shows or hides it. In a main the nested instance element carries both attributes (`CARRIED_ATTRS`) so reading the main back keeps them. `data-doop-slot` and other template attributes mean nothing on a `<doop-use>`: they are dropped with an `ignored_attribute` issue that says what to write instead.
 - **Inferred props** (`inferBindings`, only for markup with no `data-doop-prop` of its own): leaf text,
   image sources and link targets. A name comes from `data-name`, else the last class that is not a
   utility class, else what the element or its nearest ancestor is (`h1`-`h6` title, `button` / `a`
@@ -182,7 +187,7 @@ drops), within a quarter of the operation's parse budget; frames it had to leave
 `server/componentTools.ts` holds each tool's schema and handler once, for MCP and the resident agent:
 `list_components`, `get_component`, `create_component`, `update_component`, `insert_instance`,
 `update_instances`, `delete_component`, `restore_component`, `restore_component_version`,
-`import_component`, `sync_component`. Previews are `get_component_preview` (MCP) and
+`import_component`, `sync_component`, `duplicate_component`, `detach_from_library`. Previews are `get_component_preview` (MCP) and
 `screenshot_component` (resident). `get_canvas` carries the catalog; `get_frame` and `edit_frame_html` speak
 the compact form. Instructions are `COMPONENTS` in `server/guide.ts`.
 
@@ -190,18 +195,16 @@ the compact form. Instructions are `COMPONENTS` in `server/guide.ts`.
 
 Layers / Components switch in the left rail (`ComponentsPanel.tsx`): search, previews, click to place, repeated
 design scan, library import. `ComponentSection.tsx` heads the Design tab: props, go to main, reset, detach on an
-instance; description and make-a-prop / make-a-slot on a main. Right-click and ⌘⌥K create one.
+instance; description and make-a-prop / make-a-slot on a main. Right-click and ⌘⌥K create one. Props have a control per type (number with min/max/step, colour with the canvas's tokens, instance from `accepts`), each overridden prop and part wears a dot with its own reset, and a swapped nested instance says what it was swapped to. On a main the section lists its instances with jump-to (`InstanceList.tsx`) and shows its code mapping with a copyable import line and an edit form (`ComponentCodeSection.tsx`). The Components panel's card menu duplicates a component and detaches a linked library one (after a confirm).
 
 ## Limits
 
 - Variants are styled in CSS, through agents or the HTML tab. There is no visual per-variant editing yet.
-- Placing is by click; no drag from the panel onto the canvas.
 - Selection outlines do not yet distinguish mains and instances; the Layers glyph and Design tab do.
 - The Components page frame for a main made from markup uses a default size until resized.
 - A component made from markup is not placed anywhere; the result says to write `<doop-use>` or call
   `insert_instance`.
-- A component cannot pass its props on to a component nested in it. The nested one takes fixed
-  values, or the spot is a slot each instance fills.
+- A `<doop-use>` cannot be a slot's default content directly (`data-doop-slot` on it is refused): wrap it in an element that carries the slot. Own overrides of a nested instance whose component an outer `instance` prop swaps are kept only for the props and parts the new component also has.
 - Figma import does not map Figma components to these.
 - A restored revision older than the 20 kept cannot be used for merging: its instance keeps its marker
   state and upgrades.
