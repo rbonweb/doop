@@ -895,4 +895,43 @@ describe('review fixes', () => {
     const hits = out.report.issues.filter((issue) => issue.detail.includes('<style> in the component head'))
     expect(hits).toHaveLength(1)
   })
+
+  it('writes src/fonts.css for a roster family named in CSS with no link at all', () => {
+    const card = def('Card', '<div class="c" data-doop-part="r">hi</div>', {
+      rawCss: '.c { font-family: "Inter", sans-serif }',
+    })
+    for (const styling of ['modules', 'tailwind'] as const) {
+      const out = exportOf([card], [], { styling, componentIds: [card.id] })
+      expect(fileOf(out, 'src/fonts.css')).toMatch(
+        /^@import url\("https:\/\/fonts\.googleapis\.com\/css2\?family=Inter:/,
+      )
+      expect(componentOf(out, 'Card')).toContain("import '../fonts.css'")
+    }
+    const own = def('Own', '<div class="c" data-doop-part="r">hi</div>', {
+      rawCss: '@font-face { font-family: "Inter"; src: url(/a/i.woff2) } .c { font-family: "Inter" }',
+    })
+    expect(exportOf([own], [], { componentIds: [own.id] }).files.some((f) => f.path === 'src/fonts.css')).toBe(false)
+    const pageOut = exportOf([], frame('<p style="font-family: Inter">x</p>'))
+    expect(fileOf(pageOut, 'src/fonts.css')).toContain('family=Inter')
+    expect(fileOf(pageOut, 'src/pages/Home.tsx')).toContain("import '../fonts.css'")
+  })
+
+  it('makes a page with a background fill the screen', () => {
+    for (const styling of ['modules', 'tailwind'] as const) {
+      const painted = exportOf([], frame('<p>x</p>', '<style>body { background: #111; color: #fff }</style>'), {
+        styling,
+      })
+      expect(fileOf(painted, 'src/pages/Home.css')).toMatch(
+        /\.page-Home \{\n {2}min-height: 100vh;\n {2}min-height: 100dvh;/,
+      )
+      const bare = exportOf([], frame('<p>x</p>', '<style>body { color: #fff }</style>'), { styling })
+      expect(bare.files.find((f) => f.path === 'src/pages/Home.css')?.content ?? '').not.toContain('min-height')
+    }
+    const inline = exportOf(
+      [],
+      [{ id: 'f1', name: 'Home', html: '<html><body style="background:#000"><p>x</p></body></html>' }],
+    )
+    expect(fileOf(inline, 'src/pages/Home.css')).toContain('min-height: 100vh')
+    expect(fileOf(inline, 'README.md')).toContain('full screen')
+  })
 })

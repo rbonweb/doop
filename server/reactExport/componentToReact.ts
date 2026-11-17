@@ -26,7 +26,7 @@ import {
   type InstanceState,
 } from '../componentEngine.ts'
 import { moduleClassName, safeClass, safeClassCss, splitComponentCss, type CssModuleSplit } from './cssSplit.ts'
-import { googleFontsUrl } from './fonts.ts'
+import { componentDocument, googleFontsUrl, hostedFontUrl } from './fonts.ts'
 import { nodeToJsx, htmlToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
 import { isUnsafeUrl, jsString, type ExportIssue } from './issues.ts'
 import { NameAllocator, componentName, isIdentifier, propName } from './names.ts'
@@ -1198,6 +1198,11 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
         'dropped-element',
         "a stylesheet link in the component head was dropped: add it to the app's HTML yourself",
       )
+  }
+  const named = hostedFontUrl(componentDocument(def.template, def.rawCss))
+  if (named) {
+    session.fontLinks.add(named)
+    fc.usesFonts = true
   }
   let body = 'null'
   const marker = markerFor(def.template)

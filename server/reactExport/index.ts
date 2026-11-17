@@ -103,6 +103,7 @@ function readme(styling: ReactStyling, hasTokens: boolean, hasFonts: boolean): s
           '- `src/fonts.css` imports the hosted Google Fonts stylesheets the canvas uses; the pages and components that need them import it.',
         ]
       : []),
+    '- A page is a full screen: its root fills the viewport height (`min-height: 100vh`) when the canvas gave the page a background, so render a page on its own, not inside a smaller layout.',
     '- `src/cx.ts` joins class names, `src/css-modules.d.ts` types CSS Modules imports.',
     '- Dark themes: a page stands for the canvas `<body>`, and the canvas switches theme with `data-doop-theme="dark"` on `<html>`. Put that attribute on your app\'s `<html>` element to turn the dark rules on; they are kept as `html[data-doop-theme=dark] .page-… .x`.',
     '- `export-report.json` lists everything the export dropped or changed, and the instances whose markup was inlined.',

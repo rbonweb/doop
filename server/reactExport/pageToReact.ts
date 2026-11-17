@@ -25,7 +25,7 @@ import {
 import { parseItems, safeClass, safeClassCss, splitComponentCss, splitTopLevel, type Item } from './cssSplit.ts'
 import { cssToTailwind, type TailwindSplit } from './tailwind.ts'
 import { htmlToJsx, nodeToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
-import { googleFontsUrl } from './fonts.ts'
+import { googleFontsUrl, hostedFontUrl } from './fonts.ts'
 import { jsString, type ExportIssue } from './issues.ts'
 
 type Element = Tree.Element
@@ -99,6 +99,12 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
   }
   walk(doc)
 
+  const named = hostedFontUrl(frame.html)
+  if (named) {
+    session.fontLinks.add(named)
+    fc.usesFonts = true
+  }
+
   const body = findBody(doc)
   const scoped = themeOnHtml(safeClassCss(styles.join('\n')))
   const rewriteUrl = session.urls.url
@@ -106,7 +112,10 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
   const split = tw ? tw.leftover : splitComponentCss(scoped, { rootClass, rewriteUrl })
   fc.issues.push(...(tw ? [...tw.issues, ...tw.leftover.issues] : split.issues))
   fc.pageTw = tw
-  const joined = scopePageCss([split.globalCss, split.moduleCss].filter(Boolean).join('\n'), rootClass)
+  const fillsScreen = paintsBackground(scoped) || /background/i.test(attrOf(body, 'style') ?? '')
+  const fill = fillsScreen ? `.${rootClass} {\n  min-height: 100vh;\n  min-height: 100dvh;\n}\n` : ''
+  const joined =
+    scopePageCss([split.globalCss, split.moduleCss].filter(Boolean).join('\n'), rootClass) + (fill ? `\n${fill}` : '')
   const css = joined || (tw ? '' : '/* no styles */\n')
 
   const options = pageOptions(fc, session)
@@ -316,6 +325,24 @@ function signature(nodes: Tree.ChildNode[]): string {
 /** The canvas switches theme on `<html>`: a rule that opens with the bare theme attribute (`[data-doop-theme=dark] .x`) is spelled with its `html`, so the split leaves it a global rule rather than gluing the page root class onto the attribute. */
 const themeOnHtml = (css: string): string =>
   css.replace(/(^|[,{};]\s*)(\[data-doop-theme(?:[~|^$*]?=[^\]]*)?\])(?=\s)/gi, '$1html$2')
+
+const BACKGROUND_DECLARATION = /(?:^|[;{\s])background(?:-[a-z]+)?\s*:/i
+const PAGE_ELEMENT = /^(?:html|body|:root)$/i
+
+/** Does the page's own CSS give `html`, `body` or `:root` a background? Then the page root must fill the screen, or the viewer sees the browser's white below a short page. */
+function paintsBackground(css: string): boolean {
+  return parseItems(css).some((item) => {
+    if (item.body === null) return false
+    if (item.prelude.startsWith('@'))
+      return (
+        GROUPING_AT_RULES.has(/^@([\w-]+)/.exec(item.prelude)?.[1]?.toLowerCase() ?? '') && paintsBackground(item.body)
+      )
+    return (
+      BACKGROUND_DECLARATION.test(item.body) &&
+      splitTopLevel(item.prelude, ',').some((selector) => PAGE_ELEMENT.test(selector.trim()))
+    )
+  })
+}
 
 const GROUPING_AT_RULES = new Set(['media', 'supports', 'container', 'layer', 'starting-style'])
 const ROOT_COMPOUND = /^:root(?![\w-])/i

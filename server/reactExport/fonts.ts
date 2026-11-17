@@ -1,3 +1,5 @@
+import { WEB_FONT_LINK_ATTR, withWebFontLinks } from '../../shared/webFonts.ts'
+
 /** Doop's hosted font roster is one Google Fonts stylesheet link; it is the only stylesheet link an export can carry. */
 export function googleFontsUrl(href: string): string | null {
   try {
@@ -29,3 +31,14 @@ export function fontsCss(urls: Iterable<string>): string {
     .map((url) => `@import url(${cssString(url)});`)
     .join('\n')}\n`
 }
+
+/** The hosted-font stylesheet a document needs, by the rule that writes the link into a frame (`withWebFontLinks`): every roster family its CSS names and does not load itself. Null when it needs none; the address still passes `googleFontsUrl`. */
+export function hostedFontUrl(html: string): string | null {
+  const link = new RegExp(`<link\\b[^>]*\\b${WEB_FONT_LINK_ATTR}\\b[^>]*>`, 'i').exec(withWebFontLinks(html))
+  const href = link ? /href\s*=\s*["']([^"']*)["']/i.exec(link[0])?.[1] : undefined
+  return href === undefined ? null : googleFontsUrl(href.replace(/&amp;/g, '&'))
+}
+
+/** A component's own CSS and markup as a document, so `hostedFontUrl` can read what fonts it names. */
+export const componentDocument = (template: string, css: string): string =>
+  `<!doctype html><html><head></head><body>${template}<style>${css}</style></body></html>`
