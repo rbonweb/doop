@@ -316,6 +316,9 @@ needs a reusable piece the system lacks, add it, then use it.
   deletedComponents while any remain. Leave those instances alone unless asked. A new
   <doop-use> of a deleted component is refused: restore_component brings it back, instances
   linked again. delete_component with detach_instances=true turns them into plain markup for good.
+- update_instances takes swap: { part, component } to show another component in one nested <doop-use> of that instance only (component: null resets it); a slot's content is the instance's own markup, edited in the frame, with no swap for it.
+- duplicate_component makes a local copy ("<name> copy") with a main of its own beside the original's, for a variant or a divergent version; the original and its instances are untouched.
+- detach_from_library makes a linked library component this canvas's own (same id, instances stay linked, a main is written on the Components page); only when the human wants it to diverge, since library updates stop reaching it.
 - To reuse components from another canvas: list_components with libraries=true, import_component, and sync_component
   when list_components says library_update_available.
 - Workspace libraries: get_canvas lists workspaceLibraries, the components the canvas's workspace

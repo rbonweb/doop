@@ -1,5 +1,6 @@
 import { serializeOuter, type DefaultTreeAdapterTypes as Tree } from 'parse5'
-import { canvasPages, COMPONENTS_PAGE } from '../shared/pages.ts'
+import { freeSpotBeside } from '../shared/arrange.ts'
+import { canvasPages, COMPONENTS_PAGE, framePageId, pageFrames } from '../shared/pages.ts'
 import {
   BIND_ATTR,
   COMPONENT_ATTR,
@@ -17,6 +18,7 @@ import {
   activeComponents,
   componentSignature,
   isDeleted,
+  isHollow,
   isPropName,
   parseBindings,
   propValueProblem,
@@ -42,14 +44,17 @@ import {
   attrOf,
   compactDocument,
   detachedMarkup,
+  effectiveComponent,
   elementCount,
   findAllMarked,
   findMarked,
+  fittingState,
   inferBindings,
   innermost,
   isElement,
   kidsOf,
   measureTree,
+  nestsComponent,
   parseTemplateRoot,
   fitsIn,
   isTableContext,
@@ -680,12 +685,18 @@ function writeNewMain(
   actor: Actor,
   width = 480,
   height = 240,
+  /** where to put the frame, when it should not take the Components page's next free spot */
+  place?: { pageId: string; x: number; y: number },
 ): Frame {
   /* one unit: when the main cannot be written, its empty frame (and a Components page made
      for it) does not stay behind */
   return transaction(() => {
-    const pageId = componentsPageId(canvasId, actor)
-    const frame = actions.createFrame(canvasId, { name: def.name, pageId, width, height, html: '' }, actor)
+    const pageId = place?.pageId ?? componentsPageId(canvasId, actor)
+    const frame = actions.createFrame(
+      canvasId,
+      { name: def.name, pageId, width, height, html: '', ...(place ? { x: place.x, y: place.y } : {}) },
+      actor,
+    )
     if (!frame) fail('canvas not found')
     actions.updateFrame(frame.id, { html: mainFrameDoc(def, root, rawCss) }, actor)
     return store.getFrame(frame.id) ?? frame
@@ -810,7 +821,7 @@ export const updateComponent = atomic(function updateComponent(
   const def = requireComponent(canvasId, ref)
   if (def.source?.library && !input.dryRun)
     fail(
-      `“${def.name}” comes from the workspace library on canvas ${def.source.canvasId}: change it there and publish, then sync_component here. For one instance that must differ, use update_instances.`,
+      `“${def.name}” comes from the workspace library on canvas ${def.source.canvasId}: change it there and publish, then sync_component here. For one instance that must differ, use update_instances. To own it on this canvas instead, detach_from_library (same instances, editable here) or duplicate_component (a separate local copy).`,
     )
   if (input.expectedRev !== undefined && input.expectedRev !== def.rev)
     fail(
@@ -1037,6 +1048,60 @@ export interface InstanceChange {
   /** true clears everything; a list clears those parts */
   reset?: boolean | string[]
   detach?: boolean
+  /** show another component at one nested part of this instance; `component: null` puts the template's back */
+  swap?: { part: string; component: string | null }
+}
+
+/** One instance's swap of a nested component for another (or back): checked here, stored as `parts[part].swap`. */
+function applySwap(
+  state: InstanceOverrides,
+  def: ComponentDef,
+  swap: NonNullable<InstanceChange['swap']>,
+  canvasId: string,
+): InstanceOverrides {
+  const parts = partsOf(def.template)
+  const info = parts.get(swap.part)
+  if (!info?.isUse) {
+    const nestedParts = [...parts]
+      .filter(([, part]) => part.isUse)
+      .map(([key, part]) => `${key} (${contextFor(canvasId).find(attrOf(part.el, 'component') ?? '')?.name ?? '?'})`)
+    fail(
+      `“${swap.part}” is not a nested component of “${def.name}”, so there is nothing to swap there. ${nestedParts.length ? `Its nested parts: ${nestedParts.join(', ')}.` : `“${def.name}” nests no other component. Slot content is the instance's own markup: edit it in the frame.`}`,
+    )
+  }
+  const current = state.parts?.[swap.part]
+  const next: PartOverride = { ...current }
+  if (swap.component === null) {
+    /* what the instance kept for the swapped-in component is not the template's component's */
+    if (next.swap !== undefined) delete next.use
+    delete next.swap
+  } else {
+    const target = requireComponent(canvasId, swap.component)
+    if (nestsComponent(contextFor(canvasId), target.id, def.id))
+      fail(
+        `nesting_cycle: “${def.name}” cannot contain itself, and “${target.name}” would put it inside itself, so the swap was refused`,
+      )
+    /* what the part shows without a swap: the component the outer instance forwards, else the template's */
+    const shown = effectiveComponent(info.el, def, state.props, contextFor(canvasId))
+    if (shown?.id === target.id) {
+      if (next.swap !== undefined) delete next.use
+      delete next.swap
+    } else {
+      next.swap = target.id
+      if (next.use) {
+        const fitting = fittingState(next.use, target)
+        if (Object.keys(fitting).length) next.use = fitting
+        else delete next.use
+      }
+    }
+  }
+  const all = { ...state.parts }
+  if (Object.keys(next).length) all[swap.part] = next
+  else delete all[swap.part]
+  return {
+    ...(state.props ? { props: state.props } : {}),
+    ...(Object.keys(all).length ? { parts: all } : {}),
+  }
 }
 
 function applyChange(state: InstanceOverrides, change: InstanceChange): InstanceOverrides {
@@ -1094,7 +1159,9 @@ export const changeInstances = atomic(function changeInstances(
       const state = readInstance(located.el, ctx.atRev(def.id, Number(attrOf(located.el, REV_ATTR))) ?? def, ctx)
       if (!state) continue
       validateProps(def, change.props, ctx.find)
-      const rendered = renderInstance(def, def, applyChange(state.overrides, change), id, { ctx, stack: [] })
+      const changed = applyChange(state.overrides, change)
+      const next = change.swap ? applySwap(changed, def, change.swap, canvasId) : changed
+      const rendered = renderInstance(def, def, next, id, { ctx, stack: [] })
       if (!rendered) continue
       /* below another instance, this root is that instance's part */
       const part = attrOf(located.el, PART_ATTR)
@@ -1231,6 +1298,115 @@ export const restoreComponent = atomic(function restoreComponent(
   actions.broadcastComponent(canvasId, component, actor)
   actions.logComponent(canvasId, actor, `restored component “${component.name}”`)
   return { component, main }
+})
+
+/* ------------------------------------------------------------------ */
+/* Duplicating and detaching from a library                            */
+/* ------------------------------------------------------------------ */
+
+/** The gap left between a duplicated main and its neighbours on the page. */
+const MAIN_GAP = 80
+
+/** "<name> copy", then "<name> copy 2", … : free on the canvas and within the name limit,
+ *  the base name clipped to make room for the suffix. */
+function copyName(canvasId: string, name: string): string {
+  const names = new Set(activeComponents(store.getComponents(canvasId)).map((def) => def.name.toLowerCase()))
+  for (let n = 1; ; n++) {
+    const suffix = n === 1 ? ' copy' : ` copy ${n}`
+    const candidate = `${name.slice(0, MAX_COMPONENT_NAME - suffix.length).trimEnd()}${suffix}`
+    if (!names.has(candidate.toLowerCase())) return candidate
+  }
+}
+
+/** Where a new main goes beside an existing one: the first free spot to its right on its page,
+ *  at its size. Undefined when that frame is not a main on this canvas any more. */
+function spotBesideMain(canvas: Canvas, def: ComponentDef) {
+  const frame = def.mainFrameId ? store.getFrame(def.mainFrameId) : undefined
+  if (!frame || frame.canvasId !== canvas.id || !frame.html.includes(`${COMPONENT_ATTR}="${def.id}"`)) return undefined
+  const pageId = framePageId(canvas, frame)
+  const occupied = pageFrames(canvas, pageId).map(({ x, y, width, height }) => ({ x, y, width, height }))
+  const spot = freeSpotBeside(frame, occupied, MAIN_GAP)
+  return { pageId, ...spot, width: frame.width, height: frame.height }
+}
+
+export interface DuplicateResult {
+  component: ComponentDef
+  /** the component it was copied from */
+  source: ComponentDef
+}
+
+/** A second component made from an existing one: its own id, the same design, a name that
+ *  says it is a copy and a main of its own beside the original's. The copy starts its history
+ *  over and is always local, even from a linked library component. The original is not written,
+ *  so its instances stay as they are. */
+export const duplicateComponent = atomic(function duplicateComponent(
+  canvasId: string,
+  ref: string,
+  actor: Actor,
+): DuplicateResult {
+  const canvas = store.getCanvas(canvasId)
+  if (!canvas) fail('canvas not found')
+  const source = requireComponent(canvasId, ref)
+  if (isHollow(source)) fail(`“${source.name}” has no markup yet, so there is nothing to copy`)
+  checkCapacity(canvasId)
+  const def: ComponentDef = {
+    ...blankComponent({
+      name: copyName(canvasId, source.name),
+      description: source.description,
+      props: structuredClone(source.props),
+      ...(source.code ? { code: structuredClone(source.code) } : {}),
+      by: actor.name,
+    }),
+    head: [...source.head],
+  }
+  /* one unit with the main's write, like createComponentFromHtml */
+  store.saveComponent(canvasId, def)
+  const root = singleRoot(source.template)
+  setAttr(root, COMPONENT_ATTR, def.id)
+  const place = spotBesideMain(canvas, source)
+  writeNewMain(canvasId, def, serializeOuter(root), source.rawCss, actor, place?.width, place?.height, place)
+  /* the main's write derived the props and slots: the mapping is checked against those */
+  const made = requireComponent(canvasId, def.id)
+  const code = validCode(source.code, made)
+  if (code) store.saveComponent(canvasId, { ...made, code })
+  const component = requireComponent(canvasId, def.id)
+  actions.logComponent(canvasId, actor, `duplicated component “${source.name}” as “${component.name}”`)
+  return { component, source }
+})
+
+export interface DetachFromLibraryResult {
+  component: ComponentDef
+}
+
+/** A linked library component made this canvas's own: the same id, so every instance stays
+ *  linked, with the library link dropped and a main written on the Components page from the
+ *  design it has now. From then on it is edited here and sync_component has nothing to pull. */
+export const detachFromLibrary = atomic(function detachFromLibrary(
+  canvasId: string,
+  ref: string,
+  actor: Actor,
+): DetachFromLibraryResult {
+  const canvas = store.getCanvas(canvasId)
+  if (!canvas) fail('canvas not found')
+  const def = requireComponent(canvasId, ref)
+  if (!def.source?.library)
+    fail(
+      def.source
+        ? `“${def.name}” was copied from another canvas, not linked to a workspace library, so it is already local: edit it here`
+        : `“${def.name}” is already local: it is not linked to a workspace library`,
+    )
+  if (isHollow(def))
+    fail(`“${def.name}” has no design yet (its library has not published one), so there is nothing to detach`)
+  const { source: _source, ...local } = def
+  const next: ComponentDef = { ...local, mainFrameId: null, updatedAt: Date.now(), updatedBy: actor.name }
+  /* one unit with the main's write: a main that cannot be written leaves it linked */
+  store.saveComponent(canvasId, next)
+  const root = alignedRoot(def.template, def)
+  writeNewMain(canvasId, next, serializeOuter(root), def.rawCss, actor)
+  const component = requireComponent(canvasId, def.id)
+  actions.broadcastComponent(canvasId, component, actor)
+  actions.logComponent(canvasId, actor, `detached component “${component.name}” from its library`)
+  return { component }
 })
 
 /** Cut every instance of a component loose, keeping its look: plain markup, no longer linked.
