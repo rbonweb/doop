@@ -297,8 +297,8 @@ needs a reusable piece the system lacks, add it, then use it.
         <doop-use component="Button" label="Start" data-doop-prop="label:cta"></doop-use>
       </article>
       <doop-use component="Card" title="Team" cta="Buy"></doop-use>
-- Write a description saying when to use it. Set code (file and export name) when the component
-  exists in the human's repo: that is what makes the design implementable with their real code.
+- Write a description saying when to use it. Set code to map it to the human's package: importFrom,
+  exportName, and a props and slots mapping; React export imports that export instead.
 - Vary with props, not copies. An enum prop sets data-<name> on the root, so a variant is plain
   CSS: .btn[data-tone="ghost"] { … }. Hover and focus are ordinary CSS too. You do not need a
   component per state, or per size.

@@ -30,6 +30,7 @@ import {
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR } from '../shared/elementId.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
+import { validCode } from './componentCodeMap.ts'
 import { decodeQuotes, familyKey, fontFaceRule, usesFamily, type CustomFont } from '../shared/fonts.ts'
 import { fontsForCanvas } from './fonts.ts'
 import * as actions from './actions.ts'
@@ -351,6 +352,15 @@ export function catalogEntry(canvas: Canvas, def: ComponentDef, usage = usageOf(
   }
 }
 
+/** What a list shows of a component's code: the export it is, not the whole prop mapping,
+ *  which get_component and a write return. Omitted when neither is set (a legacy path/name too). */
+export function codeSummary(def: Pick<ComponentDef, 'code'>) {
+  const importFrom = def.code?.importFrom
+  const exportName = def.code?.exportName
+  if (!importFrom && !exportName) return {}
+  return { code: { ...(importFrom ? { importFrom } : {}), ...(exportName ? { exportName } : {}) } }
+}
+
 /** A component on another canvas, as something to import: what it is and how to
  *  use it. Not how often it is used there: counting reads that canvas's frame
  *  HTML, which is loaded per canvas and is not this caller's to load. */
@@ -517,7 +527,7 @@ export const createComponentFromElement = atomic(function createComponentFromEle
   if (withinInstance(el)) fail('that element sits inside an instance — edit its main, or detach the instance first')
 
   const shape = shapeOf(el)
-  const def = blankComponent({ name, description: clip(input.description), props, code: input.code, by: actor.name })
+  const def = blankComponent({ name, description: clip(input.description), props, by: actor.name })
   /* one unit: a write that fails leaves no main-less component holding the name */
   const inferred = transaction(() => {
     store.saveComponent(canvasId, def)
@@ -530,6 +540,10 @@ export const createComponentFromElement = atomic(function createComponentFromEle
     return bound
   })
   const saved = requireComponent(canvasId, def.id)
+  /* after the main's write, the props and slots are the ones the template really derives:
+     the mapping is checked against those, then kept clean of unknown keys */
+  const code = validCode(input.code, saved)
+  if (code) store.saveComponent(canvasId, { ...saved, code })
   const matching = input.replaceMatching
     ? convertMatching(canvasId, shape, saved, actor)
     : { converted: [], stopped: false }
@@ -615,7 +629,6 @@ export const createComponentFromHtml = atomic(function createComponentFromHtml(
     name,
     description: clip(input.description),
     props: validProps(input.props),
-    code: input.code,
     by: actor.name,
   })
   /* nothing of a create that fails stays: the definition, the Components page it may have
@@ -625,6 +638,10 @@ export const createComponentFromHtml = atomic(function createComponentFromHtml(
   const inferred = input.autoProps !== false && !hasBindings(root) ? inferBindings(root) : []
   setAttr(root, COMPONENT_ATTR, def.id)
   writeNewMain(canvasId, def, serializeOuter(root), input.css ?? '', actor, input.width, input.height)
+  /* the main's write derived the props and slots: the mapping is checked against those */
+  const made = requireComponent(canvasId, def.id)
+  const code = validCode(input.code, made)
+  if (code) store.saveComponent(canvasId, { ...made, code })
   const component = requireComponent(canvasId, def.id)
   /* the component is made: a note that cannot be worked out within budget is left out */
   if (input.css) optional(() => reportCssNotKept(component, input.css!))
@@ -828,7 +845,6 @@ export const updateComponent = atomic(function updateComponent(
     updatedBy: actor.name,
   }
   if (input.code === null) delete meta.code
-  else if (input.code !== undefined) meta.code = input.code
   store.saveComponent(canvasId, meta)
 
   if (root) {
@@ -837,6 +853,13 @@ export const updateComponent = atomic(function updateComponent(
     if (propsChanged) withinRevision(canvasId, def.id, write)
     else write()
   } else actions.broadcastComponent(canvasId, requireComponent(canvasId, def.id), actor)
+  /* after the main's write the definition has the props and slots the template derives,
+     so that is what a new mapping is checked against */
+  if (input.code !== undefined && input.code !== null) {
+    const current = requireComponent(canvasId, def.id)
+    const code = validCode(input.code, current)
+    if (code) store.saveComponent(canvasId, { ...current, code })
+  }
   /* new defaults change what instances render even when the main's markup did not move */
   if (propsChanged) actions.queuePropagation(canvasId, [requireComponent(canvasId, def.id)], actor)
   if (input.name !== undefined && def.mainFrameId && store.getFrame(def.mainFrameId)?.name === def.name) {

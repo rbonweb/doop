@@ -1,10 +1,12 @@
 import { z } from 'zod'
 import { activeComponents, PROP_TYPES, USE_TAG, type ComponentDef } from '../shared/components.ts'
+import { CODE_ORIGINS } from '../shared/componentCode.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
 import {
   catalog,
   catalogEntry,
   changeInstances,
+  codeSummary,
   componentDetail,
   ComponentError,
   createComponentFromElement,
@@ -79,8 +81,38 @@ export const codeSchema = z
     path: z.string().max(500).optional().describe('Source file or package, e.g. "src/components/ui/button.tsx"'),
     name: z.string().max(200).optional().describe('Export name, e.g. "Button"'),
     snippet: z.string().max(4000).optional().describe('How it is used in code, or how props map to it'),
+    importFrom: z.string().max(300).optional().describe('Package to import from, e.g. "@acme/ui"'),
+    exportName: z.string().max(200).optional().describe('The export to import, a JavaScript identifier: "Button"'),
+    defaultExport: z.boolean().optional().describe('The export is the package default, not a named one'),
+    props: z
+      .record(
+        z
+          .object({
+            name: z.string().optional().describe('The export prop that receives this one, if named differently'),
+            values: z
+              .record(z.union([z.string(), z.number(), z.boolean()]))
+              .optional()
+              .describe('Enum or boolean value -> what the export receives, e.g. { "ghost": "secondary" }'),
+            omit: z.literal(true).optional().describe('The export has no such prop: do not pass it'),
+          })
+          .partial(),
+      )
+      .optional()
+      .describe('Doop prop -> its mapping on the export, keyed by prop name'),
+    slots: z
+      .record(z.string())
+      .optional()
+      .describe('Doop slot -> "children" or the export prop that receives it, e.g. { "actions": "footer" }'),
+    origin: z
+      .object({
+        kind: z.enum([...CODE_ORIGINS]).describe('manual, storybook, cli or agent'),
+        storyId: z.string().optional().describe('Storybook story id, for a storybook mapping'),
+        url: z.string().optional().describe('The page the mapping was read from, http(s)'),
+      })
+      .optional()
+      .describe('Where this mapping came from'),
   })
-  .describe('Where this lives in code, read by whoever implements a design that uses it')
+  .describe('Where this lives in code: the package export it is, and how its props and slots map onto it')
 
 export interface ToolContext {
   canvas: Canvas
@@ -182,7 +214,9 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
       const wanted = typeof query === 'string' ? query.toLowerCase() : ''
       const matches = (def: ComponentDef) =>
         !wanted || def.name.toLowerCase().includes(wanted) || def.description.toLowerCase().includes(wanted)
-      const components = catalog(canvas, activeComponents(canvas.components).filter(matches))
+      const components = catalog(canvas, activeComponents(canvas.components).filter(matches)).map(
+        ({ code, ...entry }) => ({ ...entry, ...codeSummary({ code }) }),
+      )
       const shared = libraryCatalog(canvas)
         .map((library) => ({
           ...library,
@@ -443,7 +477,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
       name: z.string().optional(),
       description: z.string().optional(),
       props: z.array(propSchema).optional().describe('Full replacement of the prop metadata'),
-      code: codeSchema.optional(),
+      code: codeSchema.nullable().optional().describe('Full replacement of the code mapping; null clears it'),
       expected_rev: z.number().optional().describe('Refuse if the component has moved past this revision'),
       dry_run: z.boolean().optional().describe('Report the impact and change nothing'),
     },

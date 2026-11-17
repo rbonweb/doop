@@ -8,6 +8,8 @@
  * Spec: .context/specs/components.md.
  */
 
+import type { ComponentCode } from './componentCode.ts'
+
 export const COMPONENT_ATTR = 'data-doop-component'
 export const INSTANCE_ATTR = 'data-doop-instance'
 export const REV_ATTR = 'data-doop-rev'
@@ -72,14 +74,7 @@ export interface ComponentSlot {
 }
 
 /** Where this component lives in code: the handoff for an agent turning a design into a repo's own components. */
-export interface ComponentCode {
-  /** source file or package, `src/components/ui/button.tsx` or `@acme/ui` */
-  path?: string
-  /** export name, `Button` */
-  name?: string
-  /** free-form usage or a prop mapping */
-  snippet?: string
-}
+export type { ComponentCode } from './componentCode.ts'
 
 export interface ComponentSnapshot {
   rev: number
