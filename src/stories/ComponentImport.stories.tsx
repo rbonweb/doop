@@ -1,0 +1,117 @@
+import type { Meta, StoryObj } from '@storybook/react-vite'
+import { useEffect, useState } from 'react'
+import type { Canvas } from '../../shared/types'
+import { CliImportSection } from '@/components/CliImportSection'
+import { StorybookImportSection, type StorybookPhase } from '@/components/StorybookImportSection'
+import { Modal } from '@/components/ui/modal'
+import type { ImportResult } from '@/lib/componentImport'
+import { useStore } from '@/lib/store'
+
+const meta = { title: 'Screens/Import components' } satisfies Meta
+export default meta
+
+type Story = StoryObj<typeof meta>
+
+const noop = () => {}
+
+const RESULT: ImportResult = {
+  created: ['Button', 'Input', 'Select', 'Card', 'Badge'].map((name) => ({ name, id: name })),
+  updated: [{ name: 'Tabs', id: 'Tabs' }],
+  unchanged: [{ name: 'Avatar', id: 'Avatar' }],
+  skipped: [{ name: 'Tooltip', reason: 'it only renders inside a portal' }],
+  tokens: { created: ['--brand', '--radius'], skipped: [] },
+  pageId: 'imported',
+  issues: [{ component: 'Tabs', code: 'css', message: 'a :has() rule was dropped' }],
+}
+
+function Storybook({ phase, url = 'https://storybook.acme.com' }: { phase: StorybookPhase; url?: string }) {
+  return (
+    <Modal size="xl" className="sm:max-w-[820px]" onClose={noop}>
+      <StorybookImportSection
+        canvasId="canvas"
+        onBack={noop}
+        onUseCli={noop}
+        onOpenPage={noop}
+        initialPhase={phase}
+        initialUrl={url}
+      />
+    </Modal>
+  )
+}
+
+export const StorybookIdle: Story = { render: () => <Storybook phase={{ kind: 'idle' }} url="" /> }
+
+export const StorybookPreview: Story = {
+  render: () => (
+    <Storybook
+      phase={{
+        kind: 'preview',
+        plan: [
+          { name: 'Button', stories: 6, renders: 14 },
+          { name: 'Input', stories: 4, renders: 9 },
+        ],
+        result: RESULT,
+      }}
+    />
+  ),
+}
+
+export const StorybookRunning: Story = {
+  render: () => <Storybook phase={{ kind: 'running', rendered: 12, total: 34, component: 'Select' }} />,
+}
+
+export const StorybookDone: Story = { render: () => <Storybook phase={{ kind: 'done', result: RESULT }} /> }
+
+export const StorybookPrivate: Story = {
+  render: () => <Storybook phase={{ kind: 'refused', code: 'private', message: '' }} url="https://internal.acme.com" />,
+}
+
+const storyComponent = (id: string, rev: number) => ({ id, name: id, rev, props: [], slots: [], history: [] })
+
+/* the story answers the ticket route itself, so the card runs its whole flow with no server */
+function Cli({ lifetimeMs, landed = false }: { lifetimeMs: number; landed?: boolean }) {
+  /* the card reads the canvas and asks for its ticket as it opens, before any effect of this wrapper runs,
+     so the store and the fake route are in place first */
+  const [real] = useState(() => {
+    const original = window.fetch
+    useStore.setState({ canvas: { id: 'canvas', components: [storyComponent('Existing', 1)] } as unknown as Canvas })
+    window.fetch = async (input, init) => {
+      if (!String(input).includes('/component-import/ticket')) return original(input, init)
+      return Response.json({
+        upload_url: 'https://doop.design/import/Zk3x9P',
+        expires_at: new Date(Date.now() + lifetimeMs).toISOString(),
+        command: 'npx doop-import --storybook ./storybook-static --ticket https://doop.design/import/Zk3x9P',
+        curl: 'curl -T bundle.json https://doop.design/import/Zk3x9P',
+      })
+    }
+    return original
+  })
+  useEffect(() => {
+    const arrive = landed
+      ? window.setTimeout(
+          () =>
+            useStore.setState({
+              canvas: {
+                id: 'canvas',
+                components: [storyComponent('Existing', 1), storyComponent('Button', 1), storyComponent('Card', 1)],
+              } as unknown as Canvas,
+            }),
+          600,
+        )
+      : undefined
+    return () => {
+      window.fetch = real
+      window.clearTimeout(arrive)
+      useStore.setState({ canvas: null })
+    }
+  }, [real, landed])
+  return (
+    <Modal size="xl" className="sm:max-w-[820px]" onClose={noop}>
+      <CliImportSection canvasId="canvas" onBack={noop} onOpenPage={noop} />
+    </Modal>
+  )
+}
+
+export const CliTicket: Story = { render: () => <Cli lifetimeMs={15 * 60_000} /> }
+export const CliExpired: Story = { render: () => <Cli lifetimeMs={-1000} /> }
+export const CliComponentsLanded: Story = { render: () => <Cli lifetimeMs={14 * 60_000} landed /> }
