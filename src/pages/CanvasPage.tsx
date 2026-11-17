@@ -1782,7 +1782,8 @@ function ImportModal({
     <Modal
       /* the source list reads best narrow; every screen after it takes the review width */
       size={picking ? 'lg' : 'xl'}
-      className={picking ? undefined : 'sm:max-w-[820px]'}
+      /* anchored near the top, so the modal does not re-centre as a screen grows or shrinks */
+      className={cn('sm:top-12 sm:translate-y-0', picking ? undefined : 'sm:max-w-[820px]')}
       onClose={() => !busy && onClose()}
     >
       <>

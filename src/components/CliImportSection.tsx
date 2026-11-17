@@ -110,8 +110,8 @@ export function CliImportSection({
   const spent = expired || used
 
   return (
-    <div className="flex min-h-[440px] flex-col" data-slot="import-screen">
-      <div className="flex-1">
+    <div data-slot="import-screen">
+      <div>
         <ImportStepHeader
           icon={<AppIcon brand="cli" size={40} />}
           title={t('componentImport.cliHeading')}
@@ -153,7 +153,7 @@ export function CliImportSection({
                       ? t('componentImport.expired')
                       : t('componentImport.expiresIn', { time: relativeIn(minted.expiresAt, now) })}
                 </Note>
-                <Button size="sm" variant={spent ? 'primary' : 'ghost'} onClick={renew}>
+                <Button size={spent ? 'md' : 'sm'} variant={spent ? 'primary' : 'ghost'} onClick={renew}>
                   {t('componentImport.newCommand')}
                 </Button>
               </div>

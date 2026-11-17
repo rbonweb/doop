@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '@/lib/api'
 import {
+  groupImportIssues,
+  type IssueGroupKey,
+  relativeInSeconds,
   streamStorybookImport,
+  StorybookRequestError,
   type ImportResult,
   type PlannedComponent,
   type StorybookErrorCode,
   type StorybookEvent,
 } from '@/lib/componentImport'
-import { useT } from '@/lib/i18n'
+import { useT, type Translate } from '@/lib/i18n'
 import { posthog } from '@/lib/posthog'
 import { ImportStepFooter, ImportStepHeader } from './ImportSources'
 import { Badge } from './ui/badge'
@@ -15,26 +19,36 @@ import { AppIcon } from './ui/brand-mark'
 import { Button } from './ui/button'
 import { Callout } from './ui/callout'
 import { Checkbox } from './ui/checkbox'
+import { Disclosure } from './ui/collapsible'
 import { Field } from './ui/field'
 import { CheckIcon } from './ui/icons'
 import { Input } from './ui/input'
 import { Note } from './ui/note'
 import { Progress } from './ui/progress'
+import { SearchField } from './ui/search-field'
 import { SelectionBar, SelectionBarAction } from './ui/selection-bar'
 
 /** Names listed before "+N more", so a 60-component Storybook still fits the modal. */
 const NAMES_SHOWN = 8
 
-/** The most titles the server takes in one `include`. */
-const MAX_INCLUDE = 50
+/** The most components one import takes (the bundle's cap): the checklist stops selecting here. */
+const MAX_IMPORT = 60
+
+/** A list this long gets a filter field above it. */
+const FILTER_FROM = 12
 
 export type StorybookPhase =
   | { kind: 'idle'; cancelled?: boolean }
   | { kind: 'reading' }
-  | { kind: 'preview'; plan: PlannedComponent[]; result: ImportResult }
+  | { kind: 'preview'; plan: PlannedComponent[]; result: ImportResult; found?: number }
   | { kind: 'running'; rendered: number; total: number; component: string | null }
   | { kind: 'done'; result: ImportResult }
-  | { kind: 'refused'; code: StorybookErrorCode | 'generic'; message: string }
+  | {
+      kind: 'refused'
+      code: StorybookErrorCode | 'generic' | 'rate_limited'
+      message: string
+      retryAfter?: number | null
+    }
 
 const isAbort = (e: unknown) => e instanceof DOMException && e.name === 'AbortError'
 
@@ -45,19 +59,46 @@ function normalizeUrl(raw: string): string {
 }
 
 /** The Storybook titles of a plan, one each, or null when a component does not carry one (it cannot be narrowed). */
+/** What an import takes when nothing is chosen: the first MAX_IMPORT titles. */
+function firstTitles(titles: string[] | null): string[] {
+  return (titles ?? []).slice(0, MAX_IMPORT)
+}
+
 function planTitles(plan: PlannedComponent[]): string[] | null {
   if (plan.length < 2 || plan.some((c) => !c.group)) return null
   return [...new Set(plan.map((c) => c.group as string))]
 }
 
-/** One height for every state, so the modal does not re-centre as the import moves along. */
+/** One import note group, in plain words with its count. */
+function issueSummary(t: Translate, key: IssueGroupKey, count: number): string {
+  switch (key) {
+    case 'props':
+      return t('componentImport.issueProps', { count })
+    case 'noProps':
+      return t('componentImport.issueNoProps', { count })
+    case 'styles':
+      return t('componentImport.issueStyles', { count })
+    case 'variants':
+      return t('componentImport.issueVariants', { count })
+    case 'markup':
+      return t('componentImport.issueMarkup', { count })
+    case 'files':
+      return t('componentImport.issueFiles', { count })
+    case 'unsafe':
+      return t('componentImport.issueUnsafe', { count })
+    case 'limits':
+      return t('componentImport.issueLimits', { count })
+    case 'other':
+      return t('componentImport.issueOther', { count })
+  }
+}
+
+/** The header, the screen's body, then its footer. */
 function Screen({ header, footer, children }: { header: ReactNode; footer: ReactNode; children?: ReactNode }) {
   return (
-    <div className="flex min-h-[440px] flex-col" data-slot="import-screen">
-      <div className="flex-1">
-        {header}
-        {children}
-      </div>
+    <div data-slot="import-screen">
+      {header}
+      {children}
       {footer}
     </div>
   )
@@ -113,8 +154,9 @@ export function StorybookImportSection({
   const [phase, setPhase] = useState<StorybookPhase>(initialPhase)
   /* the Storybook titles ticked in the preview's checklist; all of them until the person narrows it */
   const [picked, setPicked] = useState<Set<string>>(
-    () => new Set(initialPhase.kind === 'preview' ? (planTitles(initialPhase.plan) ?? []) : []),
+    () => new Set(initialPhase.kind === 'preview' ? firstTitles(planTitles(initialPhase.plan)) : []),
   )
+  const [filter, setFilter] = useState('')
   const controller = useRef<AbortController | null>(null)
 
   /* closing the modal mid-import closes the request, which stops the import on the server */
@@ -123,8 +165,12 @@ export function StorybookImportSection({
   const busy = phase.kind === 'reading' || phase.kind === 'running'
   const ready = url.trim().length > 0
 
-  function refusal(code: StorybookErrorCode | 'generic', message: string): StorybookPhase {
-    return { kind: 'refused', code, message }
+  function refusal(
+    code: StorybookErrorCode | 'generic' | 'rate_limited',
+    message: string,
+    retryAfter?: number | null,
+  ): StorybookPhase {
+    return { kind: 'refused', code, message, retryAfter }
   }
 
   async function run(dryRun: boolean, include?: string[]) {
@@ -133,9 +179,11 @@ export function StorybookImportSection({
     controller.current = abort
     setPhase(dryRun ? { kind: 'reading' } : { kind: 'running', rendered: 0, total: 0, component: null })
     let plan: PlannedComponent[] = []
+    let found: number | undefined
     const onEvent = (event: StorybookEvent) => {
       if (event.type === 'plan') {
         plan = event.components
+        found = event.total
         if (!dryRun) setPhase({ kind: 'running', rendered: 0, total: event.renders, component: null })
       } else if (event.type === 'progress') {
         setPhase({ kind: 'running', rendered: event.rendered, total: event.total, component: event.component ?? null })
@@ -150,8 +198,9 @@ export function StorybookImportSection({
       )
       if (last?.type === 'result') {
         if (dryRun) {
-          setPicked(new Set(planTitles(plan) ?? []))
-          setPhase({ kind: 'preview', plan, result: last.result })
+          setPicked(new Set(firstTitles(planTitles(plan))))
+          setFilter('')
+          setPhase({ kind: 'preview', plan, result: last.result, found })
         } else {
           setPhase({ kind: 'done', result: { ...last.result, issues: last.issues ?? last.result.issues } })
           posthog.capture('storybook_imported', {
@@ -163,17 +212,23 @@ export function StorybookImportSection({
       else setPhase(refusal('generic', ''))
     } catch (e) {
       if (isAbort(e)) setPhase({ kind: 'idle', cancelled: true })
-      else if (e instanceof ApiError)
-        setPhase(refusal(e.status === 429 ? 'busy' : 'generic', String(e.body.error ?? e.body.message ?? '')))
-      else setPhase(refusal('unreachable', ''))
+      else if (e instanceof ApiError) {
+        const message = String(e.body.error ?? e.body.message ?? '')
+        /* a 429 before streaming is the hourly cap, with the server's own words and a wait; "busy" is a real busy code */
+        if (e.status === 429)
+          setPhase(refusal('rate_limited', message, e instanceof StorybookRequestError ? e.retryAfterSeconds : null))
+        else setPhase(refusal('generic', message))
+      } else setPhase(refusal('unreachable', ''))
     } finally {
       if (controller.current === abort) controller.current = null
     }
   }
 
   /* fixed copy where Doop knows the cause; otherwise the server's own words, which are already for people */
-  function refusedText(code: StorybookErrorCode | 'generic', message: string) {
+  function refusedText(code: StorybookErrorCode | 'generic' | 'rate_limited', message: string) {
     switch (code) {
+      case 'rate_limited':
+        return message || t('componentImport.rateLimited')
       case 'private':
         return t('componentImport.errPrivate')
       case 'unreachable':
@@ -186,8 +241,10 @@ export function StorybookImportSection({
         return message || t('componentImport.errGeneric')
     }
   }
-  const refusedHeading = (code: StorybookErrorCode | 'generic') =>
-    code === 'invalid' || code === 'generic' ? t('componentImport.failedHeading') : t('componentImport.refusedHeading')
+  const refusedHeading = (code: StorybookErrorCode | 'generic' | 'rate_limited') =>
+    code === 'invalid' || code === 'generic' || code === 'rate_limited'
+      ? t('componentImport.failedHeading')
+      : t('componentImport.refusedHeading')
 
   const header = (
     <ImportStepHeader
@@ -244,10 +301,17 @@ export function StorybookImportSection({
       result.skipped.length && t('componentImport.skipped', { count: result.skipped.length }),
       result.tokens.created.length && t('componentImport.tokensAdded', { count: result.tokens.created.length }),
     ].filter(Boolean)
-    const worth = [
+    const groups = groupImportIssues(result.issues)
+    const summary = [
+      ...(result.skipped.length ? [t('componentImport.issueSkipped', { count: result.skipped.length })] : []),
+      ...groups.map((group) => issueSummary(t, group.key, group.items.length)),
+    ]
+    const details = [
       ...result.skipped.map((s) => t('componentImport.skippedLine', { name: s.name, reason: s.reason })),
-      ...result.issues.map((i) =>
-        i.component ? t('componentImport.issueLine', { component: i.component, message: i.message }) : i.message,
+      ...groups.flatMap((group) =>
+        group.items.map((i) =>
+          i.component ? t('componentImport.issueLine', { component: i.component, message: i.message }) : i.message,
+        ),
       ),
     ]
     return (
@@ -276,15 +340,25 @@ export function StorybookImportSection({
               </Badge>
             ))}
           </div>
-          {worth.length > 0 && (
+          {summary.length > 0 && (
             <div className="flex flex-col gap-1.5" data-slot="storybook-issues">
               <span className="text-label font-medium text-ink-soft">{t('componentImport.issuesHeading')}</span>
-              <ul className="flex max-h-[132px] flex-col gap-1 overflow-y-auto text-label text-ink-soft">
-                {worth.slice(0, 20).map((line, i) => (
-                  <li key={i}>{line}</li>
+              <ul className="flex flex-col gap-1 text-label text-ink-soft">
+                {summary.map((line) => (
+                  <li key={line}>{line}</li>
                 ))}
               </ul>
-              {worth.length > 20 && <Note>{t('componentImport.moreNames', { count: worth.length - 20 })}</Note>}
+              <Disclosure
+                label={<span className="text-caption font-medium text-ink-faint">{t('componentImport.details')}</span>}
+                contentClassName="mt-1.5"
+              >
+                <ul className="flex max-h-[132px] flex-col gap-1 overflow-y-auto text-caption text-ink-faint">
+                  {details.slice(0, 100).map((line, i) => (
+                    <li key={i}>{line}</li>
+                  ))}
+                </ul>
+                {details.length > 100 && <Note>{t('componentImport.moreNames', { count: details.length - 100 })}</Note>}
+              </Disclosure>
             </div>
           )}
         </div>
@@ -294,17 +368,35 @@ export function StorybookImportSection({
 
   if (phase.kind === 'preview') {
     const { result, plan } = phase
-    const empty = !result.created.length && !result.updated.length
-    const renders = plan.reduce((sum, c) => sum + c.renders, 0)
     const titles = planTitles(plan)
-    const everything = !titles || picked.size === titles.length
-    const tooMany = !everything && picked.size > MAX_INCLUDE
+    const everything = !titles || (titles.length <= MAX_IMPORT && picked.size === titles.length)
+    /* the lists, the counts and the renders follow what is ticked, not the whole plan */
+    const chosen = titles ? plan.filter((c) => c.group && picked.has(c.group)) : plan
+    const planned = new Set(plan.map((c) => c.name))
+    const chosenNames = new Set(chosen.map((c) => c.name))
+    const inChoice = (name: string) => !planned.has(name) || chosenNames.has(name)
+    const created = result.created.filter((c) => inChoice(c.name))
+    const updated = result.updated.filter((c) => inChoice(c.name))
+    const skipped = result.skipped.filter((c) => inChoice(c.name))
+    const empty = !created.length && !updated.length
+    const renders = chosen.reduce((sum, c) => sum + c.renders, 0)
     const nothingPicked = !!titles && picked.size === 0
+    const full = !!titles && picked.size >= MAX_IMPORT
+    const found = Math.max(phase.found ?? 0, titles?.length ?? 0)
+    const needle = filter.trim().toLowerCase()
+    const shown = titles ? titles.filter((title) => !needle || title.toLowerCase().includes(needle)) : []
     const toggle = (title: string) =>
       setPicked((current) => {
         const next = new Set(current)
         if (next.has(title)) next.delete(title)
-        else next.add(title)
+        else if (next.size < MAX_IMPORT) next.add(title)
+        return next
+      })
+    /* Select all takes what the filter shows, in order, up to the cap */
+    const selectShown = () =>
+      setPicked((current) => {
+        const next = new Set(current)
+        for (const title of shown) if (next.size < MAX_IMPORT) next.add(title)
         return next
       })
     return (
@@ -314,7 +406,7 @@ export function StorybookImportSection({
           <ImportStepFooter note={t('componentImport.storybookNote')} onBack={() => setPhase({ kind: 'idle' })}>
             <Button
               variant="primary"
-              disabled={empty || nothingPicked || tooMany}
+              disabled={empty || nothingPicked}
               onClick={() => void run(false, everything ? undefined : [...picked])}
             >
               {t('componentImport.import')}
@@ -329,20 +421,20 @@ export function StorybookImportSection({
           </div>
           {empty && <Note size="sm">{t('componentImport.previewNothing')}</Note>}
           <NameList
-            label={t('componentImport.wouldCreate', { count: result.created.length })}
-            names={result.created.map((c) => c.name)}
+            label={t('componentImport.wouldCreate', { count: created.length })}
+            names={created.map((c) => c.name)}
           />
           <NameList
-            label={t('componentImport.wouldUpdate', { count: result.updated.length })}
-            names={result.updated.map((c) => c.name)}
+            label={t('componentImport.wouldUpdate', { count: updated.length })}
+            names={updated.map((c) => c.name)}
           />
-          {result.skipped.length > 0 && (
+          {skipped.length > 0 && (
             <div className="flex flex-col gap-1.5">
               <span className="text-label font-medium text-ink-soft">
-                {t('componentImport.wouldSkip', { count: result.skipped.length })}
+                {t('componentImport.wouldSkip', { count: skipped.length })}
               </span>
               <ul className="flex max-h-[96px] flex-col gap-1 overflow-y-auto text-label text-ink-soft">
-                {result.skipped.map((s) => (
+                {skipped.map((s) => (
                   <li key={s.name}>{t('componentImport.skippedLine', { name: s.name, reason: s.reason })}</li>
                 ))}
               </ul>
@@ -350,14 +442,27 @@ export function StorybookImportSection({
           )}
           {titles && (
             <div data-slot="storybook-choose">
+              {found > MAX_IMPORT && (
+                <Note size="sm" className="mb-2 block" data-slot="storybook-found">
+                  {t('componentImport.foundPick', { count: found, max: MAX_IMPORT })}
+                </Note>
+              )}
+              {titles.length > FILTER_FROM && (
+                <SearchField
+                  className="mb-2"
+                  aria-label={t('componentImport.chooseFilter')}
+                  placeholder={t('componentImport.chooseFilter')}
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                />
+              )}
               <SelectionBar
                 count={picked.size}
                 total={titles.length}
-                tone={tooMany ? 'error' : 'default'}
-                note={tooMany ? ` ${t('componentImport.chooseAtMost', { count: MAX_INCLUDE })}` : undefined}
+                note={full ? ` · ${t('componentImport.chooseFull')}` : undefined}
                 actions={
                   <>
-                    <SelectionBarAction onClick={() => setPicked(new Set(titles))}>
+                    <SelectionBarAction disabled={full} onClick={selectShown}>
                       {t('panels.exportSelectAll')}
                     </SelectionBarAction>
                     <SelectionBarAction onClick={() => setPicked(new Set())}>
@@ -371,15 +476,21 @@ export function StorybookImportSection({
                 aria-label={t('componentImport.chooseAria')}
                 className="max-h-[168px] overflow-y-auto rounded-panel bg-surface shadow-ring"
               >
-                {titles.map((title) => (
-                  <label
-                    key={title}
-                    className="relative flex min-h-9 cursor-pointer items-center gap-3 border-b border-line-soft px-3.5 py-1.5 transition-colors last:border-b-0 hover:bg-sub"
-                  >
-                    <Checkbox checked={picked.has(title)} onChange={() => toggle(title)} />
-                    <span className="min-w-0 truncate text-body text-ink">{title}</span>
-                  </label>
-                ))}
+                {shown.length === 0 && (
+                  <p className="px-3.5 py-2.5 text-label text-ink-faint">{t('componentImport.chooseNone')}</p>
+                )}
+                {shown.map((title) => {
+                  const on = picked.has(title)
+                  return (
+                    <label
+                      key={title}
+                      className="relative flex min-h-9 cursor-pointer items-center gap-3 border-b border-line-soft px-3.5 py-1.5 transition-colors last:border-b-0 hover:bg-sub"
+                    >
+                      <Checkbox checked={on} disabled={!on && full} onChange={() => toggle(title)} />
+                      <span className="min-w-0 truncate text-body text-ink">{title}</span>
+                    </label>
+                  )
+                })}
               </div>
             </div>
           )}
@@ -454,6 +565,9 @@ export function StorybookImportSection({
         <Callout tone="error" className="mt-4 flex flex-col items-start gap-2" role="alert">
           <b className="font-medium">{refusedHeading(phase.code)}</b>
           <span>{refusedText(phase.code, phase.message)}</span>
+          {phase.code === 'rate_limited' && phase.retryAfter ? (
+            <span>{t('componentImport.retryIn', { time: relativeInSeconds(phase.retryAfter) })}</span>
+          ) : null}
           {(phase.code === 'private' || phase.code === 'too_many') && (
             <Button size="sm" onClick={onUseCli}>
               {t('componentImport.useCli')}
