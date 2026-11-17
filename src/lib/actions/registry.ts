@@ -82,6 +82,8 @@ export interface ActionHost {
   openFind(mode: 'find' | 'replace'): void
   findStep(dir: 1 | -1): void
   openExport(): void
+  /** Export to React: the dialog that zips frames, a page or components as React code */
+  openExportReact(): void
   openImport(): void
   openVersionHistory(): void
   openLink(): void
@@ -313,6 +315,16 @@ export const ACTIONS: readonly CanvasAction[] = [
       const canvasId = h()?.canvasId
       if (canvasId) void downloadFramesPdf(canvasId, pdfFrames())
     },
+  },
+
+  {
+    id: 'export-react',
+    label: 'actions.exportReact',
+    menu: 'file',
+    section: 3,
+    /* anyone who can see the canvas can take its code: the route is behind the view role */
+    enabled: () => !!store().canvas,
+    run: () => h()?.openExportReact(),
   },
 
   /* ---- Edit ---- */

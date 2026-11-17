@@ -19,6 +19,7 @@ import {
   restoreDeletedComponent,
 } from '../lib/components'
 import { isDeleted } from '../../shared/components'
+import { copyComponentAsReact } from '../lib/reactExport'
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from './ui/context-menu'
 import { MenuHint } from './ui/menu'
 import { FrameExportModal } from './FrameExportModal'
@@ -138,6 +139,11 @@ function ElementMenuItems({ frame, selector, hit, onRename, onExport }: ElementI
           {component && !isDeleted(component.def) && (
             <ContextMenuItem onSelect={() => goToMain(component.def)}>
               {t('components.goToMainComponent')}
+            </ContextMenuItem>
+          )}
+          {component && !isDeleted(component.def) && (
+            <ContextMenuItem onSelect={() => void copyComponentAsReact(frame.canvasId, component.def)}>
+              {t('reactExport.copyAsReact')}
             </ContextMenuItem>
           )}
           {component && isDeleted(component.def) && (

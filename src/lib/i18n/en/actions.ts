@@ -27,6 +27,7 @@ export const actions = {
   versionHistory: 'Show version history',
   export: 'Export…',
   exportPdf: 'Export frames to PDF…',
+  exportReact: 'Export to React…',
 
   /* Edit */
   undo: 'Undo',

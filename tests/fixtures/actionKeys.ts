@@ -23,6 +23,7 @@ export function installActionKeys() {
     openFind: noop,
     findStep: noop,
     openExport: noop,
+    openExportReact: noop,
     openImport: noop,
     openVersionHistory: noop,
     openLink: noop,
