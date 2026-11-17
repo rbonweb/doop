@@ -1243,10 +1243,9 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
   return { tsx: `${lines.join('\n')}\n`, css, fc }
 }
 
-/** The component's `.module.css`: empty in Tailwind mode when everything converted, a placeholder comment in CSS Modules mode. */
+/** The component's `.module.css`, empty when it has no styles (then no file is written and nothing imports it). */
 export function componentCss(plan: ComponentPlan): string {
-  const css = [plan.split.moduleCss, plan.split.globalCss].filter(Boolean).join('\n')
-  return css || (plan.tw ? '' : '/* no styles */\n')
+  return [plan.split.moduleCss, plan.split.globalCss].filter(Boolean).join('\n')
 }
 
 /** The import block of a generated file, sorted so two runs agree. `from` says where the file lives. */
@@ -1257,10 +1256,11 @@ export function importLines(fc: FileCtx, self: ComponentPlan | null, from: 'comp
   if (reactTypes.length) lines.push(`import type { ${reactTypes.join(', ')} } from 'react'`)
   const rel = from === 'component' ? '.' : '../components'
   const sheets = [...fc.styleUses].sort((a, b) => (a.name < b.name ? -1 : 1))
-  if (self && fc.styleUses.has(self)) lines.push(`import styles from './${self.name}.module.css'`)
-  else if (self && (self.split.moduleCss || self.split.globalCss)) lines.push(`import './${self.name}.module.css'`)
+  const styled = (plan: ComponentPlan) => Boolean(plan.split.moduleCss || plan.split.globalCss)
+  if (self && styled(self) && fc.styleUses.has(self)) lines.push(`import styles from './${self.name}.module.css'`)
+  else if (self && styled(self)) lines.push(`import './${self.name}.module.css'`)
   for (const plan of sheets)
-    if (plan !== self) lines.push(`import ${plan.stylesIdent} from '${rel}/${plan.name}.module.css'`)
+    if (plan !== self && styled(plan)) lines.push(`import ${plan.stylesIdent} from '${rel}/${plan.name}.module.css'`)
   if (fc.usesCx) lines.push(`import { cx } from '../cx'`)
   const generated = [...fc.generated].filter((plan) => plan !== self).sort((a, b) => (a.name < b.name ? -1 : 1))
   if (from === 'component') {
