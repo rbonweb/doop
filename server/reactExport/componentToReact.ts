@@ -1,4 +1,4 @@
-import type { DefaultTreeAdapterTypes as Tree } from 'parse5'
+import { parseFragment, type DefaultTreeAdapterTypes as Tree } from 'parse5'
 import {
   BIND_ATTR,
   IF_ATTR,
@@ -25,7 +25,8 @@ import {
   type EngineContext,
   type InstanceState,
 } from '../componentEngine.ts'
-import { moduleClassName, splitComponentCss, type CssModuleSplit } from './cssSplit.ts'
+import { moduleClassName, safeClass, safeClassCss, splitComponentCss, type CssModuleSplit } from './cssSplit.ts'
+import { googleFontsUrl } from './fonts.ts'
 import { nodeToJsx, htmlToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
 import { isUnsafeUrl, jsString, type ExportIssue } from './issues.ts'
 import { NameAllocator, componentName, isIdentifier, propName } from './names.ts'
@@ -206,12 +207,15 @@ export class ExportSession {
   readonly urls: UrlRewriter
   readonly styling: ReactStyling
   readonly customElements = new Set<string>()
+  /** hosted font stylesheets (Google Fonts) any file needs: written to `src/fonts.css` */
+  readonly fontLinks = new Set<string>()
   /** components in the order they were first needed: files are emitted in this order */
   readonly order: ComponentPlan[] = []
   private readonly defs: readonly ComponentDef[]
   private readonly plans = new Map<string, ComponentPlan>()
   private readonly urlMemo = new Map<string, boolean>()
   private readonly droppedDefaults = new Set<string>()
+  private readonly droppedUses = new Set<string>()
 
   constructor(options: SessionOptions) {
     this.defs = options.components
@@ -286,7 +290,7 @@ export class ExportSession {
       seen.add(def.id)
       for (const match of def.template.matchAll(/\scomponent="([^"]+)"/g)) {
         const next = this.find(match[1] ?? '')
-        if (next) stack.push(next)
+        if (next && !this.droppedUses.has(`${def.id}\u0000${next.id}`)) stack.push(next)
       }
       for (const prop of def.props) {
         if (prop.type !== 'instance' || !prop.default || this.droppedDefaults.has(`${def.id}\u0000${prop.name}`))
@@ -296,6 +300,11 @@ export class ExportSession {
       }
     }
     return false
+  }
+
+  /** a template's nested use of another component that would make the two render each other: left out of the export */
+  dropUse(fromId: string, toId: string): void {
+    this.droppedUses.add(`${fromId}\u0000${toId}`)
   }
 
   dropDefault(id: string, prop: string): void {
@@ -340,8 +349,9 @@ export class ExportSession {
 
     const rootClass = /root/i.test(def.rawCss) || /root/i.test(def.template) ? 'doop-root' : 'root'
     const rewriteUrl = this.urls.url
-    const tw = this.styling === 'tailwind' ? cssToTailwind(def.rawCss, { rootClass, rewriteUrl }) : undefined
-    const split = tw ? tw.leftover : splitComponentCss(def.rawCss, { rootClass, rewriteUrl })
+    const rawCss = safeClassCss(def.rawCss)
+    const tw = this.styling === 'tailwind' ? cssToTailwind(rawCss, { rootClass, rewriteUrl }) : undefined
+    const split = tw ? tw.leftover : splitComponentCss(rawCss, { rootClass, rewriteUrl })
     const cssIssues = tw ? [...tw.issues, ...tw.leftover.issues] : split.issues
     const plan: ComponentPlan = {
       def,
@@ -356,7 +366,7 @@ export class ExportSession {
       split,
       ...(tw ? { tw } : {}),
       cssIssues,
-      moduleClasses: new Set(split.classes.filter((name) => name !== '__proto__')),
+      moduleClasses: new Set(split.classes),
       rootClass,
       stylesIdent: mapped ? '' : this.names.take(`${name}Styles`),
       directUrlProps,
@@ -368,8 +378,12 @@ export class ExportSession {
 
 /** A bare package specifier (`@scope/name`, `name`, either with a subpath): never a relative or absolute path or a URL. */
 const SPECIFIER = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*(?:\/[A-Za-z0-9._~@-]+)*$/
+const ALIAS = /^(?:@|~)\/[A-Za-z0-9_./-]+$/
 const isBareSpecifier = (value: string): boolean =>
-  value.length <= 214 && SPECIFIER.test(value) && !value.split('/').some((part) => part === '.' || part === '..')
+  value.length <= 214 &&
+  (SPECIFIER.test(value) || ALIAS.test(value)) &&
+  !value.includes('//') &&
+  !value.split('/').some((part) => part === '.' || part === '..')
 const TARGET_NAME = /^[A-Za-z_$][\w$]*$/
 const REACT_OWNED = new Set(['key', 'ref', 'dangerouslysetinnerhtml'])
 
@@ -545,6 +559,7 @@ export class FileCtx {
   usesCx = false
   usesNode = false
   usesCssProps = false
+  usesFonts = false
   /** a page file in Tailwind mode: the utilities its own global classes became */
   pageTw?: TailwindSplit
   readonly issues: ExportIssue[] = []
@@ -565,7 +580,8 @@ export class FileCtx {
   }
 
   /** the className value for classes inside `plan`'s own markup */
-  className(plan: ComponentPlan, classes: string[], own: boolean, withRoot: boolean): string {
+  className(plan: ComponentPlan, rawClasses: string[], own: boolean, withRoot: boolean): string {
+    const classes = rawClasses.map(safeClass)
     const rootUsed = plan.tw
       ? plan.tw.utilities.has(plan.rootClass) || plan.moduleClasses.has(plan.rootClass)
       : plan.moduleClasses.has(plan.rootClass)
@@ -1165,6 +1181,19 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
   const fc = new FileCtx(session, file)
   const root = parseTemplateRoot(def.template)
   fc.issues.push(...plan.mappingIssues, ...plan.cssIssues)
+  for (const tag of def.head) {
+    const link = parseFragment(tag).childNodes.find(isElement)
+    if (!link || link.tagName !== 'link') continue
+    const fonts = googleFontsUrl(attrOf(link, 'href') ?? '')
+    if (fonts) {
+      session.fontLinks.add(fonts)
+      fc.usesFonts = true
+    } else
+      fc.note(
+        'dropped-element',
+        "a stylesheet link in the component head was dropped: add it to the app's HTML yourself",
+      )
+  }
   let body = 'null'
   const marker = markerFor(def.template)
   if (root) {
@@ -1213,6 +1242,7 @@ export function componentCss(plan: ComponentPlan): string {
 /** The import block of a generated file, sorted so two runs agree. `from` says where the file lives. */
 export function importLines(fc: FileCtx, self: ComponentPlan | null, from: 'component' | 'page'): string[] {
   const lines: string[] = []
+  if (fc.usesFonts) lines.push("import '../fonts.css'")
   const reactTypes = [fc.usesCssProps ? 'CSSProperties' : '', fc.usesNode ? 'ReactNode' : ''].filter(Boolean)
   if (reactTypes.length) lines.push(`import type { ${reactTypes.join(', ')} } from 'react'`)
   const rel = from === 'component' ? '.' : '../components'
@@ -1336,6 +1366,14 @@ function visitUse(fc: FileCtx, plan: ComponentPlan, use: Element, ctx: JsxContex
   }
   if (nestedDef.id === plan.def.id) {
     ctx.issues.push({ kind: 'dropped-element', detail: '<doop-use> dropped: a component cannot render itself' })
+    return ''
+  }
+  if (fc.session.reaches(nestedDef, plan.def.id)) {
+    fc.session.dropUse(plan.def.id, nestedDef.id)
+    ctx.issues.push({
+      kind: 'dropped-element',
+      detail: `<doop-use> of ${jsString(nestedDef.name)} dropped: it renders this component back, so the two would never stop`,
+    })
     return ''
   }
   const target = fc.session.plan(nestedDef)

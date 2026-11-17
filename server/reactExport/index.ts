@@ -3,6 +3,7 @@ import { tokensCss, tokensDtcg, tokensTailwind, type DesignToken } from '../../s
 import { usedComponentIds } from '../componentEngine.ts'
 import { ExportSession, emitComponent, type ComponentFiles } from './componentToReact.ts'
 import { emitPage } from './pageToReact.ts'
+import { fontsCss } from './fonts.ts'
 import { jsString } from './issues.ts'
 import { NameAllocator, componentName, fileBase } from './names.ts'
 import { emptyReport, sortReport, type ExportReport, type ReactStyling } from './report.ts'
@@ -79,7 +80,7 @@ function customElementsDts(tags: readonly string[]): string {
   return `${lines.join('\n')}\n`
 }
 
-function readme(styling: ReactStyling, hasTokens: boolean): string {
+function readme(styling: ReactStyling, hasTokens: boolean, hasFonts: boolean): string {
   const tailwind = styling === 'tailwind'
   return [
     '# Doop export',
@@ -97,7 +98,13 @@ function readme(styling: ReactStyling, hasTokens: boolean): string {
         ? "- `src/tokens.css` imports Tailwind's theme and utilities (no Preflight reset: the canvas was designed under browser defaults), then holds the canvas tokens as a Tailwind `@theme` block and as CSS custom properties. `src/tokens.json` has the same tokens as W3C design tokens."
         : '- `src/tokens.css` holds the canvas design tokens as CSS custom properties (import it once in your app) and `src/tokens.json` the same tokens as W3C design tokens.'
       : '- Design tokens were not exported.',
+    ...(hasFonts
+      ? [
+          '- `src/fonts.css` imports the hosted Google Fonts stylesheets the canvas uses; the pages and components that need them import it.',
+        ]
+      : []),
     '- `src/cx.ts` joins class names, `src/css-modules.d.ts` types CSS Modules imports.',
+    '- Dark themes: a page stands for the canvas `<body>`, and the canvas switches theme with `data-doop-theme="dark"` on `<html>`. Put that attribute on your app\'s `<html>` element to turn the dark rules on; they are kept as `html[data-doop-theme=dark] .page-… .x`.',
     '- `export-report.json` lists everything the export dropped or changed, and the instances whose markup was inlined.',
     '',
     ...(tailwind
@@ -256,7 +263,8 @@ export function buildReactExport(input: ReactExportInput): ReactExportResult {
     files.push({ path: 'src/tokens.css', content: tokens.endsWith('\n') ? tokens : `${tokens}\n` })
     files.push({ path: 'src/tokens.json', content: tokensDtcg(input.tokens, input.themeOrder) })
   }
-  files.push({ path: 'README.md', content: readme(input.styling, includeTokens) })
+  if (session.fontLinks.size) files.push({ path: 'src/fonts.css', content: fontsCss(session.fontLinks) })
+  files.push({ path: 'README.md', content: readme(input.styling, includeTokens, session.fontLinks.size > 0) })
   const report = sortReport(built.report)
   files.push({ path: 'export-report.json', content: `${JSON.stringify(report, null, 2)}\n` })
   files.sort((a, b) => byText(a.path, b.path))

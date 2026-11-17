@@ -1,3 +1,6 @@
+import { selectAll } from 'css-select'
+import { parse } from 'parse5'
+import { adapter } from 'parse5-htmlparser2-tree-adapter'
 import { describe, expect, it } from 'vitest'
 import { renderInstanceHtml } from '../server/componentEngine.ts'
 import { buildReactExport, type ReactExportInput, type ReactExportResult } from '../server/reactExport/index.ts'
@@ -715,5 +718,138 @@ describe('review fixes', () => {
     expect(
       fileOf(callIt(mappedTo('Btn', { importFrom: 'acme-ui', exportName: 'Button' })), 'src/pages/Home.tsx'),
     ).toContain('from "acme-ui"')
+  })
+
+  it('keeps the html ancestor of a dark theme rule and matches the page it styles', () => {
+    const css = [
+      'html[data-doop-theme=dark] .x { color: white }',
+      '[data-doop-theme=dark] body { background: black }',
+      'html.dark body .x { color: red }',
+      'body.dark .x { color: blue }',
+      'html > body > .x { margin: 0 }',
+      'body:not(.a) .x { padding: 0 }',
+    ].join('\n')
+    const out = exportOf([], frame('<p class="x">x</p>', `<style>${css}</style>`))
+    const sheet = fileOf(out, 'src/pages/Home.css')
+    expect(sheet).toContain('html[data-doop-theme=dark] .page-Home .x')
+    expect(sheet).toContain('[data-doop-theme=dark] .page-Home')
+    expect(sheet).toContain('html.dark .page-Home .x')
+    expect(sheet).toContain('.page-Home.dark .x')
+    expect(sheet).toContain('html > .page-Home > .x')
+    expect(sheet).toContain('.page-Home:not(.a) .x')
+    expect(sheet).not.toMatch(/^[^\n]*\bbody\b[^\n]*\{/m)
+    // the app's DOM: the theme on <html>, the page's root inside the app's body
+    const dom = parse(
+      '<!doctype html><html data-doop-theme="dark" class="dark"><body><div class="page-Home dark"><p class="x">x</p></div></body></html>',
+      { treeAdapter: adapter },
+    )
+    const matches = (selector: string) => selectAll(selector, dom as never).length
+    expect(matches('html[data-doop-theme=dark] .page-Home .x')).toBe(1)
+    expect(matches('[data-doop-theme=dark] .page-Home')).toBe(1)
+    expect(matches('html.dark .page-Home .x')).toBe(1)
+    expect(matches('.page-Home.dark .x')).toBe(1)
+    expect(fileOf(out, 'README.md')).toContain('data-doop-theme="dark"')
+  })
+
+  it('turns a Google Fonts stylesheet link into src/fonts.css instead of dropping it', () => {
+    const link =
+      '<link rel="stylesheet" data-doop-webfonts href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;display=swap">'
+    const font =
+      '<style data-doop-fonts>@font-face{font-family:"Brand";src:url(/a/brand.woff2) format("woff2")}</style>'
+    const evil = '<link rel="stylesheet" href="https://evil.example/x.css">'
+    for (const styling of ['modules', 'tailwind'] as const) {
+      const out = exportOf([], frame('<p>x</p>', `${link}${font}${evil}`), { styling })
+      const fonts = fileOf(out, 'src/fonts.css')
+      expect(fonts).toBe('@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap");\n')
+      expect(fileOf(out, 'src/pages/Home.tsx')).toContain("import '../fonts.css'")
+      expect(fileOf(out, 'src/pages/Home.css')).toContain('url("https://doop.example/a/brand.woff2")')
+      expect(fileOf(out, 'README.md')).toContain('src/fonts.css')
+      const details = out.report.issues.map((issue) => issue.detail).join('\n')
+      expect(details).not.toContain('googleapis')
+      expect(details).toContain('evil.example')
+    }
+    const none = exportOf([], frame('<p>x</p>'))
+    expect(none.files.some((file) => file.path === 'src/fonts.css')).toBe(false)
+  })
+
+  it('does not follow a link that is not Google Fonts', () => {
+    for (const href of [
+      'http://fonts.googleapis.com/css2?family=X',
+      'https://fonts.googleapis.com.evil.example/css2',
+      'https://user@fonts.googleapis.com/css2',
+      'https://fonts.googleapis.com/other',
+      'javascript:alert(1)',
+    ]) {
+      const out = exportOf([], frame('<p>x</p>', `<link rel="stylesheet" href="${href}">`))
+      expect(out.files.some((file) => file.path === 'src/fonts.css')).toBe(false)
+    }
+    const quote = exportOf(
+      [],
+      frame('<p>x</p>', '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=A&quot;);body{x:y}">'),
+    )
+    expect(fileOf(quote, 'src/fonts.css')).toContain('%22')
+  })
+
+  it('stops two templates that use each other from rendering forever', async () => {
+    const k1 = def('K1', '<div data-doop-part="r">k1<doop-use component="c-k2" data-doop-part="u"></doop-use></div>')
+    const k2 = def('K2', '<div data-doop-part="r">k2<doop-use component="c-k1" data-doop-part="u"></doop-use></div>')
+    const out = exportOf([k1, k2], [], { componentIds: [k1.id, k2.id] })
+    const dropped = out.report.issues.filter((issue) => issue.detail.includes('never stop'))
+    expect(dropped).toHaveLength(1)
+    const project = writeProject(out.files)
+    try {
+      expect(typecheck(project)).toEqual([])
+      const rendered = await renderAll(project, {
+        k1: { from: './src/components/K1', name: 'K1' },
+        k2: { from: './src/components/K2', name: 'K2' },
+      })
+      expect(rendered.k1).toContain('k1')
+      expect(rendered.k2).toContain('k2')
+    } finally {
+      project.cleanup()
+    }
+    const three = [
+      def('A', '<div data-doop-part="r"><doop-use component="c-b" data-doop-part="u"></doop-use></div>'),
+      def('B', '<div data-doop-part="r"><doop-use component="c-c" data-doop-part="u"></doop-use></div>'),
+      def('C', '<div data-doop-part="r"><doop-use component="c-a" data-doop-part="u"></doop-use></div>'),
+    ]
+    expect(() => exportOf(three, [], { componentIds: three.map((entry) => entry.id) })).not.toThrow()
+  })
+
+  it('renames a class called __proto__ in the CSS and the markup alike', () => {
+    const odd = def('Odd', '<div class="__proto__ ok" data-doop-part="r"></div>', {
+      rawCss: '.__proto__ { color: red } .ok { color: blue }',
+    })
+    for (const styling of ['modules', 'tailwind'] as const) {
+      const out = exportOf([odd], [], { styling, componentIds: [odd.id] })
+      const tsx = componentOf(out, 'Odd')
+      expect(tsx).not.toContain('__proto__')
+      const css = out.files
+        .filter((file) => file.path.endsWith('.css'))
+        .map((file) => file.content)
+        .join('\n')
+      expect(css).not.toContain('__proto__')
+      if (styling === 'modules') {
+        expect(css).toContain('.doop-proto')
+        expect(tsx).toContain('doop-proto')
+      }
+    }
+    const pageOut = exportOf([], frame('<p class="__proto__">x</p>', '<style>.__proto__ { color: red }</style>'))
+    expect(fileOf(pageOut, 'src/pages/Home.tsx')).not.toContain('__proto__')
+    expect(fileOf(pageOut, 'src/pages/Home.css')).toContain('.doop-proto')
+    expect(fileOf(pageOut, 'src/pages/Home.tsx')).toContain('doop-proto')
+  })
+
+  it('accepts an @/ or ~/ alias and nothing that climbs or doubles a slash', () => {
+    for (const importFrom of ['@/components/ui/button', '~/ui/Button_v2']) {
+      const out = callIt(mappedTo('Btn', { importFrom, exportName: 'Button' }))
+      expect(fileOf(out, 'src/pages/Home.tsx')).toContain(`from "${importFrom}"`)
+      expect(out.files.some((file) => file.path === 'src/components/Btn.tsx')).toBe(false)
+    }
+    for (const importFrom of ['@/../x', '@//x', '~/a//b', '@/a b', '@/', '~/../../etc', '@/a/./b']) {
+      const out = callIt(mappedTo('Btn', { importFrom, exportName: 'Button' }))
+      expect(fileOf(out, 'src/pages/Home.tsx')).not.toContain(importFrom)
+      expect(out.files.some((file) => file.path === 'src/components/Btn.tsx')).toBe(true)
+    }
   })
 })
