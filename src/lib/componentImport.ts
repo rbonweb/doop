@@ -33,6 +33,8 @@ export type StorybookEvent =
 export interface StorybookImportInput {
   url: string
   package?: string
+  /** only components whose Storybook title starts with one of these (the server takes at most 50) */
+  include?: string[]
   dryRun?: boolean
 }
 
@@ -111,7 +113,12 @@ export async function streamStorybookImport(
   const res = await fetch(`/api/canvases/${canvasId}/import/storybook`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: input.url, package: input.package || undefined, dryRun: input.dryRun || undefined }),
+    body: JSON.stringify({
+      url: input.url,
+      package: input.package || undefined,
+      include: input.include?.length ? input.include : undefined,
+      dryRun: input.dryRun || undefined,
+    }),
     signal,
   })
   if (!res.ok) throw new ApiError(res.status, await res.text())

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '@/lib/api'
 import {
   streamStorybookImport,
@@ -14,14 +14,19 @@ import { Badge } from './ui/badge'
 import { AppIcon } from './ui/brand-mark'
 import { Button } from './ui/button'
 import { Callout } from './ui/callout'
+import { Checkbox } from './ui/checkbox'
 import { Field } from './ui/field'
 import { CheckIcon } from './ui/icons'
 import { Input } from './ui/input'
 import { Note } from './ui/note'
 import { Progress } from './ui/progress'
+import { SelectionBar, SelectionBarAction } from './ui/selection-bar'
 
 /** Names listed before "+N more", so a 60-component Storybook still fits the modal. */
 const NAMES_SHOWN = 8
+
+/** The most titles the server takes in one `include`. */
+const MAX_INCLUDE = 50
 
 export type StorybookPhase =
   | { kind: 'idle'; cancelled?: boolean }
@@ -37,6 +42,25 @@ const isAbort = (e: unknown) => e instanceof DOMException && e.name === 'AbortEr
 function normalizeUrl(raw: string): string {
   const clean = raw.trim()
   return /^https?:\/\//i.test(clean) ? clean : `https://${clean}`
+}
+
+/** The Storybook titles of a plan, one each, or null when a component does not carry one (it cannot be narrowed). */
+function planTitles(plan: PlannedComponent[]): string[] | null {
+  if (plan.length < 2 || plan.some((c) => !c.group)) return null
+  return [...new Set(plan.map((c) => c.group as string))]
+}
+
+/** One height for every state, so the modal does not re-centre as the import moves along. */
+function Screen({ header, footer, children }: { header: ReactNode; footer: ReactNode; children?: ReactNode }) {
+  return (
+    <div className="flex min-h-[440px] flex-col" data-slot="import-screen">
+      <div className="flex-1">
+        {header}
+        {children}
+      </div>
+      {footer}
+    </div>
+  )
 }
 
 function NameList({ names, label }: { names: string[]; label: string }) {
@@ -61,8 +85,9 @@ function NameList({ names, label }: { names: string[]; label: string }) {
 
 /**
  * The picker's Storybook screen: an address (and the package the components come from), a dry run that
- * lists what would be created, updated and skipped, then the import with its progress, and the result.
- * A Storybook that needs a login is refused, and the refusal offers the command-line card.
+ * lists what would be created, updated and skipped (and lets a big plan be narrowed), then the import with
+ * its progress, and the result. A Storybook that needs a login is refused, and the refusal offers the
+ * command-line card.
  */
 export function StorybookImportSection({
   canvasId,
@@ -86,6 +111,10 @@ export function StorybookImportSection({
   const [url, setUrl] = useState(initialUrl)
   const [pkg, setPkg] = useState('')
   const [phase, setPhase] = useState<StorybookPhase>(initialPhase)
+  /* the Storybook titles ticked in the preview's checklist; all of them until the person narrows it */
+  const [picked, setPicked] = useState<Set<string>>(
+    () => new Set(initialPhase.kind === 'preview' ? (planTitles(initialPhase.plan) ?? []) : []),
+  )
   const controller = useRef<AbortController | null>(null)
 
   /* closing the modal mid-import closes the request, which stops the import on the server */
@@ -98,7 +127,7 @@ export function StorybookImportSection({
     return { kind: 'refused', code, message }
   }
 
-  async function run(dryRun: boolean) {
+  async function run(dryRun: boolean, include?: string[]) {
     if (busy || !ready) return
     const abort = new AbortController()
     controller.current = abort
@@ -115,13 +144,15 @@ export function StorybookImportSection({
     try {
       const last = await streamStorybookImport(
         canvasId,
-        { url: normalizeUrl(url), package: pkg.trim(), dryRun },
+        { url: normalizeUrl(url), package: pkg.trim(), include, dryRun },
         abort.signal,
         onEvent,
       )
       if (last?.type === 'result') {
-        if (dryRun) setPhase({ kind: 'preview', plan, result: last.result })
-        else {
+        if (dryRun) {
+          setPicked(new Set(planTitles(plan) ?? []))
+          setPhase({ kind: 'preview', plan, result: last.result })
+        } else {
           setPhase({ kind: 'done', result: { ...last.result, issues: last.issues ?? last.result.issues } })
           posthog.capture('storybook_imported', {
             created: last.result.created.length,
@@ -140,17 +171,23 @@ export function StorybookImportSection({
     }
   }
 
-  const refusedText = (code: StorybookErrorCode | 'generic', message: string) => {
-    const text: Record<StorybookErrorCode | 'generic', string> = {
-      private: t('componentImport.errPrivate'),
-      unreachable: t('componentImport.errUnreachable'),
-      too_many: t('componentImport.errTooMany'),
-      busy: t('componentImport.errBusy'),
-      invalid: t('componentImport.errInvalid'),
-      generic: message || t('componentImport.errGeneric'),
+  /* fixed copy where Doop knows the cause; otherwise the server's own words, which are already for people */
+  function refusedText(code: StorybookErrorCode | 'generic', message: string) {
+    switch (code) {
+      case 'private':
+        return t('componentImport.errPrivate')
+      case 'unreachable':
+        return t('componentImport.errUnreachable')
+      case 'too_many':
+        return t('componentImport.errTooMany')
+      case 'busy':
+        return t('componentImport.errBusy')
+      default:
+        return message || t('componentImport.errGeneric')
     }
-    return text[code]
   }
+  const refusedHeading = (code: StorybookErrorCode | 'generic') =>
+    code === 'invalid' || code === 'generic' ? t('componentImport.failedHeading') : t('componentImport.refusedHeading')
 
   const header = (
     <ImportStepHeader
@@ -163,8 +200,16 @@ export function StorybookImportSection({
   if (phase.kind === 'running') {
     const known = phase.total > 0
     return (
-      <>
-        {header}
+      <Screen
+        header={header}
+        footer={
+          <ImportStepFooter onBack={onBack} backDisabled>
+            <Button variant="ghost" onClick={() => controller.current?.abort()}>
+              {t('componentImport.cancel')}
+            </Button>
+          </ImportStepFooter>
+        }
+      >
         <div className="mt-[22px] flex flex-col gap-3" role="status" aria-live="polite" data-slot="storybook-progress">
           <div className="flex items-baseline justify-between gap-3 text-body">
             <span className="font-medium text-ink">
@@ -180,17 +225,13 @@ export function StorybookImportSection({
           </div>
           <Progress
             aria-label={t('componentImport.progressAria')}
+            indeterminate={!known}
             value={known ? phase.rendered : 0}
             max={known ? phase.total : 1}
           />
           <Note>{t('componentImport.runningNote')}</Note>
         </div>
-        <ImportStepFooter onBack={onBack} backDisabled>
-          <Button variant="ghost" onClick={() => controller.current?.abort()}>
-            {t('componentImport.cancel')}
-          </Button>
-        </ImportStepFooter>
-      </>
+      </Screen>
     )
   }
 
@@ -210,8 +251,19 @@ export function StorybookImportSection({
       ),
     ]
     return (
-      <>
-        {header}
+      <Screen
+        header={header}
+        footer={
+          <ImportStepFooter onBack={onBack}>
+            <Button variant="ghost" onClick={() => setPhase({ kind: 'idle' })}>
+              {t('componentImport.importAnother')}
+            </Button>
+            <Button variant="primary" onClick={() => onOpenPage(result.pageId)}>
+              {t('componentImport.openPage')}
+            </Button>
+          </ImportStepFooter>
+        }
+      >
         <div className="mt-[22px] flex flex-col gap-3.5" data-slot="storybook-done">
           <div className="flex items-center gap-2 text-copy font-medium text-ink">
             <CheckIcon size={16} className="text-success-ink" />
@@ -236,15 +288,7 @@ export function StorybookImportSection({
             </div>
           )}
         </div>
-        <ImportStepFooter onBack={onBack}>
-          <Button variant="ghost" onClick={() => setPhase({ kind: 'idle' })}>
-            {t('componentImport.importAnother')}
-          </Button>
-          <Button variant="primary" onClick={() => onOpenPage(result.pageId)}>
-            {t('componentImport.openPage')}
-          </Button>
-        </ImportStepFooter>
-      </>
+      </Screen>
     )
   }
 
@@ -252,9 +296,32 @@ export function StorybookImportSection({
     const { result, plan } = phase
     const empty = !result.created.length && !result.updated.length
     const renders = plan.reduce((sum, c) => sum + c.renders, 0)
+    const titles = planTitles(plan)
+    const everything = !titles || picked.size === titles.length
+    const tooMany = !everything && picked.size > MAX_INCLUDE
+    const nothingPicked = !!titles && picked.size === 0
+    const toggle = (title: string) =>
+      setPicked((current) => {
+        const next = new Set(current)
+        if (next.has(title)) next.delete(title)
+        else next.add(title)
+        return next
+      })
     return (
-      <>
-        {header}
+      <Screen
+        header={header}
+        footer={
+          <ImportStepFooter note={t('componentImport.storybookNote')} onBack={() => setPhase({ kind: 'idle' })}>
+            <Button
+              variant="primary"
+              disabled={empty || nothingPicked || tooMany}
+              onClick={() => void run(false, everything ? undefined : [...picked])}
+            >
+              {t('componentImport.import')}
+            </Button>
+          </ImportStepFooter>
+        }
+      >
         <div className="mt-[22px] flex flex-col gap-3.5" data-slot="storybook-preview">
           <div className="flex items-baseline justify-between gap-3">
             <span className="text-copy font-medium text-ink">{t('componentImport.previewHeading')}</span>
@@ -281,19 +348,61 @@ export function StorybookImportSection({
               </ul>
             </div>
           )}
+          {titles && (
+            <div data-slot="storybook-choose">
+              <SelectionBar
+                count={picked.size}
+                total={titles.length}
+                tone={tooMany ? 'error' : 'default'}
+                note={tooMany ? ` ${t('componentImport.chooseAtMost', { count: MAX_INCLUDE })}` : undefined}
+                actions={
+                  <>
+                    <SelectionBarAction onClick={() => setPicked(new Set(titles))}>
+                      {t('panels.exportSelectAll')}
+                    </SelectionBarAction>
+                    <SelectionBarAction onClick={() => setPicked(new Set())}>
+                      {t('panels.exportClear')}
+                    </SelectionBarAction>
+                  </>
+                }
+              />
+              <div
+                role="group"
+                aria-label={t('componentImport.chooseAria')}
+                className="max-h-[168px] overflow-y-auto rounded-panel bg-surface shadow-ring"
+              >
+                {titles.map((title) => (
+                  <label
+                    key={title}
+                    className="relative flex min-h-9 cursor-pointer items-center gap-3 border-b border-line-soft px-3.5 py-1.5 transition-colors last:border-b-0 hover:bg-sub"
+                  >
+                    <Checkbox checked={picked.has(title)} onChange={() => toggle(title)} />
+                    <span className="min-w-0 truncate text-body text-ink">{title}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
-        <ImportStepFooter note={t('componentImport.storybookNote')} onBack={() => setPhase({ kind: 'idle' })}>
-          <Button variant="primary" disabled={empty} onClick={() => void run(false)}>
-            {t('componentImport.import')}
-          </Button>
-        </ImportStepFooter>
-      </>
+      </Screen>
     )
   }
 
   return (
-    <>
-      {header}
+    <Screen
+      header={header}
+      footer={
+        <ImportStepFooter note={t('componentImport.storybookNote')} onBack={onBack} backDisabled={busy}>
+          <Button variant="primary" disabled={busy || !ready} onClick={() => void run(true)}>
+            {phase.kind === 'reading'
+              ? t('componentImport.reading')
+              : phase.kind === 'refused'
+                ? t('componentImport.tryAgain')
+                : t('componentImport.preview')}
+          </Button>
+        </ImportStepFooter>
+      }
+    >
       <Field className="mt-[22px]" label={t('componentImport.urlLabel')} labelVariant="form" htmlFor="storybook-url">
         <Input
           id="storybook-url"
@@ -343,7 +452,7 @@ export function StorybookImportSection({
       </Field>
       {phase.kind === 'refused' && (
         <Callout tone="error" className="mt-4 flex flex-col items-start gap-2" role="alert">
-          <b className="font-medium">{t('componentImport.refusedHeading')}</b>
+          <b className="font-medium">{refusedHeading(phase.code)}</b>
           <span>{refusedText(phase.code, phase.message)}</span>
           {(phase.code === 'private' || phase.code === 'too_many') && (
             <Button size="sm" onClick={onUseCli}>
@@ -353,19 +462,10 @@ export function StorybookImportSection({
         </Callout>
       )}
       {phase.kind === 'idle' && phase.cancelled && (
-        <Note className="mt-3 block" size="sm">
+        <Callout className="mt-4" role="status" data-slot="storybook-cancelled">
           {t('componentImport.cancelled')}
-        </Note>
+        </Callout>
       )}
-      <ImportStepFooter note={t('componentImport.storybookNote')} onBack={onBack} backDisabled={busy}>
-        <Button variant="primary" disabled={busy || !ready} onClick={() => void run(true)}>
-          {phase.kind === 'reading'
-            ? t('componentImport.reading')
-            : phase.kind === 'refused'
-              ? t('componentImport.tryAgain')
-              : t('componentImport.preview')}
-        </Button>
-      </ImportStepFooter>
-    </>
+    </Screen>
   )
 }
