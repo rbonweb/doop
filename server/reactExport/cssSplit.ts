@@ -82,17 +82,91 @@ function indent(text: string): string {
 
 /* ---------- reading ---------- */
 
-function stringEnd(text: string, start: number): number {
+/** Reads a string token the way CSS does: it ends at its closing quote, or, unclosed, at the first newline or the end of the text. */
+function readString(text: string, start: number): { end: number; closed: boolean } {
   const quote = text[start]
   let i = start + 1
   while (i < text.length) {
     const char = text[i]
     if (char === '\\') i += 2
-    else if (char === quote) return i + 1
-    else if (char === '\n') return i
+    else if (char === quote) return { end: i + 1, closed: true }
+    else if (char === '\n') return { end: i, closed: false }
     else i++
   }
-  return text.length
+  return { end: text.length, closed: false }
+}
+
+function stringEnd(text: string, start: number): number {
+  return readString(text, start).end
+}
+
+const IDENT_CHAR = /[\w\u0080-\uffff-]/
+const HEX = /[0-9a-fA-F]/
+const WHITESPACE = /[ \t\n\r\f]/
+
+interface UrlToken {
+  /** the index just past the closing `)` */
+  end: number
+  /** the decoded address, or null for a bad-url token */
+  arg: string | null
+}
+
+/** A `url(` token with an unquoted argument that starts at `i`, read the way CSS Syntax does, so that this reader and a browser agree on where it ends: the argument may not hold a quote, `(`, inner whitespace, a non-printable or a backslash-newline, and a bad one runs on to the first `)`. Null when no unquoted `url(` starts here; `url("…")` is an ordinary function whose argument is a string. */
+function urlTokenAt(text: string, i: number): UrlToken | null {
+  const first = text[i]
+  if (first !== 'u' && first !== 'U' && first !== '\\') return null
+  const before = text[i - 1]
+  if (before !== undefined && IDENT_CHAR.test(before)) return null
+  IDENT.lastIndex = i
+  const ident = IDENT.exec(text)?.[0]
+  if (!ident || text[i + ident.length] !== '(' || decodeCssEscapes(ident).toLowerCase() !== 'url') return null
+  let j = i + ident.length + 1
+  while (j < text.length && WHITESPACE.test(text[j]!)) j++
+  if (text[j] === '"' || text[j] === "'") return null
+  const start = j
+  let contentEnd = -1
+  let bad = false
+  while (j < text.length) {
+    const char = text[j]!
+    const code = char.charCodeAt(0)
+    if (char === ')') {
+      return { end: j + 1, arg: bad ? null : decodeCssEscapes(text.slice(start, contentEnd === -1 ? j : contentEnd)) }
+    }
+    if (WHITESPACE.test(char)) {
+      if (contentEnd === -1) contentEnd = j
+      while (j < text.length && WHITESPACE.test(text[j]!)) j++
+      if (text[j] !== ')') bad = true
+      continue
+    }
+    if (char === '\\') {
+      const next = text[j + 1]
+      if (next === undefined || next === '\n' || next === '\r' || next === '\f') bad = true
+      j++
+      if (next !== undefined && HEX.test(next)) {
+        let digits = 0
+        while (digits < 6 && j < text.length && HEX.test(text[j]!)) {
+          j++
+          digits++
+        }
+        if (j < text.length && WHITESPACE.test(text[j]!)) j++
+      } else j++
+      continue
+    }
+    if (
+      char === '"' ||
+      char === "'" ||
+      char === '(' ||
+      code <= 8 ||
+      code === 0x0b ||
+      (code >= 0x0e && code <= 0x1f) ||
+      code === 0x7f
+    ) {
+      bad = true
+    }
+    if (contentEnd !== -1) bad = true
+    j++
+  }
+  return { end: text.length, arg: null }
 }
 
 function stripComments(css: string): string {
@@ -106,6 +180,10 @@ function stripComments(css: string): string {
       out += ' '
     } else if (char === '"' || char === "'") {
       const end = stringEnd(css, i)
+      out += css.slice(i, end)
+      i = end
+    } else if (urlTokenAt(css, i)) {
+      const end = urlTokenAt(css, i)!.end
       out += css.slice(i, end)
       i = end
     } else if (char === '\\') {
@@ -128,6 +206,11 @@ function blockEnd(text: string, from: number): number {
     const char = text[i]!
     if (char === '"' || char === "'") {
       i = stringEnd(text, i)
+      continue
+    }
+    const url = urlTokenAt(text, i)
+    if (url) {
+      i = url.end
       continue
     }
     if (char === '\\') i += 2
@@ -156,6 +239,11 @@ function parseItems(text: string): Item[] {
     const char = text[i]!
     if (char === '"' || char === "'") {
       i = stringEnd(text, i)
+      continue
+    }
+    const url = urlTokenAt(text, i)
+    if (url) {
+      i = url.end
       continue
     }
     if (char === '\\') {
@@ -227,8 +315,8 @@ function clip(text: string): string {
   return flat.length > 80 ? `${flat.slice(0, 77)}...` : flat
 }
 
-/** True when every quote is closed and every `(` and `[` is matched in order, so the text can be written into a stylesheet without swallowing what follows. A `{` or `}` is refused; a `;` too unless `semicolons` allows it (a declaration value may hold one inside `url(data:…;base64,…)`). */
-function balanced(text: string, semicolons: boolean): boolean {
+/** True when every quote is closed and every `(` and `[` is matched in order, so a selector or at-rule prelude can be written into a stylesheet without swallowing what follows. A `{`, `}` or `;` is refused. */
+function balanced(text: string): boolean {
   const stack: string[] = []
   for (let i = 0; i < text.length; i++) {
     const char = text[i]!
@@ -236,41 +324,101 @@ function balanced(text: string, semicolons: boolean): boolean {
       if (i + 1 >= text.length) return false
       i++
     } else if (char === '"' || char === "'") {
-      let end = i + 1
-      while (end < text.length && text[end] !== char && text[end] !== '\n') end += text[end] === '\\' ? 2 : 1
-      if (text[end] !== char) return false
-      i = end
+      const string = readString(text, i)
+      if (!string.closed) return false
+      i = string.end - 1
     } else if (char === '(' || char === '[') stack.push(char === '(' ? ')' : ']')
     else if (char === ')' || char === ']') {
       if (stack.pop() !== char) return false
-    } else if (char === '{' || char === '}' || (char === ';' && !semicolons)) return false
+    } else if (char === '{' || char === '}' || char === ';') return false
   }
   return stack.length === 0
 }
 
-/* ---------- declarations ---------- */
-
-/** The URL inside every `url(...)` of an already decoded value. */
-function urlArguments(decoded: string): string[] {
-  const found: string[] = []
-  const pattern = /url\s*\(/gi
-  for (let match = pattern.exec(decoded); match; match = pattern.exec(decoded)) {
-    let depth = 1
-    let i = match.index + match[0].length
-    const start = i
-    while (i < decoded.length && depth > 0) {
-      const char = decoded[i]!
-      if (char === '(') depth++
-      else if (char === ')') depth--
-      i++
-    }
-    found.push(decoded.slice(start, depth === 0 ? i - 1 : i).replace(/^[\s"']+/, ''))
-  }
-  return found
+function hasUrlFunction(text: string): boolean {
+  return /url\s*\(/i.test(decodeCssEscapes(text))
 }
 
-function quotedStrings(decoded: string): string[] {
-  return [...decoded.matchAll(/"([^"\n]*)"|'([^'\n]*)'/g)].map((match) => match[1] ?? match[2] ?? '')
+/* ---------- declarations ---------- */
+
+/** Functions whose string arguments are addresses, like `url()`'s. */
+const IMAGE_FUNCTIONS = ['image', 'image-set', 'cross-fade', 'element', 'src']
+
+interface ValueTokens {
+  /** false when the value could be read differently by a browser, a bundler or a CSS parser: an unclosed quote or bracket, a bad-url, or a `{`, `}`, `;` or `@` outside a string or url token */
+  ok: boolean
+  /** the decoded address of every `url()` */
+  urls: string[]
+  /** the decoded content of every string */
+  strings: string[]
+  /** the lower-case names of the functions called, vendor prefix removed */
+  functions: Set<string>
+  /** a `:` outside every bracket, string and url: no standard property value has one, and a CSS parser reads it as the start of the next declaration */
+  colon: boolean
+}
+
+/** Reads a declaration value as CSS tokens: strings, unquoted `url()` tokens, identifiers and functions, and brackets. */
+function tokenizeValue(value: string): ValueTokens {
+  const result: ValueTokens = { ok: true, urls: [], strings: [], functions: new Set(), colon: false }
+  const stack: string[] = []
+  let urlString = false
+  let i = 0
+  while (i < value.length) {
+    const char = value[i]!
+    const url = urlTokenAt(value, i)
+    if (url) {
+      if (url.arg === null) result.ok = false
+      else result.urls.push(url.arg)
+      urlString = false
+      i = url.end
+      continue
+    }
+    if (char === '"' || char === "'") {
+      const string = readString(value, i)
+      if (!string.closed) result.ok = false
+      const content = decodeCssEscapes(value.slice(i + 1, string.closed ? string.end - 1 : string.end))
+      result.strings.push(content)
+      if (urlString) result.urls.push(content)
+      urlString = false
+      i = string.end
+      continue
+    }
+    if (WHITESPACE.test(char)) {
+      i++
+      continue
+    }
+    urlString = false
+    if (IDENT_CHAR.test(char) || (char === '\\' && value[i + 1] !== undefined && value[i + 1] !== '\n')) {
+      if (value[i - 1] !== undefined && IDENT_CHAR.test(value[i - 1]!)) {
+        i++
+        continue
+      }
+      IDENT.lastIndex = i
+      const ident = IDENT.exec(value)?.[0] ?? char
+      i += ident.length
+      if (value[i] === '(') {
+        const name = decodeCssEscapes(ident)
+          .toLowerCase()
+          .replace(/^-[a-z]+-/, '')
+        result.functions.add(name)
+        if (name === 'url') {
+          stack.push(')')
+          i++
+          urlString = true
+        }
+      }
+      continue
+    }
+    if (char === '\\') result.ok = false
+    else if (char === '(' || char === '[') stack.push(char === '(' ? ')' : ']')
+    else if (char === ')' || char === ']') {
+      if (stack.pop() !== char) result.ok = false
+    } else if (char === '{' || char === '}' || char === ';' || char === '@') result.ok = false
+    else if (char === ':' && stack.length === 0) result.colon = true
+    i++
+  }
+  if (stack.length > 0) result.ok = false
+  return result
 }
 
 /** True for a CSS URL that is safe to leave in an exported stylesheet: absolute `http(s)`, protocol-relative, root-relative without a `..` segment, a fragment, or a raster or SVG data image. Anything else (a relative path, `~pkg`, `file:`) is something a bundler would resolve to a file on the exporter's machine, so it is refused. */
@@ -279,9 +427,9 @@ function isKeptUrl(raw: string): boolean {
     .filter((char) => char.charCodeAt(0) > 0x20 && char.charCodeAt(0) !== 0x7f)
     .join('')
   if (!value || isUnsafeUrl(value)) return false
-  if (/^https?:\/\//i.test(value) || value.startsWith('//') || value.startsWith('#')) return true
+  if (/^https?:\/\/(?!\/)/i.test(value) || /^\/\/(?!\/)/.test(value) || value.startsWith('#')) return true
   if (/^data:image\//i.test(value)) return true
-  if (!value.startsWith('/') || value.includes('\\')) return false
+  if (!value.startsWith('/') || value.startsWith('//') || value.includes('\\')) return false
   let path = value
   try {
     path = decodeURIComponent(value)
@@ -294,11 +442,16 @@ function isKeptUrl(raw: string): boolean {
 /** Why a declaration cannot be kept, or null when it is safe. */
 function declarationProblem(name: string, value: string): string | null {
   if (BLOCKED_PROPERTIES.has(decodeCssEscapes(name).trim().toLowerCase())) return `${name.trim()} is not allowed`
-  const decoded = decodeCssEscapes(value)
-  if (/expression\s*\(/i.test(decoded)) return 'expression() is not allowed'
-  if (!urlArguments(decoded).every(isKeptUrl)) return 'url() points at code or at a local file'
-  if (/image-set\s*\(|\bsrc\s*\(/i.test(decoded) && !quotedStrings(decoded).every(isKeptUrl))
+  const tokens = tokenizeValue(value)
+  if (!tokens.ok) return 'unbalanced brackets or quotes, a bad url() or a stray { } ; @'
+  if (tokens.colon && !name.trim().startsWith('--')) return 'a stray colon in the value'
+  if (tokens.functions.has('expression') || /expression\s*\(/i.test(decodeCssEscapes(value))) {
+    return 'expression() is not allowed'
+  }
+  if (!tokens.urls.every(isKeptUrl)) return 'url() points at code or at a local file'
+  if (IMAGE_FUNCTIONS.some((fn) => tokens.functions.has(fn)) && !tokens.strings.every(isKeptUrl)) {
     return 'image URL points at code or at a local file'
+  }
   return null
 }
 
@@ -318,7 +471,7 @@ function emitBody(body: string, context: Context, owner: string): string[] {
         })
         continue
       }
-      const problem = balanced(value, true) ? declarationProblem(name, value) : 'unbalanced brackets or quotes'
+      const problem = declarationProblem(name, value)
       if (problem) {
         context.issues.push({
           kind: 'css',
@@ -385,7 +538,8 @@ function analyzeSelector(selector: string): SelectorInfo {
 /** Why a selector cannot be written into a module: it escapes the module's scope, is not well formed, or has unbalanced brackets or quotes. Null when it is fine. */
 function selectorProblem(selector: string): string | null {
   if (!selector) return 'empty selector'
-  if (!balanced(selector, false)) return 'unbalanced brackets or quotes'
+  if (!balanced(selector)) return 'unbalanced brackets or quotes'
+  if (hasUrlFunction(selector)) return 'url() in a selector'
   if (SCOPE_ESCAPE.test(decodeCssEscapes(selector))) return ':global and :local escape module scoping'
   let depth = 0
   let combinator = false
@@ -427,7 +581,10 @@ function selectorProblem(selector: string): string | null {
 }
 
 function nestedPreludeProblem(prelude: string): string | null {
-  if (prelude.startsWith('@')) return balanced(prelude, false) ? null : 'unbalanced brackets or quotes'
+  if (prelude.startsWith('@')) {
+    if (hasUrlFunction(prelude)) return 'url() in an at-rule prelude'
+    return balanced(prelude) ? null : 'unbalanced brackets or quotes'
+  }
   if (prelude.startsWith('--')) return 'a custom property holding a block is not supported'
   return splitTopLevel(prelude, ',').map(selectorProblem).find(Boolean) ?? (prelude ? null : 'empty selector')
 }
@@ -472,7 +629,7 @@ function processStatement(prelude: string, context: Context, blocks: Blocks): vo
 function processAtRule(item: Item & { body: string }, context: Context, blocks: Blocks): void {
   const prelude = tidy(item.prelude)
   const name = atName(prelude)
-  if (!balanced(prelude, false) || (name === 'keyframes' && !KEYFRAMES_NAME.test(prelude))) {
+  if (!balanced(prelude) || hasUrlFunction(prelude) || (name === 'keyframes' && !KEYFRAMES_NAME.test(prelude))) {
     context.issues.push({ kind: 'css', detail: `dropped at-rule with a malformed prelude "${clip(prelude)}"` })
     return
   }
@@ -501,7 +658,7 @@ function processAtRule(item: Item & { body: string }, context: Context, blocks: 
 
 function processStyleRule(item: Item & { body: string }, context: Context, blocks: Blocks): void {
   const owner = tidy(item.prelude)
-  if (!balanced(owner, false)) {
+  if (!balanced(owner) || hasUrlFunction(owner)) {
     context.issues.push({ kind: 'css', detail: `dropped rule "${clip(owner)}": unbalanced brackets or quotes` })
     return
   }

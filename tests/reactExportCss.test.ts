@@ -378,6 +378,118 @@ describe('splitComponentCss: urls a bundler would resolve', () => {
   })
 })
 
+describe('splitComponentCss: url() read like CSS', () => {
+  const importedAtTopLevel = (sheet: string) => {
+    let found = false
+    postcss.parse(sheet).walkAtRules('import', () => {
+      found = true
+    })
+    return found
+  }
+
+  it('does not let a bad url hide the rules after it', () => {
+    const out = splitComponentCss('.a{b:url(http://x"y)} @import url(https://evil/x.css); .c{d:url(http://z"w)}')
+    expect(() => postcss.parse(out.moduleCss)).not.toThrow()
+    expect(importedAtTopLevel(out.moduleCss)).toBe(false)
+    expect(out.moduleCss).not.toContain('@import')
+    expect(out.moduleCss).not.toContain('evil')
+    expect(out.issues.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('parses the second exact bad input', () => {
+    const out = splitComponentCss(".a{background:url(#..''%2E\"~~)}")
+    expect(() => postcss.parse(out.moduleCss)).not.toThrow()
+    expect(out.moduleCss).toBe('')
+    expect(out.issues).toHaveLength(1)
+  })
+
+  it.each([
+    'url(a"b)',
+    "url(a'b)",
+    'url(a(b)',
+    'url(a b)',
+    'url(a\tb)',
+    'url(a\\\nb)',
+    'url(a\u0001b)',
+    'url(\\75 "x)',
+    '\\75rl(/a/x"y.png)',
+    'URL(/a/x y.png)',
+  ])('drops a bad-url token %j and reads on after its first )', (value) => {
+    const out = splitComponentCss(`.a { top: 0; background: ${value} } .z { left: 1px }`)
+    expect(out.moduleCss, value).toBe('.a {\n  top: 0;\n}\n\n.z {\n  left: 1px;\n}\n')
+    expect(out.issues, value).toHaveLength(1)
+  })
+
+  it('keeps braces, semicolons, quotes and comment markers inside a good url token', () => {
+    const out = splitComponentCss('.a { background: url(/a/x;y}z/*w.png) } .b { top: 0 }')
+    expect(out.issues).toEqual([])
+    expect(out.moduleCss).toContain('url(/a/x;y}z/*w.png)')
+    expect(out.classes).toEqual(['a', 'b'])
+  })
+
+  it('allows whitespace around an unquoted url and escaped characters in it', () => {
+    const out = splitComponentCss('.a { background: url(  /a/x.png  ) } .b { background: url(/a/\\78 .png) }')
+    expect(out.issues).toEqual([])
+    expect(out.classes).toEqual(['a', 'b'])
+  })
+
+  it.each(['b: http://x@import b:', 'b: c@d', 'b: c{d}', 'b: c(d;e)', 'b: red:root', 'b: a :hover'])(
+    'drops the value %j',
+    (declaration) => {
+      const out = splitComponentCss(`.a { top: 0; ${declaration} }`)
+      expect(() => postcss.parse(out.moduleCss)).not.toThrow()
+      expect(out.moduleCss).toBe('.a {\n  top: 0;\n}\n')
+      expect(out.issues.length).toBeGreaterThan(0)
+    },
+  )
+
+  it('keeps a colon inside parens, a string, a url and a custom property', () => {
+    const out = splitComponentCss('.a { --x: a:b; b: f(a:b); content: "a:b"; background: url(http://x.test/a) }')
+    expect(out.issues).toEqual([])
+  })
+
+  it('keeps @, braces and semicolons inside a string', () => {
+    const out = splitComponentCss('.a { content: "a@b {c;d}" }')
+    expect(out.issues).toEqual([])
+    expect(out.moduleCss).toContain('content: "a@b {c;d}";')
+  })
+
+  it.each([
+    'image("../x.png")',
+    'image-set("x.png" 1x)',
+    '-webkit-image-set("../x.png" 1x)',
+    'cross-fade("x.png", "/a/y.png", 50%)',
+    'element("javascript:x")',
+    'IMAGE("./x.png")',
+    '\\69mage("x.png")',
+    'src("x.png")',
+  ])('applies the url rule to the strings of %s', (value) => {
+    const out = splitComponentCss(`.a { top: 0; background: ${value} }`)
+    expect(out.moduleCss, value).toBe('.a {\n  top: 0;\n}\n')
+    expect(out.issues, value).toHaveLength(1)
+  })
+
+  it.each(['image("/a/x.png")', 'cross-fade("/a/x.png", "https://x.test/y.png", 50%)'])('keeps %s', (value) => {
+    expect(splitComponentCss(`.a { background: ${value} }`).issues).toEqual([])
+  })
+
+  it.each(['url(///evil.test/x.png)', 'url("///evil.test/x.png")', 'url(https:///x.png)', 'url(////x.png)'])(
+    'drops %s',
+    (value) => {
+      expect(splitComponentCss(`.a { background: ${value} }`).issues).toHaveLength(1)
+    },
+  )
+
+  it('keeps a protocol-relative url with two slashes', () => {
+    expect(splitComponentCss('.a { background: url(//cdn.test/x.png) }').issues).toEqual([])
+  })
+
+  it('refuses a url() in a selector or an at-rule prelude', () => {
+    const out = splitComponentCss('.a[x=url(y)] { top: 0 } @media url(x) { .b { top: 0 } } .ok { top: 1px }')
+    expect(out.moduleCss).toBe('.ok {\n  top: 1px;\n}\n')
+  })
+})
+
 /** a small seeded generator, so a failure repeats */
 function seeded(seed: number): () => number {
   let state = seed
@@ -458,19 +570,21 @@ const FRAGMENTS = [
 ]
 
 describe('splitComponentCss: output always parses', () => {
-  it('writes a moduleCss and globalCss that postcss reads, for thousands of random inputs', () => {
+  it('writes a moduleCss and globalCss that postcss reads, and holds no @import, for 30,000 random inputs', () => {
     const random = seeded(20240611)
     const failures: string[] = []
-    for (let n = 0; n < 6000; n++) {
+    for (let n = 0; n < 30000; n++) {
       const length = 1 + Math.floor(random() * 28)
       let css = ''
       for (let i = 0; i < length; i++) css += FRAGMENTS[Math.floor(random() * FRAGMENTS.length)]!
       const out = splitComponentCss(css, { rootClass: random() < 0.5 ? 'root' : 'x y' })
       for (const sheet of [out.moduleCss, out.globalCss]) {
         try {
-          postcss.parse(sheet)
-        } catch {
-          failures.push(JSON.stringify(css))
+          postcss.parse(sheet).walkAtRules('import', () => {
+            throw new Error('an @import survived')
+          })
+        } catch (error) {
+          failures.push(`${JSON.stringify(css)} -> ${String(error)}`)
           break
         }
       }
