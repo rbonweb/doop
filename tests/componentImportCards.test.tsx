@@ -745,3 +745,41 @@ it('storybook running: a render that takes a while shows the seconds since the l
   await run.send({ type: 'progress', rendered: 6, total: 17, component: 'Select' })
   expect(dialog.querySelector('[data-slot="storybook-progress"]')?.textContent).not.toContain('Still rendering')
 })
+
+it('storybook done: a renamed component is told in the result, and a note does not repeat the name', async () => {
+  const dialog = await importToResult({
+    ...RESULT,
+    issues: [
+      {
+        component: 'Button',
+        code: 'renamed',
+        message:
+          'a component named “Button” is already on this canvas, so this one was imported as “Button (Primer)” (its code export is still Button)',
+      },
+      { component: 'Button', code: 'argtypes_dropped', message: 'Button: the default story has no controls' },
+    ],
+  })
+  const renamed = dialog.querySelector('[data-slot="storybook-renamed"]')!
+  expect(renamed.textContent).toContain('1 component was renamed')
+  expect(renamed.textContent).toContain(
+    'Button is now “Button (Primer)”: a component named Button was already on this canvas',
+  )
+  const issues = dialog.querySelector('[data-slot="storybook-issues"]')!
+  expect(issues.textContent).not.toContain('renamed')
+  expect(issues.textContent).toContain('Button: the default story has no controls')
+  expect(issues.textContent).not.toContain('Button: Button:')
+})
+
+it('storybook error: needs_worker explains it and offers the command line', async () => {
+  const run = stream()
+  answerWith(() => run.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  await run.send({ type: 'error', code: 'needs_worker', message: 'needs a service worker' })
+  await run.end()
+  expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('service worker')
+  expect(button(dialog, /^Try again$/)).toBeTruthy()
+  await click(button(dialog, /Use the command line instead/))
+  expect(onUseCli).toHaveBeenCalledTimes(1)
+})
