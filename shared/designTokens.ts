@@ -395,6 +395,112 @@ export function tokensTailwind(tokens: readonly DesignToken[], themeOrder: reado
   return blocks.join('\n\n')
 }
 
+/** the canvas's tokens as W3C Design Tokens Community Group JSON (the string-value draft format Style Dictionary 4 and Tokens Studio read) */
+export function tokensDtcg(tokens: readonly DesignToken[], themeOrder: readonly string[] = []): string {
+  if (!tokens.length) return '{}\n'
+  const sorted = sortTokens(tokens)
+  const aliases = new Map(sorted.map((t) => [t.name, `${t.type}.${dtcgKey(t.name)}`]))
+  const toValue = (value: string, type: TokenType): DtcgValue => {
+    const target = aliases.get(aliasOf(value) ?? '')
+    if (target) return `{${target}}`
+    if (type === 'fontFamily') return fontFamilies(value)
+    /* numbers are what Style Dictionary expects for these, so a plain one is not quoted */
+    if (NUMBER_RE.test(value.trim()) && (type === 'opacity' || type === 'lineHeight' || type === 'fontWeight')) {
+      return Number(value)
+    }
+    return value
+  }
+  const themes = allThemes(sorted, themeOrder)
+  const tree: DtcgTree = {}
+  for (const type of TOKEN_TYPES) {
+    const group = sorted.filter((t) => t.type === type)
+    if (!group.length) continue
+    const entries: Record<string, DtcgToken> = {}
+    for (const token of group) {
+      const entry: DtcgToken = { $value: toValue(token.value, type), $type: DTCG_TYPE[type] }
+      if (token.description) entry.$description = token.description
+      const overrides = themes.filter((theme) => token.themes?.[theme] !== undefined)
+      if (overrides.length) {
+        const values: Record<string, DtcgValue> = {}
+        for (const theme of overrides) {
+          const value = token.themes?.[theme]
+          if (value !== undefined) values[theme] = toValue(value, type)
+        }
+        entry.$extensions = { 'design.doop': { themes: values } }
+      }
+      entries[dtcgKey(token.name)] = entry
+    }
+    tree[type] = entries
+  }
+  return `${JSON.stringify(tree, null, 2)}\n`
+}
+
+type DtcgValue = string | number | string[]
+
+interface DtcgToken {
+  $value: DtcgValue
+  $type: string
+  $description?: string
+  $extensions?: { 'design.doop': { themes: Record<string, DtcgValue> } }
+}
+
+type DtcgTree = Partial<Record<TokenType, Record<string, DtcgToken>>>
+
+/** The DTCG `$type` each Doop type exports as. */
+const DTCG_TYPE: Record<TokenType, string> = {
+  color: 'color',
+  opacity: 'number',
+  radius: 'dimension',
+  spacing: 'dimension',
+  container: 'dimension',
+  breakpoint: 'dimension',
+  fontFamily: 'fontFamily',
+  fontWeight: 'fontWeight',
+  fontSize: 'dimension',
+  lineHeight: 'number',
+  letterSpacing: 'dimension',
+}
+
+const NUMBER_RE = /^-?(?:\d+\.?\d*|\.\d+)$/
+
+/** A token name as a DTCG key: no `--`, no group separators, no leading `$`. */
+function dtcgKey(name: string): string {
+  return name.replace(/^--/, '').replace(/[.{}]/g, '-').replace(/^\$/, '')
+}
+
+/** A font-family list split on its top-level commas, with quotes and space stripped. */
+function fontFamilies(value: string): string[] {
+  const names: string[] = []
+  let current = ''
+  let quote = ''
+  let depth = 0
+  for (const char of value) {
+    if (quote) {
+      current += char
+      if (char === quote) quote = ''
+      continue
+    }
+    if (char === '"' || char === "'") quote = char
+    else if (char === '(') depth++
+    else if (char === ')') depth = Math.max(0, depth - 1)
+    else if (char === ',' && depth === 0) {
+      names.push(current)
+      current = ''
+      continue
+    }
+    current += char
+  }
+  names.push(current)
+  return names
+    .map((name) =>
+      name
+        .trim()
+        .replace(/^(['"])(.*)\1$/, '$2')
+        .trim(),
+    )
+    .filter(Boolean)
+}
+
 const TYPE_LABEL: Record<TokenType, string> = {
   color: 'Colour',
   opacity: 'Opacity',
