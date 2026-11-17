@@ -27,6 +27,7 @@ export const actions: Catalog['actions'] = {
   versionHistory: 'Mostrar histórico de versões',
   export: 'Exportar…',
   exportPdf: 'Exportar frames para PDF…',
+  exportReact: 'Exportar para React…',
 
   /* Edit */
   undo: 'Desfazer',

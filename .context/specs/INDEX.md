@@ -12,6 +12,7 @@ lists every file in this folder.
 - [components.md](components.md) - Reusable components: mains, materialized instances, `<doop-use>`,
   props, enum variants, slots, overrides and three-way merge, propagation and sign-off, libraries,
   the MCP and resident tools, and the editor UI.
+- [react-export.md](react-export.md) - Export to React (draft): the safety rules, the converter core in `server/reactExport/` (HTML to JSX, CSS Modules split, names, DTCG tokens) and what components, pages, packaging and Tailwind add.
 - [design-tokens.md](design-tokens.md) - Design tokens and themes: Paper's eleven token types as
   CSS custom properties per canvas, the managed `<style data-doop-tokens>` block every frame
   carries, propagation as annotation writes, modes via `data-doop-mode`, REST + MCP + the

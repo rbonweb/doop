@@ -70,6 +70,7 @@ function stubHost(): ActionHost {
     openFind: vi.fn(),
     findStep: vi.fn(),
     openExport: vi.fn(),
+    openExportReact: vi.fn(),
     openImport: vi.fn(),
     openVersionHistory: vi.fn(),
     openLink: vi.fn(),
