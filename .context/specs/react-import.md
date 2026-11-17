@@ -64,7 +64,7 @@ The published-Storybook way in, MCP `import_storybook({ canvas_id, url, package?
 
 ## CLI (`packages/doop-import`)
 
-`npx doop-import --storybook <dir|url> --ticket <url> [--package <name>] [--include <title prefix>…] [--browser <path>] [--dry-run] [--out bundle.json]`. It uses the same `shared/storybook/*` and `shared/componentBundle.ts` as the server path, so the two produce the same bundle.
+`npx doop-import --storybook <dir|url> --ticket <url> [--package <name>] [--include <title>…] [--browser <path>] [--dry-run] [--out bundle.json]`. It uses the same `shared/storybook/*` and `shared/componentBundle.ts` as the server path, so the two produce the same bundle.
 
 - A directory is served on `127.0.0.1` at a random port by a tiny static server with a Host-header check and a symlink-escape check; a URL must be a dev server on this machine (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`); any other URL is refused before a browser starts, pointing at the Storybook URL import in Doop or `import_storybook`.
 - Renders with `puppeteer-core` and the first browser of: `--browser`, `DOOP_IMPORT_BROWSER`, `CHROME_PATH`, then a Chromium, Edge or Brave found at its usual install path. A named path must be executable; it never falls through to another browser. Any Chromium-based executable works; Google Chrome is not looked up, so its users pass `--browser` or `CHROME_PATH`, and anyone without a browser can run `npx @puppeteer/browsers install chrome-headless-shell@stable` and pass the path it prints.

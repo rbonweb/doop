@@ -37,7 +37,7 @@ npx doop-import --storybook ./storybook-static --ticket <upload url> --dry-run
 - `--storybook <dir|url>` a `storybook build` directory or the URL of a Storybook dev server on this machine. Required. Any other address is refused before a browser starts: a published Storybook goes through the Storybook URL import in Doop's import picker (or an agent's `import_storybook`) instead, where Doop renders it in its own hardened renderer.
 - `--ticket <url>` the upload URL. Required unless you only want a file with `--out`.
 - `--package <name>` the npm package the components are imported from in code, for example `@acme/ui`. It lets Doop's React export import the real component instead of regenerating it.
-- `--include <title prefix>` only components whose Storybook title starts with this. Repeat it for several.
+- `--include <title>` only the component with this Storybook title, or every component in this folder of titles (`Components/Button` matches `Components/Button` and `Components/Button/…`, not `Components/ButtonGroup`). Repeat it for several.
 - `--browser <path>` the browser to render with.
 - `--dry-run` check without writing.
 - `--out <file>` also write the bundle JSON to a file. With no `--ticket` it only writes the file.
