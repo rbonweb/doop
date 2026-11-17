@@ -48,6 +48,8 @@ import { batchScope } from './responseShaping.ts'
 import { componentBundleSchema, MAX_INLINE_BUNDLE_BYTES } from '../shared/componentBundle.ts'
 import { importComponentBundle } from './componentBundleImport.ts'
 import { createImportTicket, ImportTicketError, ticketAnswer } from './componentImportTickets.ts'
+import { failedBeforeRendering, runStorybookImport, storybookFailure, storybookInput } from './storybookImportRun.ts'
+import { checkStorybookUrl, takeStorybookImport } from './storybookImport.ts'
 
 export { codeSchema, propSchema }
 
@@ -848,6 +850,62 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
             : []),
         ].join('\n'),
         frames: defs.flatMap((def) => outcomeFrames({ canvas } as ToolContext, def)),
+      }
+    },
+  },
+  {
+    name: 'import_storybook',
+    title: 'Import a published Storybook',
+    description:
+      'Import the components of a PUBLISHED Storybook (a public URL, such as the team\'s deployed storybook-static) into this canvas as Doop components: each Storybook component becomes a component with its enum, boolean, number, color and text props, its variants and a code mapping, on the "Imported components" page. Doop renders every story in a sandboxed browser, so it takes a minute or two. Private Storybooks (behind a sign-in) are refused: for one of those, or one only on a dev machine, use create_import_ticket and the doop-import CLI. Pass dry_run=true first to see what would be created or updated; at most 3 imports an hour.',
+    readOnly: false,
+    shape: {
+      ...storybookInput,
+      dry_run: z.boolean().optional().describe('Render and report what would change, and write nothing'),
+    },
+    async run(input, { canvas, actor, userId, budgetKey, canEdit }) {
+      const dryRun = input.dry_run === true
+      let refund = () => {}
+      try {
+        /* a URL that could never be read costs nothing; the hour is the requesting account's on every surface */
+        const checked = checkStorybookUrl(String(input.url))
+        if (!checked.ok) throw new ComponentError(checked.message)
+        refund = takeStorybookImport(userId ?? budgetKey ?? `canvas:${canvas.id}`)
+        const { result, issues, renders } = await runStorybookImport({
+          canvasId: canvas.id,
+          actor,
+          canEdit: () => canEdit(canvas.id),
+          url: String(input.url),
+          package: typeof input.package === 'string' ? input.package : undefined,
+          include: Array.isArray(input.include) ? (input.include as string[]) : undefined,
+          dryRun,
+        })
+        const defs = [...result.created, ...result.updated].flatMap(({ id }) => {
+          const def = id ? findComponent(canvas.id, id) : undefined
+          return def ? [def] : []
+        })
+        const counts = `${result.created.length} created, ${result.updated.length} updated, ${result.unchanged.length} unchanged, ${result.skipped.length} refused`
+        return {
+          data: { ok: true, dry_run: dryRun, ...result, issues, renders },
+          note: [
+            dryRun
+              ? `Dry run, nothing was written (${renders} story renders): ${counts}.`
+              : `Imported from the Storybook (${renders} story renders): ${counts}. The mains are on the "Imported components" page; compose screens from them with <doop-use component="Name">. Check one with get_component_preview.`,
+            ...(result.skipped.length
+              ? [`Refused: ${result.skipped.map((entry) => `${entry.name} (${entry.reason})`).join('; ')}`]
+              : []),
+            ...(issues.length
+              ? [
+                  `${issues.length} issue${issues.length === 1 ? '' : 's'} are listed in issues: read them, they say what could not be captured or was left out.`,
+                ]
+              : []),
+          ].join('\n'),
+          frames: defs.flatMap((def) => outcomeFrames({ canvas } as ToolContext, def)),
+        }
+      } catch (error) {
+        if (failedBeforeRendering(error)) refund()
+        if (error instanceof ComponentError) throw error
+        throw new ComponentError(storybookFailure(error).message)
       }
     },
   },

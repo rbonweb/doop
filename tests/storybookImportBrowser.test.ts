@@ -5,6 +5,7 @@ import { componentBundleSchema } from '../shared/componentBundle.ts'
 import { CAPTURE_PRELUDE, captureStory, STYLE_PROPERTIES } from '../shared/storybook/capture.ts'
 import { MAX_PROBE_CHARS } from '../shared/storybook/probe.ts'
 import { STORYBOOK_LIMITS } from '../shared/storybook/plan.ts'
+import { failedBeforeRendering } from '../server/storybookImportRun.ts'
 import * as screenshot from '../server/screenshot.ts'
 import { findBrowserPath, getBrowser } from '../server/screenshot.ts'
 import { guardPublicPageRequests } from '../server/publicUrl.ts'
@@ -474,6 +475,8 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     expect(captures.length).toBeGreaterThan(2)
     expect(metas.length).toBe(3)
     for (const event of captures) expect(event.bytes).toBeLessThanOrEqual(STORYBOOK_LIMITS.captureBytes)
+    /* a refusal is an object, and it is measured as its JSON, not as nothing */
+    expect(captures.some((event) => event.bytes > 20 && event.bytes < 300)).toBe(true)
     for (const event of metas) expect(event.bytes).toBeLessThanOrEqual(MAX_PROBE_CHARS + 1024)
   })
 
@@ -557,9 +560,25 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
   })
 
   it('stops the whole import when a story page answers 403', async () => {
-    await expect(
-      storybookBundle(`${storybook.origin}/lockedframe/`, {}, deps(storybook.origin)),
-    ).rejects.toBeInstanceOf(StorybookAccessError)
+    const error = await storybookBundle(`${storybook.origin}/lockedframe/`, {}, deps(storybook.origin)).catch(
+      (caught: unknown) => caught,
+    )
+    expect(error).toBeInstanceOf(StorybookAccessError)
+    /* browser work was spent on that page, so the slot is not refunded: otherwise it is free renderer time */
+    expect((error as StorybookAccessError).duringRender).toBe(true)
+    expect(failedBeforeRendering(error)).toBe(false)
+  })
+
+  it('refunds an index that answers 401 before any body is read, never one that was downloaded and rejected', async () => {
+    const denied = await storybookBundle(`${storybook.origin}/private/`, {}, deps(storybook.origin)).catch(
+      (caught: unknown) => caught,
+    )
+    expect(failedBeforeRendering(denied)).toBe(true)
+    const notJson = await storybookBundle(`${storybook.origin}/html/`, {}, deps(storybook.origin)).catch(
+      (caught: unknown) => caught,
+    )
+    expect(notJson).toBeInstanceOf(StorybookIndexError)
+    expect(failedBeforeRendering(notJson)).toBe(false)
   })
 
   it('refuses a private address with the real URL rules', async () => {

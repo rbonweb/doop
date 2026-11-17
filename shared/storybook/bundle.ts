@@ -60,6 +60,27 @@ function refusalMessage(reason: string, bytes?: number): string {
   return reason
 }
 
+/** A reason a render failed that its raiser wrote for the person: shown as is. Any other error (a browser, protocol or network failure) can name internal addresses and paths, so it is replaced by `RENDER_FAILED`. */
+export class KnownRenderError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'KnownRenderError'
+  }
+}
+
+export const RENDER_FAILED = 'The renderer could not open this story'
+
+const reasonOf = (error: unknown): string =>
+  error instanceof KnownRenderError ? error.message.slice(0, 200) : RENDER_FAILED
+
+/** The import itself could not produce a bundle (nothing could be captured, or what was captured is not a valid bundle). The message is written for the person, never taken raw from an exception. */
+export class BundleImportError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BundleImportError'
+  }
+}
+
 /** One story, rendered and captured. A failure to load, a story that errors or one that never renders is a `capture` with `ok: false`, never a throw (an abort is the only throw). */
 export async function renderStory(page: StoryPage, request: RenderRequest, signal?: AbortSignal): Promise<StoryRender> {
   const issues: StorybookIssue[] = []
@@ -144,7 +165,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     return { capture, props, displayName, issues }
   } catch (error) {
     if (signal?.aborted) throw error
-    return fail(error instanceof Error ? error.message.slice(0, 200) : 'The story could not be rendered')
+    return fail(reasonOf(error))
   }
 }
 
@@ -213,6 +234,19 @@ export interface BundleInput {
   /** the clock, for the import's time box */
   now?: () => number
   onProgress?: (done: number, total: number) => void
+  /** the components the import will render, once the stories are grouped and before the first render */
+  onPlan?: (groups: PlannedComponent[]) => void
+  /** after each render: `total` is what is planned so far (a component's variants join it once its default has been read), so it only grows */
+  onRender?: (event: { rendered: number; total: number; component: string }) => void
+}
+
+export interface PlannedComponent {
+  name: string
+  /** the Storybook title path */
+  group: string
+  stories: number
+  /** renders known before any story is read: the default story, one */
+  renders: number
 }
 
 export interface BundleResult {
@@ -242,6 +276,16 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   const issues: StorybookIssue[] = []
   const grouped = groupStories(input.entries, { include: input.include })
   issues.push(...grouped.issues)
+  input.onPlan?.(
+    grouped.groups.map((group) => ({
+      name: group.name,
+      group: group.title,
+      stories: group.stories.length,
+      renders: 1,
+    })),
+  )
+  let plannedTotal = grouped.groups.length
+  let renderedCount = 0
   const concurrency = input.concurrency ?? 1
   const components: BundleComponent[] = []
   const shared = new Set<string>()
@@ -259,8 +303,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     } catch (error) {
       if (input.signal?.aborted) throw error
       openFailures++
-      const reason = error instanceof Error ? error.message.slice(0, 200) : 'a page could not be opened'
-      return { capture: { ok: false, reason }, props: [], issues: [] }
+      return { capture: { ok: false, reason: reasonOf(error) }, props: [], issues: [] }
     }
   }
 
@@ -291,6 +334,8 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     renders++
     const base = await render({ storyId: group.defaultStory.id, args: {}, readMeta: true })
     for (const issue of base.issues) note(issue.code, issue.message)
+    renderedCount++
+    input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
     const capture = base.capture
     if (!capture.ok) {
       note('story_failed', `The default story "${group.defaultStory.name}" could not be captured: ${capture.reason}`)
@@ -309,14 +354,17 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     const plan = planVariants(props, variantAllowance(renders, grouped.groups.length - index - 1))
     for (const reason of plan.skipped) note('variants_skipped', reason)
     renders += plan.renders.length
-    const rendered = await inPool(plan.renders, concurrency, async (variant) => ({
-      variant,
-      result: await render({
+    plannedTotal += plan.renders.length
+    const rendered = await inPool(plan.renders, concurrency, async (variant) => {
+      const result = await render({
         storyId: group.defaultStory.id,
         args: { [variant.arg]: variant.argValue },
         readMeta: false,
-      }),
-    }))
+      })
+      renderedCount++
+      input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
+      return { variant, result }
+    })
     const variants: NonNullable<BundleComponent['variants']> = {}
     const reflected = new Set<string>()
     for (const { variant, result } of rendered) {
@@ -374,7 +422,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   }
 
   if (!components.length) {
-    throw new Error(
+    throw new BundleImportError(
       (
         issues.find((issue) => issue.code === 'renderer_unavailable') ??
         issues.find((issue) => issue.code === 'story_failed')
@@ -400,7 +448,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     components,
   })
   if (!parsed.success) {
-    throw new Error(
+    throw new BundleImportError(
       `The captured components do not make a valid bundle: ${parsed.error.issues[0]?.message ?? 'invalid'}`,
     )
   }
