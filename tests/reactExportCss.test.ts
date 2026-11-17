@@ -321,6 +321,63 @@ describe('splitComponentCss: hardening', () => {
   })
 })
 
+describe('splitComponentCss: urls a bundler would resolve', () => {
+  const local = [
+    'url(x.png)',
+    'url(./x.png)',
+    'url(../x.png)',
+    'url(../../../../home/x/.ssh/id_rsa)',
+    'url("../secret.png")',
+    "url('./a/b.png')",
+    'url(~pkg/secret.png)',
+    'url(/a/../../x.png)',
+    'url(/a/..%2f..%2fx.png)',
+    'url(/a/%2e%2e/x.png)',
+    'url(\\2e\\2e/x.png)',
+    'url("\\2e \\2e /x.png")',
+    'url(/a/..\\5c x.png)',
+    'url(file:///etc/passwd)',
+    'url(C:/x.png)',
+    'url()',
+    'url(a.png), url(https://x.test/b.png)',
+    'image-set("../x.png" 1x, "/a/y.png" 2x)',
+    'image-set(url(x.png) 1x)',
+  ]
+
+  it.each(local)('drops background: %s', (value) => {
+    const out = splitComponentCss(`.a { top: 0; background: ${value} }`)
+    expect(out.moduleCss).toBe('.a {\n  top: 0;\n}\n')
+    expect(out.issues).toHaveLength(1)
+    expect(out.issues[0]).toMatchObject({ kind: 'css' })
+  })
+
+  it.each([
+    'url(https://x.test/a.png)',
+    'url("http://x.test/a.png")',
+    'url(//cdn.test/a.png)',
+    'url(/a/x.png)',
+    'url("/photos/pexels/1.jpeg?w=10&h=10")',
+    'url(/a/x..png)',
+    'url(#grad)',
+    'url("#grad")',
+    'url(data:image/png;base64,AAAA)',
+    'url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27/%3E")',
+    'linear-gradient(red, blue), url(/a/x.png)',
+    'image-set("/a/x.png" 1x, "https://x.test/y.png" 2x)',
+    'image-set(url(/a/x.png) 1x)',
+  ])('keeps background: %s', (value) => {
+    const out = splitComponentCss(`.a { background: ${value} }`)
+    expect(out.issues, value).toEqual([])
+    expect(out.moduleCss, value).toContain('background:')
+  })
+
+  it('drops a relative @font-face source from the global sheet', () => {
+    const out = splitComponentCss('@font-face { font-family: X; src: url(./x.woff2) }')
+    expect(out.globalCss).not.toContain('x.woff2')
+    expect(out.issues).toHaveLength(1)
+  })
+})
+
 /** a small seeded generator, so a failure repeats */
 function seeded(seed: number): () => number {
   let state = seed

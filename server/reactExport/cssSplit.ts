@@ -273,14 +273,32 @@ function quotedStrings(decoded: string): string[] {
   return [...decoded.matchAll(/"([^"\n]*)"|'([^'\n]*)'/g)].map((match) => match[1] ?? match[2] ?? '')
 }
 
+/** True for a CSS URL that is safe to leave in an exported stylesheet: absolute `http(s)`, protocol-relative, root-relative without a `..` segment, a fragment, or a raster or SVG data image. Anything else (a relative path, `~pkg`, `file:`) is something a bundler would resolve to a file on the exporter's machine, so it is refused. */
+function isKeptUrl(raw: string): boolean {
+  const value = Array.from(raw.trim().replace(/["']+$/, ''))
+    .filter((char) => char.charCodeAt(0) > 0x20 && char.charCodeAt(0) !== 0x7f)
+    .join('')
+  if (!value || isUnsafeUrl(value)) return false
+  if (/^https?:\/\//i.test(value) || value.startsWith('//') || value.startsWith('#')) return true
+  if (/^data:image\//i.test(value)) return true
+  if (!value.startsWith('/') || value.includes('\\')) return false
+  let path = value
+  try {
+    path = decodeURIComponent(value)
+  } catch {
+    return false
+  }
+  return !path.split(/[/\\]/).some((segment) => segment === '..' || segment.startsWith('..?'))
+}
+
 /** Why a declaration cannot be kept, or null when it is safe. */
 function declarationProblem(name: string, value: string): string | null {
   if (BLOCKED_PROPERTIES.has(decodeCssEscapes(name).trim().toLowerCase())) return `${name.trim()} is not allowed`
   const decoded = decodeCssEscapes(value)
   if (/expression\s*\(/i.test(decoded)) return 'expression() is not allowed'
-  if (urlArguments(decoded).some(isUnsafeUrl)) return 'url() points at code'
-  if (/image-set\s*\(|\bsrc\s*\(/i.test(decoded) && quotedStrings(decoded).some(isUnsafeUrl))
-    return 'image URL points at code'
+  if (!urlArguments(decoded).every(isKeptUrl)) return 'url() points at code or at a local file'
+  if (/image-set\s*\(|\bsrc\s*\(/i.test(decoded) && !quotedStrings(decoded).every(isKeptUrl))
+    return 'image URL points at code or at a local file'
   return null
 }
 
