@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import {
-  componentSource,
+  componentFile,
+  localImports,
   copyComponentAsReact,
   downloadReactZip,
   fetchReactFiles,
+  onReactExportRequest,
   ReactExportError,
   type ReactExportReport,
 } from '../src/lib/reactExport'
@@ -113,9 +115,9 @@ it('finds a component’s file by the report, else the one under src/components'
     { path: 'src/cx.ts', content: 'cx' },
     { path: 'src/components/Button.tsx', content: 'BUTTON' },
   ]
-  expect(componentSource({ files, report }, { id: 'c1', name: 'Button' })).toBe('BUTTON')
-  expect(componentSource({ files, report: { ...report, components: [] } }, { id: 'x', name: 'Button' })).toBe('BUTTON')
-  expect(componentSource({ files: [files[0]!], report }, { id: 'c1', name: 'Button' })).toBeUndefined()
+  expect(componentFile({ files, report }, { id: 'c1', name: 'Button' })).toBe(files[1])
+  expect(componentFile({ files, report: { ...report, components: [] } }, { id: 'x', name: 'Button' })).toBe(files[1])
+  expect(componentFile({ files: [files[0]!], report }, { id: 'c1', name: 'Button' })).toBeUndefined()
 })
 
 it('remembers styling and tokens per browser, each field on its own', () => {
@@ -162,4 +164,39 @@ it('names the package when the component maps to one and has no file', async () 
   )
   await copyComponentAsReact('c', { id: 'c1', name: 'Button' })
   expect(useStore.getState().notice?.text).toBe('Button maps to @acme/ui, so there is no file to copy.')
+})
+
+const CARD = [
+  "import styles from './Card.module.css'",
+  "import { cx } from '../cx'",
+  "import { Button } from './Button'",
+  "import type { ReactNode } from 'react'",
+  "import './Card.module.css'",
+  'export function Card() { return null }',
+].join('\n')
+
+it('lists the local files a copied component imports, once each, and nothing from packages', () => {
+  expect(localImports(CARD)).toEqual(['Card.module.css', 'cx', 'Button'])
+  expect(localImports("import { Button } from '@acme/ui'\nexport const a = 1")).toEqual([])
+})
+
+it('names what the copy leaves behind and offers the export for that component', async () => {
+  vi.stubGlobal('navigator', { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+  fetchMock.mockResolvedValue(
+    Response.json({
+      files: [{ path: 'src/components/Card.tsx', content: CARD }],
+      report: { ...report, components: [{ id: 'c9', name: 'Card', file: 'src/components/Card.tsx' }] },
+    }),
+  )
+  const requests: string[][] = []
+  const stop = onReactExportRequest(({ componentIds }) => requests.push(componentIds))
+
+  await copyComponentAsReact('c', { id: 'c9', name: 'Card' })
+
+  const { notice } = useStore.getState()
+  expect(notice?.text).toBe('Copied Card.tsx. It imports Card.module.css, cx, and Button: export the zip for those.')
+  expect(notice?.action?.label).toBe('Export…')
+  notice?.action?.run()
+  expect(requests).toEqual([['c9']])
+  stop()
 })
