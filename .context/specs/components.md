@@ -42,8 +42,7 @@ component loses nothing visually: deleting writes no frame at all (see Deleting 
 - **Template markup**: `data-doop-prop` binds text, attributes, styles and custom properties;
   `data-doop-if` makes elements conditional; `data-doop-slot` / `data-doop-slot-suggest` declare slots.
   Enum props exist only in the definition and set `data-<name>` on the root. Nested components are
-  `<doop-use>` by id, so a rename cannot break them. The template attributes mean nothing on a
-  `<doop-use>`: they are dropped with an `ignored_attribute` issue that says what to write instead.
+  `<doop-use>` by id, so a rename cannot break them. Prop forwarding: `data-doop-prop="inner:outer"` on a nested `<doop-use>` hands the outer component's prop `outer` to the nested prop `inner` (`component:icon` lets an `instance` prop pick which component renders). It is live only when the outer prop is declared or derived (derivation copies the nested prop's type, options, limits or `accepts`; `component:` makes an `instance` prop accepting the literal). Precedence: the outer instance's own override of that nested part, then the forwarded value (its override, else the prop's default), then the attribute the template wrote; with no forwarded value the nested instance renders as it always did. Reading an instance subtracts forwarded and literal values from the nested state, and retyping a forwarded value inside an instance sets the outer prop. `data-doop-if` on a `<doop-use>` shows or hides it. In a main the nested instance element carries both attributes (`CARRIED_ATTRS`) so reading the main back keeps them. `data-doop-slot` and other template attributes mean nothing on a `<doop-use>`: they are dropped with an `ignored_attribute` issue that says what to write instead.
 - **Inferred props** (`inferBindings`, only for markup with no `data-doop-prop` of its own): leaf text,
   image sources and link targets. A name comes from `data-name`, else the last class that is not a
   utility class, else what the element or its nearest ancestor is (`h1`-`h6` title, `button` / `a`
@@ -200,8 +199,7 @@ instance; description and make-a-prop / make-a-slot on a main. Right-click and â
 - The Components page frame for a main made from markup uses a default size until resized.
 - A component made from markup is not placed anywhere; the result says to write `<doop-use>` or call
   `insert_instance`.
-- A component cannot pass its props on to a component nested in it. The nested one takes fixed
-  values, or the spot is a slot each instance fills.
+- A `<doop-use>` cannot be a slot's default content directly (`data-doop-slot` on it is refused): wrap it in an element that carries the slot. Own overrides of a nested instance whose component an outer `instance` prop swaps are kept only for the props and parts the new component also has.
 - Figma import does not map Figma components to these.
 - A restored revision older than the 20 kept cannot be used for merging: its instance keeps its marker
   state and upgrades.

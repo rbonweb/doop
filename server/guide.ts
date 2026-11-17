@@ -281,10 +281,22 @@ needs a reusable piece the system lacks, add it, then use it.
   with <doop-use> in a frame, or insert_instance. Its result lists the props it inferred; name
   your own with data-doop-prop. create_components does the same for up to 12 at once, in order,
   so a later one can nest an earlier one; an entry that is refused does not stop the others.
-- A component inside a component: write <doop-use> in the template and give it fixed props. One
-  component cannot pass its props on to another (data-doop-prop on a <doop-use> is dropped, with
-  a COMPONENT note); where each instance should choose, make that spot a data-doop-slot. Its CSS
-  may restyle the nested one from its own element (.card .btn { width: 100% }), inside it only.
+- A component inside a component: write <doop-use> in the template. Its CSS may restyle the nested
+  one from its own element (.card .btn { width: 100% }), inside it only. Fixed values are plain
+  attributes (label="Go"). To let each instance of the outer component choose, forward its props:
+  data-doop-prop="inner:outer" on the <doop-use>, the same target:prop order as any binding. The
+  outer prop is made for you, typed like the inner one (an enum keeps its options, a number its
+  limits). An instance's own override of the nested part beats the forwarded value, which beats the
+  attribute you wrote; with no value the attribute stands. Editing the nested label inside a Card
+  instance sets the Card's prop. data-doop-prop="component:icon" lets an instance prop pick which
+  component renders there (accepts defaults to the one you wrote). data-doop-if="showCta" on the
+  <doop-use> shows or hides it. data-doop-slot is not for a <doop-use>: wrap it in an element that
+  carries the slot.
+      <article>
+        <h3 data-doop-prop="title">Pro</h3>
+        <doop-use component="Button" label="Start" data-doop-prop="label:cta"></doop-use>
+      </article>
+      <doop-use component="Card" title="Team" cta="Buy"></doop-use>
 - Write a description saying when to use it. Set code (file and export name) when the component
   exists in the human's repo: that is what makes the design implementable with their real code.
 - Vary with props, not copies. An enum prop sets data-<name> on the root, so a variant is plain

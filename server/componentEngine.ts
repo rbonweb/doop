@@ -382,7 +382,7 @@ function renderNode(el: Element, def: Revision, overrides: InstanceOverrides, op
         kept.push(child)
         continue
       }
-      const rendered = renderUseElement(child, part, options, key)
+      const rendered = renderUseElement(child, part, options, key, { def, overrides })
       if (rendered) {
         rendered.parentNode = el
         kept.push(rendered)
@@ -421,24 +421,156 @@ function renderPart(
   renderNode(el, def, overrides, options)
 }
 
+/** The outer instance a nested `<doop-use>` sits in: what its forwarded props are read from. */
+interface Outer {
+  def: Revision
+  overrides: InstanceOverrides
+}
+
 function renderUseElement(
   use: Element,
   part: PartOverride | undefined,
   options: RenderOptions,
   outerKey: string | undefined,
+  outer?: Outer,
 ): Element | undefined {
-  const ref = attrOf(use, 'component') ?? ''
-  const nested = options.ctx.find(ref)
+  const { ctx } = options
+  const forward = outer ? forwardingOf(use, outer.def, outer.overrides.props, ctx, true) : undefined
+  const literalRef = attrOf(use, 'component') ?? ''
+  const ref = forward?.component ?? literalRef
+  const nested = ctx.find(ref)
   if (!nested) {
-    options.ctx.issues.push({ code: 'unknown_component', message: `no component “${ref}” on this canvas` })
+    ctx.issues.push({ code: 'unknown_component', message: `no component “${ref}” on this canvas` })
     return undefined
   }
-  const state = part?.use ?? stateFromUseAttrs(use, nested, options.ctx).overrides
+  /* a use that forwards nothing renders exactly as it always has: the nested instance's own state, else the literal */
+  const state = forward?.bindings.length
+    ? forwardedState(use, nested, part?.use, forward, options, ctx.find(literalRef)?.id !== nested.id)
+    : (part?.use ?? stateFromUseAttrs(use, nested, ctx, true).overrides)
   const id = attrOf(use, ELEMENT_ID_ATTR) ?? nestedInstanceId(options.ownerId, outerKey)
   const rendered = renderInstance(nested, nested, state, id, options)
   if (rendered && outerKey) setAttr(rendered, PART_ATTR, outerKey)
   return rendered
 }
+
+/** What a nested `<doop-use>` takes from the component that holds it. `bindings` are the live ones
+ *  (the outer prop exists), whether or not the outer instance has a value for it yet. */
+interface Forward {
+  bindings: { target: string; outer: string }[]
+  /** nested prop → the outer prop it takes and the value the outer instance has for it */
+  props: Map<string, { outer: string; value: string }>
+  /** the component the outer instance picked for the nested one, when it picked one */
+  component?: string
+}
+
+/** Read a nested `<doop-use>`'s `data-doop-prop="inner:outer"` bindings against the outer component.
+ *  The outer value is the instance's own, else the prop's declared default; with neither, nothing is
+ *  forwarded and the nested instance keeps what the template wrote. `report` says what does not bind. */
+function forwardingOf(
+  use: Element,
+  outer: Revision,
+  outerProps: Record<string, string> | undefined,
+  ctx: EngineContext,
+  report: boolean,
+): Forward {
+  const forward: Forward = { bindings: [], props: new Map() }
+  const raw = attrOf(use, BIND_ATTR)
+  if (raw === undefined) return forward
+  const name = attrOf(use, 'component') ?? ''
+  const skip = (why: string) => {
+    if (report)
+      ctx.issues.push({
+        code: 'ignored_attribute',
+        message: `${BIND_ATTR}="${raw}" on <${USE_TAG} component="${name}"> forwards nothing for one binding: ${why}. ${FORWARD_GRAMMAR}`,
+      })
+  }
+  for (const { target, prop } of parseBindings(raw, use.tagName)) {
+    if (target === null) {
+      skip(`“${prop}” names no prop of “${outer.name}”’s nested component; write inner:outer, as label:${prop}`)
+      continue
+    }
+    const outerProp = outer.props.find((candidate) => candidate.name === prop)
+    if (!outerProp) {
+      skip(`“${outer.name}” has no prop “${prop}”, so there is nothing to forward`)
+      continue
+    }
+    if (target === 'component' && outerProp.type !== 'instance') {
+      skip(`“${prop}” must be an instance prop to pick the component`)
+      continue
+    }
+    forward.bindings.push({ target, outer: prop })
+    const value = propValue(outer, { props: outerProps }, prop)
+    if (value === undefined) continue
+    if (target === 'component') {
+      const problem = propValueProblem(outerProp, value, ctx.find)
+      if (problem) {
+        if (report)
+          ctx.issues.push({
+            code: 'invalid_prop_value',
+            message: `${outer.name}: "${value}" is not a value of ${prop} — ${problem}`,
+          })
+        continue
+      }
+      forward.component = value
+    } else forward.props.set(target, { outer: prop, value })
+  }
+  return forward
+}
+
+const FORWARD_GRAMMAR =
+  'Forward with data-doop-prop="inner:outer" (label:cta passes this component’s prop cta to the nested prop label; component:icon lets an instance prop icon pick the nested component).'
+
+/** A forwarding use's nested state: the template's literal attributes, then the values forwarded from
+ *  the outer instance, then what the outer instance overrode on that nested part itself. */
+function forwardedState(
+  use: Element,
+  nested: ComponentDef,
+  own: InstanceOverrides | undefined,
+  forward: Forward,
+  options: RenderOptions,
+  swapped: boolean,
+): InstanceOverrides {
+  const { ctx } = options
+  /* attributes written for the literal component may not fit the one picked: quiet then, or when `own` stands in */
+  const quiet = swapped || own !== undefined
+  const literal = stateFromUseAttrs(use, nested, quiet ? silent(ctx) : ctx, true).overrides
+  const props: Record<string, string> = { ...literal.props }
+  for (const [target, { value }] of forward.props) {
+    const prop = nested.props.find((candidate) => candidate.name === target)
+    if (!prop) {
+      ctx.issues.push({
+        code: 'ignored_attribute',
+        message: `${BIND_ATTR} on <${USE_TAG} component="${nested.name}"> forwards to “${target}”, which “${nested.name}” does not have (it has ${nested.props.map((p) => p.name).join(', ') || 'no props'})`,
+      })
+      continue
+    }
+    const problem = propValueProblem(prop, value, ctx.find)
+    if (problem) {
+      ctx.issues.push({
+        code: 'invalid_prop_value',
+        message: `${nested.name}: "${value}" is not a value of ${target} — ${problem}`,
+      })
+      continue
+    }
+    props[target] = value
+  }
+  const usable = own && forward.component !== undefined ? fittingState(own, nested) : own
+  Object.assign(props, usable?.props)
+  return clean({ props, parts: usable?.parts ?? literal.parts })
+}
+
+/** State read from one component, handed to another the outer instance swapped in: only what that one has. */
+function fittingState(own: InstanceOverrides, nested: ComponentDef): InstanceOverrides {
+  const names = new Set(nested.props.map((prop) => prop.name))
+  const keys = new Set(partsOf(nested.template).keys())
+  return clean({
+    props: Object.fromEntries(Object.entries(own.props ?? {}).filter(([name]) => names.has(name))),
+    parts: Object.fromEntries(Object.entries(own.parts ?? {}).filter(([key]) => keys.has(key))),
+  })
+}
+
+/** The same lookups with the issues thrown away: a literal read only to know what it would say. */
+const silent = (ctx: EngineContext): EngineContext => ({ find: ctx.find, atRev: ctx.atRev, issues: [] })
 
 function markRoot(root: Element, def: Revision, instanceId: string, overrides: InstanceOverrides) {
   setAttr(root, INSTANCE_ATTR, def.id)
@@ -628,7 +760,11 @@ export function readInstance(el: Element, def: Revision | undefined, ctx: Engine
     if (key && info?.isUse && attrOf(child, INSTANCE_ATTR)) {
       const nestedDef = ctx.atRev(attrOf(child, INSTANCE_ATTR)!, Number(attrOf(child, REV_ATTR)) || 0)
       const nested = readInstance(child, nestedDef, ctx)
-      if (nested) merged[key] = { ...merged[key], use: nested.overrides }
+      if (nested) {
+        const use = withoutForwarded(nested.overrides, info.el, def, state.overrides.props, nestedDef, ctx)
+        /* a forwarding use merges its own state over the literal, so nothing left to say is not a state */
+        if (use === nested.overrides || Object.keys(use).length) merged[key] = { ...merged[key], use }
+      }
       continue
     }
     if (attrOf(child, INSTANCE_ATTR)) continue
@@ -641,9 +777,36 @@ export function readInstance(el: Element, def: Revision | undefined, ctx: Engine
   return { ...state, overrides: clean({ ...state.overrides, parts: merged }) }
 }
 
+/** A nested instance's state without what the outer instance hands it: its marker holds the
+ *  forwarded values it was rendered with (that is what keeps its own diff honest), but they are
+ *  the outer instance's to give, not overrides of the nested part. A value the template's literal
+ *  already says is no override either, so a prop forwarded later still reaches it. */
+function withoutForwarded(
+  overrides: InstanceOverrides,
+  use: Element,
+  outer: Revision,
+  outerProps: Record<string, string> | undefined,
+  nested: Revision | undefined,
+  ctx: EngineContext,
+): InstanceOverrides {
+  const forward = forwardingOf(use, outer, outerProps, ctx, false)
+  if (!forward.bindings.length || !nested) return overrides
+  const literal = stateFromUseAttrs(use, nested, silent(ctx), true).overrides
+  const props = { ...overrides.props }
+  for (const [name, value] of Object.entries(props))
+    if (value === literal.props?.[name] || value === forward.props.get(name)?.value) delete props[name]
+  const sameParts = stableJson(overrides.parts ?? {}) === stableJson(literal.parts ?? {})
+  return clean({ props, parts: sameParts ? undefined : overrides.parts })
+}
+
 /* ------------------------------------------------------------------ */
 /* Reconcile: what did this edit change?                               */
 /* ------------------------------------------------------------------ */
+
+/** What a template's nested `<doop-use>` says beyond which component it is: forwarded props and a
+ *  condition. In a main the instance element stands for the use, so it carries them until the
+ *  template is read back from it. */
+const CARRIED_ATTRS = [BIND_ATTR, IF_ATTR]
 
 const INTERNAL_ATTRS = new Set([INSTANCE_ATTR, REV_ATTR, PROPS_ATTR, OVERRIDES_ATTR, PART_ATTR])
 
@@ -722,6 +885,7 @@ function diffPart(
   isRoot: boolean,
   state: InstanceOverrides,
   ctx: EngineContext,
+  origin: Record<string, string> | undefined,
 ) {
   const info = parts.get(key)
   const into: PartOverride = {}
@@ -790,10 +954,10 @@ function diffPart(
       continue
     }
     if (baseKid.tagName === USE_TAG) {
-      diffNested(match, kidKey, parts, state, ctx)
+      diffNested(match, kidKey, parts, state, ctx, def, origin)
       continue
     }
-    diffPart(baseKid, match, kidKey, parts, def, false, state, ctx)
+    diffPart(baseKid, match, kidKey, parts, def, false, state, ctx, origin)
   }
 }
 
@@ -803,14 +967,56 @@ function diffNested(
   parts: Map<string, PartInfo>,
   state: InstanceOverrides,
   ctx: EngineContext,
+  outer: Revision,
+  origin: Record<string, string> | undefined,
 ) {
   const reconciled = reconcileInstance(incoming, ctx)
   const use = parts.get(key)?.el
   if (!reconciled || !use) return
   const nested = ctx.find(reconciled.componentId)
-  const defaults = nested ? stateFromUseAttrs(use, nested, ctx).overrides : {}
+  const forward = forwardingOf(use, outer, origin, ctx, false)
+  if (forward.bindings.length) {
+    diffForwarding(incoming, key, use, nested, reconciled, forward, state, ctx)
+    return
+  }
+  const defaults = nested ? stateFromUseAttrs(use, nested, ctx, true).overrides : {}
   const same = stableJson(defaults) === stableJson(reconciled.overrides)
   mergeInto(state, key, {}, { use: same ? undefined : reconciled.overrides })
+}
+
+/** A nested instance that takes props from the one holding it. What it shows of a forwarded value is
+ *  the outer instance's, so a person retyping the nested label sets the outer prop (`cta`) and no
+ *  override is kept; a value the nested instance already overrode on its own stays its override. */
+function diffForwarding(
+  incoming: Element,
+  key: string,
+  use: Element,
+  nested: ComponentDef | undefined,
+  reconciled: InstanceState,
+  forward: Forward,
+  state: InstanceOverrides,
+  ctx: EngineContext,
+) {
+  const swapped = !!nested && ctx.find(attrOf(use, 'component') ?? '')?.id !== nested.id
+  const literal = nested ? stateFromUseAttrs(use, nested, swapped ? silent(ctx) : ctx, true).overrides : {}
+  const marker = readMarker(incoming)?.overrides.props ?? {}
+  const props = { ...reconciled.overrides.props }
+  for (const { target, outer } of forward.bindings) {
+    const value = props[target]
+    if (value === undefined) continue
+    const given = forward.props.get(target)?.value
+    const before = marker[target]
+    if (value !== before && (before === undefined || before === given || before === literal.props?.[target])) {
+      /* an edit of what the outer instance gave: it is the outer prop's new value */
+      ;(state.props ??= {})[outer] = value
+      delete props[target]
+    } else if (value === given) delete props[target]
+  }
+  /* what the literal says is not an override either */
+  for (const [name, value] of Object.entries(props)) if (literal.props?.[name] === value) delete props[name]
+  const parts = reconciled.overrides.parts
+  const same = !Object.keys(props).length && stableJson(literal.parts ?? {}) === stableJson(parts ?? {})
+  mergeInto(state, key, {}, { use: same ? undefined : clean({ props, parts }) })
 }
 
 function mergeInto(
@@ -901,7 +1107,20 @@ function templateValueOf(prop: string, parts: Map<string, PartInfo>): string | u
 /** The state that explains this instance's markup: its marker, plus whatever
  *  was edited relative to what its own revision would have rendered. When that
  *  revision is gone there is nothing to diff against and the marker stands. */
-export function reconcileInstance(el: Element, ctx: EngineContext): InstanceState | undefined {
+export function reconcileInstance(el: Element, ctx: EngineContext, inMain = false): InstanceState | undefined {
+  if (inMain) {
+    /* a main's nested instance wears the template's own data-doop-prop / data-doop-if (see CARRIED_ATTRS):
+       they are not the instance's attributes, so they are not read as edits of it */
+    const carried = el.attrs.filter((attr) => CARRIED_ATTRS.includes(attr.name))
+    if (carried.length) {
+      el.attrs = el.attrs.filter((attr) => !CARRIED_ATTRS.includes(attr.name))
+      try {
+        return reconcileInstance(el, ctx)
+      } finally {
+        el.attrs.push(...carried)
+      }
+    }
+  }
   const marker = readMarker(el)
   if (!marker) return undefined
   const revision = ctx.atRev(marker.componentId, marker.rev)
@@ -927,7 +1146,7 @@ export function reconcileInstance(el: Element, ctx: EngineContext): InstanceStat
   if (rootKey || attrOf(parseTemplateRoot(revision.template)!, PART_ATTR)) {
     const key = attrOf(parseTemplateRoot(revision.template)!, PART_ATTR) ?? rootKey!
     setAttr(base, PART_ATTR, key)
-    diffPart(base, el, key, parts, revision, true, state, ctx)
+    diffPart(base, el, key, parts, revision, true, state, ctx, marker.overrides.props)
   }
   return { ...read, overrides: pruneOverrides(state, parts, revision) }
 }
@@ -959,9 +1178,13 @@ export function useTagFor(
   if (!marker) return serializeOuter(el)
   const def = ctx.find(marker.componentId)
   const revision = ctx.atRev(marker.componentId, marker.rev) ?? def
-  const state = (reconcile ? reconcileInstance(el, ctx) : undefined) ?? readInstance(el, revision, ctx) ?? marker
+  const state =
+    (reconcile ? reconcileInstance(el, ctx, inTemplate) : undefined) ?? readInstance(el, revision, ctx) ?? marker
   const ref = byId ? marker.componentId : (def?.name ?? marker.componentId)
-  return useMarkup(ref, state, revision, inTemplate ? attrOf(el, PART_ATTR) : undefined, withId)
+  const carried = inTemplate
+    ? CARRIED_ATTRS.flatMap((name) => (attrOf(el, name) === undefined ? [] : [[name, attrOf(el, name)!] as const]))
+    : []
+  return useMarkup(ref, state, revision, inTemplate ? attrOf(el, PART_ATTR) : undefined, withId, carried)
 }
 
 export function useMarkup(
@@ -971,6 +1194,8 @@ export function useMarkup(
   part: string | undefined,
   /** with a part: the element id too. A frame's copy of a main keeps both; a stored template never an id */
   withId = false,
+  /** a main's own attributes on the nested use: forwarded props and a condition */
+  carried: readonly (readonly [string, string])[] = [],
 ): string {
   const rest: Record<string, PartOverride> = {}
   const slotChildren: string[] = []
@@ -989,22 +1214,25 @@ export function useMarkup(
   for (const [prop, value] of Object.entries(state.overrides.props ?? {}).sort(([a], [b]) => a.localeCompare(b)))
     tag += attrText(prop, value)
   if (Object.keys(rest).length) tag += attrText('overrides', stableJson(rest))
+  for (const [attr, value] of carried) tag += attrText(attr, value)
   return `${tag}>${slotChildren.join('')}</${USE_TAG}>`
 }
 
 /* Attributes that mean something on a template's own element and nothing on a `<doop-use>`: the
    nested instance is written out in the main, so one of these would only ride along as an
-   attribute override on its root. Each says what to write instead. */
+   attribute override on its root. Each says what to write instead. Inside a component's main (`inTemplate`)
+   data-doop-prop forwards the outer component's props and data-doop-if shows or hides the nested
+   instance, so those two are the template's own and raise nothing. */
 const TEMPLATE_ONLY_ATTRS: Record<string, string> = {
-  [BIND_ATTR]:
-    'a component cannot pass its props on to a component inside it. Give that one fixed values (label="…"), or put an element with data-doop-slot there and let each instance supply its own <doop-use>',
-  [IF_ATTR]: 'put it on an element wrapped around the <doop-use>',
+  [BIND_ATTR]: `it forwards a prop of the component that holds this <doop-use>, so it only works inside a component's main. In a frame give the component fixed values (label="…"). ${FORWARD_GRAMMAR}`,
+  [IF_ATTR]:
+    "it shows or hides a <doop-use> inside a component's main, so it only works there. In a frame, put it on an element wrapped around the <doop-use>",
   [SLOT_ATTR]: 'put it on an element wrapped around the <doop-use>, which is then the slot’s default content',
   [SLOT_SUGGEST_ATTR]: 'it belongs on the element that carries data-doop-slot',
 }
 
 /** Build an instance's overrides from a `<doop-use>`'s attributes, reporting what does not fit. */
-export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContext): InstanceState {
+export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContext, inTemplate = false): InstanceState {
   const props: Record<string, string> = {}
   let parts: Record<string, PartOverride> = {}
   const root = parseTemplateRoot(def.template)
@@ -1021,6 +1249,7 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
   for (const attr of use.attrs) {
     const name = attr.name
     if (name === 'component' || name === 'id' || name === PART_ATTR || name === ELEMENT_ID_ATTR) continue
+    if (inTemplate && (name === BIND_ATTR || name === IF_ATTR)) continue
     const instead = TEMPLATE_ONLY_ATTRS[name]
     if (instead) {
       ctx.issues.push({
@@ -1199,6 +1428,13 @@ export function expandUses(
 ): string {
   if (indexOfAscii(html, `<${USE_TAG}`) === -1) return html
   const opaque = opaqueRanges(html)
+  /* only a use that forwards props or carries a condition needs to know whether it stands in a main */
+  let mains: Located[] | undefined
+  const inMain = (span: UseSpan) => {
+    if (!CARRIED_ATTRS.some((name) => html.slice(span.start, span.openEnd + 1).includes(name))) return false
+    mains ??= findMarked(html, COMPONENT_ATTR)
+    return mains.some((main) => span.start >= main.start && span.start < main.end)
+  }
   let out = ''
   let cursor = 0
   for (let span = nextUse(html, 0, opaque, final); span; span = nextUse(html, cursor, opaque, final)) {
@@ -1210,7 +1446,7 @@ export function expandUses(
         message: `<${USE_TAG} component="${ref}"> was never closed with </${USE_TAG}>, so it was placed with no slot content. Close every <${USE_TAG}>, or write it self-closing.`,
       })
     }
-    out += expandOne(html, span, ctx, stack, depth, final)
+    out += expandOne(html, span, ctx, stack, depth, final, inMain(span))
     cursor = span.end
   }
   return out + html.slice(cursor)
@@ -1223,6 +1459,7 @@ function expandOne(
   stack: string[],
   depth: number,
   final: boolean,
+  inMain: boolean,
 ): string {
   const openTag = html.slice(span.start, span.openEnd + 1).replace(/\/>$/, '>')
   const inner = span.selfClosing ? '' : html.slice(span.openEnd + 1, span.closeStart)
@@ -1246,9 +1483,20 @@ function expandOne(
     })
     return ''
   }
-  const state = stateFromUseAttrs(use, def, ctx)
+  const state = stateFromUseAttrs(use, def, ctx, inMain)
   const root = renderInstance(def, def, state.overrides, state.instanceId, { ctx, stack, depth, final })
   if (!root) return ''
+  /* in a main the instance stands for the template's `<doop-use>`, and keeps what that said beyond the
+     component: its forwarded props and its condition, or the next read of the main would lose them */
+  if (inMain) {
+    for (const name of CARRIED_ATTRS) setAttr(root, name, attrOf(use, name) ?? null)
+    for (const { target, prop } of parseBindings(attrOf(use, BIND_ATTR) ?? '', use.tagName))
+      if (target === null)
+        ctx.issues.push({
+          code: 'ignored_attribute',
+          message: `${BIND_ATTR}="${prop}" on <${USE_TAG} component="${def.name}"> forwards nothing: write inner:outer, as label:${prop}. ${FORWARD_GRAMMAR}`,
+        })
+  }
   /* a template read back by update_component keeps the nested instance's key, and its overrides
      with it. One that names none gets no key from the component it renders: that is the
      component's own root key, the same for every use of it, so a second keyless use in a main
@@ -1572,6 +1820,8 @@ const declaredOf = (declared: ComponentProp[], name: string) => declared.find((p
 export function derivePropsAndSlots(
   template: string,
   declared: ComponentProp[],
+  /** a component by name or id: a nested `<doop-use>`'s forwarded prop takes its type from the prop it feeds */
+  find?: (ref: string) => Pick<ComponentDef, 'id' | 'props'> | undefined,
 ): { props: ComponentProp[]; slots: ComponentSlot[] } {
   const root = parseTemplateRoot(template)
   const props = new Map<string, ComponentProp>()
@@ -1589,6 +1839,27 @@ export function derivePropsAndSlots(
     for (const { target, prop } of parseBindings(attrOf(el, BIND_ATTR) ?? '', el.tagName)) {
       if (props.has(prop)) continue
       const known = declaredOf(declared, prop)
+      if (el.tagName === USE_TAG) {
+        /* `inner:outer` on a nested use: the outer prop is the nested component's prop, handed up */
+        if (target === null) continue
+        const nested = find?.(attrOf(el, 'component') ?? '')
+        const fed = nested?.props.find((candidate) => candidate.name === target)
+        props.set(prop, {
+          name: prop,
+          type: known?.type ?? (target === 'component' ? 'instance' : (fed?.type ?? 'text')),
+          ...(known
+            ? typedFieldsOf(known)
+            : target === 'component'
+              ? nested
+                ? { accepts: [nested.id] }
+                : {}
+              : fed
+                ? fedFieldsOf(fed)
+                : {}),
+          ...descriptionOf(known),
+        })
+        continue
+      }
       const type = target === 'src' ? 'image' : target === 'href' ? 'link' : 'text'
       props.set(prop, {
         name: prop,
@@ -1622,6 +1893,17 @@ export function derivePropsAndSlots(
     }
   }
   return { props: [...props.values()], slots }
+}
+
+/** What a forwarded prop takes from the nested prop it feeds: its limits, never its default. */
+function fedFieldsOf(prop: ComponentProp): Partial<ComponentProp> {
+  return {
+    ...(prop.options ? { options: prop.options } : {}),
+    ...(prop.min !== undefined ? { min: prop.min } : {}),
+    ...(prop.max !== undefined ? { max: prop.max } : {}),
+    ...(prop.step !== undefined ? { step: prop.step } : {}),
+    ...(prop.accepts?.length ? { accepts: prop.accepts } : {}),
+  }
 }
 
 /** What a declared prop says beyond its name and type: kept for a prop the template still uses. */

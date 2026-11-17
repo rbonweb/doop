@@ -263,7 +263,7 @@ function prepareMains(
     const variants = variantAttrs(def.props)
     const { css, rawCss } = extractComponentCss(sheet(), found.el, id, variants)
     const head = headTags()
-    const { props, slots } = derivePropsAndSlots(template, def.props)
+    const { props, slots } = derivePropsAndSlots(template, def.props, ctx.find)
     const same =
       def.template === template &&
       def.css === css &&

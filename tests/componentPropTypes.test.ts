@@ -147,7 +147,17 @@ describe('component prop types', () => {
         'var(--brand)',
       ])
         expect(propValueProblem(colour, good), good).toBeUndefined()
-      for (const bad of ['', 'redd', '#ff', '#fffff', 'rgb(0,0,0', 'var(brand)', 'url(x)', 'rgb(expression(1))'])
+      for (const bad of [
+        '',
+        'redd',
+        '#ff',
+        '#fffff',
+        'rgb(0,0,0',
+        'var(brand)',
+        'url(x)',
+        'rgb(expression(1))',
+        'var(--x, url(//host/x))',
+      ])
         expect(propValueProblem(colour, bad), bad).toBeDefined()
       expect(propValueProblem({ name: 'i', type: 'instance' }, 'Anything')).toBeUndefined()
       expect(propValueProblem({ name: 'i', type: 'instance' }, '')).toBeDefined()

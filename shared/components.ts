@@ -387,7 +387,8 @@ export function isColorValue(value: string): boolean {
     COLOR_FUNCTION.test(text) ||
     TOKEN_COLOR.test(text) ||
     NAMED_COLORS.has(text.toLowerCase()) ||
-    (LOOSE_COLOR.test(text) && balanced(text))
+    /* a fallback may name colours and calls but never fetch: `var(--x, url(//host/x))` is refused */
+    (LOOSE_COLOR.test(text) && !/url\(/i.test(text) && balanced(text))
   )
 }
 
