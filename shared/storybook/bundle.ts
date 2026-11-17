@@ -76,6 +76,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
       .map((prop) => ({ prop: prop.name, value: String(prop.initial) }))
     const capture = await page.evaluate(captureStory, {
       textArgs,
+      styleProperties: STYLE_PROPERTIES,
       maxBytes: STORYBOOK_LIMITS.captureBytes,
       maxElements: 300,
     })

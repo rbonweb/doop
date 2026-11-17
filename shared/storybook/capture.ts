@@ -60,6 +60,8 @@ export interface CaptureOptions {
   textArgs: { prop: string; value: string }[]
   /** the sanitized html may not be longer than this (UTF-16 units, as a cheap bound on bytes) */
   maxBytes: number
+  /** the computed properties to read; pass `STYLE_PROPERTIES`, since a function sent to the page cannot see this module */
+  styleProperties: readonly string[]
   /** over this many elements no computed styles are read, so a variant cannot be diffed */
   maxElements: number
 }
@@ -292,7 +294,7 @@ export function captureStory(options: CaptureOptions): StoryCapture {
   if (kept.length <= options.maxElements) {
     styles = kept.map(({ live: el }) => {
       const computed = getComputedStyle(el)
-      return STYLE_PROPERTIES.map((property) => computed.getPropertyValue(property))
+      return options.styleProperties.map((property) => computed.getPropertyValue(property))
     })
   } else {
     issues.push({

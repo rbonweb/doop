@@ -1,4 +1,4 @@
-/** What an imported page becomes before it is stored: passive HTML. Both functions here run inside the page (`page.evaluate`), so each is self-contained and may use only what the page has. */
+/** What an imported page becomes before it is stored: passive HTML. `snapshotDocument` runs inside the page (`page.evaluate`), so it is self-contained and may use only what the page has. */
 
 export interface DocumentSnapshot {
   /** the document's base URL before its own `<base>` tags are removed */
