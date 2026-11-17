@@ -481,8 +481,9 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         ...(Object.keys(propMapping).length ? { props: propMapping } : {}),
         origin: {
           kind: input.source.kind,
-          storyId: group.defaultStory.id,
-          url: storyIframeUrl(input.baseUrl, group.defaultStory.id),
+          /* the story the markup came from: the default, or the one with the controls */
+          storyId: controls.storyId,
+          url: storyIframeUrl(input.baseUrl, controls.storyId),
         },
       },
     })
