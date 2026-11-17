@@ -36,6 +36,8 @@ component loses nothing visually: deleting writes no frame at all (see Deleting 
 - **Prop types** (`PROP_TYPES`): `text`, `image`, `link`, `enum`, `boolean`, `number` (`min`, `max`, `step`), `color` (hex, `rgb()`/`hsl()`/`hwb()`/`lab()`/`lch()`/`oklab()`/`oklch()`, named colours, `transparent`, `currentColor`, `var(--token)` with an optional fallback, `color-mix()`; anything holding `url(` is refused) and `instance` (a component named in `accepts`, any component when empty). Values are strings; `propValueProblem` in `shared/components.ts` checks them for the engine, `update_instances`, `insert_instance` and the Design tab, and a bad value on a `<doop-use>` is an `invalid_prop_value` naming what is allowed. Booleans stay lenient (any value but `"false"` is on), so old compact frames round-trip unchanged.
 - **Booleans on attributes**: a `boolean` prop bound to an HTML boolean attribute (`disabled`, `checked`, `hidden`, `open`, …) writes `attr=""` when on and removes it when off; reconcile reads a removed attribute or a stored `"false"` as off. Other attributes (`aria-pressed`) keep the value string. `reflect: true` also puts `data-<name>` on the root, a variant for CSS like an enum's (`variantAttrs`). The fix needs the prop declared `type: boolean`; an undeclared `disabled:disabled` binding stays a text prop.
 - **Text bindings keep siblings**: a bound text prop replaces only the element's own text nodes, so `<a><svg/>Label</a>` keeps its icon. An old instance whose earlier render had wiped such a sibling re-saves with that sibling as a `hidden` override, since old data cannot be told from a deliberate delete.
+- **Swap** (`PartOverride.swap`, a component id): one instance renders a nested `<doop-use>` part as another component. Which component renders: the part's `swap`, then a forwarded `component:` prop, then the template's literal; props the new component lacks are dropped, same-named ones carry over. Reconcile records a swap when the nested rendered component differs from that and drops it when it matches again; a cycle or unknown target renders the template's component with an issue. `update_instances` takes `swap: { part, component | null }`. Slot content is the instance's own markup, so it needs no swap.
+- **Duplicate and detach**: `duplicate_component` copies a definition under a new id and a unique `<name> copy` name, history reset to rev 1, `code` kept, a new main beside the source's (else on the Components page); a linked library component duplicates into a local one. `detach_from_library` keeps the id, so every instance stays linked, drops `source.library` and writes a local main; library updates stop arriving.
 - **Code mapping** (`ComponentCode`, `shared/componentCode.ts`, checked by `validCode` in `server/componentCodeMap.ts` on create and update against the component's real props and slots): the legacy `path`, `name`, `snippet`, plus `importFrom`, `exportName`, `defaultExport`, a `props` map (code name, enum and boolean value maps, `omit`), a `slots` map (`children` or a code prop) and `origin` (`manual`, `storybook`, `cli`, `agent`). `get_component` and writes return it whole; `list_components` shows only `importFrom` and `exportName`. Library publish, pull and restore copy it as stored.
 - **Instance**: root attributes `data-doop-instance`, `data-doop-rev`, `data-doop-id`, and when needed
   `data-doop-props` / `data-doop-overrides` as JSON. Every element keeps its `data-doop-part` key.
@@ -185,7 +187,7 @@ drops), within a quarter of the operation's parse budget; frames it had to leave
 `server/componentTools.ts` holds each tool's schema and handler once, for MCP and the resident agent:
 `list_components`, `get_component`, `create_component`, `update_component`, `insert_instance`,
 `update_instances`, `delete_component`, `restore_component`, `restore_component_version`,
-`import_component`, `sync_component`. Previews are `get_component_preview` (MCP) and
+`import_component`, `sync_component`, `duplicate_component`, `detach_from_library`. Previews are `get_component_preview` (MCP) and
 `screenshot_component` (resident). `get_canvas` carries the catalog; `get_frame` and `edit_frame_html` speak
 the compact form. Instructions are `COMPONENTS` in `server/guide.ts`.
 
@@ -193,7 +195,7 @@ the compact form. Instructions are `COMPONENTS` in `server/guide.ts`.
 
 Layers / Components switch in the left rail (`ComponentsPanel.tsx`): search, previews, click to place, repeated
 design scan, library import. `ComponentSection.tsx` heads the Design tab: props, go to main, reset, detach on an
-instance; description and make-a-prop / make-a-slot on a main. Right-click and ⌘⌥K create one.
+instance; description and make-a-prop / make-a-slot on a main. Right-click and ⌘⌥K create one. Props have a control per type (number with min/max/step, colour with the canvas's tokens, instance from `accepts`), each overridden prop and part wears a dot with its own reset, and a swapped nested instance says what it was swapped to. On a main the section lists its instances with jump-to (`InstanceList.tsx`) and shows its code mapping with a copyable import line and an edit form (`ComponentCodeSection.tsx`). The Components panel's card menu duplicates a component and detaches a linked library one (after a confirm).
 
 ## Limits
 

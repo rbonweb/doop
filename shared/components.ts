@@ -182,6 +182,8 @@ export interface PartOverride {
   slot?: string
   /** a nested instance's own state */
   use?: InstanceOverrides
+  /** on a part that is a nested `<doop-use>`: the id of the component this instance shows there instead of the template's */
+  swap?: string
 }
 
 export interface InstanceOverrides {

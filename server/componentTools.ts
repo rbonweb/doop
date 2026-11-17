@@ -13,6 +13,8 @@ import {
   createComponentFromHtml,
   deleteComponent,
   detachAllInstances,
+  detachFromLibrary,
+  duplicateComponent,
   findComponent,
   findDeletedComponent,
   importableEntry,
@@ -561,7 +563,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     name: 'update_instances',
     title: 'Change instances',
     description:
-      "Change instances in one frame in a single undo step: set props, override one element (keyed by part, from get_component), reset overrides back to the main, or detach. Instance ids come from get_frame's instances list. An override is sparse: everything else keeps following the main. Detaching keeps the look and cuts the link, for that instance only (instances nested inside it stay linked).",
+      "Change instances in one frame in a single undo step: set props, override one element (keyed by part, from get_component), swap the component nested at a part for another on this instance only (swap: { part, component }; component null undoes it), reset overrides back to the main, or detach. Instance ids come from get_frame's instances list. An override is sparse: everything else keeps following the main. Detaching keeps the look and cuts the link, for that instance only (instances nested inside it stay linked).",
     readOnly: false,
     shape: {
       frame_id: FRAME_ID,
@@ -579,6 +581,18 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
               .optional()
               .describe('true = everything, or these part keys'),
             detach: z.boolean().optional(),
+            swap: z
+              .object({
+                part: z.string().describe("The nested component's part key, from get_component"),
+                component: z
+                  .string()
+                  .nullable()
+                  .describe("Name or id of the component to show there instead; null puts the main's own back"),
+              })
+              .optional()
+              .describe(
+                "Show another component in one nested <doop-use> of this instance only; props the new one lacks are dropped, same-named props carry over. Content inside a slot is the instance's own markup: edit it in the frame, there is no swap for it.",
+              ),
           }),
         )
         .min(1),
@@ -590,6 +604,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
         overrides?: Record<string, never>
         reset?: boolean | string[]
         detach?: boolean
+        swap?: { part: string; component: string | null }
       }[]
       const { frame, missing } = changeInstances(
         canvas.id,
@@ -600,6 +615,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           overrides: entry.overrides,
           reset: entry.reset,
           detach: entry.detach,
+          swap: entry.swap,
         })),
         actor,
       )
@@ -662,6 +678,39 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           main === 'written'
             ? 'Its old main was gone, so a new one was written on the Components page (main_frame_id).'
             : 'Its instances follow it again.',
+        frames: outcomeFrames({ canvas } as ToolContext, def),
+      }
+    },
+  },
+  {
+    name: 'duplicate_component',
+    title: 'Duplicate a component',
+    description:
+      'Make a second component from an existing one: the same design, props, slots and code mapping, named "<name> copy" ("copy 2", … when taken), with a main of its own beside the original\'s (or on the Components page when the original has none). Use it to start a variant or a divergent version without disturbing the original: the original and every instance of it stay exactly as they are, and the copy has no instances yet. A component linked from a workspace library is duplicated into a plain local one, which you can edit here. The copy starts at revision 1 with no history. Rename it with update_component.',
+    readOnly: false,
+    shape: { component: COMPONENT_REF },
+    run({ component }, { canvas, actor }) {
+      const { component: def, source } = duplicateComponent(canvas.id, String(component), actor)
+      return {
+        data: { ok: true, component: summary(canvas, def), source: source.name, main_frame_id: def.mainFrameId },
+        note: `“${source.name}” is unchanged. The copy's main is frame main_frame_id on the Components page. No instance was placed: use it with ${usageExample(def)}, and rename it with update_component.`,
+        frames: outcomeFrames({ canvas } as ToolContext, def),
+      }
+    },
+  },
+  {
+    name: 'detach_from_library',
+    title: 'Detach a component from its workspace library',
+    description:
+      "Make a component linked from a workspace library this canvas's own. It keeps its id, so every instance stays linked and none of them changes; the link to the library is dropped, a main is written on the Components page from the design it has now, and from then on it is edited here with update_component and sync_component no longer applies. Use it only when the human wants this canvas to diverge from the shared library: later library updates will not reach it. Refused for a component that is already local. For a separate copy that leaves the linked one alone, use duplicate_component.",
+    readOnly: false,
+    destructive: true,
+    shape: { component: COMPONENT_REF },
+    run({ component }, { canvas, actor }) {
+      const { component: def } = detachFromLibrary(canvas.id, String(component), actor)
+      return {
+        data: { ok: true, component: summary(canvas, def), main_frame_id: def.mainFrameId },
+        note: 'It is local now: its main is frame main_frame_id on the Components page, and every instance still follows it. Later library publications will not reach it.',
         frames: outcomeFrames({ canvas } as ToolContext, def),
       }
     },
