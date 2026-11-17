@@ -285,8 +285,9 @@ needs a reusable piece the system lacks, add it, then use it.
   component cannot pass its props on to another (data-doop-prop on a <doop-use> is dropped, with
   a COMPONENT note); where each instance should choose, make that spot a data-doop-slot. Its CSS
   may restyle the nested one from its own element (.card .btn { width: 100% }), inside it only.
-- Write a description saying when to use it. Set code (file and export name) when the component
-  exists in the human's repo: that is what makes the design implementable with their real code.
+- Write a description saying when to use it. Set code to map the component to the human's own package:
+  importFrom and exportName, plus a props and slots mapping (renamed props, enum value maps, slots
+  to children). React export imports that export instead of generating the component.
 - Vary with props, not copies. An enum prop sets data-<name> on the root, so a variant is plain
   CSS: .btn[data-tone="ghost"] { … }. Hover and focus are ordinary CSS too. You do not need a
   component per state, or per size.
