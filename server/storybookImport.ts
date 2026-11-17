@@ -1,8 +1,14 @@
 import type { Page } from 'puppeteer-core'
-import { buildComponentBundle, type BundleResult, type StoryPage } from '../shared/storybook/bundle.ts'
+import {
+  buildComponentBundle,
+  type BundleResult,
+  type PlannedComponent,
+  type StoryPage,
+} from '../shared/storybook/bundle.ts'
 import { parseStorybookIndex, type StoryEntry } from '../shared/storybook/index.ts'
 import { probeAttribute } from '../shared/storybook/probe.ts'
-import { STORYBOOK_LIMITS, storybookBasePath } from '../shared/storybook/plan.ts'
+import { groupStories, STORYBOOK_LIMITS, storybookBasePath } from '../shared/storybook/plan.ts'
+import { env } from './env.ts'
 import { fetchPinnedPublicUrl, guardPublicPageRequests, parsePublicHttpUrl } from './publicUrl.ts'
 import { openIsolatedPage } from './screenshot.ts'
 
@@ -52,11 +58,17 @@ export interface StorybookImportDeps {
   fetchUrl?: typeof fetchPinnedPublicUrl
   parseUrl?: (raw: string) => URL
   guard?: Parameters<typeof guardPublicPageRequests>[1]
+  /** the Storybook may be on a private address (the operator turned DOOP_STORYBOOK_PRIVATE_HOSTS on): its own origin is reached directly, nothing else private is */
+  privateHosts?: boolean
   /** sees the size of each answer that came back from the page, for tests */
   observe?: (event: { step: 'capture' | 'meta'; bytes: number }) => void
 }
 
 export interface StorybookImportOptions {
+  /** the components the import will render, as soon as the index is read */
+  onPlan?: (groups: PlannedComponent[]) => void
+  /** after each render, with what is planned so far */
+  onRender?: (event: { rendered: number; total: number; component: string }) => void
   /** the npm package the components are imported from in code, "@acme/ui" */
   package?: string
   /** only components whose Storybook title starts with one of these */
@@ -70,6 +82,35 @@ interface IsolatedRealm {
     pageFunction: string,
     options: { timeout: number; polling: number },
   ): Promise<{ jsonValue(): Promise<unknown> }>
+}
+
+/** What came back from the page, in characters: a string's length, else the JSON of what it was (a small refusal object, null). */
+function answerSize(result: unknown): number {
+  if (typeof result === 'string') return result.length
+  try {
+    return JSON.stringify(result)?.length ?? 0
+  } catch {
+    return 0
+  }
+}
+
+/** An operator's own Storybook on a private network: plain http(s) addresses, no credentials in the URL. */
+function anyHttpUrl(raw: string): URL {
+  const url = new URL(raw)
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('only http(s) URLs are allowed')
+  if (url.username || url.password) throw new Error('URLs containing credentials are not allowed')
+  return url
+}
+
+/** The dependencies an import runs with: what a test passed, else the public-only defaults, else (an operator's opt-in) private hosts for the Storybook's own origin. */
+export function resolveDeps(deps: StorybookImportDeps = {}): StorybookImportDeps {
+  if (!deps.privateHosts && !env.DOOP_STORYBOOK_PRIVATE_HOSTS) return deps
+  return {
+    ...deps,
+    privateHosts: true,
+    parseUrl: deps.parseUrl ?? anyHttpUrl,
+    fetchUrl: deps.fetchUrl ?? ((raw, init) => fetch(raw as never, init as never)),
+  }
 }
 
 let running = 0
@@ -179,7 +220,12 @@ async function openStoryPage(
   const isolated = await openIsolatedPage({ priority: 'background' })
   try {
     const raw: Page = isolated.page
-    await guardPublicPageRequests(raw, deps.guard)
+    await guardPublicPageRequests(
+      raw,
+      deps.privateHosts
+        ? { ...deps.guard, allowUrl: (url) => url.origin === origin || (deps.guard?.allowUrl?.(url) ?? false) }
+        : deps.guard,
+    )
     await raw.setViewport(VIEWPORT)
     await raw.setUserAgent(UA)
     const deadline = Date.now() + STORYBOOK_LIMITS.renderMs
@@ -232,12 +278,12 @@ async function openStoryPage(
       async readMeta(probe, storyId) {
         /* a plain Runtime.evaluate of an expression: it needs nothing from the page's builtins */
         const result = await bounded(raw.evaluate(`window[${JSON.stringify(probe)}].meta(${JSON.stringify(storyId)})`))
-        deps.observe?.({ step: 'meta', bytes: typeof result === 'string' ? result.length : 0 })
+        deps.observe?.({ step: 'meta', bytes: answerSize(result) })
         return result
       },
       async evaluate(fn, arg) {
         const result = await bounded(isolatedWorld().evaluate(fn as never, arg as never))
-        deps.observe?.({ step: 'capture', bytes: typeof result === 'string' ? result.length : 0 })
+        deps.observe?.({ step: 'capture', bytes: answerSize(result) })
         return result as never
       },
       evaluateSource: (source) => bounded(isolatedWorld().evaluate(source)),
@@ -253,8 +299,9 @@ async function openStoryPage(
 export async function storybookBundle(
   rawUrl: string,
   options: StorybookImportOptions = {},
-  deps: StorybookImportDeps = {},
+  rawDeps: StorybookImportDeps = {},
 ): Promise<BundleResult> {
+  const deps = resolveDeps(rawDeps)
   const parseUrl = deps.parseUrl ?? parsePublicHttpUrl
   let url: URL
   try {
@@ -287,6 +334,8 @@ export async function storybookBundle(
       baseUrl: index.base.href,
       package: options.package,
       include: options.include,
+      onPlan: options.onPlan,
+      onRender: options.onRender,
       signal: controller.signal,
       concurrency: 2,
       withPage: async (use) => {
@@ -309,5 +358,76 @@ export async function storybookBundle(
     clearTimeout(timer)
     options.signal?.removeEventListener('abort', abort)
     running--
+  }
+}
+
+/** Imports of a Storybook one account may start in an hour. */
+export const STORYBOOK_IMPORTS_PER_HOUR = 3
+
+/** The account is over its hourly Storybook imports. */
+export class StorybookRateLimitError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super(
+      `You have started ${STORYBOOK_IMPORTS_PER_HOUR} Storybook imports in the last hour, the most Doop runs for one account. Try again in ${Math.ceil(retryAfterSeconds / 60)} minutes, or run the Doop CLI on your machine.`,
+    )
+    this.name = 'StorybookRateLimitError'
+  }
+}
+
+const importStarts = new Map<string, number[]>()
+
+/** Counts one import against `account`'s hour; throws StorybookRateLimitError when it is over. A dry run that only plans (no renders) is not counted. */
+export function takeStorybookImport(account: string, now = Date.now()): void {
+  const recent = (importStarts.get(account) ?? []).filter((at) => now - at < 3_600_000)
+  if (recent.length >= STORYBOOK_IMPORTS_PER_HOUR) {
+    importStarts.set(account, recent)
+    throw new StorybookRateLimitError(Math.max(1, Math.ceil((recent[0]! + 3_600_000 - now) / 1000)))
+  }
+  recent.push(now)
+  importStarts.set(account, recent)
+  /* the map holds only accounts with an import in the last hour */
+  if (importStarts.size > 5000) {
+    for (const [key, list] of importStarts) if (list.every((at) => now - at >= 3_600_000)) importStarts.delete(key)
+  }
+}
+
+/** What a dry run shows: the components the Storybook would bring in, from its index alone (no story is rendered, no browser is opened). */
+export async function storybookPlan(
+  rawUrl: string,
+  options: Pick<StorybookImportOptions, 'include' | 'signal'> = {},
+  rawDeps: StorybookImportDeps = {},
+): Promise<{
+  components: (PlannedComponent & { story: string })[]
+  issues: { code: string; message: string }[]
+  baseUrl: string
+}> {
+  const deps = resolveDeps(rawDeps)
+  const parseUrl = deps.parseUrl ?? parsePublicHttpUrl
+  let url: URL
+  try {
+    url = parseUrl(/^[a-z][a-z0-9+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`)
+  } catch (error) {
+    throw new StorybookIndexError(error instanceof Error ? error.message : 'not a valid URL')
+  }
+  const base = new URL(url.href)
+  base.pathname = storybookBasePath(base.pathname)
+  base.search = ''
+  base.hash = ''
+  const index = await fetchStorybookIndex(
+    base,
+    { fetchUrl: deps.fetchUrl ?? fetchPinnedPublicUrl, parseUrl },
+    options.signal,
+  )
+  const grouped = groupStories(index.entries, { include: options.include })
+  return {
+    components: grouped.groups.map((group) => ({
+      name: group.name,
+      group: group.title,
+      stories: group.stories.length,
+      renders: 1,
+      story: group.defaultStory.id,
+    })),
+    issues: [...index.issues, ...grouped.issues],
+    baseUrl: index.base.href,
   }
 }

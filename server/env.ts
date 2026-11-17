@@ -270,6 +270,10 @@ const schema = {
      self-hosted instance whose models run on its own network */
   DOOP_CUSTOM_PROVIDERS: bool({ default: true }),
   DOOP_CUSTOM_PROVIDER_PRIVATE_HOSTS: bool({ default: false }),
+  /* A Storybook import reads only public addresses unless this is on, for a self-hosted
+     instance whose Storybook is on its own network. Even then the story pages may reach
+     only the Storybook's own origin, never another private address */
+  DOOP_STORYBOOK_PRIVATE_HOSTS: bool({ default: false }),
 
   /* ------------------------------------------------ image generation */
   OPENAI_API_KEY: str({ default: undefined }),

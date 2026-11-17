@@ -474,6 +474,8 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     expect(captures.length).toBeGreaterThan(2)
     expect(metas.length).toBe(3)
     for (const event of captures) expect(event.bytes).toBeLessThanOrEqual(STORYBOOK_LIMITS.captureBytes)
+    /* a refusal is an object, and it is measured as its JSON, not as nothing */
+    expect(captures.some((event) => event.bytes > 20 && event.bytes < 300)).toBe(true)
     for (const event of metas) expect(event.bytes).toBeLessThanOrEqual(MAX_PROBE_CHARS + 1024)
   })
 

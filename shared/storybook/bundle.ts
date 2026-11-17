@@ -213,6 +213,19 @@ export interface BundleInput {
   /** the clock, for the import's time box */
   now?: () => number
   onProgress?: (done: number, total: number) => void
+  /** the components the import will render, once the stories are grouped and before the first render */
+  onPlan?: (groups: PlannedComponent[]) => void
+  /** after each render: `total` is what is planned so far (a component's variants join it once its default has been read), so it only grows */
+  onRender?: (event: { rendered: number; total: number; component: string }) => void
+}
+
+export interface PlannedComponent {
+  name: string
+  /** the Storybook title path */
+  group: string
+  stories: number
+  /** renders known before any story is read: the default story, one */
+  renders: number
 }
 
 export interface BundleResult {
@@ -242,6 +255,16 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   const issues: StorybookIssue[] = []
   const grouped = groupStories(input.entries, { include: input.include })
   issues.push(...grouped.issues)
+  input.onPlan?.(
+    grouped.groups.map((group) => ({
+      name: group.name,
+      group: group.title,
+      stories: group.stories.length,
+      renders: 1,
+    })),
+  )
+  let plannedTotal = grouped.groups.length
+  let renderedCount = 0
   const concurrency = input.concurrency ?? 1
   const components: BundleComponent[] = []
   const shared = new Set<string>()
@@ -291,6 +314,8 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     renders++
     const base = await render({ storyId: group.defaultStory.id, args: {}, readMeta: true })
     for (const issue of base.issues) note(issue.code, issue.message)
+    renderedCount++
+    input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
     const capture = base.capture
     if (!capture.ok) {
       note('story_failed', `The default story "${group.defaultStory.name}" could not be captured: ${capture.reason}`)
@@ -309,14 +334,17 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     const plan = planVariants(props, variantAllowance(renders, grouped.groups.length - index - 1))
     for (const reason of plan.skipped) note('variants_skipped', reason)
     renders += plan.renders.length
-    const rendered = await inPool(plan.renders, concurrency, async (variant) => ({
-      variant,
-      result: await render({
+    plannedTotal += plan.renders.length
+    const rendered = await inPool(plan.renders, concurrency, async (variant) => {
+      const result = await render({
         storyId: group.defaultStory.id,
         args: { [variant.arg]: variant.argValue },
         readMeta: false,
-      }),
-    }))
+      })
+      renderedCount++
+      input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
+      return { variant, result }
+    })
     const variants: NonNullable<BundleComponent['variants']> = {}
     const reflected = new Set<string>()
     for (const { variant, result } of rendered) {
