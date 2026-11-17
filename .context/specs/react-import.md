@@ -96,7 +96,6 @@ Over MCP an import is a job (`server/storybookJobs.ts`), since one of a dozen co
 
 - A story that registers a service worker (MSW mocks, as Grafana UI's do) cannot render in the hardened renderer, whose policy blocks workers: it is reported as needing a service worker, with the CLI as the way in.
 - A story whose controls live only in a sibling story (Primer's Playground) is imported from that sibling, named in a `controls_from_story` issue.
-
 - The CLI duplicates the server adapter's page logic (`packages/doop-import/src/render.ts`) rather than sharing it with `server/storybookImport.ts`; a follow-up could move the adapter into `shared/`.
 - Chrome is not auto-detected: its install paths are left out of `browser.ts` so the repo's no-owner-Chrome rule holds. Chrome users pass `--browser` or set `CHROME_PATH`.
 - CSS from a cross-origin stylesheet without CORS cannot be read through the CSSOM, so its rules are skipped with a `css_cross_origin` issue; Google Fonts links are the common case.
