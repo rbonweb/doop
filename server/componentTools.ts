@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import { activeComponents, PROP_TYPES, USE_TAG, type ComponentDef } from '../shared/components.ts'
-import { CODE_ORIGINS } from '../shared/componentCode.ts'
+import { activeComponents, USE_TAG, type ComponentDef } from '../shared/components.ts'
+import { codeSchema, propSchema } from '../shared/componentSchemas.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
 import {
   catalog,
@@ -46,78 +46,13 @@ import { exportCanvasReact, MAX_INLINE_EXPORT_BYTES, reactExportRequest } from '
 import { zipExport } from './reactExport/zip.ts'
 import { batchScope } from './responseShaping.ts'
 
+export { codeSchema, propSchema }
+
 /**
  * The component tools every agent gets, over MCP (server/mcp.ts) or in the server
  * (server/resident.ts): one schema and one handler each, so the two cannot drift.
  * Spec: .context/specs/components.md.
  */
-
-export const propSchema = z.object({
-  name: z.string().describe('Lowercase, it becomes an attribute: "label", "tone", "show-icon"'),
-  type: z
-    .enum(PROP_TYPES)
-    .optional()
-    .describe('text (default), image, link, boolean, number, color, instance, or enum with options'),
-  default: z
-    .string()
-    .optional()
-    .describe('enum, boolean, number, color and instance only; text-like defaults are the template content'),
-  options: z
-    .array(z.string())
-    .optional()
-    .describe('enum values. An enum sets data-<name> on the root, for CSS to key on'),
-  min: z.number().optional().describe('number only: smallest value'),
-  max: z.number().optional().describe('number only: largest value'),
-  step: z.number().positive().optional().describe('number only: values sit on this step, counted from min (else 0)'),
-  accepts: z
-    .array(z.string())
-    .max(20)
-    .optional()
-    .describe('instance only: component names or ids that may be chosen; leave out for any'),
-  reflect: z
-    .boolean()
-    .optional()
-    .describe('boolean only: put data-<name>="true"|"false" on the root, for CSS to key on like an enum'),
-  description: z.string().optional().describe('When to use it, in a line'),
-})
-
-export const codeSchema = z
-  .object({
-    path: z.string().max(500).optional().describe('Source file or package, e.g. "src/components/ui/button.tsx"'),
-    name: z.string().max(200).optional().describe('Export name, e.g. "Button"'),
-    snippet: z.string().max(4000).optional().describe('How it is used in code, or how props map to it'),
-    importFrom: z.string().max(300).optional().describe('Package to import from, e.g. "@acme/ui"'),
-    exportName: z.string().max(200).optional().describe('The export to import, a JavaScript identifier: "Button"'),
-    defaultExport: z.boolean().optional().describe('The export is the package default, not a named one'),
-    props: z
-      .record(
-        z
-          .object({
-            name: z.string().optional().describe('The export prop that receives this one, if named differently'),
-            values: z
-              .record(z.union([z.string(), z.number(), z.boolean()]))
-              .optional()
-              .describe('Enum or boolean value -> what the export receives, e.g. { "ghost": "secondary" }'),
-            omit: z.literal(true).optional().describe('The export has no such prop: do not pass it'),
-          })
-          .partial(),
-      )
-      .optional()
-      .describe('Doop prop -> its mapping on the export, keyed by prop name'),
-    slots: z
-      .record(z.string())
-      .optional()
-      .describe('Doop slot -> "children" or the export prop that receives it, e.g. { "actions": "footer" }'),
-    origin: z
-      .object({
-        kind: z.enum([...CODE_ORIGINS]).describe('manual, storybook, cli or agent'),
-        storyId: z.string().optional().describe('Storybook story id, for a storybook mapping'),
-        url: z.string().optional().describe('The page the mapping was read from, http(s)'),
-      })
-      .optional()
-      .describe('Where this mapping came from'),
-  })
-  .describe('Where this lives in code: the package export it is, and how its props and slots map onto it')
 
 export interface ToolContext {
   canvas: Canvas
