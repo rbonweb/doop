@@ -18,6 +18,7 @@ export const GUIDE_TOPICS = [
   'redesigns',
   'comments-and-agents',
   'export',
+  'react-import',
   'imported-frames',
   'editing-tools',
   'checking-tools',
@@ -37,6 +38,7 @@ export const GUIDE_TOPIC_SUMMARIES: Record<GuideTopic, string> = {
   redesigns: 'redesigning an existing site or page: import, audit, two directions',
   'comments-and-agents': "comment threads, and the built-in Doop Agent's roles",
   export: 'images, PDF and React code (export_react)',
+  'react-import': 'bringing a team’s React component system in: a Storybook, the CLI or a bundle',
   'imported-frames': 'frames imported from a GitHub repo or synced from a live app',
   'editing-tools': 'part of a frame or many frames: sections, patches, search, bulk, claims, compose',
   'checking-tools': 'measure, lint, targeted screenshots, compare, snapshot',
@@ -287,8 +289,7 @@ needs a reusable piece the system lacks, add it, then use it.
         <doop-use component="Button" label="Start" data-doop-prop="label:cta"></doop-use>
       </article>
       <doop-use component="Card" title="Team" cta="Buy"></doop-use>
-- Write a description saying when to use it. Set code to map it to the human's package: importFrom,
-  exportName, and a props and slots mapping; React export imports that export instead.
+- Write a description saying when to use it. Map it to the human's package with code (importFrom, exportName, props and slots); export_react imports that export instead.
 - Vary with props, not copies. An enum prop sets data-<name> on the root, so a variant is plain
   CSS: .btn[data-tone="ghost"] { … }. Hover and focus are ordinary CSS too. You do not need a
   component per state, or per size.
@@ -383,7 +384,7 @@ and judge the render like a senior designer. Evaluate each item, give a one-line
 and fix real issues before moving on:
 
 - **Fit**: content clipped at the frame edge, or a large dead zone below? Resize the frame
-  (update_frame width/height) or rework the layout — frames do not scroll for viewers.
+  (update_frame width/height) or rework the layout — frames do not scroll.
 - **Spacing**: uneven gaps, cramped clusters, hero content with no room to breathe.
 - **Hierarchy**: can you tell heading from body from caption at a glance?
 - **Contrast**: text you would squint at; elements dissolving into their background.
@@ -429,7 +430,7 @@ Viewers watch designs assemble live. Stream with append_frame_html:
   never hold a chunk back to "finish" something.
 - For small tweaks (copy, a color, one element's spacing) use edit_frame_html — an exact
   find/replace that morphs into the rendered frame in place, with no re-render. Resending
-  a whole document via set_frame_html is for genuine redesigns.
+  a whole document via set_frame_html is for redesigns.
 - Every replace and stream files the design it overwrote in the frame's version history.
   list_frame_versions shows the earlier states; restore_frame_version brings one back (HTML
   and size). Reach for it when a human asks for the previous version, or when your own
@@ -460,11 +461,10 @@ ${FRAME_STYLES}
   A font that is neither in the library nor on Google Fonts goes in with upload_font first.
 - Pictures on the canvas: a frame listed with \`images\` references raster images people
   uploaded or pasted, each with a \`description\` of what it shows, written by a vision model
-  (null while pending). Read them before designing, and call get_frame_screenshot on the
-  relevant frames to see the pixels. A frame that is nothing but one image (its description is
+  (null while pending). Read them before designing and screenshot the relevant frames to see the pixels. A frame that is only one image (its description is
   the whole frame) is a reference someone pasted for you: leave it unchanged and deliver in a
   separate frame. A design that happens to use images is an ordinary frame — edit it when asked.
-- Always reset: * { margin: 0; box-sizing: border-box; } and design to the exact frame size.
+- Always reset: * { margin: 0; box-sizing: border-box; } and design to the frame size.
 - Size frames to their content: mobile screen 390×844, desktop page 1280×800, card or
   component 480×360, square social post 640×640. Set width/height on create_frame, or
   adjust later with update_frame.
@@ -544,15 +544,14 @@ automatically once addressed — but feedback your human gives YOU in
 conversation is invisible to the canvas unless you report it. After you
 address design feedback from your own chat ("rounder corners", "more white
 and blue"), call save_decision with the human's words and the reason. The same goes
-for a direction you choose yourself: the decision and why, never a list of values
-(those are tokens). Save one decision and its
+for a direction you choose yourself: the decision and why, never a list of values. Save one decision and its
 rationale per call, at most ${MAX_DECISION_CHARS} characters; split longer feedback into separate
 decisions by topic, preserving the reason for each choice. Design taste only —
 never one-off content edits like typos or copy tweaks.
 
 ## Fast tools for big canvases
 
-- Edit without the whole HTML: get_section, replace_section, patch_frame, find_frames (topic "editing-tools"). Pass expected_version (your last read's version) when another agent may edit.
+- Edit without the whole HTML: get_section, replace_section, patch_frame, find_frames (topic "editing-tools"). Pass expected_version (your last read) when another agent may edit.
 - Judge a render by numbers first: measure_frame, lint_frame (topic "checking-tools").
 - duplicate_frames instead of re-typing a frame; arrange_frames, check_layout, run_batch (topic "canvas-tools").
 
@@ -572,7 +571,7 @@ ${DESIGN_QUALITY}
 ## Components — design once, use everywhere
 
 A component is one design used in many places: change its main and every instance follows.
-get_canvas and list_components show a canvas's components with their props.
+get_canvas and list_components show them with their props.
 
 - Anything on that list goes in through <doop-use>, never redrawn:
       <doop-use component="Button" label="Start free" tone="ghost"></doop-use>
@@ -598,7 +597,7 @@ them; the rest is open to you. get_guide({ topic: "comments-and-agents" }) has b
 ## Exports
 
 Every frame result carries image_url, a public render of its current HTML. export_frame
-gives PNG, JPG or PDF, export_layer one element (get_guide export).
+gives PNG, JPG or PDF, export_layer one element.
 
 ## Multiplayer etiquette
 
@@ -856,6 +855,64 @@ When a human wants the design as code for their app, export_react turns the canv
 - Asset URLs (/a/, /icons/, /photos/, /i/, /fonts/) are rewritten to this server's address so the exported app shows the same images; for production the team uploads them to its own hosting.
 - Nothing from the canvas is ever pasted into code as markup: text and attribute values are string literals, there is no dangerouslySetInnerHTML, scripts and event handlers are dropped. Do not add any by hand to the exported files.
 - People get the same export in the app (File, Export to React…) as a zip, and Copy as React on a component.
+`,
+  'react-import': `# Bringing a team's React component system into Doop
+
+Three ways in, one importer: a published Storybook, a Storybook in the repo through the CLI, or a bundle you write yourself. Find out which one fits before starting.
+
+## When
+
+The person says "import our components", "bring our design system in", names a Storybook, or points at a repo with React components. Ask for the published Storybook URL or the repo; only when there is neither do you write the bundle yourself.
+
+## Path 1 — a published Storybook
+
+Call import_storybook({ canvas_id, url, package: "@acme/ui", dry_run: true }) first: it answers what would happen and writes nothing. Call it again without dry_run to create the components. url is the published Storybook root (the storybook-static build), and package becomes the default importFrom for every component, so pass the name the team imports from. The answer is { created, updated, unchanged, skipped, tokens, pageId, issues }: tell the human what was skipped and read every issue.
+
+A private or authenticated Storybook is refused (401 or 403, a sign-in redirect, a private address), and no cookies or credentials are sent. Ask for a public build, or use path 2.
+
+## Path 2 — a Storybook in the repo
+
+Call create_import_ticket({ canvas_id }): it returns { upload_url, expires_at, command, curl }. Run its command in the repo's shell on this machine: npx doop-import --storybook ./storybook-static --ticket <upload_url> --package @acme/ui. A dev server URL works in place of the directory (http://localhost:6006). With no storybook-static, build it first with the repo's build-storybook script. The CLI renders every story here with a local browser, bundles the result and uploads it; nothing of the repo runs on the Doop server. Add --include <title prefix> to narrow it, --dry-run to preview and --out bundle.json to keep the bundle. The ticket is single use and lasts 15 minutes.
+
+## Path 3 — no Storybook: read the repo
+
+Read the component files and their TypeScript prop types, and take the variants from the code: a union-typed prop becomes an enum prop with its options, a boolean prop a boolean.
+
+Write each component's default render as one root element of plain HTML and CSS. Bind text with data-doop-prop="label" and slots with data-doop-slot="children". An enum variant is variants[prop][value].css written against the default html; a variant that changes the structure is variants[prop][value].html instead.
+
+Fill code so export_react imports the real component: importFrom, exportName, props (name to rename one, values to map enum or boolean values, omit: true for a prop the export does not take) and slots (each slot to "children" or the export's prop name).
+
+Call import_components({ canvas_id, bundle, dry_run: true }) first, then for real. One call takes at most 60 components. A bundle over 300 KB goes through create_import_ticket and curl -T bundle.json <upload_url> instead, or the same upload URL with ?dry_run=1 to preview.
+
+## A minimal bundle
+
+    {
+      "version": 1,
+      "source": { "kind": "agent", "name": "acme/ui" },
+      "package": "@acme/ui",
+      "components": [{
+        "name": "Button",
+        "html": "<button class=\\"btn\\" data-doop-prop=\\"label\\">Save</button>",
+        "css": ".btn { padding: 8px 14px; border-radius: 8px; }",
+        "props": [
+          { "name": "label", "type": "text" },
+          { "name": "tone", "type": "enum", "options": ["primary", "ghost"], "default": "primary" }
+        ],
+        "variants": { "tone": {
+          "primary": { "css": ".btn { background: #111; color: #fff; }" },
+          "ghost": { "css": ".btn { background: transparent; border: 1px solid #111; }" }
+        } },
+        "code": { "importFrom": "@acme/ui", "exportName": "Button", "props": { "tone": { "values": { "ghost": "secondary" } } }, "slots": { "label": "children" } }
+      }]
+    }
+
+## Re-importing
+
+Run the import again: a component whose code.importFrom and code.exportName match a live one updates in place (same id, history kept) and its instances follow. Unchanged components are reported unchanged and not written, so a re-import after the package changes is safe.
+
+## After the import
+
+Open the "Imported components" page (the result's pageId) with get_frame_screenshot, fix what renders wrong in the bundle and import again. Then export_react on a screen that uses the components and read report.components: every mapped component is imported from its package instead of generated as a file.
 `,
   'imported-frames': `# Imported frames\n\n## From a GitHub repo — the repo is the source of truth
 
