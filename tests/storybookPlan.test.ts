@@ -70,13 +70,15 @@ describe('groupStories', () => {
       story('Components/ActionMenu/Examples', 'Playground'),
       story('Components/Button', 'Primary'),
       story('Components/Button/Examples/Docs', 'Large'),
-      story('Orphans/Thing/Features', 'A'),
+      story('Layout/Features', 'A'),
     ])
+    /* "Layout/Features" has no Layout above it, so it is a component of its own */
     expect(groups.map((group) => [group.name, group.stories.length, group.defaultStory.name])).toEqual([
       ['ActionMenu', 3, 'Default'],
       ['Button', 2, 'Primary'],
+      ['Features', 1, 'A'],
     ])
-    expect(issues.map((issue) => issue.code)).toEqual(['collections_skipped'])
+    expect(issues).toEqual([])
   })
 
   it('matches include on the merged component title, so a picked component brings its collections along', () => {
@@ -98,7 +100,9 @@ describe('groupStories', () => {
     expect(again.groups.map((group) => [group.title, group.stories.length])).toEqual(
       all.groups.map((group) => [group.title, group.stories.length]),
     )
+    /* naming a collection alone selects nothing: include names components */
     expect(groupStories(entries, { include: ['Components/ActionMenu/Features'] }).issues[0]?.code).toBe('no_components')
+    expect(groupStories([story('Layout/Features', 'A')], { include: ['Layout/Features'] }).groups).toHaveLength(1)
   })
 
   it('matches include on a whole title or up to a slash, in any case, never part of a name', () => {

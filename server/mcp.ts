@@ -2796,6 +2796,7 @@ export function buildMcpServer(
           userId: ownerId,
           budgetKey: ownerId,
           progress: progressReporter(extra),
+          signal: extra?.signal,
         })
         if (!outcome.ok) return err(outcome.error)
         const { data, note, frames, attachment } = outcome.result
@@ -3431,6 +3432,8 @@ async function oauthClientName(clientId: string): Promise<string | undefined> {
 /** What a tool callback is handed beside its arguments: the request's progress token and the way to send a notification on it. */
 interface ToolExtra {
   _meta?: { progressToken?: string | number }
+  /** aborted when the client disconnects or cancels the call */
+  signal?: AbortSignal
   sendNotification?: (notification: {
     method: 'notifications/progress'
     params: { progressToken: string | number; progress: number; total?: number; message?: string }

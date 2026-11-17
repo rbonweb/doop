@@ -51,7 +51,16 @@ export interface FakeStorybook {
   close(): Promise<void>
 }
 
-export async function startFakeStorybook(): Promise<FakeStorybook> {
+export interface FakeStorybookOptions {
+  /** hold every story page this long before answering, so an import is mid-render for a while */
+  iframeDelayMs?: number
+  /** a story page was asked for */
+  onIframe?: () => void
+  /** a story page's request was cut off by the client before it was answered */
+  onCut?: () => void
+}
+
+export async function startFakeStorybook(options: FakeStorybookOptions = {}): Promise<FakeStorybook> {
   const requests: string[] = []
   const server: Server = createServer((req, res) => {
     const url = req.url ?? ''
@@ -61,7 +70,16 @@ export async function startFakeStorybook(): Promise<FakeStorybook> {
       res.end(body)
     }
     if (url === '/sb/index.json') return send(200, 'application/json', JSON.stringify({ v: 5, entries: ENTRIES }))
-    if (url.startsWith('/sb/iframe.html')) return send(200, 'text/html', IFRAME)
+    if (url.startsWith('/sb/iframe.html')) {
+      options.onIframe?.()
+      if (!options.iframeDelayMs) return send(200, 'text/html', IFRAME)
+      const timer = setTimeout(() => send(200, 'text/html', IFRAME), options.iframeDelayMs)
+      res.on('close', () => {
+        clearTimeout(timer)
+        if (!res.writableEnded) options.onCut?.()
+      })
+      return
+    }
     if (url.startsWith('/private/')) return send(401, 'text/plain', 'sign in')
     send(404, 'text/plain', 'not found')
   })

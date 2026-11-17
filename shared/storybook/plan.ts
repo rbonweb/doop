@@ -96,37 +96,16 @@ function matchesInclude(title: string, include: string[] | undefined): boolean {
 /** Stories to components by title, in index order, limited to `include` (a title, or the folders above it, up to a `/`) and to STORYBOOK_LIMITS.components. */
 export function groupStories(entries: StoryEntry[], options: { include?: string[] } = {}): GroupedStories {
   const issues: StorybookIssue[] = []
-  const byTitle = new Map<string, StoryEntry[]>()
-  for (const entry of entries) {
-    /* `include` names components, so a story collection is matched by the title of the component it folds into */
-    if (!matchesInclude(collectionOwner(entry.title) ?? entry.title, options.include)) continue
-    const list = byTitle.get(entry.title)
-    if (list) list.push(entry)
-    else byTitle.set(entry.title, [entry])
-  }
-  /* a title ending in a collection word ("Components/ActionMenu/Features") is more stories of the component above it, not a component of its own */
+  /* a title ending in a collection word ("Components/ActionMenu/Features") is more stories of the component above it when that component has stories of its own; with none above it ("Layout/Features") it is a component itself. `include` names components, so it is matched against the title a story ends up under. */
+  const titles = new Set(entries.map((entry) => normalizedTitle(entry.title)))
   const owned = new Map<string, StoryEntry[]>()
-  const byNormalized = new Map<string, StoryEntry[]>()
-  const collections: { title: string; stories: StoryEntry[] }[] = []
-  for (const [title, stories] of byTitle) {
-    const owner = collectionOwner(title)
-    if (owner === undefined) {
-      const own = [...stories]
-      owned.set(title, own)
-      byNormalized.set(normalizedTitle(title), own)
-    } else collections.push({ title: owner, stories })
-  }
-  let skippedCollections = 0
-  for (const { title, stories } of collections) {
-    const parent = byNormalized.get(title)
-    if (parent) parent.push(...stories)
-    else skippedCollections++
-  }
-  if (skippedCollections) {
-    issues.push({
-      code: 'collections_skipped',
-      message: `${skippedCollections} story collection${skippedCollections === 1 ? '' : 's'} (Features, Examples, Playground and the like) had no component above ${skippedCollections === 1 ? 'it' : 'them'} in this import, so ${skippedCollections === 1 ? 'it was' : 'they were'} left out`,
-    })
+  for (const entry of entries) {
+    const owner = collectionOwner(entry.title)
+    const title = owner !== undefined && titles.has(owner) ? owner : entry.title
+    if (!matchesInclude(title, options.include)) continue
+    const list = owned.get(title)
+    if (list) list.push(entry)
+    else owned.set(title, [entry])
   }
   const candidates: StoryGroup[] = []
   const names = new Set<string>()

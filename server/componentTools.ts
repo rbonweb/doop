@@ -46,7 +46,7 @@ import { exportCanvasReact, MAX_INLINE_EXPORT_BYTES, reactExportRequest } from '
 import { zipExport } from './reactExport/zip.ts'
 import { batchScope } from './responseShaping.ts'
 import { componentBundleSchema, MAX_INLINE_BUNDLE_BYTES } from '../shared/componentBundle.ts'
-import { importComponentBundle } from './componentBundleImport.ts'
+import { cleanLabel, importComponentBundle } from './componentBundleImport.ts'
 import { createImportTicket, ImportTicketError, ticketAnswer } from './componentImportTickets.ts'
 import { failedBeforeRendering, runStorybookImport, storybookFailure, storybookInput } from './storybookImportRun.ts'
 import { checkStorybookUrl, takeStorybookImport } from './storybookImport.ts'
@@ -76,6 +76,8 @@ export interface ToolContext {
   budgetKey?: string
   /** a tool that runs for minutes (import_storybook) says how far it is, when the caller can listen: over MCP, a client that sent a progress token */
   progress?: (update: { progress: number; total: number; message: string }) => void
+  /** aborted when the caller goes away (an MCP client that disconnects, a resident run that is cancelled): a tool that runs for minutes stops its work */
+  signal?: AbortSignal
 }
 
 /** A file that travels beside the answer: over MCP an embedded resource, as export_frame's PDF does. The resident agent has no use for one and never gets it. */
@@ -865,7 +867,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
       ...storybookInput,
       dry_run: z.boolean().optional().describe('Render and report what would change, and write nothing'),
     },
-    async run(input, { canvas, actor, userId, budgetKey, canEdit, progress }) {
+    async run(input, { canvas, actor, userId, budgetKey, canEdit, progress, signal }) {
       const dryRun = input.dry_run === true
       let refund = () => {}
       try {
@@ -881,8 +883,14 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           package: typeof input.package === 'string' ? input.package : undefined,
           include: Array.isArray(input.include) ? (input.include as string[]) : undefined,
           dryRun,
+          signal,
+          /* the name comes from the page: only its cleaned label goes into a message */
           onRender: ({ rendered, total, component }) =>
-            progress?.({ progress: rendered, total, message: `Rendered ${component} (${rendered} of ${total})` }),
+            progress?.({
+              progress: rendered,
+              total,
+              message: `Rendered ${cleanLabel(component) || 'Component'} (${rendered} of ${total})`,
+            }),
         })
         const defs = [...result.created, ...result.updated].flatMap(({ id }) => {
           const def = id ? findComponent(canvas.id, id) : undefined

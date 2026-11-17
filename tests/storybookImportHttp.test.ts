@@ -180,6 +180,50 @@ describe.skipIf(!findBrowserPath())(
       expect((tool.content as { text: string }[])[0]!.text).toContain('Storybook imports in the last hour')
     })
 
+    it('stops rendering when the MCP client goes away mid-import', async () => {
+      let asked = 0
+      let firstAsked!: () => void
+      let cutOff!: () => void
+      const first = new Promise<void>((resolve) => (firstAsked = resolve))
+      const cut = new Promise<void>((resolve) => (cutOff = resolve))
+      const slow = await startFakeStorybook({
+        iframeDelayMs: 30_000,
+        onIframe: () => {
+          asked++
+          firstAsked()
+        },
+        onCut: () => cutOff(),
+      })
+      const leaver = await new Client(server).signUp('leaver@storybook.test', 'Leaver')
+      const id = ((await (await leaver.post('/api/canvases', { name: 'Leaver' })).json()) as { id: string }).id
+      const { secret } = (await (await leaver.post('/api/agent-keys', { name: 'Agent' })).json()) as { secret: string }
+      const client = new McpClient({ name: 'leaver', version: '1.0.0' })
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL('/mcp', server.base), {
+          requestInit: { headers: { Authorization: `Bearer ${secret}` } },
+        }),
+      )
+      try {
+        const pending = client
+          .callTool({
+            name: 'import_storybook',
+            arguments: { canvas_id: id, agent_name: 'T', url: `${slow.origin}/sb/` },
+          })
+          .catch(() => undefined)
+        await first
+        const left = Date.now()
+        await client.close()
+        /* the renderer closed its page, so the story request is cut off; no further page was opened after the first two (the import renders two at a time) */
+        await cut
+        await pending
+        /* well inside the 20 s a render in flight would otherwise be left to run out */
+        expect(Date.now() - left).toBeLessThan(10_000)
+        expect(asked).toBeLessThanOrEqual(2)
+      } finally {
+        await slow.close()
+      }
+    })
+
     it('refuses a private Storybook, an address with no Storybook, a bad URL, a bad body and a stranger', async () => {
       const privateRun = await lines(
         await owner.post(importUrl(), { url: `${storybook.origin}/private/`, dryRun: true }),
