@@ -364,6 +364,7 @@ export const SETTLING_TOOLS: ReadonlySet<string> = new Set([
   'get_frame',
   'get_frame_screenshot',
   'export_frame',
+  'export_react',
   'get_frame_html',
   'inspect_frame',
   'screenshot_frame',

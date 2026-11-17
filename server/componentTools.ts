@@ -42,6 +42,15 @@ import { store } from './store.ts'
 import { inlineDataRefusal, type Surface } from './inlineData.ts'
 import { optional, WorkBudgetError } from './workBudget.ts'
 import { transaction } from './journal.ts'
+import {
+  contentBytes,
+  exportCanvasReact,
+  MAX_INLINE_EXPORT_BYTES,
+  reactExportRequest,
+  reactExportRetryAfter,
+  takeReactExportSlot,
+} from './reactExport/canvasExport.ts'
+import { zipExport } from './reactExport/zip.ts'
 
 /**
  * The component tools every agent gets, over MCP (server/mcp.ts) or in the server
@@ -131,7 +140,14 @@ export interface ToolContext {
   surface?: Surface
 }
 
-export type ToolResult = { data: unknown; note?: string; frames?: Frame[] }
+/** A file that travels beside the answer: over MCP an embedded resource, as export_frame's PDF does. The resident agent has no use for one and never gets it. */
+export interface ToolAttachment {
+  uri: string
+  mimeType: string
+  bytes: Buffer
+}
+
+export type ToolResult = { data: unknown; note?: string; frames?: Frame[]; attachment?: ToolAttachment }
 
 interface ComponentTool {
   name: string
@@ -156,6 +172,9 @@ function missingNested(def: ComponentDef): string[] {
 
 /** One create_components call: a canvas's starting kit, not its whole library. */
 export const MAX_BATCH_COMPONENTS = 12
+
+/** The largest zip an export_react call carries as an embedded resource (export_frame's PDF cap). */
+const MAX_ZIP_BYTES = 15_000_000
 
 const COMPONENT_REF = z.string().describe('Component name or id')
 const FRAME_ID = z.string().describe('Frame id from get_canvas')
@@ -850,6 +869,79 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
             : report.dry_run
               ? 'Dry run: nothing was changed. frames_changed counts the frames holding an instance of what would update; approved frames keep their sign-off. Tell the human before running it for real.'
               : `Updated ${count} canvas${count === 1 ? '' : 'es'}. Tell the human which canvases changed${report.skipped.length ? ', and which were skipped and why' : ''}.`,
+      }
+    },
+  },
+  {
+    name: 'export_react',
+    title: 'Export as React code',
+    description:
+      "Export the canvas's components and screens as React + TypeScript code a team can drop into its app: one .tsx per component and per frame, styled with CSS Modules (default) or Tailwind, the canvas's tokens as src/tokens.css and src/tokens.json. Deterministic, no model. Name what to export: frame_ids (screens), page_id (every visible screen on that page), component_ids (ids or names; components used by an exported screen come along). With none of them, the canvas's first page goes out with the components it uses. Returns { files: [{ path, content }], report }: write each file into the project at its path. report lists everything that could not be carried over (dropped scripts, unsafe URLs, unsupported CSS) in issues; read it and tell the human. When the files total more than 300 KB the answer carries the report, the file list with sizes and a zip of everything as an embedded application/zip resource (base64); over the resident agent, narrow the scope instead. Read the guide first: get_guide({ topic: \"export\" }).",
+    readOnly: true,
+    shape: {
+      frame_ids: z.array(z.string()).max(200).optional().describe('Frames to export as screens, in this order'),
+      page_id: z.string().optional().describe('Export every visible screen on this page, in reading order'),
+      component_ids: z
+        .array(z.string())
+        .max(200)
+        .optional()
+        .describe('Components to export (ids or names), even when no exported screen uses them'),
+      styling: z.enum(['modules', 'tailwind']).optional().describe('modules (default) or tailwind'),
+      tokens: z.boolean().optional().describe('Include src/tokens.css and src/tokens.json (default true)'),
+    },
+    async run(input, { canvas, actor, userId, surface }) {
+      const request = reactExportRequest.safeParse({
+        frameIds: input.frame_ids,
+        pageId: input.page_id,
+        componentIds: input.component_ids,
+        styling: input.styling,
+        tokens: input.tokens,
+      })
+      if (!request.success) {
+        const issue = request.error.issues[0]
+        throw new ComponentError(
+          `invalid export_react arguments: ${issue?.path.join('.') || 'input'} ${issue?.message ?? ''}`.trim(),
+        )
+      }
+      const key = userId ?? `agent:${actor.name}`
+      if (!takeReactExportSlot(key))
+        throw new ComponentError(
+          `React export rate limit: wait ${reactExportRetryAfter(key)} seconds before exporting again`,
+        )
+      const exported = exportCanvasReact(canvas, request.data)
+      if (!exported.ok) throw new ComponentError(exported.error)
+      const { result } = exported
+      const issues = result.report.issues.length
+      const issuesNote = issues
+        ? `${issues} thing${issues === 1 ? '' : 's'} did not carry over: read report.issues and tell the human.`
+        : 'Everything carried over.'
+      if (contentBytes(result) <= MAX_INLINE_EXPORT_BYTES) {
+        return {
+          data: { files: result.files, report: result.report },
+          note: `Write each file at its path in the project (for example under the app's src/). ${issuesNote}`,
+        }
+      }
+      const listing = result.files.map((file) => ({ path: file.path, bytes: Buffer.byteLength(file.content, 'utf8') }))
+      if (surface === 'resident') {
+        return {
+          data: { report: result.report, files: listing, too_large: true },
+          note: `The files total ${Math.round(exported.bytes / 1024)} KB, too much to return here. Export a narrower scope (one page_id, fewer frame_ids or component_ids). ${issuesNote}`,
+        }
+      }
+      const zip = await zipExport(result, exported.rootDir)
+      if (zip.length > MAX_ZIP_BYTES) {
+        throw new ComponentError(
+          'The export is too large to return: narrow it with page_id, frame_ids or component_ids',
+        )
+      }
+      return {
+        data: { report: result.report, files: listing, zip: { file_name: exported.fileName, bytes: zip.length } },
+        note: `The files total ${Math.round(exported.bytes / 1024)} KB, so they come as one zip: the embedded application/zip resource (base64). Save it as ${exported.fileName} and unzip it into the project; files is the listing of what is inside, under the folder ${exported.rootDir}/. ${issuesNote}`,
+        attachment: {
+          uri: `doop://canvas/${canvas.id}/${encodeURIComponent(exported.fileName)}`,
+          mimeType: 'application/zip',
+          bytes: zip,
+        },
       }
     },
   },
