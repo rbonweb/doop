@@ -229,9 +229,10 @@ export function relativeInSeconds(seconds: number, locale: string = getLocale())
 
 /** What a kind of import note is about, in the words the card uses for it. */
 export type IssueGroupKey =
-  'props' | 'noProps' | 'styles' | 'variants' | 'markup' | 'files' | 'unsafe' | 'limits' | 'other'
+  'worker' | 'props' | 'noProps' | 'styles' | 'variants' | 'markup' | 'files' | 'unsafe' | 'limits' | 'other'
 
 const ISSUE_GROUP: Record<string, IssueGroupKey> = {
+  story_needs_worker: 'worker',
   argtypes_dropped: 'props',
   text_arg_ambiguous: 'props',
   unsafe_prop_value: 'unsafe',
