@@ -101,6 +101,43 @@ body { margin: 0; }
 </script></body></html>`
 }
 
+/* The phases a story's render goes through, per Storybook major (read from each version's preview runtime): 7 ends on completed, 8 and 9 on completed or afterEach, 10 on finished. A story that errors ends on errored (and in 10 moves on to finished with the error display still up). */
+const PHASES: Record<string, { sequence: string[]; errorDisplay?: boolean }> = {
+  'phases-v7--default': { sequence: ['preparing', 'loading', 'rendering', 'playing', 'played', 'completed'] },
+  'phases-v8--default': { sequence: ['preparing', 'loading', 'rendering', 'completing', 'completed'] },
+  'phases-v9--default': { sequence: ['preparing', 'loading', 'rendering', 'completing', 'completed', 'afterEach'] },
+  'phases-v10--default': {
+    sequence: ['preparing', 'loading', 'rendering', 'completing', 'completed', 'afterEach', 'finished'],
+  },
+  'phases-broken--default': { sequence: ['preparing', 'loading', 'rendering', 'errored'] },
+  'phases-broken10--default': {
+    sequence: ['preparing', 'loading', 'rendering', 'errored', 'finished'],
+    errorDisplay: true,
+  },
+}
+
+/* walks the phases faster than the probe polls (50 ms), so a probe that only knew the middle phases would miss them, as it did on a real Storybook 10 */
+function phasesPage(id: string): string {
+  const plan = PHASES[id]
+  return `<!doctype html><html><body class="sb-show-preparing-story"><div id="storybook-root"></div><script>
+(function () {
+  var sequence = ${JSON.stringify(plan?.sequence ?? [])}
+  var id = ${JSON.stringify(id)}
+  var render = { phase: sequence[0], story: { id: id, argTypes: {}, initialArgs: {}, component: { displayName: 'Phased' } } }
+  window.__STORYBOOK_PREVIEW__ = { currentRender: render }
+  document.getElementById('storybook-root').innerHTML = '<button class="btn">Go</button>'
+  var step = 0
+  var timer = setInterval(function () {
+    step++
+    if (step >= sequence.length) return clearInterval(timer)
+    render.phase = sequence[step]
+    if (sequence[step] === 'errored' && ${JSON.stringify(plan?.errorDisplay ?? false)}) document.body.className = 'sb-show-errordisplay'
+  }, 4)
+  if (sequence[sequence.length - 1] !== 'errored' && !${JSON.stringify(plan?.errorDisplay ?? false)}) document.body.className = 'sb-show-main'
+})()
+</script></body></html>`
+}
+
 /* A story page that fights back. Its script runs before anything of ours but after the probe, which has already captured the browser's own builtins: it replaces the ones the capture and the probe use (JSON.stringify, Object.keys, String.prototype.slice, the outerHTML and innerHTML getters, getComputedStyle, Function.prototype.call and more) and then hands out 50 MB of text, a 50 MB style rule and a preview object made of traps. */
 function evilIframePage(id: string): string {
   const sabotage = `
@@ -275,6 +312,29 @@ beforeAll(async () => {
     }
     if (url.startsWith('/evil/iframe.html')) {
       return send(200, 'text/html', evilIframePage(new URL(url, 'http://x').searchParams.get('id') ?? ''))
+    }
+    if (url === '/phases/index.json') {
+      return send(
+        200,
+        'application/json',
+        JSON.stringify({
+          v: 5,
+          entries: Object.fromEntries(
+            Object.keys(PHASES).map((id) => [
+              id,
+              {
+                type: 'story',
+                id,
+                name: 'Default',
+                title: `Phases/${id.slice(7, -9).replace(/^./, (c) => c.toUpperCase())}`,
+              },
+            ]),
+          ),
+        }),
+      )
+    }
+    if (url.startsWith('/phases/iframe.html')) {
+      return send(200, 'text/html', phasesPage(new URL(url, 'http://x').searchParams.get('id') ?? ''))
     }
     if (url === '/huge/index.json') {
       return send(
@@ -557,6 +617,17 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
       storybookBundle(`${storybook.origin}/sb/`, { signal: controller.signal }, deps(storybook.origin)),
     ).rejects.toThrow('cancelled before it began')
     expect(indexFetches()).toBe(before)
+  })
+
+  it('knows when a story is done in every Storybook version, and skips the ones that error', async () => {
+    const started = Date.now()
+    const { bundle, issues } = await storybookBundle(`${storybook.origin}/phases/`, {}, deps(storybook.origin))
+    /* each of the four versions' sequences ends on a phase that counts as done, none waits out the render timeout */
+    expect(bundle.components.map((component) => component.name).sort()).toEqual(['V10', 'V7', 'V8', 'V9'])
+    expect(Date.now() - started).toBeLessThan(STORYBOOK_LIMITS.renderMs)
+    const failed = issues.filter((issue) => issue.code === 'story_failed').map((issue) => issue.component)
+    expect(failed.sort()).toEqual(['Broken', 'Broken10'])
+    expect(issues.map((issue) => issue.message).join('\n')).toContain('Storybook shows an error for this story')
   })
 
   it('stops the whole import when a story page answers 403', async () => {

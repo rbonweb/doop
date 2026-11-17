@@ -74,6 +74,8 @@ export interface ToolContext {
   surface?: Surface
   /** whose per-minute budget a metered tool spends: the account the call is made for (the signed-in user over MCP, the payer of a resident run), never a name the caller chose */
   budgetKey?: string
+  /** a tool that runs for minutes (import_storybook) says how far it is, when the caller can listen: over MCP, a client that sent a progress token */
+  progress?: (update: { progress: number; total: number; message: string }) => void
 }
 
 /** A file that travels beside the answer: over MCP an embedded resource, as export_frame's PDF does. The resident agent has no use for one and never gets it. */
@@ -863,7 +865,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
       ...storybookInput,
       dry_run: z.boolean().optional().describe('Render and report what would change, and write nothing'),
     },
-    async run(input, { canvas, actor, userId, budgetKey, canEdit }) {
+    async run(input, { canvas, actor, userId, budgetKey, canEdit, progress }) {
       const dryRun = input.dry_run === true
       let refund = () => {}
       try {
@@ -879,6 +881,8 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           package: typeof input.package === 'string' ? input.package : undefined,
           include: Array.isArray(input.include) ? (input.include as string[]) : undefined,
           dryRun,
+          onRender: ({ rendered, total, component }) =>
+            progress?.({ progress: rendered, total, message: `Rendered ${component} (${rendered} of ${total})` }),
         })
         const defs = [...result.created, ...result.updated].flatMap(({ id }) => {
           const def = id ? findComponent(canvas.id, id) : undefined

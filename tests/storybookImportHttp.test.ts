@@ -12,6 +12,8 @@ type Line = {
   [key: string]: unknown
 }
 
+type Progress = { progress: number; total?: number; message?: string }
+
 let server: Server
 let storybook: FakeStorybook
 let owner: Client
@@ -122,11 +124,15 @@ describe.skipIf(!findBrowserPath())(
     })
 
     it('MCP import_storybook: a dry run, then again for real, which updates in place', async () => {
-      const call = async (args: Record<string, unknown>) => {
-        const result = await agent.callTool({
-          name: 'import_storybook',
-          arguments: { canvas_id: canvasId, agent_name: 'T', url: `${storybook.origin}/sb/`, ...args },
-        })
+      const call = async (args: Record<string, unknown>, onprogress?: (progress: Progress) => void) => {
+        const result = await agent.callTool(
+          {
+            name: 'import_storybook',
+            arguments: { canvas_id: canvasId, agent_name: 'T', url: `${storybook.origin}/sb/`, ...args },
+          },
+          undefined,
+          onprogress ? { onprogress } : undefined,
+        )
         return { isError: result.isError, text: (result.content as { text: string }[])[0]!.text }
       }
       const dry = await call({ dry_run: true })
@@ -141,8 +147,16 @@ describe.skipIf(!findBrowserPath())(
       expect(dryData.updated.map((entry) => entry.name).sort()).toEqual(['Badge', 'Button'])
       expect(dryData.renders).toBeGreaterThan(3)
 
-      const real = await call({ package: '@acme/ui', include: ['Inputs'] })
+      /* a client that sends a progress token hears one notification per render, which also starts the answer streaming at once (a long call would otherwise outlast a client's headers timeout) */
+      const progress: Progress[] = []
+      const real = await call({ package: '@acme/ui', include: ['Inputs'] }, (update) => progress.push(update))
       expect(real.isError).toBeFalsy()
+      expect(progress.length).toBeGreaterThanOrEqual(2)
+      expect(progress.map((update) => update.progress)).toEqual(
+        [...progress.map((update) => update.progress)].sort((a, b) => a - b),
+      )
+      expect(progress.at(-1)?.message).toContain('Rendered Button')
+      expect(progress.at(-1)?.total).toBeGreaterThanOrEqual(progress.at(-1)?.progress ?? 0)
       const data = JSON.parse(real.text) as {
         created: unknown[]
         updated: { name: string }[]
