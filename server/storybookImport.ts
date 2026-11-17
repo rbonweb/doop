@@ -138,6 +138,11 @@ export function checkStorybookUrl(
 
 let running = 0
 
+/** Whether an import may start now: fewer than STORYBOOK_LIMITS.concurrentImports are running on this server. */
+export function storybookSlotFree(): boolean {
+  return running < STORYBOOK_LIMITS.concurrentImports
+}
+
 async function readBounded(response: Response, max: number): Promise<string> {
   const declared = Number(response.headers.get('content-length') || 0)
   if (declared > max) throw new StorybookIndexError('The Storybook index is too large', true)

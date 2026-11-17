@@ -12,7 +12,36 @@ type Line = {
   [key: string]: unknown
 }
 
-type Progress = { progress: number; total?: number; message?: string }
+type JobStatus = {
+  job_id: string
+  status: string
+  rendered: number
+  total: number
+  planned?: { renders: number; components: { name: string }[] }
+  result?: { created: unknown[]; updated: { name: string }[]; unchanged: { name: string }[] }
+  error?: { message: string }
+}
+
+/** The most status reads a test makes while a real import finishes: each read is the wait, so the bound is a count. */
+const MAX_STATUS_READS = 4000
+
+async function toolData<T>(client: McpClient, name: string, args: Record<string, unknown>): Promise<T> {
+  const result = await client.callTool({ name, arguments: args })
+  const text = (result.content as { text: string }[])[0]!.text
+  if (result.isError) throw new Error(text)
+  return JSON.parse(text) as T
+}
+
+const readStatus = (client: McpClient, canvas: string, jobId: string) =>
+  toolData<JobStatus>(client, 'get_import_status', { canvas_id: canvas, agent_name: 'T', job_id: jobId })
+
+async function untilNotRunning(client: McpClient, canvas: string, jobId: string): Promise<JobStatus> {
+  for (let reads = 0; reads < MAX_STATUS_READS; reads++) {
+    const status = await readStatus(client, canvas, jobId)
+    if (status.status !== 'running') return status
+  }
+  throw new Error(`the import was still running after ${MAX_STATUS_READS} status reads`)
+}
 
 let server: Server
 let storybook: FakeStorybook
@@ -123,51 +152,45 @@ describe.skipIf(!findBrowserPath())(
       expect(canvas.pages.some((page) => page.id === last.result.pageId)).toBe(true)
     })
 
-    it('MCP import_storybook: a dry run, then again for real, which updates in place', async () => {
-      const call = async (args: Record<string, unknown>, onprogress?: (progress: Progress) => void) => {
-        const result = await agent.callTool(
-          {
-            name: 'import_storybook',
-            arguments: { canvas_id: canvasId, agent_name: 'T', url: `${storybook.origin}/sb/`, ...args },
-          },
-          undefined,
-          onprogress ? { onprogress } : undefined,
+    it('MCP import_storybook: a dry run plans in the call, then a job imports for real and updates in place', async () => {
+      const start = (args: Record<string, unknown>) =>
+        toolData<JobStatus & { dry_run?: boolean; updated: { name: string }[]; created: unknown[] }>(
+          agent,
+          'import_storybook',
+          { canvas_id: canvasId, agent_name: 'T', url: `${storybook.origin}/sb/`, ...args },
         )
-        return { isError: result.isError, text: (result.content as { text: string }[])[0]!.text }
-      }
-      const dry = await call({ dry_run: true })
-      expect(dry.isError).toBeFalsy()
-      const dryData = JSON.parse(dry.text) as {
-        dry_run: boolean
-        created: unknown[]
-        updated: { name: string }[]
-        renders: number
-      }
-      expect(dryData.dry_run).toBe(true)
-      expect(dryData.updated.map((entry) => entry.name).sort()).toEqual(['Badge', 'Button'])
-      expect(dryData.renders).toBeGreaterThan(3)
+      const before = storybook.requests.filter((url) => url.startsWith('/sb/iframe.html')).length
+      const dry = await start({ dry_run: true })
+      expect(dry.dry_run).toBe(true)
+      expect(dry.updated.map((entry) => entry.name).sort()).toEqual(['Badge', 'Button'])
+      expect(dry.planned?.renders).toBe(2)
+      /* a plan renders nothing */
+      expect(storybook.requests.filter((url) => url.startsWith('/sb/iframe.html')).length).toBe(before)
 
-      /* a client that sends a progress token hears one notification per render, which also starts the answer streaming at once (a long call would otherwise outlast a client's headers timeout) */
-      const progress: Progress[] = []
-      const real = await call({ package: '@acme/ui', include: ['Inputs'] }, (update) => progress.push(update))
-      expect(real.isError).toBeFalsy()
-      expect(progress.length).toBeGreaterThanOrEqual(2)
-      expect(progress.map((update) => update.progress)).toEqual(
-        [...progress.map((update) => update.progress)].sort((a, b) => a - b),
-      )
-      expect(progress.at(-1)?.message).toContain('Rendered Button')
-      expect(progress.at(-1)?.total).toBeGreaterThanOrEqual(progress.at(-1)?.progress ?? 0)
-      const data = JSON.parse(real.text) as {
-        created: unknown[]
-        updated: { name: string }[]
-        unchanged: { name: string }[]
-      }
-      expect(data.created).toEqual([])
-      expect([...data.updated, ...data.unchanged].map((entry) => entry.name)).toEqual(['Button'])
+      const started = await start({ package: '@acme/ui', include: ['Inputs'] })
+      expect(started.status).toBe('running')
+      expect(started.job_id).toMatch(/^[A-Za-z0-9_-]{22}$/)
+      expect(started.planned?.components.map((c) => c.name)).toEqual(['Button'])
+      const done = await untilNotRunning(agent, canvasId, started.job_id)
+      expect(done.status).toBe('done')
+      expect(done.rendered).toBeGreaterThanOrEqual(2)
+      expect(done.total).toBeGreaterThanOrEqual(done.rendered)
+      expect(done.result?.created).toEqual([])
+      expect([...(done.result?.updated ?? []), ...(done.result?.unchanged ?? [])].map((entry) => entry.name)).toEqual([
+        'Button',
+      ])
       expect((await canvasComponents()).components.map((c) => c.name).sort()).toEqual(['Badge', 'Button'])
     })
 
     it('the fourth import in an hour is refused, over REST and MCP, with a retry hint', async () => {
+      /* the third, to its end: only one runs at a time for an account */
+      const third = await toolData<JobStatus>(agent, 'import_storybook', {
+        canvas_id: canvasId,
+        agent_name: 'T',
+        url: `${storybook.origin}/sb/`,
+        include: ['Data'],
+      })
+      expect((await untilNotRunning(agent, canvasId, third.job_id)).status).toBe('done')
       const rest = await owner.post(importUrl(), { url: `${storybook.origin}/sb/` })
       expect(rest.status).toBe(429)
       expect(Number(rest.headers.get('retry-after'))).toBeGreaterThan(0)
@@ -180,47 +203,77 @@ describe.skipIf(!findBrowserPath())(
       expect((tool.content as { text: string }[])[0]!.text).toContain('Storybook imports in the last hour')
     })
 
-    it('stops rendering when the MCP client goes away mid-import', async () => {
-      let asked = 0
+    it('keeps importing when the MCP client goes away, and cancel_import stops it', async () => {
       let firstAsked!: () => void
       let cutOff!: () => void
       const first = new Promise<void>((resolve) => (firstAsked = resolve))
       const cut = new Promise<void>((resolve) => (cutOff = resolve))
       const slow = await startFakeStorybook({
         iframeDelayMs: 30_000,
-        onIframe: () => {
-          asked++
-          firstAsked()
-        },
+        onIframe: () => firstAsked(),
         onCut: () => cutOff(),
       })
       const leaver = await new Client(server).signUp('leaver@storybook.test', 'Leaver')
       const id = ((await (await leaver.post('/api/canvases', { name: 'Leaver' })).json()) as { id: string }).id
       const { secret } = (await (await leaver.post('/api/agent-keys', { name: 'Agent' })).json()) as { secret: string }
-      const client = new McpClient({ name: 'leaver', version: '1.0.0' })
-      await client.connect(
+      const connect = async () => {
+        const client = new McpClient({ name: 'leaver', version: '1.0.0' })
+        await client.connect(
+          new StreamableHTTPClientTransport(new URL('/mcp', server.base), {
+            requestInit: { headers: { Authorization: `Bearer ${secret}` } },
+          }),
+        )
+        return client
+      }
+      const client = await connect()
+      let second: McpClient | undefined
+      try {
+        const started = await toolData<JobStatus>(client, 'import_storybook', {
+          canvas_id: id,
+          agent_name: 'T',
+          url: `${slow.origin}/sb/`,
+        })
+        expect(started.status).toBe('running')
+        await first
+        await client.close()
+        /* the job is no one's request: a new connection still finds it running, a story page still being asked for */
+        second = await connect()
+        expect((await readStatus(second, id, started.job_id)).status).toBe('running')
+        const cancelled = await toolData<JobStatus>(second, 'cancel_import', {
+          canvas_id: id,
+          agent_name: 'T',
+          job_id: started.job_id,
+        })
+        expect(['cancelling', 'cancelled']).toContain(cancelled.status)
+        /* the renderer closed its page, so the story request is cut off well inside the 30 s the render would otherwise take */
+        await cut
+        expect((await untilNotRunning(second, id, started.job_id)).status).toBe('cancelled')
+      } finally {
+        await second?.close()
+        await slow.close()
+      }
+    })
+
+    it('shows a job only to the account that started it or an editor of the canvas', async () => {
+      const stranger = await new Client(server).signUp('jobstranger@storybook.test', 'Stranger')
+      const { secret } = (await (await stranger.post('/api/agent-keys', { name: 'Agent' })).json()) as {
+        secret: string
+      }
+      const outsider = new McpClient({ name: 'outsider', version: '1.0.0' })
+      await outsider.connect(
         new StreamableHTTPClientTransport(new URL('/mcp', server.base), {
           requestInit: { headers: { Authorization: `Bearer ${secret}` } },
         }),
       )
       try {
-        const pending = client
-          .callTool({
-            name: 'import_storybook',
-            arguments: { canvas_id: id, agent_name: 'T', url: `${slow.origin}/sb/` },
-          })
-          .catch(() => undefined)
-        await first
-        const left = Date.now()
-        await client.close()
-        /* the renderer closed its page, so the story request is cut off; no further page was opened after the first two (the import renders two at a time) */
-        await cut
-        await pending
-        /* well inside the 20 s a render in flight would otherwise be left to run out */
-        expect(Date.now() - left).toBeLessThan(10_000)
-        expect(asked).toBeLessThanOrEqual(2)
+        const result = await outsider.callTool({
+          name: 'get_import_status',
+          arguments: { canvas_id: canvasId, agent_name: 'T', job_id: 'AAAAAAAAAAAAAAAAAAAAAA' },
+        })
+        /* no access to this canvas at all */
+        expect(result.isError).toBe(true)
       } finally {
-        await slow.close()
+        await outsider.close()
       }
     })
 

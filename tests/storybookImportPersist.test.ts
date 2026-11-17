@@ -89,6 +89,17 @@ describe.skipIf(!findBrowserPath())('a Storybook import stores whole components'
       arguments: { canvas_id: canvases.mcp, agent_name: 'T', url: `${storybook.origin}/sb/`, package: '@acme/ui' },
     })
     expect(tool.isError).toBeFalsy()
+    /* it answers with a job: read its status until it ends (each read is the wait, bounded by count) */
+    const { job_id } = JSON.parse((tool.content as { text: string }[])[0]!.text) as { job_id: string }
+    let status = 'running'
+    for (let reads = 0; reads < 4000 && status === 'running'; reads++) {
+      const read = await agent.callTool({
+        name: 'get_import_status',
+        arguments: { canvas_id: canvases.mcp, agent_name: 'T', job_id },
+      })
+      status = (JSON.parse((read.content as { text: string }[])[0]!.text) as { status: string }).status
+    }
+    expect(status).toBe('done')
     await agent.close()
 
     for (const id of Object.values(canvases)) expectWhole(await componentsOf(id))
