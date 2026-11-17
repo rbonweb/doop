@@ -61,7 +61,7 @@ interface Job {
   error?: JobFailure
   controller: AbortController
   cancelRequested: boolean
-  /** the importer has begun writing components: a cancel can no longer stop it */
+  /** the importer has begun writing components (synchronously: nothing can observe this, except the run's own error handler, which then reports a failure rather than a cancel) */
   writing: boolean
   /** the canvas is held in memory until the job ends */
   release: () => void
@@ -81,10 +81,6 @@ export interface JobView {
   issues?: ImportIssue[]
   renders?: number
   error?: JobFailure
-  /** the importer is writing the components now: cancel_import is too late */
-  writing?: boolean
-  /** a cancel was asked for but the writes had begun, so the import finished */
-  cancel_too_late?: boolean
 }
 
 const jobs = new Map<string, Job>()
@@ -146,8 +142,6 @@ function view(job: Job): JobView {
     ...(job.issues ? { issues: job.issues } : {}),
     ...(job.renders !== undefined ? { renders: job.renders } : {}),
     ...(job.error ? { error: job.error } : {}),
-    ...(job.writing && job.status === 'running' ? { writing: true } : {}),
-    ...(job.cancelRequested && job.status === 'done' ? { cancel_too_late: true } : {}),
   }
 }
 
@@ -289,7 +283,7 @@ export function readStorybookJob(
   return view(job)
 }
 
-/** Stops a running job through its signal. A job that already ended is left as it is; one whose writes had begun still finishes. */
+/** Stops a running job through its signal. A job that already ended is left as it is. */
 export function cancelStorybookJob(
   jobId: string,
   canvasId: string,
@@ -300,8 +294,7 @@ export function cancelStorybookJob(
   const job = jobs.get(jobId)
   if (!job) return undefined
   if (!reachable(job, canvasId, access.owner, access.canEdit)) throw new JobNotFoundError()
-  /* once the importer is writing, the signal is no longer read: the import finishes, and says so */
-  if (job.status === 'running' && !job.writing) {
+  if (job.status === 'running') {
     job.cancelRequested = true
     job.controller.abort(new Error('the import was cancelled'))
   }

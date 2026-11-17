@@ -95,6 +95,17 @@ describe('import_storybook', () => {
     finish()
   })
 
+  it('answers cancel_import on a job that already ended plainly, with the job as it stands', async () => {
+    const ctx = context({ userId: 'u-late' })
+    const started = (await call('https://sb.test/', ctx)) as { result: { data: { job_id: string; status: string } } }
+    expect(started.result.data.status).toBe('done')
+    const out = await runComponentTool('cancel_import', { job_id: started.result.data.job_id }, ctx)
+    expect(out).toMatchObject({
+      ok: true,
+      result: { data: { status: 'done' }, note: expect.stringContaining('Nothing to cancel') },
+    })
+  })
+
   it('a dry run only plans, in the call, and counts a plan against its own hour', async () => {
     run.planStorybookImport.mockResolvedValue({
       components: [{ name: 'Button', group: 'Inputs', stories: 1, renders: 1 }],

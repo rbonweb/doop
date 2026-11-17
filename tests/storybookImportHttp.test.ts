@@ -38,7 +38,7 @@ const readStatus = (client: McpClient, canvas: string, jobId: string) =>
 async function untilNotRunning(client: McpClient, canvas: string, jobId: string): Promise<JobStatus> {
   for (let reads = 0; reads < MAX_STATUS_READS; reads++) {
     const status = await readStatus(client, canvas, jobId)
-    if (status.status !== 'running') return status
+    if (status.status !== 'running' && status.status !== 'cancelling') return status
   }
   throw new Error(`the import was still running after ${MAX_STATUS_READS} status reads`)
 }

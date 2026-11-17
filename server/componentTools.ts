@@ -138,7 +138,7 @@ function readJob(
 }
 
 /** A job as the tools answer it: the status and, once it is done, what it made, with the note an agent acts on. */
-function importStatus(job: JobView | undefined, canvas: Canvas): ToolResult {
+function importStatus(job: JobView | undefined, canvas: Canvas, cancelled = false): ToolResult {
   if (!job) {
     return {
       data: { ok: true, status: 'unknown' },
@@ -146,16 +146,17 @@ function importStatus(job: JobView | undefined, canvas: Canvas): ToolResult {
     }
   }
   const { result, issues = [], renders } = job
+  /* cancel_import on a job that had already ended: said plainly, with the job as it stands */
+  if (cancelled && (job.status === 'done' || job.status === 'failed')) {
+    return {
+      data: { ok: true, ...job },
+      note: `Nothing to cancel: the job had already ${job.status === 'done' ? 'finished (read result in this answer)' : `failed: ${job.error?.message ?? 'unknown error'}`}.`,
+    }
+  }
   if (job.status === 'cancelling') {
     return {
       data: { ok: true, ...job },
       note: 'Cancelling: the renders are stopping and nothing will be written. Call get_import_status to see it end as cancelled.',
-    }
-  }
-  if (job.status === 'running' && job.writing) {
-    return {
-      data: { ok: true, ...job },
-      note: 'The components are being written now, so it is too late to cancel: the import will finish. Call get_import_status for the result.',
     }
   }
   if (job.status === 'running') {
@@ -177,9 +178,6 @@ function importStatus(job: JobView | undefined, canvas: Canvas): ToolResult {
   return {
     data: { ok: true, ...job },
     note: [
-      ...(job.cancel_too_late
-        ? ['The cancel came too late: the components were already being written, so the import finished.']
-        : []),
       `Imported from the Storybook (${renders ?? job.rendered} story renders): ${counts}. The mains are on the "Imported components" page; compose screens from them with <doop-use component="Name">. Check one with get_component_preview.`,
       ...(result.skipped.length
         ? [`Refused: ${result.skipped.map((entry) => `${entry.name} (${entry.reason})`).join('; ')}`]
@@ -1028,11 +1026,11 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     name: 'cancel_import',
     title: 'Stop a Storybook import',
     description:
-      'Stop a running import_storybook job: the renders end and nothing is written. A job that already finished is left as it is (read it with get_import_status), and one already writing its components still finishes.',
+      'Stop a running import_storybook job: the renders end and nothing is written. A job that already finished is left as it is and answered with its result.',
     readOnly: false,
     shape: { job_id: z.string().min(1).max(100).describe('The job_id import_storybook returned') },
     run(input, { canvas, userId, budgetKey, canEdit }) {
-      return importStatus(readJob(input, { canvas, userId, budgetKey, canEdit }, cancelStorybookJob), canvas)
+      return importStatus(readJob(input, { canvas, userId, budgetKey, canEdit }, cancelStorybookJob), canvas, true)
     },
   },
   {

@@ -194,21 +194,6 @@ describe('a Storybook import job', () => {
     expect(cancelStorybookJob(started.job_id, 'canvas-1', mine(who))?.status).toBe('cancelled')
   })
 
-  it('a cancel after the importer began writing does not stop it: the job ends done and says so', async () => {
-    const handle = controlledRun()
-    const who = owner()
-    const started = await start(who)
-    handle.options.onWriting()
-    expect(readStorybookJob(started.job_id, 'canvas-1', mine(who))).toMatchObject({ status: 'running', writing: true })
-    expect(cancelStorybookJob(started.job_id, 'canvas-1', mine(who))).toMatchObject({
-      status: 'running',
-      writing: true,
-    })
-    expect(handle.options.signal.aborted).toBe(false)
-    await handle.finish()
-    expect(readStorybookJob(started.job_id, 'canvas-1', mine(who))?.status).toBe('done')
-  })
-
   it('reports a failure while writing as failed, never as cancelled', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const handle = controlledRun()
