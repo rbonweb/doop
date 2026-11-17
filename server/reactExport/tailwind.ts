@@ -244,7 +244,9 @@ const CONTAINERS = new Map<number, string>([
 ])
 
 function maxWidthUtility(value: string): string | null {
-  if (value.trim().toLowerCase() === 'none') return 'max-w-none'
+  const keyword = value.trim().toLowerCase()
+  if (keyword === 'none') return 'max-w-none'
+  if (keyword === 'auto') return null
   const rem = toRem(value)
   const name = rem === null ? undefined : CONTAINERS.get(rem)
   if (name) return `max-w-${name}`
@@ -340,7 +342,29 @@ function boxValues(value: string): [string, string, string, string] | null {
   return [a, b, c, parts[3] ?? b]
 }
 
-function boxMapper(prefix: string, options: LengthOptions): Mapper {
+interface BoxNames {
+  all: string
+  y: string
+  x: string
+  top: string
+  right: string
+  bottom: string
+  left: string
+}
+
+const MARGIN_NAMES: BoxNames = { all: 'm', y: 'my', x: 'mx', top: 'mt', right: 'mr', bottom: 'mb', left: 'ml' }
+const PADDING_NAMES: BoxNames = { all: 'p', y: 'py', x: 'px', top: 'pt', right: 'pr', bottom: 'pb', left: 'pl' }
+const INSET_NAMES: BoxNames = {
+  all: 'inset',
+  y: 'inset-y',
+  x: 'inset-x',
+  top: 'top',
+  right: 'right',
+  bottom: 'bottom',
+  left: 'left',
+}
+
+function boxMapper(names: BoxNames, options: LengthOptions): Mapper {
   return (value) => {
     const sides = boxValues(value)
     if (!sides) return null
@@ -348,10 +372,10 @@ function boxMapper(prefix: string, options: LengthOptions): Mapper {
     const make = (name: string, v: string) => lengthUtility(name, v, options)
     const out =
       top === right && right === bottom && bottom === left
-        ? [make(prefix, top)]
+        ? [make(names.all, top)]
         : top === bottom && right === left
-          ? [make(`${prefix}y`, top), make(`${prefix}x`, right)]
-          : [make(`${prefix}t`, top), make(`${prefix}r`, right), make(`${prefix}b`, bottom), make(`${prefix}l`, left)]
+          ? [make(names.y, top), make(names.x, right)]
+          : [make(names.top, top), make(names.right, right), make(names.bottom, bottom), make(names.left, left)]
     return out.every((entry) => entry !== null) ? (out as string[]) : null
   }
 }
@@ -670,12 +694,12 @@ const TABLE: Record<string, Mapper> = {
   visibility: standalone({ visible: 'visible', hidden: 'invisible', collapse: 'collapse' }),
   opacity: one(opacityUtility),
   /* spacing */
-  margin: boxMapper('m', MARGIN),
+  margin: boxMapper(MARGIN_NAMES, MARGIN),
   'margin-top': sideMapper('mt', MARGIN),
   'margin-right': sideMapper('mr', MARGIN),
   'margin-bottom': sideMapper('mb', MARGIN),
   'margin-left': sideMapper('ml', MARGIN),
-  padding: boxMapper('p', SPACE),
+  padding: boxMapper(PADDING_NAMES, SPACE),
   'padding-top': sideMapper('pt', SPACE),
   'padding-right': sideMapper('pr', SPACE),
   'padding-bottom': sideMapper('pb', SPACE),
@@ -695,11 +719,14 @@ const TABLE: Record<string, Mapper> = {
   'min-width': one((v) => sizeUtility('min-w', v)),
   'min-height': one((v) => sizeUtility('min-h', v)),
   'max-width': one(maxWidthUtility),
-  'max-height': one((v) => (v.trim().toLowerCase() === 'none' ? 'max-h-none' : sizeUtility('max-h', v))),
+  'max-height': one((v) => {
+    const keyword = v.trim().toLowerCase()
+    return keyword === 'none' ? 'max-h-none' : keyword === 'auto' ? null : sizeUtility('max-h', v)
+  }),
   'aspect-ratio': aspectRatio,
   'box-sizing': standalone({ 'border-box': 'box-border', 'content-box': 'box-content' }),
   /* position and inset */
-  inset: boxMapper('inset', INSET),
+  inset: boxMapper(INSET_NAMES, INSET),
   top: sideMapper('top', INSET),
   right: sideMapper('right', INSET),
   bottom: sideMapper('bottom', INSET),
@@ -925,6 +952,9 @@ const TABLE: Record<string, Mapper> = {
   'transition-timing-function': one(easingUtility),
 }
 
+/** The CSS properties the mapper can convert (the test guard compiles what each emits). */
+export const CONVERTED_PROPERTIES: readonly string[] = [...Object.keys(TABLE), 'font-size']
+
 /** font-size is converted with its rule: Tailwind's named sizes also set a line height, so they only stand in when the rule sets one too. */
 function fontSize(value: string, rule: Map<string, string>): string[] | null {
   const v = value.trim()
@@ -1063,9 +1093,15 @@ function readDeclarations(body: string): { declarations: Declaration[]; nested: 
   return { declarations, nested }
 }
 
-interface ConvertedRule {
-  /** utilities with the variants already in front */
+interface ConvertedDeclaration {
+  property: string
   utilities: string[]
+  important: boolean
+}
+
+interface ConvertedRule {
+  /** utilities with the variants already in front, per declaration */
+  converted: ConvertedDeclaration[]
   /** declaration text that did not convert */
   residual: string[]
 }
@@ -1075,7 +1111,7 @@ function convertDeclarations(declarations: Declaration[], variants: string[]): C
   for (const declaration of declarations) counts.set(declaration.property, (counts.get(declaration.property) ?? 0) + 1)
   const rule = new Map(declarations.map((declaration) => [declaration.property, declaration.value]))
   const prefix = variants.map((variant) => `${variant}:`).join('')
-  const utilities: string[] = []
+  const converted: ConvertedDeclaration[] = []
   const residual: string[] = []
   for (const declaration of declarations) {
     const mapper = counts.get(declaration.property) === 1 ? TABLE[declaration.property] : undefined
@@ -1088,20 +1124,30 @@ function convertDeclarations(declarations: Declaration[], variants: string[]): C
       residual.push(declaration.text)
       continue
     }
-    for (const utility of mapped) utilities.push(`${prefix}${utility}${declaration.important ? '!' : ''}`)
+    converted.push({
+      property: `${prefix}|${declaration.property}`,
+      utilities: mapped.map((utility) => `${prefix}${utility}${declaration.important ? '!' : ''}`),
+      important: declaration.important,
+    })
   }
-  return { utilities, residual }
+  return { converted, residual }
 }
 
+/** Per class, then per variant and property: a later rule replaces an earlier one (the cascade's last-wins), unless the earlier one is `!important` and the later is not. */
 interface Collector {
-  utilities: Map<string, string[]>
+  utilities: Map<string, Map<string, ConvertedDeclaration>>
 }
 
-function addUtilities(collector: Collector, className: string, utilities: string[]): void {
-  if (utilities.length === 0) return
-  const list = collector.utilities.get(className) ?? []
-  for (const utility of utilities) if (!list.includes(utility)) list.push(utility)
-  collector.utilities.set(className, list)
+function addUtilities(collector: Collector, className: string, converted: ConvertedDeclaration[]): void {
+  if (converted.length === 0) return
+  const entries = collector.utilities.get(className) ?? new Map<string, ConvertedDeclaration>()
+  for (const declaration of converted) {
+    const earlier = entries.get(declaration.property)
+    if (earlier?.important && !declaration.important) continue
+    entries.delete(declaration.property)
+    entries.set(declaration.property, declaration)
+  }
+  collector.utilities.set(className, entries)
 }
 
 /** One style rule: the converted selectors give their utilities away, the rest of the rule is returned as CSS. */
@@ -1127,7 +1173,7 @@ function convertRule(
   const convertibleSelectors: string[] = []
   for (const { selector, target } of convertible) {
     const result = convertDeclarations(declarations, [...extraVariants, ...target.variants])
-    addUtilities(collector, target.className, result.utilities)
+    addUtilities(collector, target.className, result.converted)
     residualShared = result.residual
     if (result.residual.length > 0 || nested.length > 0) convertibleSelectors.push(selector)
   }
@@ -1176,7 +1222,12 @@ export function cssToTailwind(css: string, options: TailwindOptions = {}): Tailw
   const remaining = convertSheet(first.moduleCss, rootClass, collector)
   const second = splitComponentCss(remaining, { rootClass })
   return {
-    utilities: collector.utilities,
+    utilities: new Map(
+      [...collector.utilities].map(([name, entries]) => [
+        name,
+        [...new Set([...entries.values()].flatMap((declaration) => declaration.utilities))],
+      ]),
+    ),
     leftover: {
       moduleCss: second.moduleCss,
       classes: second.classes,
