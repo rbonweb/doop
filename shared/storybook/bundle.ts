@@ -60,6 +60,14 @@ function refusalMessage(reason: string, bytes?: number): string {
   return reason
 }
 
+/** The import itself could not produce a bundle (nothing could be captured, or what was captured is not a valid bundle). The message is written for the person, never taken raw from an exception. */
+export class BundleImportError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BundleImportError'
+  }
+}
+
 /** One story, rendered and captured. A failure to load, a story that errors or one that never renders is a `capture` with `ok: false`, never a throw (an abort is the only throw). */
 export async function renderStory(page: StoryPage, request: RenderRequest, signal?: AbortSignal): Promise<StoryRender> {
   const issues: StorybookIssue[] = []
@@ -402,7 +410,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   }
 
   if (!components.length) {
-    throw new Error(
+    throw new BundleImportError(
       (
         issues.find((issue) => issue.code === 'renderer_unavailable') ??
         issues.find((issue) => issue.code === 'story_failed')
@@ -428,7 +436,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     components,
   })
   if (!parsed.success) {
-    throw new Error(
+    throw new BundleImportError(
       `The captured components do not make a valid bundle: ${parsed.error.issues[0]?.message ?? 'invalid'}`,
     )
   }

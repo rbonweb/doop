@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { Actor } from '../shared/types.ts'
-import type { PlannedComponent } from '../shared/storybook/bundle.ts'
+import { BundleImportError, type PlannedComponent } from '../shared/storybook/bundle.ts'
 import { importComponentBundle, type ImportIssue, type ImportResult } from './componentBundleImport.ts'
 import { ComponentError } from './componentActions.ts'
 import { detached } from './journal.ts'
@@ -13,6 +13,7 @@ import {
   StorybookRateLimitError,
   type StorybookImportDeps,
 } from './storybookImport.ts'
+import { RendererBusyError } from './renderBrowser.ts'
 import { runOperation, WorkBudgetError } from './workBudget.ts'
 
 /** What the MCP tool, the resident tool and the REST route share: a Storybook URL to components on a canvas. The long part (a browser rendering the Storybook) runs outside any write boundary; only the importer's own writes are units of their own. */
@@ -43,6 +44,8 @@ export interface StorybookRun {
   include?: string[]
   dryRun: boolean
   signal?: AbortSignal
+  /** asked again right before the importer writes, since the render took minutes: whether the account may still edit this canvas */
+  canEdit: () => boolean
   onPlan?: (groups: PlannedComponent[]) => void
   onRender?: (event: { rendered: number; total: number; component: string }) => void
   /** a test swaps what reaches a fake Storybook on this machine */
@@ -73,6 +76,9 @@ export async function runStorybookImport(run: StorybookRun): Promise<StorybookRu
       run.deps,
     ),
   )
+  /* the render took minutes: the account may have been demoted, or the request closed, since it began */
+  run.signal?.throwIfAborted()
+  if (!run.canEdit()) throw new ComponentError('You can no longer edit this canvas, so nothing was imported')
   const context = { canvasId: run.canvasId, actor: run.actor }
   const result = run.dryRun
     ? detached(() =>
@@ -129,18 +135,29 @@ export async function planStorybookImport(
 
 export type StorybookFailureCode = 'private' | 'unreachable' | 'too_many' | 'busy' | 'invalid'
 
-/** An error from the import as the code and message a caller shows. */
+/** An error from the import as the code and message a caller shows. Only errors this import raised on purpose carry their own message; anything else (a browser or network failure, a bug) is logged and answered with a fixed line, since its text can name internal addresses. */
 export function storybookFailure(error: unknown): { code: StorybookFailureCode; message: string; status: number } {
   if (error instanceof StorybookAccessError) return { code: 'private', message: error.message, status: 400 }
   if (error instanceof StorybookBusyError) return { code: 'busy', message: error.message, status: 503 }
+  if (error instanceof RendererBusyError) {
+    return { code: 'busy', message: "Doop's renderer is busy. Try again in a minute.", status: 503 }
+  }
   if (error instanceof StorybookRateLimitError) return { code: 'too_many', message: error.message, status: 429 }
   if (error instanceof StorybookIndexError) return { code: 'unreachable', message: error.message, status: 400 }
+  if (error instanceof BundleImportError) return { code: 'invalid', message: error.message, status: 400 }
   if (error instanceof ComponentError || error instanceof WorkBudgetError) {
     return { code: /holds at most/.test(error.message) ? 'too_many' : 'invalid', message: error.message, status: 400 }
   }
-  return {
-    code: 'unreachable',
-    message: error instanceof Error ? error.message.slice(0, 300) : 'The Storybook import failed',
-    status: 502,
-  }
+  console.error('[storybook-import]', error)
+  return { code: 'unreachable', message: 'The Storybook import failed', status: 502 }
+}
+
+/** Failures that happen before any story is rendered: the Storybook was not there, was private, or the server had no room. The import slot is given back for these (never for an abort, or for a failure after rendering began). */
+export function failedBeforeRendering(error: unknown): boolean {
+  return (
+    error instanceof StorybookAccessError ||
+    error instanceof StorybookIndexError ||
+    error instanceof StorybookBusyError ||
+    error instanceof RendererBusyError
+  )
 }

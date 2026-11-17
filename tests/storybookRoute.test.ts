@@ -8,7 +8,14 @@ vi.mock('../server/storybookImportRun.ts', async (importOriginal) => {
 })
 
 import { importStorybookRoute } from '../server/storybookRoutes.ts'
-import { STORYBOOK_IMPORTS_PER_HOUR, StorybookAccessError, StorybookBusyError } from '../server/storybookImport.ts'
+import { cleanLabel } from '../server/componentBundleImport.ts'
+import {
+  STORYBOOK_IMPORTS_PER_HOUR,
+  STORYBOOK_PLANS_PER_HOUR,
+  StorybookAccessError,
+  StorybookBusyError,
+  StorybookIndexError,
+} from '../server/storybookImport.ts'
 import type { Actor } from '../shared/types.ts'
 
 /* The route's own behaviour with the import mocked: what is JSON before streaming, what is a line, and that closing the request reaches the import as an abort. */
@@ -61,10 +68,16 @@ class FakeRes extends EventEmitter {
   }
 }
 
-const call = (body: unknown, user = `user-${Math.random()}`) => {
+const call = (body: unknown, user = `user-${Math.random()}`, canEdit: () => boolean = () => true) => {
   const res = new FakeRes()
-  const done = importStorybookRoute({ body } as never, res as never, 'canvas-1', actor, user, {
-    deps: { parseUrl: (raw) => new URL(raw) },
+  const done = importStorybookRoute({ body } as never, res as never, 'canvas-1', actor, user, canEdit, {
+    deps: {
+      parseUrl: (raw) => {
+        const url = new URL(raw)
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('only http(s) URLs are allowed')
+        return url
+      },
+    },
   })
   return { res, done }
 }
@@ -178,5 +191,113 @@ describe('streaming', () => {
     await done
     expect(signal!.aborted).toBe(true)
     expect(res.lines.filter((line) => line.type === 'error')).toEqual([])
+  })
+})
+
+describe('the hour and the stream', () => {
+  const ok = () => run.runStorybookImport.mockResolvedValue({ result: EMPTY_RESULT, issues: [], renders: 1 })
+
+  it('gives the slot back when the import fails before anything rendered, and not when it fails after', async () => {
+    const user = 'refunds'
+    run.runStorybookImport.mockRejectedValue(new StorybookIndexError('No Storybook index.json was found'))
+    for (let i = 0; i < STORYBOOK_IMPORTS_PER_HOUR + 2; i++) {
+      const { res, done } = call({ url: 'https://sb.test/' }, user)
+      await done
+      expect(res.statusCode).toBe(200)
+      expect(res.lines.at(-1)).toMatchObject({ type: 'error', code: 'unreachable' })
+    }
+    run.runStorybookImport.mockRejectedValue(new Error('after rendering began'))
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    for (let i = 0; i < STORYBOOK_IMPORTS_PER_HOUR; i++) await call({ url: 'https://sb.test/' }, user).done
+    log.mockRestore()
+    const { res, done } = call({ url: 'https://sb.test/' }, user)
+    await done
+    expect(res.statusCode).toBe(429)
+  })
+
+  it('does not give the slot back for an abort', async () => {
+    const user = 'aborts'
+    run.runStorybookImport.mockImplementation(
+      (options: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) =>
+          options.signal.addEventListener('abort', () => reject(new StorybookBusyError())),
+        ),
+    )
+    for (let i = 0; i < STORYBOOK_IMPORTS_PER_HOUR; i++) {
+      const { res, done } = call({ url: 'https://sb.test/' }, user)
+      await vi.waitFor(() => expect(run.runStorybookImport).toHaveBeenCalledTimes(i + 1))
+      res.emit('close')
+      await done
+    }
+    const { res, done } = call({ url: 'https://sb.test/' }, user)
+    await done
+    expect(res.statusCode).toBe(429)
+  })
+
+  it('takes no slot for a URL that could never be read', async () => {
+    const user = 'bad-urls'
+    ok()
+    for (let i = 0; i < STORYBOOK_IMPORTS_PER_HOUR + 2; i++) {
+      const { res, done } = call({ url: 'ftp://sb.test/' }, user)
+      await done
+      expect(res.statusCode).toBe(400)
+    }
+    const { res, done } = call({ url: 'https://sb.test/' }, user)
+    await done
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('gives a plan-only dry run an hour of its own, larger than the import one', async () => {
+    const user = 'planner'
+    run.planStorybookImport.mockResolvedValue({ components: [], result: EMPTY_RESULT, issues: [] })
+    for (let i = 0; i < STORYBOOK_PLANS_PER_HOUR; i++) {
+      const { res, done } = call({ url: 'https://sb.test/', dryRun: true }, user)
+      await done
+      expect(res.statusCode).toBe(200)
+    }
+    const over = call({ url: 'https://sb.test/', dryRun: true }, user)
+    await over.done
+    expect(over.res.statusCode).toBe(429)
+    expect(over.res.jsonBody).toMatchObject({ code: 'too_many' })
+    /* the import hour is untouched */
+    ok()
+    const real = call({ url: 'https://sb.test/' }, user)
+    await real.done
+    expect(real.res.statusCode).toBe(200)
+  })
+
+  it('never puts an internal error message on the stream', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    run.runStorybookImport.mockRejectedValue(new Error('connect ECONNREFUSED 10.0.0.5:9222'))
+    const { res, done } = call({ url: 'https://sb.test/' })
+    await done
+    expect(res.lines.at(-1)).toEqual({ type: 'error', code: 'unreachable', message: 'The Storybook import failed' })
+    expect(res.chunks.join('')).not.toContain('10.0.0.5')
+    log.mockRestore()
+  })
+
+  it('names components as the importer will: cleaned, in the plan and in each progress line', async () => {
+    const dirty = 'Bad\u0000 <b>Name</b>\n'
+    run.runStorybookImport.mockImplementation(async (options) => {
+      options.onPlan([{ name: dirty, group: 'A/' + dirty, stories: 1, renders: 1 }])
+      options.onRender({ rendered: 1, total: 1, component: dirty })
+      return { result: EMPTY_RESULT, issues: [], renders: 1 }
+    })
+    const { res, done } = call({ url: 'https://sb.test/' })
+    await done
+    const [plan, progress] = res.lines as unknown as {
+      components: { name: string; group: string }[]
+      component: string
+    }[]
+    expect(plan!.components[0]!.name).toBe(cleanLabel(dirty))
+    expect(progress!.component).toBe(cleanLabel(dirty))
+    expect(JSON.stringify(res.lines)).not.toMatch(/<b>|\\u0000/)
+  })
+
+  it('passes the edit-role check to the import', async () => {
+    ok()
+    const canEdit = () => false
+    await call({ url: 'https://sb.test/' }, 'role-user', canEdit).done
+    expect(run.runStorybookImport.mock.calls.at(-1)![0].canEdit).toBe(canEdit)
   })
 })

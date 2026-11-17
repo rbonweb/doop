@@ -272,7 +272,9 @@ const schema = {
   DOOP_CUSTOM_PROVIDER_PRIVATE_HOSTS: bool({ default: false }),
   /* A Storybook import reads only public addresses unless this is on, for a self-hosted
      instance whose Storybook is on its own network. Even then the story pages may reach
-     only the Storybook's own origin, never another private address */
+     only the Storybook's own origin, never another private address. Never turn it on for an
+     instance strangers can sign up to: any editor could then aim imports at private addresses
+     and read the answers (index errors tell hosts and ports apart) */
   DOOP_STORYBOOK_PRIVATE_HOSTS: bool({ default: false }),
 
   /* ------------------------------------------------ image generation */

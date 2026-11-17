@@ -2239,7 +2239,14 @@ app.post('/api/canvases/:id/component-import/ticket', (req, res) => {
 /* a published Storybook to components, streamed as NDJSON (server/storybookRoutes.ts) */
 app.post('/api/canvases/:id/import/storybook', async (req, res) => {
   if (!requireCanvas(req, res, req.params.id, 'edit')) return
-  await importStorybookRoute(req, res, req.params.id, userActor(req), req.user!.id)
+  const userId = req.user!.id
+  const canvasId = req.params.id
+  /* asked again right before the importer writes: the render takes minutes */
+  const canEdit = () => {
+    const canvas = store.getCanvas(canvasId)
+    return !!canvas && roleAtLeast(canvasRole(userId, canvas), 'edit')
+  }
+  await importStorybookRoute(req, res, canvasId, userActor(req), userId, canEdit)
 })
 
 app.post('/api/canvases/:id/tokens', (req, res) => {

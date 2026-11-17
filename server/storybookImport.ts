@@ -113,6 +113,20 @@ export function resolveDeps(deps: StorybookImportDeps = {}): StorybookImportDeps
   }
 }
 
+/** The Storybook URL as an import would read it, or the reason it never could (a bare domain gets https). `private` is a host Doop will not reach. */
+export function checkStorybookUrl(
+  rawUrl: string,
+  rawDeps: StorybookImportDeps = {},
+): { ok: true; url: URL } | { ok: false; private: boolean; message: string } {
+  try {
+    const parse = resolveDeps(rawDeps).parseUrl ?? parsePublicHttpUrl
+    return { ok: true, url: parse(/^[a-z][a-z0-9+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`) }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'not a valid URL'
+    return { ok: false, private: /not reachable/.test(message), message }
+  }
+}
+
 let running = 0
 
 async function readBounded(response: Response, max: number): Promise<string> {
@@ -363,33 +377,54 @@ export async function storybookBundle(
 
 /** Imports of a Storybook one account may start in an hour. */
 export const STORYBOOK_IMPORTS_PER_HOUR = 3
+/** Plan-only dry runs (the index is read, nothing is rendered) one account may make in an hour. */
+export const STORYBOOK_PLANS_PER_HOUR = 20
 
 /** The account is over its hourly Storybook imports. */
 export class StorybookRateLimitError extends Error {
-  constructor(readonly retryAfterSeconds: number) {
-    super(
-      `You have started ${STORYBOOK_IMPORTS_PER_HOUR} Storybook imports in the last hour, the most Doop runs for one account. Try again in ${Math.ceil(retryAfterSeconds / 60)} minutes, or run the Doop CLI on your machine.`,
-    )
+  constructor(
+    readonly retryAfterSeconds: number,
+    what = `You have started ${STORYBOOK_IMPORTS_PER_HOUR} Storybook imports in the last hour, the most Doop runs for one account`,
+  ) {
+    super(`${what}. Try again in ${Math.ceil(retryAfterSeconds / 60)} minutes, or run the Doop CLI on your machine.`)
     this.name = 'StorybookRateLimitError'
   }
 }
 
-const importStarts = new Map<string, number[]>()
-
-/** Counts one import against `account`'s hour; throws StorybookRateLimitError when it is over. A dry run that only plans (no renders) is not counted. */
-export function takeStorybookImport(account: string, now = Date.now()): void {
-  const recent = (importStarts.get(account) ?? []).filter((at) => now - at < 3_600_000)
-  if (recent.length >= STORYBOOK_IMPORTS_PER_HOUR) {
-    importStarts.set(account, recent)
-    throw new StorybookRateLimitError(Math.max(1, Math.ceil((recent[0]! + 3_600_000 - now) / 1000)))
-  }
-  recent.push(now)
-  importStarts.set(account, recent)
-  /* the map holds only accounts with an import in the last hour */
-  if (importStarts.size > 5000) {
-    for (const [key, list] of importStarts) if (list.every((at) => now - at >= 3_600_000)) importStarts.delete(key)
+/** A sliding hour per account: `take` counts one use and returns a function that gives it back. */
+function hourlyLimit(max: number, what: string) {
+  const starts = new Map<string, number[]>()
+  return (account: string, now = Date.now()): (() => void) => {
+    const recent = (starts.get(account) ?? []).filter((at) => now - at < 3_600_000)
+    if (recent.length >= max) {
+      starts.set(account, recent)
+      throw new StorybookRateLimitError(Math.max(1, Math.ceil((recent[0]! + 3_600_000 - now) / 1000)), what)
+    }
+    recent.push(now)
+    starts.set(account, recent)
+    /* the map holds only accounts with a use in the last hour */
+    if (starts.size > 5000) {
+      for (const [key, list] of starts) if (list.every((at) => now - at >= 3_600_000)) starts.delete(key)
+    }
+    return () => {
+      const list = starts.get(account)
+      const index = list ? list.indexOf(now) : -1
+      if (list && index !== -1) list.splice(index, 1)
+    }
   }
 }
+
+/** Counts one import against `account`'s hour; throws StorybookRateLimitError when it is over. Returns a refund, for an import that failed before anything was rendered. */
+export const takeStorybookImport = hourlyLimit(
+  STORYBOOK_IMPORTS_PER_HOUR,
+  `You have started ${STORYBOOK_IMPORTS_PER_HOUR} Storybook imports in the last hour, the most Doop runs for one account`,
+)
+
+/** Counts one plan-only dry run against `account`'s hour. */
+export const takeStorybookPlan = hourlyLimit(
+  STORYBOOK_PLANS_PER_HOUR,
+  `You have previewed ${STORYBOOK_PLANS_PER_HOUR} Storybooks in the last hour, the most Doop reads for one account`,
+)
 
 /** What a dry run shows: the components the Storybook would bring in, from its index alone (no story is rendered, no browser is opened). */
 export async function storybookPlan(

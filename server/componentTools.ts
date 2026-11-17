@@ -48,8 +48,8 @@ import { batchScope } from './responseShaping.ts'
 import { componentBundleSchema, MAX_INLINE_BUNDLE_BYTES } from '../shared/componentBundle.ts'
 import { importComponentBundle } from './componentBundleImport.ts'
 import { createImportTicket, ImportTicketError, ticketAnswer } from './componentImportTickets.ts'
-import { runStorybookImport, storybookFailure, storybookInput } from './storybookImportRun.ts'
-import { takeStorybookImport } from './storybookImport.ts'
+import { failedBeforeRendering, runStorybookImport, storybookFailure, storybookInput } from './storybookImportRun.ts'
+import { checkStorybookUrl, takeStorybookImport } from './storybookImport.ts'
 
 export { codeSchema, propSchema }
 
@@ -863,13 +863,18 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
       ...storybookInput,
       dry_run: z.boolean().optional().describe('Render and report what would change, and write nothing'),
     },
-    async run(input, { canvas, actor, userId, budgetKey }) {
+    async run(input, { canvas, actor, userId, budgetKey, canEdit }) {
       const dryRun = input.dry_run === true
+      let refund = () => {}
       try {
-        takeStorybookImport(budgetKey ?? userId ?? `canvas:${canvas.id}`)
+        /* a URL that could never be read costs nothing; the hour is the requesting account's on every surface */
+        const checked = checkStorybookUrl(String(input.url))
+        if (!checked.ok) throw new ComponentError(checked.message)
+        refund = takeStorybookImport(userId ?? budgetKey ?? `canvas:${canvas.id}`)
         const { result, issues, renders } = await runStorybookImport({
           canvasId: canvas.id,
           actor,
+          canEdit: () => canEdit(canvas.id),
           url: String(input.url),
           package: typeof input.package === 'string' ? input.package : undefined,
           include: Array.isArray(input.include) ? (input.include as string[]) : undefined,
@@ -898,6 +903,8 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           frames: defs.flatMap((def) => outcomeFrames({ canvas } as ToolContext, def)),
         }
       } catch (error) {
+        if (failedBeforeRendering(error)) refund()
+        if (error instanceof ComponentError) throw error
         throw new ComponentError(storybookFailure(error).message)
       }
     },

@@ -1,10 +1,17 @@
 import type express from 'express'
 import { z } from 'zod'
-import { parsePublicHttpUrl } from './publicUrl.ts'
-import { planStorybookImport, runStorybookImport, storybookFailure, storybookInput } from './storybookImportRun.ts'
+import { cleanLabel } from './componentBundleImport.ts'
 import {
-  resolveDeps,
+  failedBeforeRendering,
+  planStorybookImport,
+  runStorybookImport,
+  storybookFailure,
+  storybookInput,
+} from './storybookImportRun.ts'
+import {
+  checkStorybookUrl,
   takeStorybookImport,
+  takeStorybookPlan,
   StorybookRateLimitError,
   type StorybookImportDeps,
 } from './storybookImport.ts'
@@ -27,12 +34,21 @@ export interface StorybookRouteOptions {
   deps?: StorybookImportDeps
 }
 
+/** A plan entry as the stream shows it: the name and group the importer will use. */
+const cleaned = <T extends { name: string; group: string }>(entry: T): T => ({
+  ...entry,
+  name: cleanLabel(entry.name) || 'Component',
+  group: cleanLabel(entry.group, 200),
+})
+
 export async function importStorybookRoute(
   req: express.Request,
   res: express.Response,
   canvasId: string,
   actor: Actor,
   userId: string,
+  /** whether the account still holds the edit role: asked again right before the importer writes */
+  canEdit: () => boolean,
   options: StorybookRouteOptions = {},
 ) {
   const parsed = body.safeParse(req.body)
@@ -41,21 +57,19 @@ export async function importStorybookRoute(
   }
   const { url, include, dryRun = false } = parsed.data
   const packageName = parsed.data.package
-  const raw = /^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`
-  try {
-    ;(resolveDeps(options.deps).parseUrl ?? parsePublicHttpUrl)(raw)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'not a valid URL'
-    return res.status(400).json({ code: /not reachable/.test(message) ? 'private' : 'invalid', error: message })
+  const checked = checkStorybookUrl(url, options.deps)
+  if (!checked.ok) {
+    return res.status(400).json({ code: checked.private ? 'private' : 'invalid', error: checked.message })
   }
-  if (!dryRun) {
-    try {
-      takeStorybookImport(userId)
-    } catch (error) {
-      if (!(error instanceof StorybookRateLimitError)) throw error
-      res.setHeader('Retry-After', String(error.retryAfterSeconds))
-      return res.status(429).json({ code: 'too_many', error: error.message })
-    }
+  const raw = checked.url.href
+  /* what is counted: an import is 3 an hour, a plan-only preview has a larger hour of its own; a slot is given back if the import fails before rendering */
+  let refund = () => {}
+  try {
+    refund = dryRun ? takeStorybookPlan(userId) : takeStorybookImport(userId)
+  } catch (error) {
+    if (!(error instanceof StorybookRateLimitError)) throw error
+    res.setHeader('Retry-After', String(error.retryAfterSeconds))
+    return res.status(429).json({ code: 'too_many', error: error.message })
   }
 
   /* closing the request stops the import, and the browser with it */
@@ -80,11 +94,12 @@ export async function importStorybookRoute(
       package: packageName,
       include,
       signal: controller.signal,
+      canEdit,
       deps: options.deps,
     }
     if (dryRun) {
       const planned = await planStorybookImport(run)
-      line({ type: 'plan', components: planned.components, renders: planned.components.length })
+      line({ type: 'plan', components: planned.components.map(cleaned), renders: planned.components.length })
       line({ type: 'result', result: planned.result, issues: planned.issues })
     } else {
       let planned = 0
@@ -93,16 +108,18 @@ export async function importStorybookRoute(
         dryRun: false,
         onPlan: (components) => {
           planned = components.length
-          line({ type: 'plan', components, renders: planned })
+          line({ type: 'plan', components: components.map(cleaned), renders: planned })
         },
-        onRender: ({ rendered, total, component }) => line({ type: 'progress', rendered, total, component }),
+        onRender: ({ rendered, total, component }) =>
+          line({ type: 'progress', rendered, total, component: cleanLabel(component) || 'Component' }),
       })
       line({ type: 'result', result, issues })
     }
   } catch (error) {
+    /* a failure before anything rendered gives the slot back; an abort never does */
+    if (!controller.signal.aborted && failedBeforeRendering(error)) refund()
     if (!controller.signal.aborted) {
       const failure = storybookFailure(error)
-      if (failure.status === 502) console.error('[storybook-import]', error)
       line({ type: 'error', code: failure.code, message: failure.message })
     }
   } finally {
