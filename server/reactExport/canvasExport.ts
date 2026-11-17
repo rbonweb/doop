@@ -135,9 +135,6 @@ export function exportCanvasReact(canvas: Canvas, request: ReactExportRequest): 
       assetOrigin: assetOrigin(),
     })
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e)
-    /* a request the export cannot honour (a styling it does not support yet) is the caller's to change; anything else is ours */
-    if (/^tailwind styling/.test(message)) return { ok: false, status: 400, error: message }
     console.error('[react-export] export failed', e)
     return { ok: false, status: 500, error: 'The export failed' }
   }
