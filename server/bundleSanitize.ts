@@ -1,5 +1,5 @@
 import { serialize, type DefaultTreeAdapterTypes as Tree, type Token } from 'parse5'
-import { IF_ATTR, SLOT_ATTR, BIND_ATTR } from '../shared/components.ts'
+import { IF_ATTR, SLOT_ATTR, BIND_ATTR, styleText } from '../shared/components.ts'
 import { attrOf, isElement, rootFragment } from './componentEngine.ts'
 import { parseCss, serializeNodes, splitTopLevel, type CssNode } from './componentCss.ts'
 
@@ -222,9 +222,6 @@ export const unsafeCssValue = (value: string): boolean => hasThreat(value) || /u
 /** A base64 data: URI wherever it sits in css text (image-set("data:…"), a string, a bare value). */
 const BASE64_ANYWHERE = /data:[^,;"'()\s]*(?:;[a-z0-9-]+=[^;,"'()\s]*)*;base64,[a-z0-9+/=_-]*/gi
 
-/** A stylesheet's text made safe inside a <style> element: no `<` survives, so `</style>` cannot end it. */
-const escapeAngle = (css: string) => css.replace(/</g, '\\3c ')
-
 const URL_TOKEN = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s"']*))\s*\)/gi
 
 /** Keep a url() that points at a public page or an in-document id; anything else becomes an empty url. */
@@ -268,7 +265,7 @@ function sanitizeDeclarations(body: string, issues: SanitizeIssue[]): string {
     }
     kept.push(cleanCssText(declaration.trim(), issues))
   }
-  return escapeAngle(kept.join('; '))
+  return styleText(kept.join('; '))
 }
 
 const DECLARATION_AT_RULES = new Set(['font-face', 'page', 'property', 'counter-style', 'font-palette-values'])
@@ -311,7 +308,7 @@ function sanitizeNodes(nodes: CssNode[], issues: SanitizeIssue[]): CssNode[] {
 export function sanitizeStylesheet(css: string): Sanitized {
   const issues: SanitizeIssue[] = []
   const nodes = sanitizeNodes(parseCss(css), issues)
-  return { value: escapeAngle(serializeNodes(nodes)), issues: dedupe(issues) }
+  return { value: styleText(serializeNodes(nodes)), issues: dedupe(issues) }
 }
 
 export { sanitizeDeclarations as sanitizeStyleAttribute }

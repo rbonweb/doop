@@ -25,15 +25,22 @@ export const MAX_VARIANT_VALUES = 8
 export const BUNDLE_SOURCES = ['storybook', 'cli', 'agent'] as const
 export type BundleSource = (typeof BUNDLE_SOURCES)[number]
 
-/** Characters that cannot be in an enum option or a prop default: they would end an attribute, a selector or a style block. */
-const UNSAFE_VALUE = {
-  test(value: string): boolean {
-    for (const char of value) {
-      const code = char.codePointAt(0) ?? 0
-      if (code <= 0x1f || code === 0x7f || '<>"\\{};'.includes(char)) return true
+/**
+ * The first enum option or default of a component that could end an attribute, a selector or a style block (< > " \\ { } ;
+ * or a control character), as a message naming it, or null when every value is fine. The importer skips a component with
+ * such a value (with this message as the reason) instead of refusing the whole bundle; nothing it holds reaches a selector or an attribute.
+ */
+export function unsafePropValue(component: Pick<BundleComponent, 'props'>): string | null {
+  for (const prop of component.props ?? [])
+    for (const value of [...(prop.options ?? []), ...(prop.default !== undefined ? [prop.default] : [])]) {
+      const bad = [...value].some((char) => {
+        const code = char.codePointAt(0) ?? 0
+        return code <= 0x1f || code === 0x7f || '<>"\\{};'.includes(char)
+      })
+      if (bad)
+        return `prop “${prop.name}” has ${prop.options?.includes(value) ? 'the option' : 'the default'} “${value.slice(0, 40)}”, which has a character that is not allowed in an enum option or default (< > " \\ { } ; or a control character)`
     }
-    return false
-  },
+  return null
 }
 
 const variantSchema = z.object({
@@ -56,16 +63,6 @@ export const bundleComponentSchema = z
     code: codeSchema.optional(),
   })
   .superRefine((component, ctx) => {
-    /* an enum value becomes an attribute value and a CSS selector: nothing that could end either is accepted */
-    ;(component.props ?? []).forEach((prop, index) => {
-      for (const value of [...(prop.options ?? []), ...(prop.default !== undefined ? [prop.default] : [])])
-        if (UNSAFE_VALUE.test(value))
-          ctx.addIssue({
-            code: 'custom',
-            path: ['props', index, prop.options?.includes(value) ? 'options' : 'default'],
-            message: `prop “${prop.name}” has a value (“${value.slice(0, 40)}”) with a character that is not allowed in an enum option or default: < > " \\ { } ; or a control character`,
-          })
-    })
     const axes = Object.entries(component.variants ?? {})
     if (axes.length > MAX_VARIANT_AXES)
       ctx.addIssue({

@@ -463,7 +463,7 @@ describe('nothing a bundle says can run in the frame it makes', () => {
     )
     expect(executableParts(main)).toEqual([])
     expect(executableParts(instance)).toEqual([])
-    expect(main).not.toMatch(/alert\(1\)<\/style|<script/i)
+    expect(main).not.toContain('</style><script')
   })
 
   it('css in a style attribute and in a selector', async () => {
@@ -485,15 +485,52 @@ describe('nothing a bundle says can run in the frame it makes', () => {
     expect(executableParts(store.getFrame(def.mainFrameId!)!.html)).toEqual([])
   })
 
-  it('enum option values and defaults that could end an attribute or a selector are refused', () => {
-    for (const bad of ['a</style><script>alert(8)</script>', 'x"y', 'a\\b', 'a{b}', 'a;b', 'a\nb', 'a>b'])
-      expect(() => run(one({ props: [{ name: 'tone', type: 'enum', options: ['ok', bad] }] }))).toThrow(
-        /not allowed in an enum option/,
-      )
-    expect(() =>
-      run(one({ props: [{ name: 'tone', type: 'enum', options: ['ok', 'fine'], default: 'a<b' }] })),
-    ).toThrow(/not allowed/)
-    expect(canvasHasNoComponents()).toBe(true)
+  it('a component with an enum option that could end an attribute or a selector is skipped, naming it, and the rest import', () => {
+    const bad = (name: string, options: string[], extra: Record<string, unknown> = {}) => ({
+      name,
+      html: '<div class="probe">x</div>',
+      props: [{ name: 'tone', type: 'enum', options, ...extra }],
+      variants: { tone: { [options[1]!]: { css: '.probe { color: red }' } } },
+    })
+    const result = run({
+      version: 1,
+      source: { kind: 'agent' },
+      components: [
+        bad('Bad1', ['ok', 'a</style><script>alert(8)</script>']),
+        bad('Bad2', ['ok', 'x"y']),
+        bad('Bad3', ['ok', 'fine'], { default: 'a{b}' }),
+        { name: 'Good', html: '<i class="good">g</i>' },
+      ],
+    })
+    expect(result.created.map((entry) => entry.name)).toEqual(['Good'])
+    expect(result.skipped.map((entry) => entry.name).sort()).toEqual(['Bad1', 'Bad2', 'Bad3'])
+    expect(result.skipped.find((entry) => entry.name === 'Bad1')!.reason).toMatch(
+      /option “a<\/style><script>alert\(8\)<\/script>”/,
+    )
+    expect(result.issues.filter((issue) => issue.code === 'unsafe_prop_value')).toHaveLength(3)
+    expect(activeComponents(store.getComponents(canvasId)).map((def) => def.name)).toEqual(['Good'])
+    const dry = run({ version: 1, source: { kind: 'agent' }, components: [bad('Bad4', ['ok', 'a;b'])] }, true)
+    expect(dry.skipped).toHaveLength(1)
+  })
+
+  it('range media and container queries survive, byte for byte, through the sanitizer and the import', async () => {
+    const css =
+      '@media (width < 600px) { .probe { color: blue; } }\n@container (width<400px) { .probe { color: green; } }'
+    const clean = sanitizeStylesheet(css).value
+    expect(clean).toContain('@media (width < 600px)')
+    expect(clean).toContain('@container (width<400px)')
+    expect(clean).not.toContain('\\3c')
+    const props = [{ name: 'tone', type: 'enum', options: ['a', 'b'] }]
+    const { main, instance } = await stored(
+      one({ css: '.probe { color: red }', props, variants: { tone: { b: { css } } } }, { css }),
+    )
+    const def = findComponent(canvasId, 'Probe')!
+    expect(def.rawCss).toContain('@media (width < 600px)')
+    expect(def.rawCss).toContain('@container (width<400px)')
+    expect(def.rawCss).toContain('@media (width < 600px) {\n.probe[data-tone="b"] { color: blue; }')
+    expect(main).toContain('(width < 600px)')
+    expect(executableParts(main)).toEqual([])
+    expect(executableParts(instance)).toEqual([])
   })
 
   it('an enum option that is awkward but safe is scoped as an escaped attribute value', async () => {
@@ -621,10 +658,6 @@ describe('nothing a bundle says can run in the frame it makes', () => {
     expect(activeComponents(store.getComponents(canvasId))).toHaveLength(6)
   })
 })
-
-function canvasHasNoComponents(): boolean {
-  return activeComponents(store.getComponents(canvasId)).length === 0
-}
 
 function hasMarkupOrControl(text: string): boolean {
   return [...text].some((char) => (char.codePointAt(0) ?? 0) <= 0x1f || '<>"'.includes(char))

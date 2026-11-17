@@ -1,4 +1,9 @@
-import { componentBundleSchema, type BundleComponent, type ComponentBundle } from '../shared/componentBundle.ts'
+import {
+  componentBundleSchema,
+  unsafePropValue,
+  type BundleComponent,
+  type ComponentBundle,
+} from '../shared/componentBundle.ts'
 import type { ComponentCode } from '../shared/componentCode.ts'
 import {
   activeComponents,
@@ -372,6 +377,12 @@ function writeOne(
   sharedCss: string,
 ): Outcome {
   const { component, code, match } = plan
+  /* an enum option becomes an attribute value and a selector: one with a character that could end either is not imported */
+  const unsafe = unsafePropValue(component)
+  if (unsafe) {
+    issues.push({ component: component.name, code: 'unsafe_prop_value', message: unsafe })
+    return { kind: 'skipped', reason: unsafe }
+  }
   const prepared = prepareComponent(component, sharedCss)
   for (const issue of prepared.issues) issues.push({ component: component.name, ...issue })
   if (match) {

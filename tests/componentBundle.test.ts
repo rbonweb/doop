@@ -9,6 +9,7 @@ import {
   MAX_VARIANT_AXES,
   MAX_VARIANT_VALUES,
   componentBundleSchema,
+  unsafePropValue,
 } from '../shared/componentBundle.ts'
 
 /**
@@ -211,33 +212,25 @@ describe('componentBundle constants', () => {
 })
 
 describe('enum values that reach a selector or an attribute', () => {
-  const withProp = (prop: Record<string, unknown>) =>
-    componentBundleSchema.safeParse(bundle({ components: [{ name: 'Card', html: '<div></div>', props: [prop] }] }))
+  const withProp = (prop: Record<string, unknown>) => ({
+    components: [{ name: 'Card', html: '<div></div>', props: [prop] }],
+  })
+  const flagged = (prop: Record<string, unknown>) => {
+    const parsed = componentBundleSchema.safeParse(bundle(withProp(prop)))
+    /* the schema lets the bundle through: the importer skips just that component */
+    expect(parsed.success).toBe(true)
+    return parsed.success ? unsafePropValue(parsed.data.components[0]!) : 'unparsed'
+  }
 
-  it('refuses markup, quote, brace, semicolon, backslash and control characters in options and defaults', () => {
-    for (const bad of [
-      'a</style>',
-      'x"y',
-      "a'b".replace("'", '"'),
-      'a\\b',
-      'a{b',
-      'a}b',
-      'a;b',
-      'a\nb',
-      'a\u0000b',
-      'a<b',
-      'a>b',
-    ]) {
-      const result = withProp({ name: 'tone', type: 'enum', options: ['ok', bad] })
-      expect(result.success).toBe(false)
-      expect(JSON.stringify(result.error?.issues)).toContain('not allowed in an enum option')
-    }
-    expect(withProp({ name: 'tone', type: 'enum', options: ['ok'], default: 'a<b' }).success).toBe(false)
+  it('flags markup, quote, brace, semicolon, backslash and control characters in options and defaults, naming the value', () => {
+    for (const bad of ['a</style>', 'x"y', 'a\\b', 'a{b', 'a}b', 'a;b', 'a\nb', 'a\u0000b', 'a<b', 'a>b'])
+      expect(flagged({ name: 'tone', type: 'enum', options: ['ok', bad] })).toMatch(
+        /prop “tone” has the option [\s\S]*not allowed in an enum option/,
+      )
+    expect(flagged({ name: 'tone', type: 'enum', options: ['ok'], default: 'a<b' })).toMatch(/has the default “a<b”/)
   })
 
   it('accepts ordinary options', () => {
-    expect(
-      withProp({ name: 'size', type: 'enum', options: ['sm', 'extra large', 'a-b.c_d', '16/9', 'Ünï'] }).success,
-    ).toBe(true)
+    expect(flagged({ name: 'size', type: 'enum', options: ['sm', 'extra large', 'a-b.c_d', '16/9', 'Ünï'] })).toBeNull()
   })
 })
