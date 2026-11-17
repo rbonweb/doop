@@ -125,6 +125,20 @@ describe('the browser lookup', () => {
     expect(windows.some((file) => file.startsWith('C:\\Users\\a\\AppData\\Local'))).toBe(true)
   })
 
+  it('accepts a chrome-headless-shell binary, as @puppeteer/browsers installs it', async () => {
+    const { chmod, mkdtemp, rm, writeFile } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const directory = await mkdtemp(path.join(tmpdir(), 'doop-import-shell-'))
+    try {
+      const shell = path.join(directory, 'chrome-headless-shell')
+      await writeFile(shell, '#!/bin/sh\n')
+      await chmod(shell, 0o755)
+      expect(findBrowser({ flag: shell, env: {}, platform: 'linux' })).toEqual({ path: shell, source: '--browser' })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it('makes a named path absolute and wants a file, not a directory', () => {
     const seen: string[] = []
     const record = { isExecutable: (file: string) => (seen.push(file), true) }

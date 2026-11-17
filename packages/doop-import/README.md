@@ -56,6 +56,8 @@ The first of these that is set:
 
 Google Chrome users pass `--browser` or set `CHROME_PATH` to Chrome's executable; it is not looked for automatically. A path you name is made absolute and must be an executable file; if it is not, that is an error and it never falls back to a different browser. If none is found, the error says how to point at one. Any Chromium-based executable works, headless shell builds included.
 
+With no browser to point at, install a standalone one: `npx @puppeteer/browsers install chrome-headless-shell@stable`, then pass the path it prints to `--browser`.
+
 ## What it does and does not do
 
 - It renders each component's default story, then one render per enum option and boolean to capture variants, inside Doop's limits: 60 components, 400 renders, 20 seconds a render, 10 minutes in all.
