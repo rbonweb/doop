@@ -46,10 +46,18 @@ import { exportCanvasReact, MAX_INLINE_EXPORT_BYTES, reactExportRequest } from '
 import { zipExport } from './reactExport/zip.ts'
 import { batchScope } from './responseShaping.ts'
 import { componentBundleSchema, MAX_INLINE_BUNDLE_BYTES } from '../shared/componentBundle.ts'
-import { cleanLabel, importComponentBundle } from './componentBundleImport.ts'
+import { importComponentBundle } from './componentBundleImport.ts'
 import { createImportTicket, ImportTicketError, ticketAnswer } from './componentImportTickets.ts'
-import { failedBeforeRendering, runStorybookImport, storybookFailure, storybookInput } from './storybookImportRun.ts'
-import { checkStorybookUrl, takeStorybookImport } from './storybookImport.ts'
+import { failedBeforeRendering, planStorybookImport, storybookFailure, storybookInput } from './storybookImportRun.ts'
+import { checkStorybookUrl, takeStorybookPlan } from './storybookImport.ts'
+import {
+  cancelStorybookJob,
+  JobLimitError,
+  JobNotFoundError,
+  readStorybookJob,
+  startStorybookJob,
+  type JobView,
+} from './storybookJobs.ts'
 
 export { codeSchema, propSchema }
 
@@ -74,10 +82,6 @@ export interface ToolContext {
   surface?: Surface
   /** whose per-minute budget a metered tool spends: the account the call is made for (the signed-in user over MCP, the payer of a resident run), never a name the caller chose */
   budgetKey?: string
-  /** a tool that runs for minutes (import_storybook) says how far it is, when the caller can listen: over MCP, a client that sent a progress token */
-  progress?: (update: { progress: number; total: number; message: string }) => void
-  /** aborted when the caller goes away (an MCP client that disconnects, a resident run that is cancelled): a tool that runs for minutes stops its work */
-  signal?: AbortSignal
 }
 
 /** A file that travels beside the answer: over MCP an embedded resource, as export_frame's PDF does. The resident agent has no use for one and never gets it. */
@@ -108,6 +112,71 @@ function missingNested(def: ComponentDef): string[] {
     .filter((issue) => issue.code === 'unknown_component')
     .map((issue) => /“([^”]*)”/.exec(issue.message)?.[1] ?? '')
   return [...new Set(refs)]
+}
+
+/** The Storybook job tools: the resident agent asks them the same way. */
+export const STORYBOOK_JOB_TOOLS: ReadonlySet<string> = new Set([
+  'import_storybook',
+  'get_import_status',
+  'cancel_import',
+])
+
+function readJob(
+  input: Record<string, unknown>,
+  { canvas, userId, budgetKey, canEdit }: Pick<ToolContext, 'canvas' | 'userId' | 'budgetKey' | 'canEdit'>,
+  find: typeof readStorybookJob,
+): JobView | undefined {
+  try {
+    return find(String(input.job_id), canvas.id, {
+      owner: userId ?? budgetKey ?? `canvas:${canvas.id}`,
+      canEdit: () => canEdit(canvas.id),
+    })
+  } catch (error) {
+    if (error instanceof JobNotFoundError) throw new ComponentError(error.message)
+    throw error
+  }
+}
+
+/** A job as the tools answer it: the status and, once it is done, what it made, with the note an agent acts on. */
+function importStatus(job: JobView | undefined, canvas: Canvas): ToolResult {
+  if (!job) {
+    return {
+      data: { ok: true, status: 'unknown' },
+      note: 'No import job with that id: the server may have restarted, or the job ended more than 30 minutes ago. Start the import again with import_storybook (a canvas that already has the components updates them in place).',
+    }
+  }
+  const { result, issues = [], renders } = job
+  if (job.status === 'running') {
+    return {
+      data: { ok: true, ...job },
+      note: `Still importing: ${job.rendered} of ${job.total} renders${job.component ? ` (last: ${job.component})` : ''}. Call get_import_status again; the total only grows as variants are found.`,
+    }
+  }
+  if (job.status === 'failed')
+    return { data: { ok: true, ...job }, note: `The import failed: ${job.error?.message ?? 'unknown error'}` }
+  if (job.status === 'cancelled')
+    return { data: { ok: true, ...job }, note: 'The import was cancelled and nothing was written.' }
+  if (!result) return { data: { ok: true, ...job } }
+  const defs = [...result.created, ...result.updated].flatMap(({ id }) => {
+    const def = id ? findComponent(canvas.id, id) : undefined
+    return def ? [def] : []
+  })
+  const counts = `${result.created.length} created, ${result.updated.length} updated, ${result.unchanged.length} unchanged, ${result.skipped.length} refused`
+  return {
+    data: { ok: true, ...job },
+    note: [
+      `Imported from the Storybook (${renders ?? job.rendered} story renders): ${counts}. The mains are on the "Imported components" page; compose screens from them with <doop-use component="Name">. Check one with get_component_preview.`,
+      ...(result.skipped.length
+        ? [`Refused: ${result.skipped.map((entry) => `${entry.name} (${entry.reason})`).join('; ')}`]
+        : []),
+      ...(issues.length
+        ? [
+            `${issues.length} issue${issues.length === 1 ? '' : 's'} are listed in issues: read them, they say what could not be captured or was left out.`,
+          ]
+        : []),
+    ].join('\n'),
+    frames: defs.flatMap((def) => outcomeFrames({ canvas } as ToolContext, def)),
+  }
 }
 
 /** One create_components call: a canvas's starting kit, not its whole library. */
@@ -861,64 +930,94 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     name: 'import_storybook',
     title: 'Import a published Storybook',
     description:
-      'Import the components of a PUBLISHED Storybook (a public URL, such as the team\'s deployed storybook-static) into this canvas as Doop components: each Storybook component becomes a component with its enum, boolean, number, color and text props, its variants and a code mapping, on the "Imported components" page. Doop renders every story in a sandboxed browser, so it takes a minute or two. Private Storybooks (behind a sign-in) are refused: for one of those, or one only on a dev machine, use create_import_ticket and the doop-import CLI. Pass dry_run=true first to see what would be created or updated; at most 3 imports an hour.',
+      'Import the components of a PUBLISHED Storybook (a public URL, such as the team\'s deployed storybook-static) into this canvas as Doop components: each Storybook component becomes a component with its enum, boolean, number, color and text props, its variants and a code mapping, on the "Imported components" page. Doop renders every story in a sandboxed browser, which takes minutes, so this starts a job and answers at once with { job_id, status: "running", planned }: call get_import_status with the job_id until status is done (it carries the result), failed or cancelled; cancel_import stops it. Private Storybooks (behind a sign-in) are refused: for one of those, or one only on a dev machine, use create_import_ticket and the doop-import CLI. Pass dry_run=true first to see what would be created or updated: it reads the Storybook\'s index in seconds, renders nothing and answers directly. At most 3 imports an hour, one running at a time.',
     readOnly: false,
     shape: {
       ...storybookInput,
-      dry_run: z.boolean().optional().describe('Render and report what would change, and write nothing'),
+      dry_run: z
+        .boolean()
+        .optional()
+        .describe('Read the index and report what would change, rendering and writing nothing'),
     },
-    async run(input, { canvas, actor, userId, budgetKey, canEdit, progress, signal }) {
-      const dryRun = input.dry_run === true
-      let refund = () => {}
+    async run(input, { canvas, actor, userId, budgetKey, canEdit }) {
+      const owner = userId ?? budgetKey ?? `canvas:${canvas.id}`
+      const url = String(input.url)
+      const packageName = typeof input.package === 'string' ? input.package : undefined
+      const include = Array.isArray(input.include) ? (input.include as string[]) : undefined
+      if (input.dry_run === true) {
+        let refund = () => {}
+        try {
+          /* a URL that could never be read costs nothing */
+          const checked = checkStorybookUrl(url)
+          if (!checked.ok) throw new ComponentError(checked.message)
+          refund = takeStorybookPlan(owner)
+          const planned = await planStorybookImport({
+            canvasId: canvas.id,
+            actor,
+            url: checked.url.href,
+            package: packageName,
+            include,
+          })
+          const { result } = planned
+          const counts = `${result.created.length} created, ${result.updated.length} updated`
+          return {
+            data: {
+              ok: true,
+              dry_run: true,
+              ...result,
+              issues: planned.issues,
+              planned: { renders: planned.info.importing, total: planned.info.total, components: planned.components },
+            },
+            note: `Dry run, nothing was rendered or written: an import would start with ${planned.info.importing} component${planned.info.importing === 1 ? '' : 's'} (${counts}). Call import_storybook again without dry_run to start it.`,
+          }
+        } catch (error) {
+          if (failedBeforeRendering(error)) refund()
+          if (error instanceof ComponentError) throw error
+          throw new ComponentError(storybookFailure(error).message)
+        }
+      }
       try {
-        /* a URL that could never be read costs nothing; the hour is the requesting account's on every surface */
-        const checked = checkStorybookUrl(String(input.url))
-        if (!checked.ok) throw new ComponentError(checked.message)
-        refund = takeStorybookImport(userId ?? budgetKey ?? `canvas:${canvas.id}`)
-        const { result, issues, renders } = await runStorybookImport({
+        const job = await startStorybookJob({
           canvasId: canvas.id,
           actor,
+          owner,
+          url,
+          package: packageName,
+          include,
           canEdit: () => canEdit(canvas.id),
-          url: String(input.url),
-          package: typeof input.package === 'string' ? input.package : undefined,
-          include: Array.isArray(input.include) ? (input.include as string[]) : undefined,
-          dryRun,
-          signal,
-          /* the name comes from the page: only its cleaned label goes into a message */
-          onRender: ({ rendered, total, component }) =>
-            progress?.({
-              progress: rendered,
-              total,
-              message: `Rendered ${cleanLabel(component) || 'Component'} (${rendered} of ${total})`,
-            }),
         })
-        const defs = [...result.created, ...result.updated].flatMap(({ id }) => {
-          const def = id ? findComponent(canvas.id, id) : undefined
-          return def ? [def] : []
-        })
-        const counts = `${result.created.length} created, ${result.updated.length} updated, ${result.unchanged.length} unchanged, ${result.skipped.length} refused`
+        if (job.status === 'failed') throw new ComponentError(job.error?.message ?? 'The Storybook import failed')
         return {
-          data: { ok: true, dry_run: dryRun, ...result, issues, renders },
-          note: [
-            dryRun
-              ? `Dry run, nothing was written (${renders} story renders): ${counts}.`
-              : `Imported from the Storybook (${renders} story renders): ${counts}. The mains are on the "Imported components" page; compose screens from them with <doop-use component="Name">. Check one with get_component_preview.`,
-            ...(result.skipped.length
-              ? [`Refused: ${result.skipped.map((entry) => `${entry.name} (${entry.reason})`).join('; ')}`]
-              : []),
-            ...(issues.length
-              ? [
-                  `${issues.length} issue${issues.length === 1 ? '' : 's'} are listed in issues: read them, they say what could not be captured or was left out.`,
-                ]
-              : []),
-          ].join('\n'),
-          frames: defs.flatMap((def) => outcomeFrames({ canvas } as ToolContext, def)),
+          data: { ok: true, ...job },
+          note: `The import is running as job ${job.job_id}. Call get_import_status with it until status is done: the result (created, updated, issues) comes with it. It renders every story, so it takes a minute or more; you may do other work between calls.`,
         }
       } catch (error) {
-        if (failedBeforeRendering(error)) refund()
         if (error instanceof ComponentError) throw error
+        if (error instanceof JobLimitError) throw new ComponentError(error.message)
         throw new ComponentError(storybookFailure(error).message)
       }
+    },
+  },
+  {
+    name: 'get_import_status',
+    title: 'See how a Storybook import is going',
+    description:
+      'How an import_storybook job is going: { status: running | done | failed | cancelled, rendered, total, component, planned } while it runs, and on done the result (created, updated, unchanged, skipped, tokens, issues), on failed the error. Only the account that started the job, or another editor of the canvas, can read it. A job is kept 30 minutes after it ends; one the server lost (a restart) answers status "unknown": start the import again.',
+    readOnly: true,
+    shape: { job_id: z.string().min(1).max(100).describe('The job_id import_storybook returned') },
+    run(input, { canvas, userId, budgetKey, canEdit }) {
+      return importStatus(readJob(input, { canvas, userId, budgetKey, canEdit }, readStorybookJob), canvas)
+    },
+  },
+  {
+    name: 'cancel_import',
+    title: 'Stop a Storybook import',
+    description:
+      'Stop a running import_storybook job: the renders end and nothing is written. A job that already finished is left as it is (read it with get_import_status), and one already writing its components still finishes.',
+    readOnly: false,
+    shape: { job_id: z.string().min(1).max(100).describe('The job_id import_storybook returned') },
+    run(input, { canvas, userId, budgetKey, canEdit }) {
+      return importStatus(readJob(input, { canvas, userId, budgetKey, canEdit }, cancelStorybookJob), canvas)
     },
   },
   {

@@ -58,6 +58,7 @@ import { detached, savepoint } from './journal.ts'
 import { existingStyle, existingStyleBrief } from './existingStyle.ts'
 import {
   COMPONENT_TOOLS,
+  STORYBOOK_JOB_TOOLS,
   COMPONENT_TOOL_NAMES,
   componentWriteNotes,
   libraryFeatureEvent,
@@ -852,7 +853,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
                 content: 'This task has been stopped.',
                 is_error: true,
               }
-            return execTool(block, canvasId, actor, runState, abort.signal)
+            return execTool(block, canvasId, actor, runState)
           },
         })
         if (canceled()) return 'ran'
@@ -947,7 +948,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
                   console.log(
                     `[resident] tool canvas=${canvasId} name=${block.name}${typeof target === 'string' ? ` frame=${target}` : ''}`,
                   )
-                  const result = await execTool(block, canvasId, actor, runState, abort.signal)
+                  const result = await execTool(block, canvasId, actor, runState)
                   if (block.name === 'import_webpage' && result.is_error && !runState.blockedWebsiteAccess) {
                     importFailureInBatch =
                       'The website import failed. Correct the tool error and retry the import before making design changes.'
@@ -1896,8 +1897,6 @@ export async function execTool(
   canvasId: string,
   actor: ReturnType<typeof actions.resolveActor>,
   runState: RunState,
-  /** aborted when the run is cancelled, for the tools that run for minutes */
-  signal?: AbortSignal,
 ): Promise<Anthropic.ToolResultBlockParam> {
   const input = block.input as { frame_id: string } & Record<string, string>
   const fail = (msg: string): Anthropic.ToolResultBlockParam => ({
@@ -1914,7 +1913,7 @@ export async function execTool(
 
   /* one tool call is one operation, as over MCP: a work budget of its own (server/workBudget.ts) */
   return runOperation(`resident ${block.name}`, canvasId, () =>
-    runResidentTool(canvasId, block, actor, runState, input, ok, fail, signal),
+    runResidentTool(canvasId, block, actor, runState, input, ok, fail),
   )
 }
 
@@ -1926,7 +1925,6 @@ async function runResidentTool(
   input: { frame_id: string } & Record<string, string>,
   ok: (content: Anthropic.ToolResultBlockParam['content']) => Anthropic.ToolResultBlockParam,
   fail: (msg: string) => Anthropic.ToolResultBlockParam,
-  signal: AbortSignal | undefined,
 ): Promise<Anthropic.ToolResultBlockParam> {
   /* a tool that throws answers with its error instead of failing the operation, so what it
      had changed by then is undone here (server/journal.ts) */
@@ -2713,8 +2711,8 @@ async function runResidentTool(
              asked for (an automation, billed to its payer) changes none of them */
           canEdit: (id) =>
             id === canvasId
-              ? /* a Storybook import writes minutes after it began: the person who asked must still hold the role then */
-                block.name !== 'import_storybook' || !runState.requesterId || canEditCanvas(runState.requesterId, id)
+              ? /* a Storybook import writes minutes after it began, and its job is read and stopped later: the person who asked must still hold the role then */
+                !STORYBOOK_JOB_TOOLS.has(block.name) || !runState.requesterId || canEditCanvas(runState.requesterId, id)
               : !!runState.requesterId && canEditCanvas(runState.requesterId, id),
           readableCanvases: () =>
             reader ? canvasesFor(reader).flatMap((meta) => store.getCanvas(meta.id) ?? []) : [canvas],
@@ -2722,7 +2720,6 @@ async function runResidentTool(
           userId: runState.requesterId,
           budgetKey: runState.payerId ?? runState.requesterId,
           surface: 'resident',
-          signal,
         })
         if (!outcome.ok) return fail(outcome.error)
         const { data, note, frames } = outcome.result
