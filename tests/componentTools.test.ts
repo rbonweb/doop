@@ -417,7 +417,7 @@ describe('an agent working with components', () => {
     ).toBeUndefined()
   })
 
-  it('is told that template attributes on a <doop-use> do nothing, and no override is stored for them', async () => {
+  it('forwards props and keeps a condition on a nested <doop-use>, and says what does nothing', async () => {
     const canvas = newCanvas()
     await button(canvas.id)
     const made = await call('create_component', {
@@ -426,24 +426,33 @@ describe('an agent working with components', () => {
       html: '<div class="card"><h3 data-doop-prop="title">Pro</h3><doop-use component="Button" data-doop-prop="label:cta" data-doop-if="show-cta"></doop-use></div>',
     })
     expect(made.isError).toBe(false)
-    expect(made.text).toContain('COMPONENT: data-doop-prop on <doop-use component="Button">')
-    expect(made.text).toContain('data-doop-slot')
-    expect(made.text).toContain('COMPONENT: data-doop-if on <doop-use component="Button">')
+    expect(made.text).not.toContain('COMPONENT: data-doop-prop')
+    expect(made.text).not.toContain('COMPONENT: data-doop-if')
     const card = findComponent(canvas.id, 'Card')!
-    expect(card.props.map((prop) => prop.name)).toEqual(['title'])
+    /* the binding makes the outer prop, typed from the nested one; the condition makes a boolean */
+    expect(card.props.map((prop) => prop.name)).toEqual(['title', 'cta', 'show-cta'])
+    expect(card.template).toContain('data-doop-prop="label:cta"')
+    expect(card.template).toContain('data-doop-if="show-cta"')
     expect(card.template).not.toContain('overrides=')
-    expect(card.template).not.toContain('label:cta')
-    expect(store.getFrame(made.data.main_frame_id)!.html).not.toContain('label:cta')
-    expect(store.getFrame(made.data.main_frame_id)!.html).not.toContain('show-cta')
+    expect(store.getFrame(made.data.main_frame_id)!.html).toContain('label:cta')
 
-    /* a binding that binds nothing does not stand in for the component's own props */
+    /* data-doop-slot is still not a use's: it belongs on an element wrapped around it */
+    const slotted = await call('create_component', {
+      canvas_id: canvas.id,
+      name: 'Slotted',
+      html: '<div class="slotted"><doop-use component="Button" data-doop-slot="action"></doop-use></div>',
+    })
+    expect(slotted.text).toContain('COMPONENT: data-doop-slot on <doop-use component="Button">')
+
+    /* a bare name binds nothing: forwarding is inner:outer */
     const tier = await call('create_component', {
       canvas_id: canvas.id,
       name: 'Tier',
-      html: '<div class="tier"><h3>Pro</h3><doop-use component="Button" data-doop-prop="label:cta">Buy</doop-use></div>',
+      html: '<div class="tier"><h3>Pro</h3><doop-use component="Button" data-doop-prop="cta">Buy</doop-use></div>',
     })
-    expect(tier.data.inferred_props).toEqual(['title'])
-    expect(tier.text.match(/COMPONENT: data-doop-prop/g)).toHaveLength(1)
+    expect(tier.isError).toBe(false)
+    expect(tier.text).toContain('COMPONENT: data-doop-prop="cta" on <doop-use component="Button"> forwards nothing')
+    expect(findComponent(canvas.id, 'Tier')!.props.map((prop) => prop.name)).toEqual(['title'])
     expect(findComponent(canvas.id, 'Tier')!.template).not.toContain('overrides=')
 
     /* the same in a frame, where it is not nested in anything */
