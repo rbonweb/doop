@@ -346,10 +346,10 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides,
     const value = overrides.props?.[prop]
     if (value === undefined) continue
     /* a bound value is instance data: it never becomes an event handler, and an address it sets cannot run code */
-    if (target !== null && el.tagName !== USE_TAG && unsafeBindingTarget(target)) {
+    if (target !== null && el.tagName !== USE_TAG && unsafeBindingTarget(target, el.tagName)) {
       ctx.issues.push({
         code: 'ignored_attribute',
-        message: `${prop} is bound to ${target}, which a component never sets (event handlers and srcdoc stay out of instances)`,
+        message: `${prop} is bound to ${target}, which a component never sets (event handlers, srcdoc and an animation's attributeName stay out of instances)`,
       })
       continue
     }

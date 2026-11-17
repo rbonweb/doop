@@ -27,7 +27,8 @@ export const BIND_ATTR = 'data-doop-prop'
 /** `showIcon`, `!showIcon`, `tone=ghost` or `tone!=ghost`: the element exists only when this holds. */
 export const IF_ATTR = 'data-doop-if'
 
-/** Attributes that carry a URL: a value bound to one is checked, so a prop can never become a script address. */
+/** Attributes that carry a URL (or, for srcset, a list of them, or for SVG animation the value one will set): the importer's
+ *  sanitizer checks them in markup and the engine checks a value bound to one, so a prop can never become a script address. */
 export const URL_TARGETS: ReadonlySet<string> = new Set([
   'href',
   'src',
@@ -36,16 +37,33 @@ export const URL_TARGETS: ReadonlySet<string> = new Set([
   'poster',
   'xlink:href',
   'srcset',
+  'background',
+  'longdesc',
+  'cite',
+  'data',
+  'manifest',
+  'codebase',
+  'lowsrc',
+  'dynsrc',
+  'from',
+  'to',
+  'values',
 ])
 
-/** A binding target that is never written: an event handler, or an attribute that loads a document or pings an address. */
-export function unsafeBindingTarget(target: string): boolean {
+/** SVG elements that set another attribute by name: which attribute must be written in the markup, never bound. */
+const ANIMATION_TAGS = new Set(['set', 'animate', 'animatemotion', 'animatetransform'])
+
+/** A binding target that is never written: an event handler, an attribute that loads a document or pings an address, or the
+ *  `attributeName` of an SVG animation (it could aim `to` or `values` at an event handler or a link). */
+export function unsafeBindingTarget(target: string, tagName = ''): boolean {
   const name = target.trim().toLowerCase()
+  if (name === 'attributename' && ANIMATION_TAGS.has(tagName.toLowerCase())) return true
   return name.startsWith('on') || name === 'srcdoc' || name === 'ping'
 }
 
 /** Whether a value is an address that would run code or open a document when followed: javascript:, vbscript: or data:text/html,
- *  read the way a browser reads the start of a URL (control characters and spaces ignored, any case). */
+ *  read the way a browser reads the start of a URL (control characters and spaces ignored, any case), at the start of the value
+ *  or of any comma-separated candidate in it. */
 export function unsafeUrl(value: string): boolean {
   let text = ''
   for (const char of value) {
@@ -62,7 +80,8 @@ export function unsafeUrl(value: string): boolean {
     )
       text += char
   }
-  return /(?:^|[,;(])(?:javascript|vbscript|livescript|mocha):|^data:(?:text\/html|application\/xhtml|text\/xml)/i.test(
+  /* each candidate of a srcset (comma separated) is read as a start of its own */
+  return /(?:^|[,;(])(?:(?:javascript|vbscript|livescript|mocha):|data:(?:text\/html|application\/xhtml|text\/xml))/i.test(
     text,
   )
 }

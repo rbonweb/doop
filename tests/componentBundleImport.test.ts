@@ -26,7 +26,7 @@ import { blankComponent } from '../server/components.ts'
 import * as propagation from '../server/propagation.ts'
 import { store } from '../server/store.ts'
 import { runOperation } from '../server/workBudget.ts'
-import { activeComponents, MAX_COMPONENTS } from '../shared/components.ts'
+import { activeComponents, MAX_COMPONENTS, unsafeUrl } from '../shared/components.ts'
 import { cleanLabel, qualifierOf } from '../server/componentBundleImport.ts'
 
 const OWNER = 'owner-1'
@@ -1014,5 +1014,57 @@ describe('bindings never make a prop an event handler or a script address', () =
     const html = await frameWith('<doop-use component="Btn" x="alert(2)" target="/ok" label="l"></doop-use>')
     expect(executableParts(html)).toEqual([])
     expect(html).toContain('href="/ok"')
+  })
+
+  it('checks every srcset candidate, not only the first', async () => {
+    expect(unsafeUrl('a.png 1x, data:text/html,<b>x</b> 2x')).toBe(true)
+    expect(unsafeUrl('a.png 1x, JaVa\tScript:alert(1) 2x')).toBe(true)
+    expect(unsafeUrl('a.png 1x, b.png 2x')).toBe(false)
+    expect(unsafeUrl('data:image/png;base64,AAAA')).toBe(false)
+    const result = run({
+      version: 1,
+      source: { kind: 'agent' },
+      components: [{ name: 'Pic', html: '<img class="pic" data-doop-prop="srcset:s" src="/a.png" alt="">' }],
+    })
+    expect(result.created).toHaveLength(1)
+    const html = await frameWith(
+      '<doop-use component="Pic" s="a.png 1x, data:text/html,<script>alert(1)</script> 2x"></doop-use>',
+    )
+    expect(executableParts(html)).toEqual([])
+    const fine = await frameWith('<doop-use component="Pic" s="a.png 1x, b.png 2x"></doop-use>')
+    expect(fine).toContain('srcset="a.png 1x, b.png 2x"')
+  })
+
+  it('refuses a bound attributeName on an svg animation, and script values bound to its to, from and values', async () => {
+    const svg = (extra: string) =>
+      `<div class="anim"><svg viewBox="0 0 1 1"><a><set data-doop-prop="${extra}" to="1"/></a></svg></div>`
+    /* through the importer: the attributeName piece is dropped, the others stay and are checked when set */
+    const imported = run({
+      version: 1,
+      source: { kind: 'agent' },
+      components: [{ name: 'Anim', html: svg('attributeName:an,to:tv,from:fr,values:vs') }],
+    })
+    expect(imported.issues.map((issue) => issue.code)).toContain('binding_dropped')
+    expect(findComponent(canvasId, 'Anim')!.template).not.toMatch(/attributename:an/i)
+    /* past the importer, in a template written another way */
+    runOperation('create', canvasId, () =>
+      createComponentFromHtml(
+        canvasId,
+        { name: 'Anim2', html: svg('attributeName:an,to:tv,from:fr,values:vs'), autoProps: false },
+        actor,
+      ),
+    )
+    expect(findComponent(canvasId, 'Anim2')!.template).toMatch(/attributename:an/i)
+    for (const name of ['Anim', 'Anim2'])
+      for (const value of ['javascript:alert(1)', 'vbscript:x'])
+        expect(
+          executableParts(
+            await frameWith(
+              `<doop-use component="${name}" an="href" tv="${value}" fr="${value}" vs="a;${value}"></doop-use>`,
+            ),
+          ),
+        ).toEqual([])
+    const html = await frameWith('<doop-use component="Anim2" an="onclick" tv="alert(1)"></doop-use>')
+    expect(executableParts(html)).toEqual([])
   })
 })
