@@ -30,6 +30,7 @@ import {
   type InstanceOverrides,
   type LibraryComponent,
   type PartOverride,
+  styleText,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR } from '../shared/elementId.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
@@ -592,7 +593,7 @@ function mainFrameDoc(def: ComponentDef, root: string, rawCss: string): string {
 <head>
 ${def.head.join('\n')}
 <style ${SOURCE_CSS_ATTR}="${def.id}">
-${rawCss}
+${styleText(rawCss)}
 </style>
 </head>
 <body style="margin:0;padding:24px;background:transparent">
@@ -960,7 +961,7 @@ function withHeadTags(html: string, previous: string[], next: string[]): string 
 }
 
 function withSourceCss(html: string, id: string, css: string): string {
-  const block = `<style ${SOURCE_CSS_ATTR}="${id}">\n${css}\n</style>`
+  const block = `<style ${SOURCE_CSS_ATTR}="${id}">\n${styleText(css)}\n</style>`
   const existing = new RegExp(`<style[^>]*\\b${SOURCE_CSS_ATTR}="${id}"[^>]*>[\\s\\S]*?</style>`, 'i')
   if (existing.test(html)) return html.replace(existing, () => block)
   const head = /<\/head\s*>/i.exec(html)

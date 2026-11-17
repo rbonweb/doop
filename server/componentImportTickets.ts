@@ -19,15 +19,18 @@ export const IMPORT_TICKETS_LIVE = 20
 export interface ImportTicket {
   token: string
   canvasId: string
-  /** the account the ticket was made for; its edit role is checked again at upload. Unset only on a canvas anyone may edit. */
-  userId: string | undefined
+  /** the account the ticket was made for; its edit role is checked again at upload */
+  userId: string
   /** who the import is credited to in the activity feed */
   actor: Actor
   expiresAt: number
   inFlight: boolean
 }
 
-export class ImportTicketLimitError extends Error {
+/** A ticket that cannot be made: no signed-in account behind the request, or a cap reached. */
+export class ImportTicketError extends Error {}
+
+export class ImportTicketLimitError extends ImportTicketError {
   constructor(
     message: string,
     readonly retryAfterSeconds: number,
@@ -40,8 +43,6 @@ const tickets = new Map<string, ImportTicket>()
 /** When each person's recent tickets were made, for the hourly cap. */
 const made = new Map<string, number[]>()
 
-const keyOf = (ticket: { userId: string | undefined; actor: Actor }) => ticket.userId ?? `agent:${ticket.actor.name}`
-
 function sweep(now: number) {
   for (const [token, ticket] of tickets) if (ticket.expiresAt <= now) tickets.delete(token)
 }
@@ -51,9 +52,11 @@ export function createImportTicket(input: {
   userId: string | undefined
   actor: Actor
 }): ImportTicket {
+  const key = input.userId
+  if (!key)
+    throw new ImportTicketError('import tickets are made for a signed-in account: connect with your Doop account')
   const now = Date.now()
   sweep(now)
-  const key = keyOf(input)
   const recent = (made.get(key) ?? []).filter((at) => now - at < 60 * 60 * 1000)
   if (recent.length >= IMPORT_TICKETS_PER_HOUR) {
     const wait = Math.ceil((recent[0]! + 60 * 60 * 1000 - now) / 1000)
@@ -62,7 +65,7 @@ export function createImportTicket(input: {
       wait,
     )
   }
-  const live = [...tickets.values()].filter((ticket) => keyOf(ticket) === key).length
+  const live = [...tickets.values()].filter((ticket) => ticket.userId === key).length
   if (live >= IMPORT_TICKETS_LIVE)
     throw new ImportTicketLimitError(
       `${live} import tickets are open for this account (at most ${IMPORT_TICKETS_LIVE}): use or let some expire first`,
@@ -74,7 +77,7 @@ export function createImportTicket(input: {
   const ticket: ImportTicket = {
     token: randomBytes(32).toString('base64url'),
     canvasId: input.canvasId,
-    userId: input.userId,
+    userId: key,
     actor: input.actor,
     expiresAt: now + IMPORT_TICKET_TTL_MS,
     inFlight: false,

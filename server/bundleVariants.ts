@@ -29,7 +29,8 @@ interface RootInfo {
   classes: Set<string>
 }
 
-const attrSelector = (prop: string, value: string) => `[data-${prop}="${value.replace(/[\\"]/g, '\\$&')}"]`
+const attrSelector = (prop: string, value: string) =>
+  `[data-${prop}="${value.replace(/[\\"]/g, '\\$&').replace(/</g, '\\3c ')}"]`
 
 /** The index in a compound where its pseudo-classes begin: the attribute goes before them. */
 function pseudoStart(compound: string): number {
@@ -67,18 +68,26 @@ export function scopeVariantSelector(selector: string, attr: string, root: RootI
   return `${attr} ${text}`
 }
 
-function scopeNodes(nodes: CssNode[], attr: string, root: RootInfo): CssNode[] {
-  return nodes.map((node) => {
+/** Rules scoped to the variant. Only @media, @supports, @layer and @container are looked into; every other at-rule
+ *  (@scope, @starting-style, @keyframes, @font-face, …) is dropped, since nothing scopes it. */
+function scopeNodes(nodes: CssNode[], attr: string, root: RootInfo, issues: SanitizeIssue[]): CssNode[] {
+  return nodes.flatMap((node): CssNode[] => {
     if (node.kind === 'rule')
-      return {
-        ...node,
-        selector: splitTopLevel(node.selector, ',')
-          .filter(Boolean)
-          .map((selector) => scopeVariantSelector(selector, attr, root))
-          .join(', '),
-      }
-    if (node.kind === 'group') return { ...node, nodes: scopeNodes(node.nodes, attr, root) }
-    return node
+      return [
+        {
+          ...node,
+          selector: splitTopLevel(node.selector, ',')
+            .filter(Boolean)
+            .map((selector) => scopeVariantSelector(selector, attr, root))
+            .join(', '),
+        },
+      ]
+    if (node.kind === 'group') return [{ ...node, nodes: scopeNodes(node.nodes, attr, root, issues) }]
+    issues.push({
+      code: 'variant_css_at_rule',
+      message: `@${node.name} in variant css was removed: only rules and @media, @supports, @layer and @container blocks are kept, scoped to the variant`,
+    })
+    return []
   })
 }
 
@@ -244,10 +253,10 @@ function withAlternative(baseHtml: string, altHtml: string, prop: BundleProp, va
 /* ------------------------------------------------------------------ */
 
 /**
- * Sanitize a bundle component and fold its variants in. Nothing is written: the caller creates the component from the
+ * Sanitize a bundle component and fold its variants in (`sharedCss` is the bundle's own, already sanitized, and leads the stylesheet). Nothing is written: the caller creates the component from the
  * returned markup, stylesheet and props.
  */
-export function prepareComponent(component: BundleComponent): PreparedComponent {
+export function prepareComponent(component: BundleComponent, sharedCss = ''): PreparedComponent {
   const issues: SanitizeIssue[] = []
 
   const markup = sanitizeMarkup(component.html)
@@ -256,7 +265,7 @@ export function prepareComponent(component: BundleComponent): PreparedComponent 
   issues.push(...sheet.issues)
 
   let html = markup.html
-  const css: string[] = sheet.value ? [sheet.value] : []
+  const css: string[] = [sharedCss, sheet.value].filter(Boolean)
   const props = (component.props ?? []).map((prop) => ({ ...prop }))
   const root = firstRoot(html)
   const info = root ? rootInfo(root) : undefined
@@ -268,7 +277,7 @@ export function prepareComponent(component: BundleComponent): PreparedComponent 
       if (variant.css && info) {
         const clean = sanitizeStylesheet(variant.css)
         issues.push(...clean.issues)
-        const scoped = serializeNodes(scopeNodes(parseCss(clean.value), attrSelector(propName, value), info))
+        const scoped = serializeNodes(scopeNodes(parseCss(clean.value), attrSelector(propName, value), info, issues))
         if (scoped) css.push(scoped)
         if (prop.type === 'boolean') prop.reflect = true
       }
@@ -278,7 +287,7 @@ export function prepareComponent(component: BundleComponent): PreparedComponent 
         if (alt.css) {
           const altSheet = sanitizeStylesheet(alt.css)
           const scoped = info
-            ? serializeNodes(scopeNodes(parseCss(altSheet.value), attrSelector(propName, value), info))
+            ? serializeNodes(scopeNodes(parseCss(altSheet.value), attrSelector(propName, value), info, issues))
             : ''
           if (scoped) css.push(scoped)
         }

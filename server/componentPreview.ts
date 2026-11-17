@@ -1,5 +1,5 @@
 import { serializeOuter } from 'parse5'
-import { CSS_ATTR, type ComponentDef, type InstanceOverrides } from '../shared/components.ts'
+import { CSS_ATTR, styleText, type ComponentDef, type InstanceOverrides } from '../shared/components.ts'
 import type { Frame } from '../shared/types.ts'
 import { withCanvasFaces } from './canvasFaces.ts'
 import { contextFor } from './components.ts'
@@ -32,7 +32,7 @@ function stylesFor(canvasId: string, def: ComponentDef, seen = new Set<string>()
     const dependency = contextFor(canvasId).find(match[1]!)
     return dependency ? stylesFor(canvasId, dependency, seen) : ''
   })
-  return `${nested.join('')}${def.head.join('\n')}<style ${CSS_ATTR}="${def.id}">\n${def.css}\n</style>\n`
+  return `${nested.join('')}${def.head.join('\n')}<style ${CSS_ATTR}="${def.id}">\n${styleText(def.css)}\n</style>\n`
 }
 
 const label = (combo: Record<string, string>) =>

@@ -23,6 +23,13 @@ export const SLOT_SUGGEST_ATTR = 'data-doop-slot-suggest'
 export const BIND_ATTR = 'data-doop-prop'
 /** `showIcon`, `!showIcon`, `tone=ghost` or `tone!=ghost`: the element exists only when this holds. */
 export const IF_ATTR = 'data-doop-if'
+
+/** Stylesheet text made safe to sit inside a `<style>` element: a `</style` (or `<!--`) in it would end the element and let
+ *  what follows run as markup, so its `<` becomes the CSS escape for the same character. Every writer of a component's css
+ *  into a frame goes through this. */
+export function styleText(css: string): string {
+  return css.replace(/<(?=\/?style|!--)/gi, '\\3c ')
+}
 /** The component's scoped CSS in the head of a frame that uses it. */
 export const CSS_ATTR = 'data-doop-component-css'
 /** A stylesheet link or framework script a component brought into a frame's head: never the frame's own. */

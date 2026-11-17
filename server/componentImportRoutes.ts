@@ -66,12 +66,12 @@ export async function uploadComponentBundle(req: express.Request, res: express.R
       req.destroy()
       return
     }
-    const who = ticket.userId ? await getAccessProfile(ticket.userId) : undefined
+    const who = await getAccessProfile(ticket.userId)
     await store.load(ticket.canvasId)
     release = store.hold(ticket.canvasId)
     const canvas = store.getCanvas(ticket.canvasId)
     if (!canvas) return res.status(404).json({ error: 'the canvas was deleted' })
-    if ((ticket.userId && !who) || !canEdit(who, canvas)) {
+    if (!who || !canEdit(who, canvas)) {
       res.status(403).json({ error: 'the account this ticket was made for can no longer edit this canvas' })
       req.destroy()
       return

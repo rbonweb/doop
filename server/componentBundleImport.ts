@@ -12,7 +12,7 @@ import { canvasPages, pageFrames } from '../shared/pages.ts'
 import type { Actor } from '../shared/types.ts'
 import * as actions from './actions.ts'
 import { prepareComponent } from './bundleVariants.ts'
-import { unsafeCssValue } from './bundleSanitize.ts'
+import { sanitizeStylesheet, unsafeCssValue } from './bundleSanitize.ts'
 import { ComponentError, createComponentFromHtml, updateComponent } from './componentActions.ts'
 import { parseCss, splitTopLevel, type CssNode } from './componentCss.ts'
 import { savepoint, transaction } from './journal.ts'
@@ -68,10 +68,27 @@ class DryRunDone extends Error {
   }
 }
 
+/** A name that goes into a frame name or the activity feed: no markup characters, no control characters, one line. */
+export function cleanLabel(text: string, max = 80): string {
+  let out = ''
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0
+    out += code <= 0x1f || code === 0x7f || '<>"'.includes(char) ? ' ' : char
+  }
+  return out.replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
 /** The bundle, checked: what the schema refuses is named by path, never trusted from the caller's typing. */
 export function parseBundle(raw: unknown): ComponentBundle {
   const parsed = componentBundleSchema.safeParse(raw)
-  if (parsed.success) return parsed.data
+  if (parsed.success)
+    return {
+      ...parsed.data,
+      components: parsed.data.components.map((component) => ({
+        ...component,
+        name: cleanLabel(component.name) || 'Component',
+      })),
+    }
   const lines = parsed.error.issues.slice(0, 5).map((issue) => `${issue.path.join('.') || 'bundle'}: ${issue.message}`)
   const more = parsed.error.issues.length - lines.length
   throw new ComponentError(`not a component bundle — ${lines.join('; ')}${more > 0 ? `; and ${more} more` : ''}`)
@@ -188,7 +205,7 @@ function rootVariables(nodes: CssNode[]): { name: string; value: string }[] {
   })
 }
 
-function tokenCandidates(bundle: ComponentBundle, issues: ImportIssue[]): TokenCandidate[] {
+function tokenCandidates(bundle: ComponentBundle, sharedCss: string, issues: ImportIssue[]): TokenCandidate[] {
   const found = new Map<string, TokenCandidate>()
   const add = (name: string, value: string, type: TokenType | undefined, explicit: boolean) => {
     const token = normalizeTokenName(name)
@@ -201,8 +218,8 @@ function tokenCandidates(bundle: ComponentBundle, issues: ImportIssue[]): TokenC
     if (known && !explicit) return
     found.set(token, { name: token, value, type: type ?? guessTokenType(token, value) })
   }
-  if (bundle.css)
-    for (const variable of rootVariables(parseCss(bundle.css))) add(variable.name, variable.value, undefined, false)
+  if (sharedCss)
+    for (const variable of rootVariables(parseCss(sharedCss))) add(variable.name, variable.value, undefined, false)
   for (const token of bundle.tokens ?? []) add(token.name, token.value, token.type, true)
   return [...found.values()]
 }
@@ -352,9 +369,10 @@ function writeOne(
   pageId: string | null,
   issues: ImportIssue[],
   dryRun: boolean,
+  sharedCss: string,
 ): Outcome {
   const { component, code, match } = plan
-  const prepared = prepareComponent(component)
+  const prepared = prepareComponent(component, sharedCss)
   for (const issue of prepared.issues) issues.push({ component: component.name, ...issue })
   if (match) {
     const before = fingerprint(match)
@@ -418,11 +436,12 @@ function runUnit(
   pageId: string | null,
   issues: ImportIssue[],
   dryRun: boolean,
+  sharedCss: string,
 ): Outcome {
   const own: ImportIssue[] = []
   try {
     /* each entry is its own unit: a refused one leaves nothing behind and the rest go on */
-    const outcome = transaction(() => writeOne(ctx, plan, where, pageId, own, dryRun))
+    const outcome = transaction(() => writeOne(ctx, plan, where, pageId, own, dryRun, sharedCss))
     issues.push(...own)
     return outcome
   } catch (error) {
@@ -449,12 +468,12 @@ function record(result: ImportResult, plan: Plan, outcome: Outcome) {
 }
 
 const sourceLabel = (bundle: ComponentBundle): string => {
-  if (bundle.source.name) return bundle.source.name
+  if (bundle.source.name) return cleanLabel(bundle.source.name) || bundle.source.kind
   if (bundle.source.url) {
     try {
-      return new URL(bundle.source.url).host
+      return cleanLabel(new URL(bundle.source.url).host) || bundle.source.kind
     } catch {
-      return bundle.source.url
+      return cleanLabel(bundle.source.url) || bundle.source.kind
     }
   }
   return bundle.source.kind
@@ -478,6 +497,9 @@ export function importComponentBundle(
 
   const result = emptyResult()
   const issues: ImportIssue[] = []
+  /* the bundle's own css (resets, :root variables) goes through the same sanitizer as a component's, once, and leads each stylesheet */
+  const shared = sanitizeStylesheet(bundle.css ?? '')
+  issues.push(...shared.issues)
   const claimed = new Set<string>()
   const runnable = plans.filter((plan) => {
     if (!plan.match) return true
@@ -492,7 +514,7 @@ export function importComponentBundle(
   const writes = () => {
     const toCreate = runnable.filter((plan) => !plan.match)
     result.pageId = importPageId(ctx.canvasId, ctx.actor, !dryRun && toCreate.length > 0)
-    result.tokens = importTokens(ctx.canvasId, tokenCandidates(bundle, issues), ctx.actor, dryRun)
+    result.tokens = importTokens(ctx.canvasId, tokenCandidates(bundle, shared.value, issues), ctx.actor, dryRun)
     return toCreate
   }
 
@@ -507,7 +529,8 @@ export function importComponentBundle(
     try {
       transaction(() => {
         writes()
-        for (const plan of runnable) record(result, plan, runUnit(ctx, plan, undefined, result.pageId, issues, true))
+        for (const plan of runnable)
+          record(result, plan, runUnit(ctx, plan, undefined, result.pageId, issues, true, shared.value))
         throw new DryRunDone(finish())
       })
     } catch (error) {
@@ -520,23 +543,46 @@ export function importComponentBundle(
   const batch = ctx.batch ?? (<T>(work: () => T): T => work())
   const toCreate = batch(writes)
   const spots = result.pageId ? batch(() => layout(ctx.canvasId, result.pageId!, toCreate)) : new Map()
+  let stopped = false
   for (let start = 0; start < runnable.length; start += BATCH_SIZE) {
     const chunk = runnable.slice(start, start + BATCH_SIZE)
+    if (stopped) {
+      for (const plan of chunk)
+        result.skipped.push({ name: plan.component.name, reason: 'not attempted: the import stopped on an error' })
+      continue
+    }
     const local = emptyResult()
     const found: ImportIssue[] = []
     try {
       batch(() => {
-        for (const plan of chunk) record(local, plan, runUnit(ctx, plan, spots.get(plan), result.pageId, found, false))
+        for (const plan of chunk)
+          record(local, plan, runUnit(ctx, plan, spots.get(plan), result.pageId, found, false, shared.value))
       })
     } catch (error) {
-      /* a spent work budget undoes this unit only: the rest of the import goes on in a fresh one */
-      if (!(error instanceof WorkBudgetError) || !ctx.batch) throw error
+      /* in one operation the whole import is one unit and a failure is the caller's */
+      if (!ctx.batch) throw error
+      if (error instanceof WorkBudgetError) {
+        /* a spent work budget undoes this unit only: the rest of the import goes on in a fresh one */
+        for (const plan of chunk)
+          result.skipped.push({
+            name: plan.component.name,
+            reason:
+              'the server ran out of working time for this part of the import: import it again, or in a smaller bundle',
+          })
+        continue
+      }
+      /* earlier units are committed: answer with what was done and what was not, never a bare failure */
+      console.error('[component-import]', error)
+      stopped = true
       for (const plan of chunk)
         result.skipped.push({
           name: plan.component.name,
-          reason:
-            'the server ran out of working time for this part of the import: import it again, or in a smaller bundle',
+          reason: 'the import stopped on an unexpected server error; nothing of this part was kept',
         })
+      issues.push({
+        code: 'import_failed',
+        message: `the import stopped on an unexpected server error after ${result.created.length + result.updated.length} component(s) were written: those are kept, the ones in skipped were not; importing the same bundle again picks up where it stopped`,
+      })
       continue
     }
     result.created.push(...local.created)
@@ -547,13 +593,23 @@ export function importComponentBundle(
   }
 
   const changed = result.created.length + result.updated.length
-  if (changed)
-    batch(() =>
-      actions.logComponent(
-        ctx.canvasId,
-        ctx.actor,
-        `imported ${changed} component${changed === 1 ? '' : 's'} from ${sourceLabel(bundle)}`,
-      ),
-    )
+  if (changed) {
+    try {
+      batch(() =>
+        actions.logComponent(
+          ctx.canvasId,
+          ctx.actor,
+          `imported ${changed} component${changed === 1 ? '' : 's'} from ${sourceLabel(bundle)}`,
+        ),
+      )
+    } catch (error) {
+      if (!ctx.batch) throw error
+      console.error('[component-import]', error)
+      issues.push({
+        code: 'activity_not_logged',
+        message: 'the components were imported but the activity line could not be written',
+      })
+    }
+  }
   return finish()
 }

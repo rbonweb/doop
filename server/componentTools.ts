@@ -47,7 +47,7 @@ import { zipExport } from './reactExport/zip.ts'
 import { batchScope } from './responseShaping.ts'
 import { componentBundleSchema, MAX_INLINE_BUNDLE_BYTES } from '../shared/componentBundle.ts'
 import { importComponentBundle } from './componentBundleImport.ts'
-import { createImportTicket, ImportTicketLimitError, ticketAnswer } from './componentImportTickets.ts'
+import { createImportTicket, ImportTicketError, ticketAnswer } from './componentImportTickets.ts'
 
 export { codeSchema, propSchema }
 
@@ -866,7 +866,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           note: 'Run command (the CLI, for a Storybook build) or curl (for a bundle.json you have) within 15 minutes. Add ?dry_run=1 to the URL to preview the import without using the ticket up. The answer to the request is the import result.',
         }
       } catch (error) {
-        if (error instanceof ImportTicketLimitError) throw new ComponentError(error.message)
+        if (error instanceof ImportTicketError) throw new ComponentError(error.message)
         throw error
       }
     },

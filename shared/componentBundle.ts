@@ -25,6 +25,17 @@ export const MAX_VARIANT_VALUES = 8
 export const BUNDLE_SOURCES = ['storybook', 'cli', 'agent'] as const
 export type BundleSource = (typeof BUNDLE_SOURCES)[number]
 
+/** Characters that cannot be in an enum option or a prop default: they would end an attribute, a selector or a style block. */
+const UNSAFE_VALUE = {
+  test(value: string): boolean {
+    for (const char of value) {
+      const code = char.codePointAt(0) ?? 0
+      if (code <= 0x1f || code === 0x7f || '<>"\\{};'.includes(char)) return true
+    }
+    return false
+  },
+}
+
 const variantSchema = z.object({
   html: z.string().max(MAX_BUNDLE_HTML_BYTES).optional(),
   css: z.string().max(MAX_BUNDLE_CSS_BYTES).optional(),
@@ -45,6 +56,16 @@ export const bundleComponentSchema = z
     code: codeSchema.optional(),
   })
   .superRefine((component, ctx) => {
+    /* an enum value becomes an attribute value and a CSS selector: nothing that could end either is accepted */
+    ;(component.props ?? []).forEach((prop, index) => {
+      for (const value of [...(prop.options ?? []), ...(prop.default !== undefined ? [prop.default] : [])])
+        if (UNSAFE_VALUE.test(value))
+          ctx.addIssue({
+            code: 'custom',
+            path: ['props', index, prop.options?.includes(value) ? 'options' : 'default'],
+            message: `prop “${prop.name}” has a value (“${value.slice(0, 40)}”) with a character that is not allowed in an enum option or default: < > " \\ { } ; or a control character`,
+          })
+    })
     const axes = Object.entries(component.variants ?? {})
     if (axes.length > MAX_VARIANT_AXES)
       ctx.addIssue({

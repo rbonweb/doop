@@ -209,3 +209,35 @@ describe('componentBundle constants', () => {
     expect(BUNDLE_VERSION).toBe(1)
   })
 })
+
+describe('enum values that reach a selector or an attribute', () => {
+  const withProp = (prop: Record<string, unknown>) =>
+    componentBundleSchema.safeParse(bundle({ components: [{ name: 'Card', html: '<div></div>', props: [prop] }] }))
+
+  it('refuses markup, quote, brace, semicolon, backslash and control characters in options and defaults', () => {
+    for (const bad of [
+      'a</style>',
+      'x"y',
+      "a'b".replace("'", '"'),
+      'a\\b',
+      'a{b',
+      'a}b',
+      'a;b',
+      'a\nb',
+      'a\u0000b',
+      'a<b',
+      'a>b',
+    ]) {
+      const result = withProp({ name: 'tone', type: 'enum', options: ['ok', bad] })
+      expect(result.success).toBe(false)
+      expect(JSON.stringify(result.error?.issues)).toContain('not allowed in an enum option')
+    }
+    expect(withProp({ name: 'tone', type: 'enum', options: ['ok'], default: 'a<b' }).success).toBe(false)
+  })
+
+  it('accepts ordinary options', () => {
+    expect(
+      withProp({ name: 'size', type: 'enum', options: ['sm', 'extra large', 'a-b.c_d', '16/9', 'Ünï'] }).success,
+    ).toBe(true)
+  })
+})

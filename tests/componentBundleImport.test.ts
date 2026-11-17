@@ -11,9 +11,10 @@ vi.mock('../server/db/persist.ts', () => ({
 }))
 
 import * as actions from '../server/actions.ts'
+import { executableParts } from './executableParts.ts'
 import { prepareComponent } from '../server/bundleVariants.ts'
 import { sanitizeMarkup, sanitizeStylesheet } from '../server/bundleSanitize.ts'
-import { ComponentError, findComponent } from '../server/componentActions.ts'
+import { ComponentError, findComponent, updateComponent } from '../server/componentActions.ts'
 import {
   guessTokenType,
   IMPORT_PAGE,
@@ -25,6 +26,7 @@ import * as propagation from '../server/propagation.ts'
 import { store } from '../server/store.ts'
 import { runOperation } from '../server/workBudget.ts'
 import { activeComponents, MAX_COMPONENTS } from '../shared/components.ts'
+import { cleanLabel } from '../server/componentBundleImport.ts'
 
 const OWNER = 'owner-1'
 const actor = actions.resolveActor({ name: 'Importer', kind: 'agent', userId: OWNER })
@@ -402,3 +404,228 @@ describe('token types', () => {
     expect(guessTokenType('--shadow', '0 1px 2px #0003')).toBeUndefined()
   })
 })
+
+/* Every route untrusted text takes into a stored frame, proved by parsing what was stored (tests/executableParts.ts). */
+describe('nothing a bundle says can run in the frame it makes', () => {
+  /** Import the bundle, put an instance of its first component on a frame, and return what both frames hold. */
+  async function stored(bundle: unknown) {
+    const result = run(bundle)
+    const created = result.created[0]
+    expect(created).toBeDefined()
+    const def = findComponent(canvasId, created!.id)!
+    const screen = actions.createFrame(
+      canvasId,
+      {
+        name: 'Screen',
+        html: `<!doctype html><html><head></head><body><doop-use component="${def.name}"></doop-use></body></html>`,
+      },
+      actor,
+    )!
+    await propagation.whenIdle()
+    return { result, main: store.getFrame(def.mainFrameId!)!.html, instance: store.getFrame(screen.id)!.html }
+  }
+  const one = (component: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+    version: 1,
+    source: { kind: 'agent' },
+    components: [{ name: 'Probe', html: '<div class="probe">x</div>', ...component }],
+    ...extra,
+  })
+  const BREAKOUT = 'a{x:y}</style><script>alert(1)</script><style>b{color:red}'
+
+  it('finds what it should (the helper itself)', () => {
+    expect(
+      executableParts(
+        '<style>a{}</style><script>1</script><a onclick=x href="  JaVa\tScript:1">a</a><svg><set attributeName="onmouseover"/><animate attributeName="href"/></svg>',
+      ).length,
+    ).toBe(5)
+    expect(
+      executableParts('<style>a{}</style><p class="x">hi</p><svg><animate attributeName="opacity"/></svg>'),
+    ).toEqual([])
+  })
+
+  it('css that closes the style element, in component css', async () => {
+    const { main, instance } = await stored(one({ css: BREAKOUT }))
+    expect(executableParts(main)).toEqual([])
+    expect(executableParts(instance)).toEqual([])
+  })
+
+  it('css that closes the style element, in the bundle css, a variant and a <style> in the markup', async () => {
+    const props = [{ name: 'tone', type: 'enum', options: ['a', 'b'] }]
+    const { main, instance } = await stored(
+      one(
+        {
+          html: `<div class="probe">x<style>${BREAKOUT}</style></div>`,
+          props,
+          variants: { tone: { b: { css: BREAKOUT, html: `<div class="probe">y<style>${BREAKOUT}</style></div>` } } },
+        },
+        { css: BREAKOUT },
+      ),
+    )
+    expect(executableParts(main)).toEqual([])
+    expect(executableParts(instance)).toEqual([])
+    expect(main).not.toMatch(/alert\(1\)<\/style|<script/i)
+  })
+
+  it('css in a style attribute and in a selector', async () => {
+    const { main, instance } = await stored(
+      one({
+        html: '<div class="probe" style="background:url(javascript:alert(1));color:red</style><script>alert(2)</script>">x</div>',
+        css: '</style><script>alert(3)</script>{color:red} .probe</style><script>alert(4)</script>{color:blue}',
+      }),
+    )
+    expect(executableParts(main)).toEqual([])
+    expect(executableParts(instance)).toEqual([])
+  })
+
+  it('a later update that sends css with a closing style tag, past the importer', async () => {
+    const { result } = await stored(one({}))
+    runOperation('update', canvasId, () => updateComponent(canvasId, result.created[0]!.id, { css: BREAKOUT }, actor))
+    await propagation.whenIdle()
+    const def = findComponent(canvasId, result.created[0]!.id)!
+    expect(executableParts(store.getFrame(def.mainFrameId!)!.html)).toEqual([])
+  })
+
+  it('enum option values and defaults that could end an attribute or a selector are refused', () => {
+    for (const bad of ['a</style><script>alert(8)</script>', 'x"y', 'a\\b', 'a{b}', 'a;b', 'a\nb', 'a>b'])
+      expect(() => run(one({ props: [{ name: 'tone', type: 'enum', options: ['ok', bad] }] }))).toThrow(
+        /not allowed in an enum option/,
+      )
+    expect(() =>
+      run(one({ props: [{ name: 'tone', type: 'enum', options: ['ok', 'fine'], default: 'a<b' }] })),
+    ).toThrow(/not allowed/)
+    expect(canvasHasNoComponents()).toBe(true)
+  })
+
+  it('an enum option that is awkward but safe is scoped as an escaped attribute value', async () => {
+    const { main } = await stored(
+      one({
+        css: '.probe { color: red }',
+        props: [{ name: 'tone', type: 'enum', options: ['plain', 'a b-c.d'] }],
+        variants: { tone: { 'a b-c.d': { css: '.probe { color: blue }' } } },
+      }),
+    )
+    expect(main).toContain('[data-tone="a b-c.d"]')
+    expect(executableParts(main)).toEqual([])
+  })
+
+  it('svg animations aimed at event handlers or links, and strings in attributes', async () => {
+    const { main, instance } = await stored(
+      one({
+        html: [
+          '<div class="probe"><svg viewBox="0 0 1 1">',
+          '<a href="https://x.test"><set attributeName="href" to="javascript:alert(1)"/></a>',
+          '<set attributeName="onmouseover" to="alert(2)"/>',
+          '<animate attributeName="xlink:href" values="javascript:alert(3)"/>',
+          '<animateMotion attributeName="onclick" path="M0,0"/>',
+          '<animateTransform attributeName="onload" type="rotate"/>',
+          '<animate attributeName="opacity" from="0" to="1"/>',
+          '</svg><img src="x" onerror="alert(4)" alt="&quot;><script>alert(5)</script>"></div>',
+        ].join(''),
+      }),
+    )
+    expect(executableParts(main)).toEqual([])
+    expect(executableParts(instance)).toEqual([])
+    expect(main).toContain('attributeName="opacity"')
+  })
+
+  it('names and the source label that reach frame names and the activity line carry no markup', () => {
+    const result = run({
+      version: 1,
+      source: { kind: 'agent', name: '<img src=x onerror=alert(1)>Acme "UI"\u0007' },
+      components: [{ name: 'Bad<script>\u0000"Name', html: '<i>x</i>' }],
+    })
+    const line = actions.getActivity(canvasId)[0]!.message
+    expect(hasMarkupOrControl(line)).toBe(false)
+    expect(executableParts(`<p>${line}</p>`)).toEqual([])
+    const def = findComponent(canvasId, result.created[0]!.id)!
+    expect(hasMarkupOrControl(def.name)).toBe(false)
+    expect(store.getFrame(def.mainFrameId!)!.name).toBe(def.name)
+    expect(cleanLabel('  a\n\tb <c> "d"  ')).toBe('a b c d')
+  })
+
+  it('base64 data in css outside url() is removed everywhere css can sit', async () => {
+    const b64 = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+    const { result, main, instance } = await stored(
+      one(
+        {
+          html: `<div class="probe" style="background:image-set('${b64}' 1x)">x</div>`,
+          css: `.probe { background: -webkit-image-set("${b64}" 1x); content: "${b64}" }`,
+          props: [{ name: 'tone', type: 'enum', options: ['a', 'b'] }],
+          variants: { tone: { b: { css: `.probe { background: image-set("${b64}" 1x) }` } } },
+        },
+        { css: `.probe { border-image: image-set("${b64}" 1x) }` },
+      ),
+    )
+    expect(main).not.toMatch(/base64/i)
+    expect(instance).not.toMatch(/base64/i)
+    expect(result.issues.filter((issue) => issue.code === 'inline_data').length).toBeGreaterThan(0)
+  })
+
+  it('variant css keeps only scoped rules and media-like blocks, and says what it dropped', () => {
+    const out = prepareComponent({
+      name: 'Btn',
+      html: '<button class="btn">x</button>',
+      props: [{ name: 'tone', type: 'enum', options: ['a', 'b'] }],
+      variants: {
+        tone: {
+          b: {
+            css: '@scope (html) { * { background: red } } @starting-style { body { color: red } } @keyframes k { from { x: y } } @font-face { font-family: F } @layer l { .btn { color: blue } } .btn { color: green }',
+          },
+        },
+      },
+    } as never)
+    expect(out.css).not.toMatch(/@scope|@starting-style|@keyframes|@font-face/)
+    expect(out.css).toContain('.btn[data-tone="b"] { color: blue; }')
+    expect(out.css).toContain('.btn[data-tone="b"] { color: green; }')
+    expect(out.issues.filter((issue) => issue.code === 'variant_css_at_rule')).toHaveLength(4)
+  })
+
+  it('the bundle css is sanitized like a component css and leads each stylesheet', async () => {
+    const { result, main } = await stored(
+      one(
+        { html: '<div class="probe card">x</div>', css: '.probe { color: red }' },
+        {
+          css: '@import url(https://evil.test/x.css); .card { margin: 0 } .z { background: url(javascript:alert(1)) } :root { --ink: #111 }',
+        },
+      ),
+    )
+    const def = findComponent(canvasId, result.created[0]!.id)!
+    expect(def.rawCss).toContain('margin: 0')
+    expect(main).not.toMatch(/@import|javascript:/i)
+    expect(result.issues.map((issue) => issue.code)).toEqual(
+      expect.arrayContaining(['css_import_dropped', 'unsafe_css']),
+    )
+    expect(store.getTokens(canvasId).some((token) => token.name === '--ink')).toBe(true)
+  })
+
+  it('a failure after earlier batches committed answers with the partial result, not an error', () => {
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const components = Array.from({ length: 8 }, (_, n) => ({ name: `P${n}`, html: `<i class="p${n}">x</i>` }))
+    let calls = 0
+    /* calls: page and tokens, layout, first batch of six, second batch: this one fails */
+    const result = importComponentBundle(
+      {
+        canvasId,
+        actor,
+        batch: (work) => {
+          if (++calls === 4) throw new Error('boom')
+          return runOperation('batch', canvasId, work)
+        },
+      },
+      { version: 1, source: { kind: 'agent' }, components },
+    )
+    quiet.mockRestore()
+    expect(result.created).toHaveLength(6)
+    expect(result.skipped.map((entry) => entry.name)).toEqual(['P6', 'P7'])
+    expect(result.issues.map((issue) => issue.code)).toContain('import_failed')
+    expect(activeComponents(store.getComponents(canvasId))).toHaveLength(6)
+  })
+})
+
+function canvasHasNoComponents(): boolean {
+  return activeComponents(store.getComponents(canvasId)).length === 0
+}
+
+function hasMarkupOrControl(text: string): boolean {
+  return [...text].some((char) => (char.codePointAt(0) ?? 0) <= 0x1f || '<>"'.includes(char))
+}

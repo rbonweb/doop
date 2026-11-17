@@ -130,12 +130,11 @@ function cleanAttributes(el: Tree.Element, issues: SanitizeIssue[]) {
   el.attrs = kept
 }
 
-/** Whether a node is an animation that would set a link target (`<animate attributeName="href" to="javascript:…">`). */
+/** Whether a node is an animation that would set a link target or an event handler (`<animate attributeName="href" to="javascript:…">`). */
 function animatesLink(el: Tree.Element): boolean {
-  return (
-    (el.tagName === 'set' || el.tagName === 'animate') &&
-    /href/i.test(attrOf(el, 'attributeName') ?? attrOf(el, 'attributename') ?? '')
-  )
+  if (!['set', 'animate', 'animatemotion', 'animatetransform'].includes(el.tagName.toLowerCase())) return false
+  const target = (attrOf(el, 'attributeName') ?? attrOf(el, 'attributename') ?? '').trim()
+  return /^(on|(xlink:)?href$)/i.test(target)
 }
 
 export interface MarkupResult {
@@ -220,6 +219,12 @@ const hasThreat = (css: string) => CSS_THREATS.test(readAsBrowser(css))
 /** Whether a design-token value is anything but a plain css value (a url, a script-bearing value, a block). */
 export const unsafeCssValue = (value: string): boolean => hasThreat(value) || /url\(|[{};]/i.test(value)
 
+/** A base64 data: URI wherever it sits in css text (image-set("data:…"), a string, a bare value). */
+const BASE64_ANYWHERE = /data:[^,;"'()\s]*(?:;[a-z0-9-]+=[^;,"'()\s]*)*;base64,[a-z0-9+/=_-]*/gi
+
+/** A stylesheet's text made safe inside a <style> element: no `<` survives, so `</style>` cannot end it. */
+const escapeAngle = (css: string) => css.replace(/</g, '\\3c ')
+
 const URL_TOKEN = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s"']*))\s*\)/gi
 
 /** Keep a url() that points at a public page or an in-document id; anything else becomes an empty url. */
@@ -241,6 +246,18 @@ function cleanUrls(css: string, issues: SanitizeIssue[]): string {
   })
 }
 
+/** url() tokens cleaned, then any base64 data: URI left in the text (image-set, a string) removed. */
+function cleanCssText(css: string, issues: SanitizeIssue[]): string {
+  const urls = cleanUrls(css, issues)
+  return urls.replace(BASE64_ANYWHERE, () => {
+    issues.push({
+      code: 'inline_data',
+      message: 'a base64 data: URI in css was removed: host the file and use its URL',
+    })
+    return ''
+  })
+}
+
 function sanitizeDeclarations(body: string, issues: SanitizeIssue[]): string {
   const kept: string[] = []
   for (const declaration of splitTopLevel(body, ';')) {
@@ -249,9 +266,9 @@ function sanitizeDeclarations(body: string, issues: SanitizeIssue[]): string {
       issues.push({ code: 'unsafe_css', message: `css declaration “${declaration.trim().slice(0, 60)}” was removed` })
       continue
     }
-    kept.push(cleanUrls(declaration.trim(), issues))
+    kept.push(cleanCssText(declaration.trim(), issues))
   }
-  return kept.join('; ')
+  return escapeAngle(kept.join('; '))
 }
 
 const DECLARATION_AT_RULES = new Set(['font-face', 'page', 'property', 'counter-style', 'font-palette-values'])
@@ -284,7 +301,7 @@ function sanitizeNodes(nodes: CssNode[], issues: SanitizeIssue[]): CssNode[] {
     } else if (hasThreat(node.text)) {
       issues.push({ code: 'unsafe_css', message: `css block “${node.prelude.slice(0, 60)}” was removed` })
     } else {
-      kept.push({ ...node, text: cleanUrls(node.text, issues) })
+      kept.push({ ...node, text: cleanCssText(node.text, issues) })
     }
   }
   return kept
@@ -294,7 +311,7 @@ function sanitizeNodes(nodes: CssNode[], issues: SanitizeIssue[]): CssNode[] {
 export function sanitizeStylesheet(css: string): Sanitized {
   const issues: SanitizeIssue[] = []
   const nodes = sanitizeNodes(parseCss(css), issues)
-  return { value: serializeNodes(nodes), issues: dedupe(issues) }
+  return { value: escapeAngle(serializeNodes(nodes)), issues: dedupe(issues) }
 }
 
 export { sanitizeDeclarations as sanitizeStyleAttribute }

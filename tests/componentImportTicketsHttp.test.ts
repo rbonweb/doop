@@ -8,6 +8,7 @@ import {
   endImportUpload,
   IMPORT_TICKET_TTL_MS,
   IMPORT_TICKETS_PER_HOUR,
+  ImportTicketError,
   ImportTicketLimitError,
   peekImportTicket,
   resetImportTickets,
@@ -255,6 +256,15 @@ describe('tickets in memory', () => {
     endImportUpload(ticket.token, true)
     expect(peekImportTicket(ticket.token)).toBeNull()
     expect(createImportTicket({ canvasId: 'c1', userId: 'u', actor }).token).not.toBe(ticket.token)
+  })
+
+  it('is made only for a signed-in account, and the caps key on the account, not on the agent name', () => {
+    expect(() => createImportTicket({ canvasId: 'c', userId: undefined, actor })).toThrow(ImportTicketError)
+    for (let n = 0; n < IMPORT_TICKETS_PER_HOUR; n++)
+      createImportTicket({ canvasId: 'c', userId: 'same-account', actor: { ...actor, name: `Agent ${n}` } })
+    expect(() =>
+      createImportTicket({ canvasId: 'c', userId: 'same-account', actor: { ...actor, name: 'A new name' } }),
+    ).toThrow(ImportTicketLimitError)
   })
 
   it('caps tickets an hour per account and frees the cap as time passes', () => {
