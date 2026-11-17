@@ -320,7 +320,7 @@ describe('tailwind', () => {
     expect(res.status).toBe(200)
     const zip = await JSZip.loadAsync(Buffer.from(await res.arrayBuffer()))
     const tokens = await zip.file('Shop-front-end-react/src/tokens.css')!.async('string')
-    expect(tokens.startsWith('@import "tailwindcss";')).toBe(true)
+    expect(tokens.startsWith('@import "tailwindcss/theme.css" layer(theme);')).toBe(true)
     expect(tokens).toContain('--brand')
     const report = JSON.parse(await zip.file('Shop-front-end-react/export-report.json')!.async('string')) as {
       styling: string
@@ -337,9 +337,11 @@ describe('tailwind', () => {
       await exportReact(owner, canvasId, { format: 'json', styling: 'tailwind' }),
     )
     expect((report as unknown as { styling: string }).styling).toBe('tailwind')
-    expect(files.find((file) => file.path === 'src/tokens.css')?.content.startsWith('@import "tailwindcss";')).toBe(
-      true,
-    )
+    expect(
+      files
+        .find((file) => file.path === 'src/tokens.css')
+        ?.content.startsWith('@import "tailwindcss/theme.css" layer(theme);'),
+    ).toBe(true)
   })
 })
 

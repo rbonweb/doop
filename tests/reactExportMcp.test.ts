@@ -147,7 +147,7 @@ describe('export_react over MCP', () => {
     const tokens = (out.data.files as { path: string; content: string }[]).find(
       (file) => file.path === 'src/tokens.css',
     )!
-    expect(tokens.content.startsWith('@import "tailwindcss";')).toBe(true)
+    expect(tokens.content.startsWith('@import "tailwindcss/theme.css" layer(theme);')).toBe(true)
   })
 
   it('hands a large export over as a zip resource, with the report and a file listing', async () => {

@@ -22,9 +22,10 @@ import {
   type ComponentPlan,
   type ExportSession,
 } from './componentToReact.ts'
-import { parseItems, splitComponentCss, splitTopLevel, type Item } from './cssSplit.ts'
+import { parseItems, safeClass, safeClassCss, splitComponentCss, splitTopLevel, type Item } from './cssSplit.ts'
 import { cssToTailwind, type TailwindSplit } from './tailwind.ts'
 import { htmlToJsx, nodeToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
+import { googleFontsUrl } from './fonts.ts'
 import { jsString, type ExportIssue } from './issues.ts'
 
 type Element = Tree.Element
@@ -77,19 +78,15 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
           continue
         }
         if (child.tagName === 'link' && attrOf(child, 'rel')?.toLowerCase().split(/\s+/).includes('stylesheet')) {
-          if (
-            !managed &&
-            !MANAGED_ATTRS.some((name) => attrOf(child, name) !== undefined) &&
-            attrOf(child, 'data-doop-webfonts') === undefined
-          ) {
+          const href = attrOf(child, 'href') ?? ''
+          const fonts = googleFontsUrl(href)
+          if (fonts) {
+            session.fontLinks.add(fonts)
+            fc.usesFonts = true
+          } else if (!managed) {
             fc.note(
               'dropped-element',
-              `stylesheet link in <head> dropped: add ${jsString(attrOf(child, 'href') ?? '').slice(0, 120)} to the app's HTML yourself`,
-            )
-          } else if (attrOf(child, 'data-doop-webfonts') !== undefined) {
-            fc.note(
-              'dropped-element',
-              `hosted font stylesheet link dropped: add ${jsString(attrOf(child, 'href') ?? '').slice(0, 160)} to the app's HTML yourself`,
+              `stylesheet link in <head> dropped: add ${jsString(href).slice(0, 120)} to the app's HTML yourself`,
             )
           }
           continue
@@ -103,7 +100,7 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
   walk(doc)
 
   const body = findBody(doc)
-  const scoped = styles.join('\n')
+  const scoped = themeOnHtml(safeClassCss(styles.join('\n')))
   const rewriteUrl = session.urls.url
   const tw = session.styling === 'tailwind' ? cssToTailwind(scoped, { rootClass, rewriteUrl }) : undefined
   const split = tw ? tw.leftover : splitComponentCss(scoped, { rootClass, rewriteUrl })
@@ -316,18 +313,76 @@ function signature(nodes: Tree.ChildNode[]): string {
   return out.join('\u0002')
 }
 
+/** The canvas switches theme on `<html>`: a rule that opens with the bare theme attribute (`[data-doop-theme=dark] .x`) is spelled with its `html`, so the split leaves it a global rule rather than gluing the page root class onto the attribute. */
+const themeOnHtml = (css: string): string =>
+  css.replace(/(^|[,{};]\s*)(\[data-doop-theme(?:[~|^$*]?=[^\]]*)?\])(?=\s)/gi, '$1html$2')
+
 const GROUPING_AT_RULES = new Set(['media', 'supports', 'container', 'layer', 'starting-style'])
 const ROOT_SELECTOR = /^:root(?![\w-])/i
-const DOCUMENT_ELEMENTS = /^(?:html(?![\w-])\s*(?:[>+~]|\s)\s*)?(?:html|body)(?![\w-])/i
+const BODY_COMPOUND = /^body(?![\w-])/i
+const HTML_COMPOUND = /^html(?![\w-])/i
+const THEME_COMPOUND = /^\[data-doop-theme(?:[~|^$*]?=[^\]]*)?\]/i
 
-/** One selector placed under the page's root class: `html` and `body` stand for the root element itself (`body.dark .x` is `.page-x.dark .x`), `:root` stays, anything else becomes a descendant of the root. */
+/** A selector cut into its compounds and the combinators between them (`a > b .c` is `a`, ` > `, `b`, ` `, `.c`), brackets, parentheses and strings kept whole. */
+function compoundsOf(selector: string): { compounds: string[]; combinators: string[] } {
+  const compounds: string[] = []
+  const combinators: string[] = []
+  let current = ''
+  let depth = 0
+  let quote = ''
+  for (let i = 0; i < selector.length; i += 1) {
+    const char = selector.charAt(i)
+    if (quote) {
+      current += char
+      if (char === '\\') current += selector.charAt(++i)
+      else if (char === quote) quote = ''
+      continue
+    }
+    if (char === '"' || char === "'") quote = char
+    else if (char === '[' || char === '(') depth += 1
+    else if (char === ']' || char === ')') depth -= 1
+    if (
+      depth === 0 &&
+      (char === ' ' || char === '>' || char === '+' || char === '~' || char === '\t' || char === '\n')
+    ) {
+      let combinator = ''
+      while (i < selector.length && /[\s>+~]/.test(selector.charAt(i))) combinator += selector.charAt(i++)
+      i -= 1
+      if (current) {
+        compounds.push(current)
+        combinators.push(combinator)
+        current = ''
+      }
+      continue
+    }
+    current += char
+  }
+  if (current) compounds.push(current)
+  return { compounds, combinators: combinators.slice(0, Math.max(compounds.length - 1, 0)) }
+}
+
+/** One selector placed under the page's root class. The page's `<body>` is the root element, so the `body` compound becomes the root class and whatever sits before it (`html.dark`, `[data-doop-theme=dark]`) stays, since the theme lives on the app's `<html>`: `html.dark body .x` is `html.dark .page-x .x`, `body.dark .x` is `.page-x.dark .x`. A selector that names `html` or a theme attribute but no `body` gets the root class after it (`html[data-doop-theme=dark] .x` is `html[data-doop-theme=dark] .page-x .x`); `:root` stays; anything else becomes a descendant of the root. */
 function scopeSelector(selector: string, rootClass: string): string {
   const root = `.${rootClass}`
   const sel = selector.trim()
   if (!sel || ROOT_SELECTOR.test(sel)) return sel
   if (sel.startsWith(root) && !/[\w-]/.test(sel.charAt(root.length))) return sel
-  const document = DOCUMENT_ELEMENTS.exec(sel)
-  if (document) return `${root}${sel.slice(document[0].length)}`
+  const { compounds, combinators } = compoundsOf(sel)
+  const join = (from: number, to: number): string =>
+    compounds
+      .slice(from, to)
+      .map((compound, index) => compound + (combinators[from + index] ?? ''))
+      .join('')
+  const bodyAt = compounds.findIndex((compound) => BODY_COMPOUND.test(compound))
+  if (bodyAt >= 0) {
+    const rest = (compounds[bodyAt] ?? '').slice(4)
+    return `${join(0, bodyAt)}${root}${rest}${bodyAt < compounds.length - 1 ? (combinators[bodyAt] ?? ' ') : ''}${join(bodyAt + 1, compounds.length)}`
+  }
+  const first = compounds[0] ?? ''
+  if (THEME_COMPOUND.test(first) || HTML_COMPOUND.test(first)) {
+    if (compounds.length === 1) return HTML_COMPOUND.test(first) ? `${root}${first.slice(4)}` : `${first} ${root}`
+    return `${first} ${root} ${join(1, compounds.length)}`
+  }
   return `${root} ${sel}`
 }
 
@@ -361,7 +416,8 @@ function scopePageCss(css: string, rootClass: string): string {
 }
 
 /** The className for a page's own (global) classes: in Tailwind mode the utilities they became, plus the class itself while rules for it remain or nothing replaced it. */
-function globalClassName(tw: TailwindSplit | undefined, classes: string[], always?: string): string {
+function globalClassName(tw: TailwindSplit | undefined, rawClasses: string[], always?: string): string {
+  const classes = rawClasses.map(safeClass)
   if (!tw) return `{${jsString((always ? [always, ...classes] : classes).join(' '))}}`
   const out: string[] = always ? [always] : []
   for (const name of new Set(classes)) {

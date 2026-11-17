@@ -778,3 +778,8 @@ function processStyleRule(item: Item & { body: string }, context: Context, block
   }
   if (globalSelectors.length > 0) blocks.global.push(`${globalSelectors.join(',\n')} {\n${text}\n}`)
 }
+
+/** `__proto__` as a class name is a hazard in every lookup table the converters build, so it is renamed in the CSS and in the markup alike. */
+export const PROTO_CLASS = 'doop-proto'
+export const safeClass = (name: string): string => (name === '__proto__' ? PROTO_CLASS : name)
+export const safeClassCss = (css: string): string => css.replace(/\.__proto__(?![\w-])/g, `.${PROTO_CLASS}`)
