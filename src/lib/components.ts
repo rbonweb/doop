@@ -10,6 +10,7 @@ import {
   activeComponents,
   isDeleted,
   toPropName,
+  type ComponentCode,
   type ComponentDef,
 } from '../../shared/components'
 import { ELEMENT_ID_ATTR, elementIdSelector } from '../../shared/elementId'
@@ -47,6 +48,8 @@ export type ComponentContext =
       instanceId: string
       props: Record<string, string>
       overriddenParts: string[]
+      /** nested instance part -> the id of the component this instance shows there instead of the template's */
+      swaps: Record<string, string>
       /** the selected element's own key, when it is an element of the template */
       part?: string
     }
@@ -80,6 +83,13 @@ export function componentContextOf(html: string, selector: string, defs: Compone
     for (const [name, value] of Object.entries(parseRecord(instance.getAttribute(PROPS_ATTR)))) {
       if (typeof value === 'string') props[name] = value
     }
+    const overrides = parseRecord(instance.getAttribute(OVERRIDES_ATTR))
+    /* a part's `swap` is the nested-instance swap; read structurally so a state without it is simply none */
+    const swaps: Record<string, string> = {}
+    for (const [part, override] of Object.entries(overrides)) {
+      const swap = override && typeof override === 'object' ? (override as { swap?: unknown }).swap : undefined
+      if (typeof swap === 'string' && swap) swaps[part] = swap
+    }
     return {
       kind: 'instance',
       def,
@@ -88,7 +98,8 @@ export function componentContextOf(html: string, selector: string, defs: Compone
       rootSelector: elementPath(instance),
       instanceId: instance.getAttribute(ELEMENT_ID_ATTR) ?? '',
       props,
-      overriddenParts: Object.keys(parseRecord(instance.getAttribute(OVERRIDES_ATTR))),
+      overriddenParts: Object.keys(overrides),
+      swaps,
       ...(el.getAttribute(PART_ATTR) ? { part: el.getAttribute(PART_ATTR)! } : {}),
     }
   }
@@ -197,6 +208,65 @@ export async function changeInstance(frame: Frame, change: InstanceChangeInput) 
     adopt(frame, next)
   } catch (error) {
     notifyFailure(error, t('components.changeFailed'))
+  }
+}
+
+/** One prop back to the main's value, one undo step. */
+export function resetInstanceProp(frame: Frame, instanceId: string, prop: string) {
+  return changeInstance(frame, { instanceId, props: { [prop]: '' } })
+}
+
+/** Some parts (or, with no list, everything: props and parts) back to the main, one undo step. */
+export function resetInstanceParts(frame: Frame, instanceId: string, parts?: string[]) {
+  return changeInstance(frame, { instanceId, reset: parts ?? true })
+}
+
+/** Where a component is used on this canvas: per frame, its instances in document order. */
+export interface InstanceSite {
+  frame: Pick<Frame, 'id' | 'name' | 'pageId'>
+  /** positional selectors, the editor's own selection language */
+  selectors: string[]
+}
+
+export function instanceSites(frames: readonly Frame[], componentId: string): InstanceSite[] {
+  const mark = `${INSTANCE_ATTR}="${componentId}"`
+  const sites: InstanceSite[] = []
+  for (const frame of frames) {
+    if (!frame.html.includes(mark)) continue
+    const doc = new DOMParser().parseFromString(frame.html, 'text/html')
+    const selectors = Array.from(doc.querySelectorAll(`[${INSTANCE_ATTR}="${componentId}"]`), elementPath)
+    if (selectors.length) sites.push({ frame: { id: frame.id, name: frame.name, pageId: frame.pageId }, selectors })
+  }
+  return sites
+}
+
+/** Select an instance on the canvas: its page and frame come into view, then the element. */
+export function jumpToInstance(frameId: string, selector: string) {
+  const s = useStore.getState()
+  s.select(frameId)
+  s.requestFlyTo(frameId)
+  s.setSelectedElement({ frameId, selector })
+}
+
+/** `import { Button } from '@acme/ui'`, or null until a package and an export are both named. */
+export function importLine(code: ComponentCode | undefined): string | null {
+  const from = code?.importFrom?.trim()
+  const name = code?.exportName?.trim()
+  if (!from || !name) return null
+  return code?.defaultExport ? `import ${name} from '${from}'` : `import { ${name} } from '${from}'`
+}
+
+/** Save where a component lives in code; null removes the mapping. Not undoable, like its description. */
+export async function saveComponentCode(def: ComponentDef, code: ComponentCode | null): Promise<boolean> {
+  const s = useStore.getState()
+  if (!s.canvas) return false
+  try {
+    const { component } = await api.updateComponent(s.canvas.id, def.id, { code })
+    if (useStore.getState().canvas?.id === s.canvas.id) useStore.getState().setComponentLocal(component.id, component)
+    return true
+  } catch (error) {
+    notifyFailure(error, t('components.codeSaveFailed'))
+    return false
   }
 }
 

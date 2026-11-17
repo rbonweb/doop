@@ -12,6 +12,7 @@ import {
   REV_ATTR,
   USE_TAG,
   isDeleted,
+  variantAttrs,
   type ComponentDef,
   type ComponentIssue,
   type ComponentProp,
@@ -24,6 +25,7 @@ import {
   findMarked,
   holdsHollow,
   renderInstance,
+  CARRIED_ATTRS,
   reconcileInstance,
   setAttr,
   splice,
@@ -259,10 +261,10 @@ function prepareMains(
       })
       continue
     }
-    const variants = def.props.filter((prop) => prop.type === 'enum').map((prop) => `data-${prop.name}`)
+    const variants = variantAttrs(def.props)
     const { css, rawCss } = extractComponentCss(sheet(), found.el, id, variants)
     const head = headTags()
-    const { props, slots } = derivePropsAndSlots(template, def.props)
+    const { props, slots } = derivePropsAndSlots(template, def.props, ctx.find)
     const same =
       def.template === template &&
       def.css === css &&
@@ -310,6 +312,13 @@ export function rederiveFromMains(
 
 function prepareInstances(html: string, ctx: EngineContext) {
   const edits: { start: number; end: number; text: string }[] = []
+  /* an instance inside a main stands for the template's `<doop-use>`: it wears its forwarded props and condition */
+  let mains: { start: number; end: number }[] | undefined
+  const insideMain = (start: number) => {
+    if (!html.includes(COMPONENT_ATTR)) return false
+    mains ??= findMarked(html, COMPONENT_ATTR)
+    return mains.some((main) => start >= main.start && start < main.end)
+  }
   for (const found of findMarked(html, INSTANCE_ATTR)) {
     const id = attrOf(found.el, INSTANCE_ATTR) ?? ''
     const def = ctx.find(id)
@@ -323,13 +332,15 @@ function prepareInstances(html: string, ctx: EngineContext) {
        holding an instance of a hollow component: rendered again, that instance would be lost */
     if (isDeleted(def) || holdsHollow(found.el, ctx)) continue
     const before = serializeOuter(found.el)
-    const state = reconcileInstance(found.el, ctx)
+    const inMain = insideMain(found.start)
+    const state = reconcileInstance(found.el, ctx, inMain)
     if (!state) continue
     /* only a whole write gets here: nothing more is coming for the content it holds */
     const rendered = renderInstance(def, def, state.overrides, state.instanceId, { ctx, stack: [], final: true })
     if (!rendered) continue
     /* the key it has is its place in what holds it (a main), not the component's own root key */
     setAttr(rendered, PART_ATTR, attrOf(found.el, PART_ATTR) ?? null)
+    if (inMain) for (const name of CARRIED_ATTRS) setAttr(rendered, name, attrOf(found.el, name) ?? null)
     const after = serializeOuter(rendered)
     if (after !== before) edits.push({ start: found.start, end: found.end, text: after })
   }

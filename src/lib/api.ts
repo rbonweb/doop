@@ -860,6 +860,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ sourceCanvasId, component }),
     }),
+  /** a copy of a component with a main frame of its own */
+  duplicateComponent: (canvasId: string, componentId: string) =>
+    req<{ component: ComponentDef; main_frame_id: string | null }>(
+      `/api/canvases/${canvasId}/components/${componentId}/duplicate`,
+      { method: 'POST' },
+    ),
+  /** turn a library-linked component into a local one, with a main of its own: library updates stop arriving */
+  detachComponentFromLibrary: (canvasId: string, componentId: string) =>
+    req<{ component: ComponentDef; main_frame_id: string | null }>(
+      `/api/canvases/${canvasId}/components/${componentId}/detach-library`,
+      { method: 'POST' },
+    ),
   syncComponent: (canvasId: string, componentId: string) =>
     req<{ component: ComponentDef; updated: boolean }>(`/api/canvases/${canvasId}/components/${componentId}/sync`, {
       method: 'POST',

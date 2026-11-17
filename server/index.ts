@@ -9,6 +9,8 @@ import {
   createComponentFromHtml,
   deleteComponent,
   detachAllInstances,
+  detachFromLibrary,
+  duplicateComponent,
   findComponent,
   importableEntry,
   importComponent,
@@ -2973,6 +2975,26 @@ app.post('/api/canvases/:id/components/:componentId/detach-instances', (req, res
   const canvas = requireCanvas(req, res, req.params.id, 'edit')
   if (!canvas) return
   componentRoute(res, () => detachAllInstances(canvas.id, req.params.componentId, userActor(req)))
+})
+
+/* a second, local component made from this one, with a main of its own beside the original's */
+app.post('/api/canvases/:id/components/:componentId/duplicate', (req, res) => {
+  const canvas = requireCanvas(req, res, req.params.id, 'edit')
+  if (!canvas) return
+  componentRoute(res, () => {
+    const { component } = duplicateComponent(canvas.id, req.params.componentId, userActor(req))
+    return { component, main_frame_id: component.mainFrameId }
+  })
+})
+
+/* a component linked from a workspace library made this canvas's own: same id, a main written here */
+app.post('/api/canvases/:id/components/:componentId/detach-library', (req, res) => {
+  const canvas = requireCanvas(req, res, req.params.id, 'edit')
+  if (!canvas) return
+  componentRoute(res, () => {
+    const { component } = detachFromLibrary(canvas.id, req.params.componentId, userActor(req))
+    return { component, main_frame_id: component.mainFrameId }
+  })
 })
 
 app.post('/api/canvases/:id/components/:componentId/restore', (req, res) => {

@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 import { useT } from '@/lib/i18n'
 import { useValueScrub } from '@/hooks/use-value-scrub'
 import { slidePosition, useValueSlide } from '@/hooks/use-value-slide'
-import { ChevronDownIcon, UnlinkIcon } from './icons'
+import { ChevronDownIcon, UndoIcon, UnlinkIcon } from './icons'
 
 /* The dense property controls of an inspector rail: a 26px row with a label
    column and one or more 26px fields, each carrying a faint unit at its
@@ -54,13 +54,46 @@ export function PropertySection({
   )
 }
 
-export function PropertyRow({ label, children }: { label: string; children: ReactNode }) {
+export function PropertyRow({
+  label,
+  children,
+  overridden,
+  error,
+}: {
+  label: string
+  children: ReactNode
+  /** the value differs from where it comes from: a dot beside the label that resets it */
+  overridden?: { label: string; onReset: () => void; disabled?: boolean }
+  /** why the last entry was refused, under the field */
+  error?: string
+}) {
   return (
-    <div className="mt-1.5 grid min-h-[26px] grid-cols-[58px_1fr] items-center gap-1.5">
-      <span className="truncate text-[11.5px] text-ink-faint" title={label}>
-        {label}
+    <div className="mt-1.5 grid min-h-[26px] grid-cols-[58px_1fr] items-center gap-x-1.5 gap-y-0.5">
+      <span className="flex min-w-0 items-center gap-1 text-[11.5px] text-ink-faint">
+        {overridden && (
+          <button
+            type="button"
+            data-slot="override-dot"
+            aria-label={overridden.label}
+            title={overridden.label}
+            disabled={overridden.disabled}
+            className="group/reset -ml-1 grid size-4 flex-none place-items-center rounded-full hover:bg-paper-deep disabled:pointer-events-none"
+            onClick={overridden.onReset}
+          >
+            <span className="size-1.5 rounded-full bg-brand group-hover/reset:hidden" />
+            <UndoIcon size={10} className="hidden text-ink group-hover/reset:block" />
+          </button>
+        )}
+        <span className="truncate" title={label}>
+          {label}
+        </span>
       </span>
       <div className="flex min-w-0 gap-1.5">{children}</div>
+      {error && (
+        <p role="alert" className="col-start-2 text-[10.5px] leading-[1.35] text-accent-ink">
+          {error}
+        </p>
+      )}
     </div>
   )
 }
@@ -110,8 +143,10 @@ export function NumberField({
   placeholder,
   className,
   onCommit,
+  onInvalid,
   min = 0,
   max = Infinity,
+  step,
   slider,
 }: {
   label?: string
@@ -125,8 +160,12 @@ export function NumberField({
   placeholder?: string
   className?: string
   onCommit: (v: number) => void
+  /** typed text that is not a number: the field puts the old value back and says what was typed */
+  onInvalid?: (typed: string) => void
   min?: number
   max?: number
+  /** arrow keys and dragging land on multiples of this, counted from `min` when it is finite, else 0 */
+  step?: number
   /** the field doubles as a slider over this range: press and drag across it
    *  to set the value by the pointer's place; a click still edits the text */
   slider?: readonly [number, number]
@@ -134,6 +173,19 @@ export function NumberField({
   const t = useT()
   const input = useRef<HTMLInputElement>(null)
   const shown = value === null ? '' : String(value)
+  const gridBase = Number.isFinite(min) ? min : 0
+  /* the nearest multiple of the step, which may lie outside the range */
+  const snap = (n: number) =>
+    !step || step <= 0 ? n : Number((gridBase + Math.round((n - gridBase) / step) * step).toFixed(10))
+  /* what a drag lands on: the nearest multiple, a step back in when that is past the range */
+  const onGrid = (n: number) => {
+    const snapped = snap(n)
+    return step && step > 0 && snapped > max
+      ? snapped - step
+      : step && step > 0 && snapped < min
+        ? snapped + step
+        : snapped
+  }
   const [draft, setDraft] = useState(shown)
   const [seen, setSeen] = useState({ value: shown, scrubbing: false })
   const scrubLifecycle = useContext(PropertyScrubContext)
@@ -144,8 +196,9 @@ export function NumberField({
     min,
     max,
     onChange: (v) => {
-      setDraft(v)
-      onCommit(Number(v))
+      const next = onGrid(Number(v))
+      setDraft(String(next))
+      onCommit(next)
     },
   })
   const slide = useValueSlide({
@@ -177,7 +230,10 @@ export function NumberField({
       const next = Math.min(max, Math.max(min, n))
       setDraft(String(next))
       onCommit(next)
-    } else setDraft(shown)
+    } else {
+      if (draft.trim() !== '' && !Number.isFinite(n)) onInvalid?.(draft.trim())
+      setDraft(shown)
+    }
   }
   const fill = slider ? slidePosition(Number(draft), slider) : 0
   /* the drag-to-adjust handle: the icon when the field has one, else the unit */
@@ -256,9 +312,15 @@ export function NumberField({
               if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
                 e.preventDefault()
                 const n = Number(draft) || 0
-                const next = Math.min(max, Math.max(min, n + (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 10 : 1)))
-                setDraft(String(next))
-                onCommit(next)
+                const stepBy = (step ?? 1) * (e.shiftKey ? 10 : 1) * (e.key === 'ArrowUp' ? 1 : -1)
+                /* snap first, then clamp: a key press that would leave the range keeps the value */
+                const snapped = snap(n + stepBy)
+                const next =
+                  snapped >= min && snapped <= max ? snapped : step ? n : Math.min(max, Math.max(min, n + stepBy))
+                if (next !== n) {
+                  setDraft(String(next))
+                  onCommit(next)
+                }
               }
             }}
           />
@@ -286,6 +348,7 @@ export function TextField({
   placeholder,
   className,
   onCommit,
+  onDraft,
   scrub: scrubbable = false,
   min,
   disabled,
@@ -297,6 +360,8 @@ export function TextField({
   /** `font-sans` on a field holding prose rather than a value */
   className?: string
   onCommit: (v: string) => void
+  /** every keystroke, for a form that needs to know what is typed before the field blurs */
+  onDraft?: (v: string) => void
   scrub?: boolean
   min?: number
   disabled?: boolean
@@ -327,7 +392,10 @@ export function TextField({
         value={draft}
         disabled={disabled}
         placeholder={placeholder}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => {
+          setDraft(e.target.value)
+          onDraft?.(e.target.value)
+        }}
         onBlur={() => !scrub.scrubbing && draft !== value && onCommit(draft)}
         onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
       />
@@ -445,6 +513,7 @@ export function ColorField({
   trailing,
   token,
   onCommit,
+  onInvalid,
 }: {
   value: string | null
   label?: string
@@ -455,6 +524,8 @@ export function ColorField({
   trailing?: ReactNode
   token?: FieldToken
   onCommit: (v: string | null) => void
+  /** text that is not a six-digit hex (a name, `rgb()`, `#abc`): the field puts the old value back and hands it over */
+  onInvalid?: (typed: string) => void
 }) {
   const t = useT()
   const shown = value ?? ''
@@ -473,7 +544,10 @@ export function ColorField({
     const hex = v.startsWith('#') ? v : `#${v}`
     if (/^#[0-9a-f]{6}$/.test(hex)) {
       if (hex !== value) onCommit(hex)
-    } else setDraft(shown)
+    } else {
+      setDraft(shown)
+      onInvalid?.(draft.trim())
+    }
   }
   return (
     <label className={cn(fieldCls, 'gap-1.5', className)}>
