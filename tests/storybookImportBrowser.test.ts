@@ -2,9 +2,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { componentBundleSchema } from '../shared/componentBundle.ts'
+import { CAPTURE_PRELUDE, captureStory, STYLE_PROPERTIES } from '../shared/storybook/capture.ts'
+import { MAX_PROBE_CHARS } from '../shared/storybook/probe.ts'
 import { STORYBOOK_LIMITS } from '../shared/storybook/plan.ts'
 import * as screenshot from '../server/screenshot.ts'
 import { findBrowserPath, getBrowser } from '../server/screenshot.ts'
+import { guardPublicPageRequests } from '../server/publicUrl.ts'
 import {
   StorybookAccessError,
   StorybookBusyError,
@@ -92,6 +95,57 @@ body { margin: 0; }
     meta = { argTypes: {}, initialArgs: {} }
   } else { return }
   window.__STORYBOOK_PREVIEW__ = { currentRender: { phase: 'completed', story: { id: id, argTypes: meta.argTypes, initialArgs: meta.initialArgs, component: { displayName: 'Button' } } } }
+  document.body.className = 'sb-show-main'
+})()
+</script></body></html>`
+}
+
+/* A story page that fights back. Its script runs before anything of ours but after the probe, which has already captured the browser's own builtins: it replaces the ones the capture and the probe use (JSON.stringify, Object.keys, String.prototype.slice, the outerHTML and innerHTML getters, getComputedStyle, Function.prototype.call and more) and then hands out 50 MB of text, a 50 MB style rule and a preview object made of traps. */
+function evilIframePage(id: string): string {
+  const sabotage = `
+    JSON.stringify = function () { return '"PWNED"' }
+    Object.keys = function () { return [] }
+    Object.getOwnPropertyDescriptor = function () { return undefined }
+    Reflect.ownKeys = function () { return [] }
+    Array.isArray = function () { return false }
+    String.prototype.slice = function () { return 'PWNED' }
+    Function.prototype.call = function () { return 'PWNED' }
+    Object.prototype.toJSON = function () { return 'PWNED' }
+    Array.prototype.toJSON = function () { return 'PWNED' }
+    Object.defineProperty(Element.prototype, 'outerHTML', { configurable: true, get: function () { return 'PWNED' } })
+    Object.defineProperty(Element.prototype, 'innerHTML', { configurable: true, get: function () { return 'PWNED' } })
+    window.getComputedStyle = function () { return { getPropertyValue: function () { return 'PWNED' }, fontFamily: '', animationName: '' } }
+    var big = 'x'.repeat(50 * 1024 * 1024)
+  `
+  const body =
+    id === 'evil-big--default'
+      ? `var d = document.createElement('div'); d.className = 'big'; d.textContent = big; root.appendChild(d)`
+      : id === 'evil-rule--default'
+        ? `var st = document.createElement('style'); st.textContent = '.small{content:"' + big + '"} .small{color:red}'; document.head.appendChild(st)
+           root.innerHTML = '<span class="small">NEW</span>'`
+        : `root.innerHTML = '<span class="badge">NEW</span>'`
+  const preview =
+    id === 'evil-meta--default'
+      ? `
+    var spin = function () { var end = Date.now() + 300; while (Date.now() < end) {} return ['a', 'b'] }
+    var argTypes = {
+      big: { control: 'text', description: big },
+      tone: { control: 'select', options: ['a', 'b'] },
+      flip: { get control() { return Math.random() > 0.5 ? 'text' : 'boolean' } },
+      trap: new Proxy({}, { ownKeys: function () { throw new Error('no') }, get: function () { throw new Error('no') }, getOwnPropertyDescriptor: function () { throw new Error('no') } }),
+      loop: new Proxy({}, { ownKeys: function () { spin(); return Array.from({ length: 2000000 }, function (_, i) { return 'k' + i }) } }),
+      toj: { control: 'boolean', toJSON: function () { return 'PWNED' } },
+    }
+    story = { id: '${id}', argTypes: argTypes, initialArgs: { big: big, tone: 'a' }, component: { displayName: 'Evil' } }`
+      : `story = { id: '${id}', argTypes: {}, initialArgs: {} }`
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body class="sb-show-preparing-story"><div id="storybook-root"></div><script>
+(function () {
+  ${sabotage}
+  var root = document.getElementById('storybook-root')
+  var story
+  ${preview}
+  ${body}
+  window.__STORYBOOK_PREVIEW__ = { currentRender: { phase: 'completed', story: story } }
   document.body.className = 'sb-show-main'
 })()
 </script></body></html>`
@@ -197,6 +251,29 @@ beforeAll(async () => {
           },
         }),
       )
+    }
+    if (url === '/evil/index.json') {
+      return send(
+        200,
+        'application/json',
+        JSON.stringify({
+          v: 5,
+          entries: Object.fromEntries(
+            ['big', 'rule', 'meta'].map((name) => [
+              `evil-${name}--default`,
+              {
+                type: 'story',
+                id: `evil-${name}--default`,
+                name: 'Default',
+                title: `Evil/${name[0]!.toUpperCase()}${name.slice(1)}`,
+              },
+            ]),
+          ),
+        }),
+      )
+    }
+    if (url.startsWith('/evil/iframe.html')) {
+      return send(200, 'text/html', evilIframePage(new URL(url, 'http://x').searchParams.get('id') ?? ''))
     }
     if (url === '/huge/index.json') {
       return send(
@@ -341,8 +418,103 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     expect(process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length).toBeLessThan(10)
   })
 
+  it('refuses a story with too many elements', async () => {
+    await expect(storybookBundle(`${storybook.origin}/huge/`, {}, deps(storybook.origin))).rejects.toThrow(
+      'too many elements',
+    )
+  })
+
+  it('survives a page that replaces every builtin and hands out 50 MB of everything, and receives no more than the cap', async () => {
+    const seen: { step: string; bytes: number }[] = []
+    const started = Date.now()
+    const result = await storybookBundle(
+      `${storybook.origin}/evil/`,
+      {},
+      {
+        ...deps(storybook.origin),
+        observe: (event) => seen.push(event),
+      },
+    )
+    expect(Date.now() - started).toBeLessThan(STORYBOOK_LIMITS.renderMs * 3)
+    const { bundle, issues } = result
+
+    /* 50 MB of text: refused by the capture, in the page, with a small answer */
+    expect(issues).toContainEqual(
+      expect.objectContaining({
+        component: 'Big',
+        code: 'story_failed',
+        message: expect.stringContaining('too large'),
+      }),
+    )
+    expect(bundle.components.map((component) => component.name)).toEqual(['Rule', 'Meta'])
+
+    /* a 50 MB style rule is left out, and said so; the small rule beside it stays */
+    const rule = bundle.components[0]!
+    expect(rule.css).toBe('.small { color: red; }')
+    expect(issues).toContainEqual(expect.objectContaining({ component: 'Rule', code: 'css_rules_oversize' }))
+
+    /* the capture came from an isolated world: not "PWNED", not the replaced getters' answers */
+    const meta = bundle.components[1]!
+    expect(meta.html).toBe('<span class="badge">NEW</span>')
+    expect(JSON.stringify(bundle)).not.toContain('PWNED')
+
+    /* the preview was read by the probe: primitives only, bounded, and the traps and getters did nothing */
+    expect(meta.props?.map((prop) => prop.name).sort()).toEqual(['big', 'toj', 'tone'])
+    expect(meta.props?.find((prop) => prop.name === 'big')?.description).toHaveLength(300)
+    expect(meta.props?.find((prop) => prop.name === 'tone')).toMatchObject({
+      type: 'enum',
+      options: ['a', 'b'],
+      default: 'a',
+    })
+    expect(meta.code?.exportName).toBe('Evil')
+
+    /* nothing the page sent back was bigger than the caps: 2 MB a capture, the probe's cap for the preview */
+    const captures = seen.filter((event) => event.step === 'capture')
+    const metas = seen.filter((event) => event.step === 'meta')
+    expect(captures.length).toBeGreaterThan(2)
+    expect(metas.length).toBe(3)
+    for (const event of captures) expect(event.bytes).toBeLessThanOrEqual(STORYBOOK_LIMITS.captureBytes)
+    for (const event of metas) expect(event.bytes).toBeLessThanOrEqual(MAX_PROBE_CHARS + 1024)
+  })
+
+  it('captures a normal story byte for byte the same in the isolated world as in the page’s own world', async () => {
+    const { page, close } = await screenshot.openIsolatedPage()
+    try {
+      await guardPublicPageRequests(page, deps(storybook.origin).guard)
+      await page.goto(`${storybook.origin}/sb/iframe.html?id=inputs-button--primary&viewMode=story`)
+      await page.waitForFunction("document.body.classList.contains('sb-show-main')")
+      const options = {
+        textArgs: [{ prop: 'label', value: 'Save' }],
+        styleProperties: STYLE_PROPERTIES,
+        maxBytes: STORYBOOK_LIMITS.captureBytes,
+        maxElements: 300,
+      }
+      const world = (
+        page.mainFrame() as unknown as { isolatedRealm(): { evaluate(...args: unknown[]): Promise<unknown> } }
+      ).isolatedRealm()
+      await page.evaluate(CAPTURE_PRELUDE)
+      await world.evaluate(CAPTURE_PRELUDE)
+      const own = await page.evaluate(captureStory, options)
+      const isolated = await world.evaluate(captureStory, options)
+      expect(typeof isolated).toBe('string')
+      expect(isolated).toBe(own)
+      expect(JSON.parse(isolated as string).html).toContain('data-doop-prop="label"')
+    } finally {
+      await close()
+    }
+  })
+
   it('refuses a story whose capture is over 2 MB', async () => {
-    await expect(storybookBundle(`${storybook.origin}/huge/`, {}, deps(storybook.origin))).rejects.toThrow('too large')
+    const { bundle, issues } = await storybookBundle(
+      `${storybook.origin}/evil/`,
+      { include: ['Evil/Rule'] },
+      deps(storybook.origin),
+    )
+    expect(bundle.components).toHaveLength(1)
+    expect(issues.some((issue) => issue.code === 'css_rules_oversize')).toBe(true)
+    await expect(
+      storybookBundle(`${storybook.origin}/evil/`, { include: ['Evil/Big'] }, deps(storybook.origin)),
+    ).rejects.toThrow('too large')
   })
 
   it('refuses a Storybook that answers 401, one that redirects to sign-in or away, and one that is not a Storybook', async () => {

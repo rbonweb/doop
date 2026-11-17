@@ -14,7 +14,7 @@ const MAX_NESTING = 8
 const URL_TOKEN = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s'"]*))\s*\)/gi
 const FETCHABLE = /^(?:https?:\/\/|data:image\/|data:font\/|data:application\/(?:font|x-font)[\w.+-]*[;,])[^\\]*$/i
 
-/** The top-level rules of `css`, and how many pieces were not rules. Strings and comments are skipped over (comments are not kept). A top-level statement (`@import x;`) is dropped; a stray brace, an unclosed string or an unfinished rule ends the reading, and the rest is dropped. */
+/** The top-level rules of `css`, and how many pieces were not rules. Strings are skipped over. A top-level statement (`@import x;`) is dropped; a stray brace, an unclosed string or an unfinished rule ends the reading, and the rest is dropped. */
 export function splitRules(css: string): { rules: string[]; dropped: number } {
   const rules: string[] = []
   let dropped = 0
@@ -23,12 +23,8 @@ export function splitRules(css: string): { rules: string[]; dropped: number } {
   let i = 0
   while (i < css.length) {
     const ch = css[i]!
-    if (ch === '/' && css[i + 1] === '*') {
-      const end = css.indexOf('*/', i + 2)
-      if (end === -1) break
-      i = end + 2
-      continue
-    }
+    /* CSSOM text never carries a comment, and a browser and this reader can disagree about where one ends (`url(a/*)`), so reading stops at the first */
+    if (ch === '/' && css[i + 1] === '*') return { rules, dropped: dropped + 1 }
     if (ch === '"' || ch === "'") {
       let j = i + 1
       for (; j < css.length && css[j] !== ch && css[j] !== '\n'; j++) if (css[j] === '\\') j++
@@ -55,20 +51,14 @@ export function splitRules(css: string): { rules: string[]; dropped: number } {
     i++
   }
   /* whatever is left is an unfinished rule or stray text */
-  if (
-    css
-      .slice(start)
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .trim()
-  )
-    dropped++
+  if (css.slice(start).trim()) dropped++
   return { rules: rules.filter(Boolean), dropped }
 }
 
-/** Every `@name` outside strings and comments in a rule, lowercased. */
+/** Every `@name` outside strings in a rule, lowercased. */
 function atNames(rule: string): string[] {
   const names: string[] = []
-  const bare = rule.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, '""')
+  const bare = rule.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, '""')
   for (const match of bare.matchAll(/@([\w-]*)/g)) names.push((match[1] ?? '').toLowerCase())
   return names
 }
@@ -76,9 +66,9 @@ function atNames(rule: string): string[] {
 /** Whether one top-level rule may go into a bundle. */
 export function ruleIsSafe(rule: string): boolean {
   if (rule.length > 20_000 * 20) return false
-  if (/<\/|<!--|-->|<\s*script/i.test(rule)) return false
+  if (rule.includes('/*') || /<\/|<!--|-->|<\s*script/i.test(rule)) return false
   if (atNames(rule).some((name) => !ALLOWED_AT_RULES.has(name))) return false
-  const plain = rule.replace(/\/\*[\s\S]*?\*\//g, ' ')
+  const plain = rule
   if (
     /expression\s*\(|javascript:|vbscript:|behaviou?r\s*:|-moz-binding|image-set\s*\(|(?<![\w-])src\s*\(/i.test(plain)
   )

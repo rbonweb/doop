@@ -1,7 +1,7 @@
 import type { Page } from 'puppeteer-core'
-import { storyState } from '../shared/storybook/capture.ts'
 import { buildComponentBundle, type BundleResult, type StoryPage } from '../shared/storybook/bundle.ts'
 import { parseStorybookIndex, type StoryEntry } from '../shared/storybook/index.ts'
+import { probeAttribute } from '../shared/storybook/probe.ts'
 import { STORYBOOK_LIMITS, storybookBasePath } from '../shared/storybook/plan.ts'
 import { fetchPinnedPublicUrl, guardPublicPageRequests, parsePublicHttpUrl } from './publicUrl.ts'
 import { openIsolatedPage } from './screenshot.ts'
@@ -52,6 +52,8 @@ export interface StorybookImportDeps {
   fetchUrl?: typeof fetchPinnedPublicUrl
   parseUrl?: (raw: string) => URL
   guard?: Parameters<typeof guardPublicPageRequests>[1]
+  /** sees the size of each answer that came back from the page, for tests */
+  observe?: (event: { step: 'capture' | 'meta'; bytes: number }) => void
 }
 
 export interface StorybookImportOptions {
@@ -60,6 +62,14 @@ export interface StorybookImportOptions {
   /** only components whose Storybook title starts with one of these */
   include?: string[]
   signal?: AbortSignal
+}
+
+interface IsolatedRealm {
+  evaluate(pageFunction: unknown, ...args: unknown[]): Promise<unknown>
+  waitForFunction(
+    pageFunction: string,
+    options: { timeout: number; polling: number },
+  ): Promise<{ jsonValue(): Promise<unknown> }>
 }
 
 let running = 0
@@ -187,7 +197,11 @@ async function openStoryPage(
         clearTimeout(timer)
       }
     }
+    /* the capture runs in an isolated world: it sees the DOM and CSSOM but none of the page's JavaScript, so page script cannot change what it measures or returns */
+    /* `isolatedRealm` is in puppeteer-core's CDP frame but not in its public types (25.9, the pinned version); the browser test fails if an upgrade drops it */
+    const isolatedWorld = () => (raw.mainFrame() as unknown as { isolatedRealm(): IsolatedRealm }).isolatedRealm()
     const page: StoryPage = {
+      installProbe: (source) => raw.evaluateOnNewDocument(source).then(() => undefined),
       async goto(url, timeoutMs) {
         const response = await raw.goto(url, { waitUntil: 'domcontentloaded', timeout: Math.min(timeoutMs, left()) })
         const status = response?.status() ?? 0
@@ -207,14 +221,26 @@ async function openStoryPage(
           throw new Error(`Storybook redirected the story to another address (${landed.origin})`)
         }
       },
-      async waitForState(timeoutMs) {
-        await raw.waitForFunction(`(${storyState.toString()})() !== 'pending'`, {
-          timeout: Math.min(timeoutMs, left()),
-        })
-        return (await bounded(raw.evaluate(storyState))) === 'error' ? 'error' : 'ready'
+      async waitForState(probe, timeoutMs) {
+        /* the probe leaves its verdict on the document element; the wait itself runs in the isolated world, where page script cannot touch it. `probe` is a random hex name we made, never page text */
+        const handle = await isolatedWorld().waitForFunction(
+          `document.documentElement.getAttribute(${JSON.stringify(probeAttribute(probe))}) || false`,
+          { timeout: Math.min(timeoutMs, left()), polling: 100 },
+        )
+        return (await handle.jsonValue()) === 'error' ? 'error' : 'ready'
       },
-      evaluate: (fn, arg) => bounded(raw.evaluate(fn as never, arg as never)) as never,
-      evaluateSource: (source) => bounded(raw.evaluate(source)),
+      async readMeta(probe, storyId) {
+        /* a plain Runtime.evaluate of an expression: it needs nothing from the page's builtins */
+        const result = await bounded(raw.evaluate(`window[${JSON.stringify(probe)}].meta(${JSON.stringify(storyId)})`))
+        deps.observe?.({ step: 'meta', bytes: typeof result === 'string' ? result.length : 0 })
+        return result
+      },
+      async evaluate(fn, arg) {
+        const result = await bounded(isolatedWorld().evaluate(fn as never, arg as never))
+        deps.observe?.({ step: 'capture', bytes: typeof result === 'string' ? result.length : 0 })
+        return result as never
+      },
+      evaluateSource: (source) => bounded(isolatedWorld().evaluate(source)),
     }
     return { page, close: () => isolated.close() }
   } catch (error) {

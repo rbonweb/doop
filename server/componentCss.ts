@@ -39,7 +39,7 @@ const INHERITED = new Set([
 
 const GROUP_AT_RULES = new Set(['media', 'supports', 'container', 'layer'])
 
-type CssNode =
+export type CssNode =
   | { kind: 'rule'; selector: string; body: string }
   | { kind: 'group'; prelude: string; nodes: CssNode[] }
   | { kind: 'atomic'; name: string; text: string; prelude: string; body: string }
@@ -60,7 +60,7 @@ function blockEnd(css: string, open: number): number {
   return css.length
 }
 
-function parseCss(source: string): CssNode[] {
+export function parseCss(source: string): CssNode[] {
   const css = source.replace(/\/\*[\s\S]*?\*\//g, '')
   const nodes: CssNode[] = []
   let at = 0

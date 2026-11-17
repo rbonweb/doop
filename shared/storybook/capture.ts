@@ -1,6 +1,6 @@
 import type { StorybookIssue } from './index.ts'
 
-/** Pure: no node or server imports, since the CLI bundles it. The functions below run INSIDE a Storybook story page (`page.evaluate` / `page.waitForFunction`), so each is self-contained: it may use only what the page has and its own arguments, and helpers live inside it. They are written for a page that may be hostile: they read, never run, what it holds, and what they return is plain data that the caller validates again. The caller sets `globalThis.__name = (t) => t` first (`CAPTURE_PRELUDE`), since tsx annotates nested functions with it. */
+/** Pure: no node or server imports, since the CLI bundles it. The functions below run INSIDE a Storybook story page, in an ISOLATED world (`frame.isolatedRealm()`): they see the page's DOM and CSSOM but none of its JavaScript, so page script cannot replace `JSON.stringify`, a DOM getter or `getComputedStyle` under them. Each is self-contained: it may use only what the page has and its own arguments, and helpers live inside it. The result is serialized there and measured there, so the server never receives more than the cap, and it validates what arrives again. The caller runs `CAPTURE_PRELUDE` in that world first, since tsx annotates nested functions with `__name`. Storybook's preview object lives in the page's own world and is read by probe.ts instead. */
 
 export const CAPTURE_PRELUDE = 'globalThis.__name = (target) => target'
 
@@ -85,92 +85,11 @@ export interface CapturedStory {
 
 export type StoryCapture = CapturedStory | { ok: false; reason: string }
 
-export interface StoryMeta {
-  argTypes: unknown
-  initialArgs: unknown
-  /** the component's display name, when Storybook knows it */
-  displayName?: string
-}
+/** What `captureStory` answers: the capture as one JSON string of at most `maxBytes` characters, or a small refusal. */
+export type CaptureResult = string | { ok: false; reason: string; bytes?: number }
 
-/** Where a story is: 'ready' once it has rendered, 'error' when Storybook shows its error screen, else 'pending'. */
-export function storyState(): 'ready' | 'error' | 'pending' {
-  const body = document.body
-  if (!body) return 'pending'
-  if (body.classList.contains('sb-show-errordisplay')) return 'error'
-  const preview = (window as unknown as { __STORYBOOK_PREVIEW__?: { currentRender?: { phase?: unknown } } })
-    .__STORYBOOK_PREVIEW__
-  const phase = preview?.currentRender?.phase
-  if (phase === 'errored') return 'error'
-  const root = document.querySelector('#storybook-root') ?? document.querySelector('#root')
-  const hasContent = !!root?.firstElementChild
-  if (typeof phase === 'string')
-    return (phase === 'completed' || phase === 'played') && hasContent ? 'ready' : 'pending'
-  return body.classList.contains('sb-show-main') && hasContent ? 'ready' : 'pending'
-}
-
-/** argTypes, initialArgs and the display name of a story, read from the preview and flattened to plain JSON (functions, symbols and cycles dropped, depth and size bounded). */
-export async function readStoryMeta(storyId: string): Promise<StoryMeta | null> {
-  const win = window as unknown as Record<string, unknown>
-  const preview = win.__STORYBOOK_PREVIEW__ as
-    | {
-        currentRender?: { story?: unknown }
-        storyStoreValue?: { loadStory?: (id: { storyId: string }) => Promise<unknown> }
-        storyStore?: { loadStory?: (id: { storyId: string }) => Promise<unknown> }
-      }
-    | undefined
-  let story: unknown = preview?.currentRender?.story
-  if (!story || (story as { id?: unknown }).id !== storyId) {
-    story = undefined
-    const store = preview?.storyStoreValue ?? preview?.storyStore
-    try {
-      if (store?.loadStory) story = await store.loadStory({ storyId })
-    } catch {
-      /* try the older store */
-    }
-  }
-  if (!story) {
-    const legacy = win.__STORYBOOK_STORY_STORE__ as { fromId?: (id: string) => unknown } | undefined
-    try {
-      story = legacy?.fromId?.(storyId)
-    } catch {
-      /* no store */
-    }
-  }
-  if (!story || typeof story !== 'object') return null
-
-  let budget = 20000
-  const plain = (value: unknown, depth: number): unknown => {
-    if (value === null) return null
-    const kind = typeof value
-    if (kind === 'string') return (value as string).slice(0, 400)
-    if (kind === 'number') return Number.isFinite(value as number) ? value : undefined
-    if (kind === 'boolean') return value
-    if (kind !== 'object' || depth > 4 || budget-- <= 0) return undefined
-    if (Array.isArray(value)) return value.slice(0, 60).map((item) => plain(item, depth + 1))
-    const out: Record<string, unknown> = Object.create(null)
-    let keys = 0
-    for (const key of Object.keys(value as object)) {
-      if (keys++ >= 300) break
-      let member: unknown
-      try {
-        member = (value as Record<string, unknown>)[key]
-      } catch {
-        continue
-      }
-      const flat = plain(member, depth + 1)
-      if (flat !== undefined) out[key] = flat
-    }
-    return out
-  }
-  const record = story as Record<string, unknown>
-  const component = record.component as { displayName?: unknown; name?: unknown } | undefined
-  const nameOf = (value: unknown) => (typeof value === 'string' && value.length < 100 ? value : undefined)
-  return {
-    argTypes: plain(record.argTypes, 0),
-    initialArgs: plain(record.initialArgs, 0),
-    displayName: nameOf(component?.displayName) ?? nameOf(component?.name),
-  }
-}
+/** Elements in the story's tree over which it is not captured. */
+export const MAX_CAPTURE_ELEMENTS = 20_000
 
 /** Lets a story come to rest before it is captured: fonts, images and two frames, no longer than `maxMs`. */
 export async function settleStory(maxMs: number): Promise<void> {
@@ -189,7 +108,7 @@ export async function settleStory(maxMs: number): Promise<void> {
 }
 
 /** The first element rendered into the story root, as passive html, the CSS that applies to it and what a variant needs to be diffed against it. Never mutates the live story. */
-export function captureStory(options: CaptureOptions): StoryCapture {
+export function captureStory(options: CaptureOptions): CaptureResult {
   const issues: StorybookIssue[] = []
   const host = document.querySelector('#storybook-root') ?? document.querySelector('#root')
   const live = host?.firstElementChild
@@ -199,6 +118,10 @@ export function captureStory(options: CaptureOptions): StoryCapture {
       code: 'multiple_roots',
       message: 'The story renders several root elements; only the first was captured',
     })
+  }
+
+  if (host.getElementsByTagName('*').length > 20000) {
+    return { ok: false, reason: 'too_many_elements', bytes: host.getElementsByTagName('*').length }
   }
 
   const banned =
@@ -262,7 +185,7 @@ export function captureStory(options: CaptureOptions): StoryCapture {
   }
 
   const html = clone.outerHTML
-  if (html.length > options.maxBytes) return { ok: false, reason: 'The rendered story is too large to import' }
+  if (html.length > options.maxBytes) return { ok: false, reason: 'too_large', bytes: html.length }
 
   const classPart = Array.from(clone.classList)
     .slice(0, 6)
@@ -371,6 +294,17 @@ export function captureStory(options: CaptureOptions): StoryCapture {
   const css: string[] = []
   const shared: string[] = []
   let crossOrigin = 0
+  let oversize = 0
+  let cssChars = 0
+  /* a rule's text, unless it is huge: a page can make one rule 50 MB */
+  const textOf = (rule: CSSRule): string | undefined => {
+    const text = rule.cssText
+    if (text.length > 200_000 || (cssChars += text.length) > 2_000_000) {
+      oversize++
+      return undefined
+    }
+    return text
+  }
   let scanned = 0
   const walk = (rules: CSSRuleList, base: string, depth: number): string[] => {
     const out: string[] = []
@@ -391,9 +325,11 @@ export function captureStory(options: CaptureOptions): StoryCapture {
         const style = rule as CSSStyleRule
         const selectors = splitList(style.selectorText)
         if (selectors.length && selectors.every((s) => globalOnly.test(unscoped(s)))) {
-          if (!internal.test(style.selectorText)) shared.push(absolutize(style.cssText, base))
+          const text = internal.test(style.selectorText) ? undefined : textOf(style)
+          if (text !== undefined) shared.push(absolutize(text, base))
         } else if (!internal.test(style.selectorText) && selectors.some((s) => reaches(s) || reaches(unscoped(s)))) {
-          out.push(absolutize(style.cssText, base))
+          const text = textOf(style)
+          if (text !== undefined) out.push(absolutize(text, base))
         }
         continue
       }
@@ -403,13 +339,27 @@ export function captureStory(options: CaptureOptions): StoryCapture {
           .getPropertyValue('font-family')
           .replace(/^["']|["']$/g, '')
           .toLowerCase()
-        if (used.fonts.has(family)) shared.push(absolutize(rule.cssText, base))
+        const text = used.fonts.has(family) ? textOf(rule) : undefined
+        if (text !== undefined) shared.push(absolutize(text, base))
       } else if (type === 'CSSKeyframesRule') {
-        if (used.animations.has((rule as CSSKeyframesRule).name)) out.push(rule.cssText)
+        const text = used.animations.has((rule as CSSKeyframesRule).name) ? textOf(rule) : undefined
+        if (text !== undefined) out.push(text)
       } else if ('cssRules' in rule && depth < 6 && /^CSS(?:Media|Supports|Container|LayerBlock)Rule$/.test(type)) {
         const inner = walk((rule as CSSGroupingRule).cssRules, base, depth + 1)
-        if (inner.length)
-          out.push(`${rule.cssText.slice(0, rule.cssText.indexOf('{')).trim()} {\n${inner.join('\n')}\n}`)
+        const head = inner.length ? (rule as CSSGroupingRule & { conditionText?: string }) : undefined
+        if (head) {
+          const kind = type
+            .replace(/^CSS|Rule$/g, '')
+            .replace('LayerBlock', 'layer')
+            .toLowerCase()
+          const label = [
+            (rule as { containerName?: string }).containerName,
+            head.conditionText ?? (rule as { name?: string }).name,
+          ]
+            .filter(Boolean)
+            .join(' ')
+          out.push(`@${kind} ${label} {\n${inner.join('\n')}\n}`)
+        }
       }
     }
     return out
@@ -432,11 +382,18 @@ export function captureStory(options: CaptureOptions): StoryCapture {
       message: `${crossOrigin} stylesheets could not be read (they come from another origin); their rules are not in the import`,
     })
   }
+  if (oversize) {
+    issues.push({
+      code: 'css_rules_oversize',
+      message: `${oversize} CSS rules were too large to read and were left out`,
+    })
+  }
   if (performance.now() - started > 4000 || scanned > 30000) {
     issues.push({ code: 'css_scan_capped', message: 'The page has so many CSS rules that only part of them were read' })
   }
 
-  return {
+  /* serialized and measured here, where page script cannot reach JSON.stringify: the server never receives more than the cap */
+  const text = JSON.stringify({
     ok: true,
     html,
     css: css.join('\n'),
@@ -445,5 +402,7 @@ export function captureStory(options: CaptureOptions): StoryCapture {
     paths,
     styles,
     issues,
-  }
+  })
+  if (text.length > options.maxBytes) return { ok: false, reason: 'too_large', bytes: text.length }
+  return text
 }

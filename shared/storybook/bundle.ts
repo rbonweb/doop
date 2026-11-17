@@ -9,7 +9,6 @@ import { readArgTypes, type ArgProp } from './argTypes.ts'
 import {
   CAPTURE_PRELUDE,
   captureStory,
-  readStoryMeta,
   settleStory,
   STYLE_PROPERTIES,
   type CapturedStory,
@@ -17,18 +16,24 @@ import {
 } from './capture.ts'
 import type { StoryEntry, StorybookIssue } from './index.ts'
 import { guardCss } from './cssGuard.ts'
-import { storyCaptureSchema, storyMetaSchema } from './schemas.ts'
+import { MAX_PROBE_CHARS, probeInstallSource, probeName } from './probe.ts'
+import { captureRefusalSchema, storyCaptureSchema, storyMetaSchema } from './schemas.ts'
 import { groupStories, planVariants, STORYBOOK_LIMITS, storyIframeUrl, variantAllowance } from './plan.ts'
 
 /** Pure: no node or server imports, since the CLI bundles it. Turns a Storybook's stories into a ComponentBundle through a page it is handed, so the server (the hardened renderer) and the CLI (the team's own browser) run the same capture and build the same bundle. */
 
-/** The page a story renders in: what the server's isolated page and the CLI's browser page both do. */
+/** The page a story renders in: what the server's isolated page and the CLI's browser page both do. `evaluate` and `evaluateSource` run in an ISOLATED world, where the page's own JavaScript cannot reach the capture; the probe is the only thing that runs in the page's main world. */
 export interface StoryPage {
+  /** runs `source` in the main world of every document the page loads, before any page script */
+  installProbe(source: string): Promise<void>
   goto(url: string, timeoutMs: number): Promise<void>
-  /** resolves once `storyState()` says ready or error, rejects at the timeout */
-  waitForState(timeoutMs: number): Promise<'ready' | 'error'>
+  /** asks the probe called `probe` until its state is ready or error; rejects at the timeout */
+  waitForState(probe: string, timeoutMs: number): Promise<'ready' | 'error'>
+  /** asks the probe for the story's argTypes, initial args and display name: a JSON string of at most MAX_PROBE_CHARS, or null */
+  readMeta(probe: string, storyId: string): Promise<unknown>
+  /** runs `fn` in the isolated world */
   evaluate<Arg, Result>(fn: (arg: Arg) => Result | Promise<Result>, arg: Arg): Promise<Result>
-  /** runs a source string, for the prelude */
+  /** runs a source string in the isolated world, for the prelude */
   evaluateSource(source: string): Promise<unknown>
 }
 
@@ -46,22 +51,40 @@ export interface RenderRequest {
   readMeta: boolean
 }
 
+function refusalMessage(reason: string, bytes?: number): string {
+  if (reason === 'too_large') {
+    return `The rendered story is too large to import (${bytes ?? 'over'} bytes; the limit is ${STORYBOOK_LIMITS.captureBytes})`
+  }
+  if (reason === 'too_many_elements')
+    return `The rendered story has too many elements to import (${bytes ?? 'over 20000'})`
+  return reason
+}
+
 /** One story, rendered and captured. A failure to load, a story that errors or one that never renders is a `capture` with `ok: false`, never a throw (an abort is the only throw). */
 export async function renderStory(page: StoryPage, request: RenderRequest, signal?: AbortSignal): Promise<StoryRender> {
   const issues: StorybookIssue[] = []
   const fail = (reason: string): StoryRender => ({ capture: { ok: false, reason }, props: [], issues })
   try {
     signal?.throwIfAborted()
+    const probe = probeName()
+    await page.installProbe(probeInstallSource(probe))
     await page.goto(storyIframeUrl(request.baseUrl, request.storyId, request.args), STORYBOOK_LIMITS.renderMs)
-    const state = await page.waitForState(STORYBOOK_LIMITS.renderMs)
+    const state = await page.waitForState(probe, STORYBOOK_LIMITS.renderMs)
     if (state === 'error') return fail('Storybook shows an error for this story')
     await page.evaluateSource(CAPTURE_PRELUDE)
     await page.evaluate(settleStory, 2000)
     let props: ArgProp[] = []
     let displayName: string | undefined
     if (request.readMeta) {
-      const raw = await page.evaluate(readStoryMeta, request.storyId).catch(() => null)
-      const meta = raw === null ? undefined : storyMetaSchema.safeParse(raw)
+      /* the answer comes from the page's own world: a bounded string, parsed and validated like anything else */
+      const raw = await page.readMeta(probe, request.storyId).catch(() => null)
+      let json: unknown
+      try {
+        json = typeof raw === 'string' && raw.length <= MAX_PROBE_CHARS + 1024 ? JSON.parse(raw) : null
+      } catch {
+        json = null
+      }
+      const meta = json === null ? undefined : storyMetaSchema.safeParse(json)
       if (meta?.success) {
         const read = readArgTypes(meta.data.argTypes, meta.data.initialArgs)
         props = read.props
@@ -77,14 +100,26 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     const textArgs = props
       .filter((prop) => prop.type === 'text' && typeof prop.initial === 'string')
       .map((prop) => ({ prop: prop.name, value: String(prop.initial) }))
-    const result = await page.evaluate(captureStory, {
+    const result: unknown = await page.evaluate(captureStory, {
       textArgs,
       styleProperties: STYLE_PROPERTIES,
       maxBytes: STORYBOOK_LIMITS.captureBytes,
       maxElements: 300,
     })
-    /* the page can return anything, so nothing is read before the schema has parsed it */
-    const parsed = storyCaptureSchema.safeParse(result)
+    /* serialized and measured in the isolated world: a string within the cap, or a small refusal. Anything else is not from the capture */
+    if (typeof result !== 'string') {
+      const refusal = captureRefusalSchema.safeParse(result)
+      if (!refusal.success) return fail('The page returned a capture Doop could not read')
+      return fail(refusalMessage(refusal.data.reason, refusal.data.bytes))
+    }
+    if (result.length > STORYBOOK_LIMITS.captureBytes) return fail(refusalMessage('too_large', result.length))
+    let json: unknown
+    try {
+      json = JSON.parse(result)
+    } catch {
+      return fail('The page returned a capture Doop could not read')
+    }
+    const parsed = storyCaptureSchema.safeParse(json)
     if (!parsed.success) return fail('The page returned a capture Doop could not read')
     const capture = parsed.data
     if (capture.ok) {

@@ -29,10 +29,14 @@ export const capturedStorySchema = z
     message: 'styles and paths do not line up',
   })
 
-export const storyCaptureSchema = z.union([
-  capturedStorySchema,
-  z.object({ ok: z.literal(false), reason: z.string().max(300) }),
-])
+/** what `captureStory` answers when it will not hand the story over: small by construction */
+export const captureRefusalSchema = z.object({
+  ok: z.literal(false),
+  reason: z.string().max(300),
+  bytes: z.number().int().nonnegative().optional(),
+})
+
+export const storyCaptureSchema = z.union([capturedStorySchema, captureRefusalSchema])
 
 /** Whether `value` is plain JSON of bounded size, depth and string length, checked without recursion. */
 export function isBoundedJson(value: unknown, limits = { nodes: 20_000, depth: 6, string: 400 }): boolean {

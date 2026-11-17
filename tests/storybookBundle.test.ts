@@ -1,4 +1,4 @@
-import postcss, { type AtRule, type Rule } from 'postcss'
+import { parseCss, type CssNode } from '../server/componentCss.ts'
 import { describe, expect, it } from 'vitest'
 import { componentBundleSchema } from '../shared/componentBundle.ts'
 import {
@@ -9,16 +9,11 @@ import {
   safeDeclarationValue,
   type StoryPage,
 } from '../shared/storybook/bundle.ts'
-import {
-  captureStory,
-  readStoryMeta,
-  settleStory,
-  STYLE_PROPERTIES,
-  type CapturedStory,
-} from '../shared/storybook/capture.ts'
+import { captureStory, settleStory, STYLE_PROPERTIES, type CapturedStory } from '../shared/storybook/capture.ts'
 import type { StoryEntry } from '../shared/storybook/index.ts'
 import { STORYBOOK_LIMITS } from '../shared/storybook/plan.ts'
 import { guardCss, splitRules } from '../shared/storybook/cssGuard.ts'
+import { probeAttribute, probeInstallSource, probeName } from '../shared/storybook/probe.ts'
 import { isBoundedJson } from '../shared/storybook/schemas.ts'
 
 const entry = (title: string, name = 'Default'): StoryEntry => ({
@@ -50,24 +45,24 @@ function shot(overrides: Partial<CapturedStory> = {}): CapturedStory {
 function fakePage(log: string[], options: { fail?: (url: string) => boolean } = {}): StoryPage {
   let url = ''
   return {
+    installProbe: async () => {},
     goto: async (next) => {
       url = next
       log.push(next)
     },
     waitForState: async () => (options.fail?.(url) ? 'error' : 'ready'),
+    readMeta: async () =>
+      JSON.stringify({
+        argTypes: {
+          tone: { control: 'select', options: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'] },
+          on: { control: 'boolean' },
+        },
+        initialArgs: { tone: 'a' },
+        displayName: 'MyButton',
+      }),
     evaluateSource: async () => undefined,
     evaluate: (async (fn: unknown) => {
       if (fn === settleStory) return undefined
-      if (fn === readStoryMeta) {
-        return {
-          argTypes: {
-            tone: { control: 'select', options: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'] },
-            on: { control: 'boolean' },
-          },
-          initialArgs: { tone: 'a' },
-          displayName: 'MyButton',
-        }
-      }
       if (fn === captureStory) {
         const given = new URL(url).searchParams.get('args') ?? ''
         const tone = given.match(/tone:(\w)/)?.[1] ?? 'a'
@@ -77,7 +72,7 @@ function fakePage(log: string[], options: { fail?: (url: string) => boolean } = 
             property === 'color' ? `tone-${tone}` : property === 'opacity' && on ? '0.5' : '',
           ),
         ]
-        return shot({ styles })
+        return JSON.stringify(shot({ styles }))
       }
       throw new Error('unexpected evaluate')
     }) as StoryPage['evaluate'],
@@ -292,15 +287,15 @@ describe('diffStyles against a page that writes its own paths and values', () =>
 
 describe('renderStory against a page that lies', () => {
   const pageReturning = (capture: unknown, meta: unknown = { argTypes: {}, initialArgs: {} }): StoryPage => ({
+    installProbe: async () => {},
     goto: async () => {},
     waitForState: async () => 'ready',
+    readMeta: async () => (typeof meta === 'string' ? meta : JSON.stringify(meta)),
     evaluateSource: async () => undefined,
-    evaluate: (async (fn: unknown) => {
-      if (fn === readStoryMeta) return meta
-      if (fn === captureStory) return capture
-      return undefined
-    }) as StoryPage['evaluate'],
+    evaluate: (async (fn: unknown) => (fn === captureStory ? capture : undefined)) as StoryPage['evaluate'],
   })
+  /* what the isolated-world capture sends: one JSON string */
+  const sent = (value: unknown) => JSON.stringify(value)
   const request = { baseUrl: 'https://sb.test/', storyId: 'a--b', args: {}, readMeta: true }
 
   it.each([
@@ -308,14 +303,32 @@ describe('renderStory against a page that lies', () => {
     ['styles that do not line up with paths', { ...shot(), paths: ['a', 'b'] }],
     ['a style row of the wrong length', { ...shot(), styles: [['x']] }],
     ['an html that is not a string', { ...shot(), html: 5 }],
-    ['an html over 2 MB', { ...shot(), html: 'x'.repeat(2_000_001) }],
     ['a huge shape', { ...shot(), shape: 'x'.repeat(20_001) }],
     ['too many shared rules', { ...shot(), sharedRules: Array.from({ length: 501 }, () => 'a{}') }],
     ['a null result', null],
-    ['a string', 'ok'],
+    ['a string that is not JSON', 'ok'],
   ])('turns %s into a failed capture, never a throw', async (_name, result) => {
-    const rendered = await renderStory(pageReturning(result), request)
+    const rendered = await renderStory(pageReturning(typeof result === 'string' ? result : sent(result)), request)
     expect(rendered.capture).toEqual({ ok: false, reason: 'The page returned a capture Doop could not read' })
+  })
+
+  it('refuses a capture that is not a string within the cap, without parsing it', async () => {
+    const raw = await renderStory(pageReturning({ ...shot() }), request)
+    expect(raw.capture).toEqual({ ok: false, reason: 'The page returned a capture Doop could not read' })
+    const long = await renderStory(pageReturning('{"x":"' + 'x'.repeat(2_000_000) + '"}'), request)
+    expect(long.capture).toMatchObject({ ok: false, reason: expect.stringContaining('too large') })
+  })
+
+  it('reports the capture function’s own refusals', async () => {
+    const big = await renderStory(pageReturning({ ok: false, reason: 'too_large', bytes: 50_000_000 }), request)
+    expect(big.capture).toEqual({
+      ok: false,
+      reason: 'The rendered story is too large to import (50000000 bytes; the limit is 2000000)',
+    })
+    const many = await renderStory(pageReturning({ ok: false, reason: 'too_many_elements', bytes: 30_000 }), request)
+    expect(many.capture).toMatchObject({ ok: false, reason: expect.stringContaining('too many elements') })
+    const nothing = await renderStory(pageReturning({ ok: false, reason: 'The story rendered nothing' }), request)
+    expect(nothing.capture).toEqual({ ok: false, reason: 'The story rendered nothing' })
   })
 
   it('ignores a meta that is not what it should be, and says so', async () => {
@@ -323,8 +336,9 @@ describe('renderStory against a page that lies', () => {
       { argTypes: {}, initialArgs: {}, displayName: 5 },
       'x',
       { argTypes: { a: 'y'.repeat(401) }, initialArgs: {} },
+      '{"argTypes":"' + 'y'.repeat(300_000) + '"}',
     ]) {
-      const rendered = await renderStory(pageReturning(shot(), meta), request)
+      const rendered = await renderStory(pageReturning(sent(shot()), meta), request)
       expect(rendered.capture.ok).toBe(true)
       expect(rendered.props).toEqual([])
       expect(rendered.displayName).toBeUndefined()
@@ -382,29 +396,39 @@ describe('a renderer that cannot open pages', () => {
   })
 })
 
-/** The CSS of a bundle, parsed: what a stylesheet would really contain, not what it looks like as a string. */
+/** The CSS of a bundle, parsed with the importer's own parser: what the importer will read, not what the string looks like. */
 function assertOnlySafeCss(css: string | undefined, selectors: 'emitted' | 'any'): void {
   if (!css) return
-  const root = postcss.parse(css)
-  root.walk((node) => {
-    if (node.type === 'atrule') {
-      expect(
-        ['media', 'supports', 'container', 'layer', 'font-face', 'keyframes'],
-        `@${(node as AtRule).name}`,
-      ).toContain((node as AtRule).name)
-    } else if (node.type === 'rule' && selectors === 'emitted') {
-      for (const selector of (node as Rule).selectors)
-        expect(
-          isEmittedPath(selector, selector.includes(' > ') || selector.includes(':nth-child') ? 1 : 0),
-          selector,
-        ).toBe(true)
-    } else if (node.type === 'decl') {
-      const value = node.value
-      for (const match of value.matchAll(/url\(\s*["']?([^"')]*)/gi)) expect(match[1], value).toMatch(/^https?:\/\//i)
-      expect(value).not.toMatch(/javascript|expression|<|@import/i)
+  const allowed = ['font-face', 'keyframes']
+  const check = (nodes: CssNode[]) => {
+    for (const node of nodes) {
+      if (node.kind === 'atomic') {
+        expect(allowed, `@${node.name}`).toContain(node.name)
+        continue
+      }
+      if (node.kind === 'group') {
+        expect(node.prelude).toMatch(/^@(?:media|supports|container|layer)\b/)
+        check(node.nodes)
+        continue
+      }
+      if (selectors === 'emitted') {
+        for (const selector of node.selector.split(',').map((part) => part.trim())) {
+          expect(
+            isEmittedPath(selector, selector.includes(' > ') || selector.includes(':nth-child') ? 1 : 0),
+            selector,
+          ).toBe(true)
+        }
+      }
+      for (const declaration of node.body.split(';').filter((part) => part.trim())) {
+        const value = declaration.slice(declaration.indexOf(':') + 1)
+        for (const match of value.matchAll(/url\(\s*["']?([^"')]*)/gi))
+          expect(match[1], value).toMatch(/^https?:\/\/|^data:image\//i)
+        expect(value).not.toMatch(/javascript|expression|<|@import/i)
+      }
     }
-  })
-  expect(css).not.toMatch(/<\/style|@import|<script/i)
+  }
+  check(parseCss(css))
+  expect(css).not.toMatch(/<\/style|@import|<script|\/\*/i)
 }
 
 describe('a page that hands back hostile CSS', () => {
@@ -415,39 +439,42 @@ describe('a page that hands back hostile CSS', () => {
   function hostilePage(): StoryPage {
     let url = ''
     return {
+      installProbe: async () => {},
       goto: async (next) => {
         url = next
       },
       waitForState: async () => 'ready',
+      readMeta: async () =>
+        JSON.stringify({ argTypes: { tone: { control: 'select', options: ['a', 'b'] } }, initialArgs: { tone: 'a' } }),
       evaluateSource: async () => undefined,
       evaluate: (async (fn: unknown) => {
         if (fn === settleStory) return undefined
-        if (fn === readStoryMeta)
-          return { argTypes: { tone: { control: 'select', options: ['a', 'b'] } }, initialArgs: { tone: 'a' } }
         if (fn !== captureStory) throw new Error('unexpected evaluate')
         const variant = url.includes('args=')
         const badPaths = url.includes('hostile-paths')
-        return shot({
-          css: [
-            OK_RULES,
-            '.x { background: url(javascript:alert(1)); }',
-            '.y { background: url("https://cdn.test/ok.png"); }',
-            '@import url(//evil.test/x.css);',
-            '.z { color: red; } </style><script>alert(1)</script>',
-          ].join('\n'),
-          sharedRules: [
-            '@import url(//evil.test/y.css);',
-            'body { margin: 0; }',
-            'a{}b{',
-            ':root { --x: 1 } @charset "x"; ',
-          ],
-          paths: badPaths ? ['b{}@import url(//evil.test)'] : ['button.btn'],
-          styles: [
-            STYLE_PROPERTIES.map((property) =>
-              variant && property === 'color' ? HOSTILE_VALUE : variant && property === 'cursor' ? 'pointer' : '',
-            ),
-          ],
-        })
+        return JSON.stringify(
+          shot({
+            css: [
+              OK_RULES,
+              '.x { background: url(javascript:alert(1)); }',
+              '.y { background: url("https://cdn.test/ok.png"); }',
+              '@import url(//evil.test/x.css);',
+              '.z { color: red; } </style><script>alert(1)</script>',
+            ].join('\n'),
+            sharedRules: [
+              '@import url(//evil.test/y.css);',
+              'body { margin: 0; }',
+              'a{}b{',
+              ':root { --x: 1 } @charset "x"; ',
+            ],
+            paths: badPaths ? ['b{}@import url(//evil.test)'] : ['button.btn'],
+            styles: [
+              STYLE_PROPERTIES.map((property) =>
+                variant && property === 'color' ? HOSTILE_VALUE : variant && property === 'cursor' ? 'pointer' : '',
+              ),
+            ],
+          }),
+        )
       }) as StoryPage['evaluate'],
     }
   }
@@ -511,21 +538,51 @@ describe('guardCss', () => {
     ['a { color: red } </style><script>x</script>', 'a { color: red }'],
     ['a { content: "</style>" }', ''],
     ['@media screen { @import url(x); }', ''],
+    ['a { background: url(https://a.example/x/*) } b { color: red }', ''],
+    ['.ok { color: red }\n/* c */ .b { color: blue }', '.ok { color: red }'],
+    ['a { content: "/*" }', ''],
   ])('%j keeps %j', (css, kept) => {
     expect(guardCss(css).css).toBe(kept)
   })
 
   it('keeps well-formed rules of the kinds the capture writes', () => {
     const css =
-      '/* c */ .a:hover > b { color: red }\n@media (min-width: 1px) { .a { margin: 0 } }\n@font-face { font-family: X; src: url("https://f.test/x.woff2") }\n@keyframes k { to { opacity: 0 } }\n.m { background: url("data:image/svg+xml;utf8,<svg/>") }'
+      '.a:hover > b { color: red }\n@media (min-width: 1px) { .a { margin: 0 } }\n@font-face { font-family: X; src: url("https://f.test/x.woff2") }\n@keyframes k { to { opacity: 0 } }\n.m { background: url("data:image/svg+xml;utf8,<svg/>") }'
     const { css: kept, dropped } = guardCss(css)
     expect(dropped).toBe(0)
     expect(splitRules(kept).rules).toHaveLength(5)
+  })
+
+  it('does not let a /* inside an unquoted url() hide an @import from the parser', async () => {
+    const hostile =
+      'a{background:url(https://a.example/x/*)} @import "//evil.example/e.css"; c{background:url(https://b.example/*/)}'
+    const { css } = guardCss(hostile)
+    expect(parseCss(css).filter((node) => node.kind === 'atomic')).toEqual([])
+    expect(css).not.toContain('@import')
+    expect(css).not.toContain('evil.example')
   })
 
   it('keeps the good rules around a bad one', () => {
     const { css, dropped } = guardCss('.a{color:red}\n.b{background:url(javascript:x)}\n.c{color:blue}')
     expect(dropped).toBe(1)
     expect(css).toBe('.a{color:red}\n.c{color:blue}')
+  })
+})
+
+describe('the probe', () => {
+  it('has a different random name each time, and an attribute a DOM can carry', () => {
+    const names = new Set(Array.from({ length: 20 }, () => probeName()))
+    expect(names.size).toBe(20)
+    for (const name of names) {
+      expect(name).toMatch(/^__doop_probe_[0-9a-f]{24}$/)
+      expect(probeAttribute(name)).toMatch(/^data-doop-probe-[0-9a-f]{24}$/)
+    }
+  })
+
+  it('installs as one self-contained expression that needs no helper from this module', () => {
+    const source = probeInstallSource('__doop_probe_abc')
+    expect(() => new Function(source)).not.toThrow()
+    expect(source).toContain('"__doop_probe_abc"')
+    expect(source).toContain('const __name')
   })
 })
