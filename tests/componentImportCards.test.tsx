@@ -288,7 +288,8 @@ it('cli: mints a ticket when opened and shows the command, its expiry and the ag
   expect(dialog.textContent).toContain('--storybook http://localhost:6006')
   expect(dialog.textContent).toContain('--package @acme/ui')
   expect(dialog.textContent).toContain('Ask your agent to import your components')
-  expect(button(dialog, /New command/)).toBeUndefined()
+  expect(button(dialog, /New command/)).toBeTruthy()
+  expect(dialog.querySelector('[data-slot="cli-command-spent"]')).toBeNull()
 })
 
 it('cli: the command lapses at its expiry and "New command" mints another', async () => {
@@ -372,4 +373,122 @@ it('the picker lists both cards for an editor and neither for a viewer', () => {
   expect(ids(false)).not.toContain('storybook')
   expect(ids(false)).not.toContain('cli')
   expect(importSources().map((s) => s.id)).toEqual(expect.arrayContaining(['website', 'github', 'storybook', 'cli']))
+})
+
+const PLAN = [
+  { name: 'Button', group: 'Inputs/Button', stories: 3, renders: 6 },
+  { name: 'Select', group: 'Inputs/Select', stories: 2, renders: 4 },
+  { name: 'Card', group: 'Layout/Card', stories: 1, renders: 2 },
+]
+
+/** Types an address, runs the dry run and answers it with `plan`, leaving the preview open. */
+async function previewOf(plan: typeof PLAN) {
+  const dry = stream()
+  answerWith(() => dry.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  await dry.send({ type: 'plan', components: plan, renders: 12 })
+  await dry.send({ type: 'result', result: RESULT })
+  await dry.end()
+  return dialog
+}
+
+const checkboxes = (dialog: Element) =>
+  Array.from(dialog.querySelectorAll<HTMLInputElement>('[data-slot="storybook-choose"] input[type="checkbox"]'))
+
+it('storybook error: an invalid failure shows the server message, never the address copy', async () => {
+  const run = stream()
+  answerWith(() => run.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  await run.send({ type: 'error', code: 'invalid', message: 'The story “Button/Primary” threw while rendering.' })
+  await run.end()
+  const alert = dialog.querySelector('[role="alert"]')!
+  expect(alert.textContent).toContain('The import did not finish')
+  expect(alert.textContent).toContain('The story “Button/Primary” threw while rendering.')
+  expect(alert.textContent).not.toContain('does not look like')
+  expect(alert.textContent).not.toContain('Use the command line')
+})
+
+it('storybook choose: every title is ticked, unticking sends the rest as include', async () => {
+  const dialog = await previewOf(PLAN)
+  expect(dialog.querySelector('[data-slot="selection-bar"]')?.textContent).toContain('3 of 3 selected')
+  const boxes = checkboxes(dialog)
+  expect(boxes).toHaveLength(3)
+  expect(boxes.every((b) => b.checked)).toBe(true)
+  await click(boxes[2]!)
+  expect(dialog.querySelector('[data-slot="selection-bar"]')?.textContent).toContain('2 of 3 selected')
+
+  const real = stream()
+  answerWith(() => real.response)
+  await click(button(dialog, /^Import$/))
+  expect(sentBody().include).toEqual(['Inputs/Button', 'Inputs/Select'])
+  expect(sentBody().dryRun).toBeUndefined()
+})
+
+it('storybook choose: with everything ticked no include is sent, and Clear leaves nothing to import', async () => {
+  const dialog = await previewOf(PLAN)
+  await click(button(dialog, /^Clear$/))
+  expect(button(dialog, /^Import$/).disabled).toBe(true)
+  await click(button(dialog, /^Select all$/))
+  expect(button(dialog, /^Import$/).disabled).toBe(false)
+  const real = stream()
+  answerWith(() => real.response)
+  await click(button(dialog, /^Import$/))
+  expect('include' in sentBody()).toBe(false)
+})
+
+it('storybook choose: a one-component plan has no checklist', async () => {
+  const dialog = await previewOf(PLAN.slice(0, 1))
+  expect(dialog.querySelector('[data-slot="storybook-choose"]')).toBeNull()
+})
+
+it('storybook starting: the bar is indeterminate until the first plan line, and the screen height is one value', async () => {
+  const dialog = await previewOf(PLAN)
+  const run = stream()
+  answerWith(() => run.response)
+  await click(button(dialog, /^Import$/))
+  expect(dialog.querySelector('[role="progressbar"]')?.getAttribute('data-state')).toBe('indeterminate')
+  expect(dialog.querySelector('[data-slot="import-screen"]')?.className).toContain('min-h-[440px]')
+  await run.send({ type: 'progress', rendered: 1, total: 12, component: 'Button' })
+  expect(dialog.querySelector('[role="progressbar"]')?.getAttribute('data-state')).toBe('loading')
+})
+
+it('storybook cancel: the notice is a visible status callout', async () => {
+  const dialog = await previewOf(PLAN)
+  answerWith((s) => stream(s).response)
+  await click(button(dialog, /^Import$/))
+  await click(button(dialog, /^Cancel$/))
+  expect(dialog.querySelector('[data-slot="storybook-cancelled"]')?.getAttribute('role')).toBe('status')
+})
+
+it('cli: once components have landed the command shows as used and a new one starts a new count', async () => {
+  openCanvas([component('old')])
+  answerWith(() => Response.json({ ...TICKET, expires_at: new Date(Date.now() + 15 * 60_000).toISOString() }))
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  expect(dialog.querySelector('[data-slot="code-block"]')).not.toBeNull()
+  await act(async () => {
+    openCanvas([component('old'), component('new-1')])
+  })
+  expect(dialog.querySelector('[data-slot="cli-expiry"]')?.textContent).toBe(
+    'Used. Make a new command to import again.',
+  )
+  expect(dialog.querySelector('[data-slot="cli-command-spent"]')?.textContent).toContain(TICKET.command)
+  expect(dialog.querySelector('[data-slot="code-block"]')).toBeNull()
+  expect(dialog.textContent).toContain('1 component arrived')
+
+  await click(button(dialog, /New command/))
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(dialog.querySelector('[data-slot="code-block"]')).not.toBeNull()
+  expect(dialog.textContent).not.toContain('arrived')
+  expect(dialog.querySelector('[data-slot="cli-expiry"]')?.textContent).toContain('Works once')
+})
+
+it('cli: New command is there while the command is still good', async () => {
+  answerWith(() => Response.json({ ...TICKET, expires_at: new Date(Date.now() + 15 * 60_000).toISOString() }))
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  await click(button(dialog, /New command/))
+  expect(fetchMock).toHaveBeenCalledTimes(2)
 })

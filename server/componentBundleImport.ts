@@ -19,7 +19,9 @@ import * as actions from './actions.ts'
 import { prepareComponent } from './bundleVariants.ts'
 import { sanitizeStylesheet, unsafeCssValue } from './bundleSanitize.ts'
 import { ComponentError, createComponentFromHtml, updateComponent } from './componentActions.ts'
-import { parseCss, splitTopLevel, type CssNode } from './componentCss.ts'
+import { parseCss, serializeNodes, splitTopLevel, type CssNode } from './componentCss.ts'
+import { inferBindings, kidsOf, rootFragment } from './componentEngine.ts'
+import { serializeOuter } from 'parse5'
 import { savepoint, transaction } from './journal.ts'
 import { store } from './store.ts'
 import { WorkBudgetError } from './workBudget.ts'
@@ -210,6 +212,28 @@ function rootVariables(nodes: CssNode[]): { name: string; value: string }[] {
   })
 }
 
+/** Shared css without the custom properties declared on :root that are design tokens (a frame gets those from its token block);
+ *  a :root rule left with nothing is dropped, and every other rule stays. */
+export function withoutTokenVariables(css: string, tokens: ReadonlySet<string>): string {
+  if (!css || !tokens.size) return css
+  const prune = (nodes: CssNode[]): CssNode[] =>
+    nodes.flatMap((node): CssNode[] => {
+      if (node.kind === 'group') {
+        const inner = prune(node.nodes)
+        return inner.length ? [{ ...node, nodes: inner }] : []
+      }
+      if (node.kind !== 'rule') return [node]
+      const onRoot = splitTopLevel(node.selector, ',').some((selector) => /^(:root|html)$/i.test(selector.trim()))
+      if (!onRoot) return [node]
+      const kept = splitTopLevel(node.body, ';').filter((declaration) => {
+        const name = declaration.slice(0, declaration.indexOf(':')).trim()
+        return declaration.trim() !== '' && !(name.startsWith('--') && tokens.has(name))
+      })
+      return kept.length ? [{ ...node, body: ` ${kept.join('; ')}; ` }] : []
+    })
+  return serializeNodes(prune(parseCss(css)))
+}
+
 function tokenCandidates(bundle: ComponentBundle, sharedCss: string, issues: ImportIssue[]): TokenCandidate[] {
   const found = new Map<string, TokenCandidate>()
   const add = (name: string, value: string, type: TokenType | undefined, explicit: boolean) => {
@@ -354,6 +378,16 @@ function propsForUpdate(bundled: BundleComponent['props'], existing: readonly Co
   return [...kept, ...[...byName.values()].filter((prop) => !known.has(prop.name))]
 }
 
+/** The markup as a new component would store it: with no bindings of its own, the text, image and link props a main infers.
+ *  An update sends the same, so an unchanged bundle leaves the definition as it was. */
+function withInferredBindings(html: string): string {
+  if (html.includes('data-doop-prop')) return html
+  const roots = kidsOf(rootFragment(html.trim()))
+  if (roots.length !== 1) return html
+  inferBindings(roots[0]!)
+  return serializeOuter(roots[0]!)
+}
+
 /** The components a new main names in a <doop-use> that resolved to nothing. */
 function missingNested(def: ComponentDef): string[] {
   if (!def.mainFrameId) return []
@@ -395,7 +429,7 @@ function writeOne(
         description: component.description,
         props: propsForUpdate(prepared.props, match.props),
         code,
-        html: prepared.html,
+        html: withInferredBindings(prepared.html),
         css: prepared.css,
       },
       ctx.actor,
@@ -510,6 +544,8 @@ export function importComponentBundle(
   const issues: ImportIssue[] = []
   /* the bundle's own css (resets, :root variables) goes through the same sanitizer as a component's, once, and leads each stylesheet */
   const shared = sanitizeStylesheet(bundle.css ?? '')
+  /* what each component's stylesheet starts with: the shared css less the :root variables that are tokens (set once tokens are made) */
+  let sharedCss = shared.value
   issues.push(...shared.issues)
   const claimed = new Set<string>()
   const runnable = plans.filter((plan) => {
@@ -526,6 +562,8 @@ export function importComponentBundle(
     const toCreate = runnable.filter((plan) => !plan.match)
     result.pageId = importPageId(ctx.canvasId, ctx.actor, !dryRun && toCreate.length > 0)
     result.tokens = importTokens(ctx.canvasId, tokenCandidates(bundle, shared.value, issues), ctx.actor, dryRun)
+    const isToken = new Set([...store.getTokens(ctx.canvasId).map((token) => token.name), ...result.tokens.created])
+    sharedCss = withoutTokenVariables(shared.value, isToken)
     return toCreate
   }
 
@@ -541,7 +579,7 @@ export function importComponentBundle(
       transaction(() => {
         writes()
         for (const plan of runnable)
-          record(result, plan, runUnit(ctx, plan, undefined, result.pageId, issues, true, shared.value))
+          record(result, plan, runUnit(ctx, plan, undefined, result.pageId, issues, true, sharedCss))
         throw new DryRunDone(finish())
       })
     } catch (error) {
@@ -567,7 +605,7 @@ export function importComponentBundle(
     try {
       batch(() => {
         for (const plan of chunk)
-          record(local, plan, runUnit(ctx, plan, spots.get(plan), result.pageId, found, false, shared.value))
+          record(local, plan, runUnit(ctx, plan, spots.get(plan), result.pageId, found, false, sharedCss))
       })
     } catch (error) {
       /* in one operation the whole import is one unit and a failure is the caller's */

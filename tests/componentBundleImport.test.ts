@@ -7,6 +7,7 @@ vi.mock('../server/db/persist.ts', () => ({
   saveFrameVersion: () => {},
   saveTask: () => {},
   saveComponent: () => {},
+  saveToken: () => {},
   deleteComponent: () => {},
 }))
 
@@ -226,6 +227,76 @@ describe('importing a component bundle', () => {
     expect(result.issues.map((issue) => issue.code)).toEqual(
       expect.arrayContaining(['dropped_element', 'unsafe_url', 'inline_data']),
     )
+  })
+})
+
+describe('a CLI bundle imported twice', () => {
+  const cli = () => ({
+    version: 1,
+    source: { kind: 'cli', name: 'storybook-static' },
+    package: '@acme/ui',
+    css: ':root { --brand: #0a5; --shadow: 0 1px 2px #0003 } * { box-sizing: border-box } body { margin: 0 }',
+    components: [
+      {
+        name: 'Button',
+        html: '<button class="btn">Go</button>',
+        css: '.btn { padding: 1px; color: var(--brand) }',
+        props: [{ name: 'tone', type: 'enum', options: ['a', 'b'] }],
+        variants: { tone: { b: { css: '.btn { color: red }' } } },
+        code: {
+          exportName: 'Button',
+          origin: { kind: 'cli', storyId: 'button--default', url: 'http://localhost:6006/' },
+        },
+      },
+      { name: 'Badge', html: '<span class="badge"><b>New</b></span>', css: '.badge { color: var(--brand) }' },
+    ],
+  })
+
+  it('reports every component unchanged, with no revision and no write', () => {
+    const first = run(cli())
+    expect(first.created).toHaveLength(2)
+    const before = first.created.map(({ id }) => {
+      const def = findComponent(canvasId, id)!
+      return { id, rev: def.rev, updatedAt: def.updatedAt, frameAt: store.getFrame(def.mainFrameId!)!.updatedAt }
+    })
+    const lines = actions.getActivity(canvasId).length
+    const again = run(cli())
+    expect(again.created).toEqual([])
+    expect(again.updated).toEqual([])
+    expect(again.unchanged.map((entry) => entry.name).sort()).toEqual(['Badge', 'Button'])
+    for (const entry of before) {
+      const def = findComponent(canvasId, entry.id)!
+      expect({ rev: def.rev, updatedAt: def.updatedAt, frameAt: store.getFrame(def.mainFrameId!)!.updatedAt }).toEqual({
+        rev: entry.rev,
+        updatedAt: entry.updatedAt,
+        frameAt: entry.frameAt,
+      })
+      expect(def.history).toEqual([])
+    }
+    expect(actions.getActivity(canvasId).length).toBe(lines)
+    expect(run(cli(), true).unchanged).toHaveLength(2)
+  })
+
+  it('leaves out of each component the :root variables that are tokens, and keeps the rest of the shared css', () => {
+    const result = run(cli())
+    expect(store.getTokens(canvasId).map((token) => token.name)).toContain('--brand')
+    for (const { id } of result.created) {
+      const css = findComponent(canvasId, id)!.rawCss
+      expect(css).not.toMatch(/--brand\s*:/)
+      expect(css).toContain('box-sizing: border-box')
+    }
+  })
+
+  it('drops a :root rule left empty', () => {
+    const result = run({
+      version: 1,
+      source: { kind: 'cli' },
+      css: ':root { --brand: #0a5 } .card { margin: 0 }',
+      components: [{ name: 'Card', html: '<div class="card">c</div>' }],
+    })
+    const css = findComponent(canvasId, result.created[0]!.id)!.rawCss
+    expect(css).not.toContain(':root')
+    expect(css).toContain('margin: 0')
   })
 })
 

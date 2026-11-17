@@ -116,7 +116,7 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
   const fill = fillsScreen ? `.${rootClass} {\n  min-height: 100vh;\n  min-height: 100dvh;\n}\n` : ''
   const joined =
     scopePageCss([split.globalCss, split.moduleCss].filter(Boolean).join('\n'), rootClass) + (fill ? `\n${fill}` : '')
-  const css = joined || (tw ? '' : '/* no styles */\n')
+  const css = joined
 
   const options = pageOptions(fc, session)
   const fragment = { nodeName: '#document-fragment', childNodes: body.childNodes } as unknown as Tree.DocumentFragment

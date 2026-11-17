@@ -89,10 +89,10 @@ function readme(styling: ReactStyling, hasTokens: boolean, hasFonts: boolean): s
     '',
     tailwind
       ? '- `src/components/` has one `.tsx` per component, styled with Tailwind utility classes. A `.module.css` sits beside a component only when some of its CSS (keyframes, complex selectors, `url()` images) has no utility. Components the canvas maps to your own package are imported from it and have no file here.'
-      : '- `src/components/` has one `.tsx` per component and its `.module.css`. Components the canvas maps to your own package are imported from it and have no file here.',
+      : '- `src/components/` has one `.tsx` per component and, only when it has styles, its `.module.css`. Components the canvas maps to your own package are imported from it and have no file here.',
     tailwind
       ? '- `src/pages/` has one `.tsx` per exported frame, and a `.css` only for rules that have no utility. A page `.css` is global and scoped by the page root class.'
-      : '- `src/pages/` has one `.tsx` and `.css` per exported frame. The page `.css` is global and scoped by the page root class.',
+      : '- `src/pages/` has one `.tsx` per exported frame and a `.css` only when the frame has styles. The page `.css` is global and scoped by the page root class.',
     hasTokens
       ? tailwind
         ? "- `src/tokens.css` imports Tailwind's theme and utilities (no Preflight reset: the canvas was designed under browser defaults), then holds the canvas tokens as a Tailwind `@theme` block and as CSS custom properties. `src/tokens.json` has the same tokens as W3C design tokens."
