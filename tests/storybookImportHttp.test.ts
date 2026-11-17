@@ -244,7 +244,7 @@ describe.skipIf(!findBrowserPath())(
           agent_name: 'T',
           job_id: started.job_id,
         })
-        expect(['running', 'cancelled']).toContain(cancelled.status)
+        expect(['cancelling', 'cancelled']).toContain(cancelled.status)
         /* the renderer closed its page, so the story request is cut off well inside the 30 s the render would otherwise take */
         await cut
         expect((await untilNotRunning(second, id, started.job_id)).status).toBe('cancelled')

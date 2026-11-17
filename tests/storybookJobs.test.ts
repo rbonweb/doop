@@ -6,6 +6,7 @@ vi.mock('../server/storybookImportRun.ts', async (importOriginal) => {
   return { ...actual, runStorybookImport: run.runStorybookImport }
 })
 
+import { store } from '../server/store.ts'
 import { ComponentError } from '../server/componentActions.ts'
 import { StorybookIndexError, STORYBOOK_IMPORTS_PER_HOUR } from '../server/storybookImport.ts'
 import {
@@ -17,7 +18,7 @@ import {
   readStorybookJob,
   startStorybookJob,
 } from '../server/storybookJobs.ts'
-import type { Actor } from '../shared/types.ts'
+import type { Actor, Canvas } from '../shared/types.ts'
 
 /* A Storybook import as a job: started, read and stopped through its id, never tied to the request that began it. The run is a stand-in the test finishes on cue, so no read waits on a clock. */
 
@@ -34,6 +35,7 @@ const actor = { name: 'T', kind: 'agent' } as unknown as Actor
 
 interface RunOptions {
   signal: AbortSignal
+  onWriting: () => void
   onPlan: (components: unknown[], info: unknown) => void
   onRender: (event: { rendered: number; total: number; component: string }) => void
 }
@@ -93,6 +95,33 @@ beforeEach(() => {
 })
 
 describe('a Storybook import job', () => {
+  it('holds the canvas in memory until it ends, so an idle sweep cannot drop its html mid-import', async () => {
+    const id = `job-canvas-${owners++}`
+    store.init([{ id, name: 'Job', frames: [], pages: [], components: [] } as unknown as Canvas])
+    const handle = controlledRun()
+    const who = owner()
+    const started = await start(who, { canvasId: id })
+    expect(store.isLoaded(id)).toBe(true)
+    store.evictIdle(0, Date.now() + 3_600_000)
+    expect(store.isLoaded(id)).toBe(true)
+    await handle.finish()
+    expect(readStorybookJob(started.job_id, id, mine(who))?.status).toBe('done')
+    store.evictIdle(0, Date.now() + 7_200_000)
+    expect(store.isLoaded(id)).toBe(false)
+  })
+
+  it('lets the canvas go when the job fails or is cancelled too', async () => {
+    const id = `job-canvas-${owners++}`
+    store.init([{ id, name: 'Job', frames: [], pages: [], components: [] } as unknown as Canvas])
+    const handle = controlledRun()
+    const who = owner()
+    const started = await start(who, { canvasId: id })
+    cancelStorybookJob(started.job_id, id, mine(who))
+    await handle.settled
+    store.evictIdle(0, Date.now() + 3_600_000)
+    expect(store.isLoaded(id)).toBe(false)
+  })
+
   it('starts running with its plan, shows progress, and ends done with the result', async () => {
     const handle = controlledRun()
     const who = owner()
@@ -155,12 +184,40 @@ describe('a Storybook import job', () => {
     const handle = controlledRun()
     const who = owner()
     const started = await start(who)
-    expect(cancelStorybookJob(started.job_id, 'canvas-1', mine(who))?.status).toBe('running')
+    /* until the run ends, a read says it is stopping, not that it is still importing */
+    expect(cancelStorybookJob(started.job_id, 'canvas-1', mine(who))?.status).toBe('cancelling')
+    expect(readStorybookJob(started.job_id, 'canvas-1', mine(who))?.status).toBe('cancelling')
     expect(handle.options.signal.aborted).toBe(true)
     await handle.settled
     expect(readStorybookJob(started.job_id, 'canvas-1', mine(who))?.status).toBe('cancelled')
     /* a finished job is left as it is */
     expect(cancelStorybookJob(started.job_id, 'canvas-1', mine(who))?.status).toBe('cancelled')
+  })
+
+  it('a cancel after the importer began writing does not stop it: the job ends done and says so', async () => {
+    const handle = controlledRun()
+    const who = owner()
+    const started = await start(who)
+    handle.options.onWriting()
+    expect(readStorybookJob(started.job_id, 'canvas-1', mine(who))).toMatchObject({ status: 'running', writing: true })
+    expect(cancelStorybookJob(started.job_id, 'canvas-1', mine(who))).toMatchObject({
+      status: 'running',
+      writing: true,
+    })
+    expect(handle.options.signal.aborted).toBe(false)
+    await handle.finish()
+    expect(readStorybookJob(started.job_id, 'canvas-1', mine(who))?.status).toBe('done')
+  })
+
+  it('reports a failure while writing as failed, never as cancelled', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const handle = controlledRun()
+    const who = owner()
+    const started = await start(who)
+    handle.options.onWriting()
+    await handle.fail(new Error('write failed'))
+    expect(readStorybookJob(started.job_id, 'canvas-1', mine(who))?.status).toBe('failed')
+    log.mockRestore()
   })
 
   it('answers a finished job to cancel without changing it', async () => {
@@ -198,6 +255,16 @@ describe('a Storybook import job', () => {
 
   it('answers undefined for an id it never had (a restart, or expiry)', () => {
     expect(readStorybookJob('nope', 'canvas-1', mine('x'))).toBeUndefined()
+  })
+
+  it('keeps at most five finished jobs per account, dropping the oldest first', async () => {
+    const who = owner()
+    /* a failure before rendering gives the hour back, so an account can make these as fast as it likes */
+    run.runStorybookImport.mockRejectedValue(new StorybookIndexError('No Storybook index.json was found'))
+    const ids: string[] = []
+    for (let i = 0; i < 8; i++) ids.push((await start(who)).job_id)
+    const found = ids.map((id) => readStorybookJob(id, 'canvas-1', mine(who)) !== undefined)
+    expect(found).toEqual([false, false, false, true, true, true, true, true])
   })
 
   it('allows one running job per account, and another account its own', async () => {

@@ -146,6 +146,18 @@ function importStatus(job: JobView | undefined, canvas: Canvas): ToolResult {
     }
   }
   const { result, issues = [], renders } = job
+  if (job.status === 'cancelling') {
+    return {
+      data: { ok: true, ...job },
+      note: 'Cancelling: the renders are stopping and nothing will be written. Call get_import_status to see it end as cancelled.',
+    }
+  }
+  if (job.status === 'running' && job.writing) {
+    return {
+      data: { ok: true, ...job },
+      note: 'The components are being written now, so it is too late to cancel: the import will finish. Call get_import_status for the result.',
+    }
+  }
   if (job.status === 'running') {
     return {
       data: { ok: true, ...job },
@@ -155,7 +167,7 @@ function importStatus(job: JobView | undefined, canvas: Canvas): ToolResult {
   if (job.status === 'failed')
     return { data: { ok: true, ...job }, note: `The import failed: ${job.error?.message ?? 'unknown error'}` }
   if (job.status === 'cancelled')
-    return { data: { ok: true, ...job }, note: 'The import was cancelled and nothing was written.' }
+    return { data: { ok: true, ...job }, note: 'The import was cancelled before anything was written.' }
   if (!result) return { data: { ok: true, ...job } }
   const defs = [...result.created, ...result.updated].flatMap(({ id }) => {
     const def = id ? findComponent(canvas.id, id) : undefined
@@ -165,6 +177,9 @@ function importStatus(job: JobView | undefined, canvas: Canvas): ToolResult {
   return {
     data: { ok: true, ...job },
     note: [
+      ...(job.cancel_too_late
+        ? ['The cancel came too late: the components were already being written, so the import finished.']
+        : []),
       `Imported from the Storybook (${renders ?? job.rendered} story renders): ${counts}. The mains are on the "Imported components" page; compose screens from them with <doop-use component="Name">. Check one with get_component_preview.`,
       ...(result.skipped.length
         ? [`Refused: ${result.skipped.map((entry) => `${entry.name} (${entry.reason})`).join('; ')}`]
@@ -1002,7 +1017,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     name: 'get_import_status',
     title: 'See how a Storybook import is going',
     description:
-      'How an import_storybook job is going: { status: running | done | failed | cancelled, rendered, total, component, planned } while it runs, and on done the result (created, updated, unchanged, skipped, tokens, issues), on failed the error. Only the account that started the job, or another editor of the canvas, can read it. A job is kept 30 minutes after it ends; one the server lost (a restart) answers status "unknown": start the import again.',
+      'How an import_storybook job is going: { status: running | cancelling | done | failed | cancelled, rendered, total, component, planned } while it runs, and on done the result (created, updated, unchanged, skipped, tokens, issues), on failed the error. Only the account that started the job, or another editor of the canvas, can read it. A job is kept 30 minutes after it ends; one the server lost (a restart) answers status "unknown": start the import again.',
     readOnly: true,
     shape: { job_id: z.string().min(1).max(100).describe('The job_id import_storybook returned') },
     run(input, { canvas, userId, budgetKey, canEdit }) {

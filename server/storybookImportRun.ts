@@ -50,6 +50,8 @@ export interface StorybookRun {
   /** asked again right before the importer writes, since the render took minutes: whether the account may still edit this canvas */
   canEdit: () => boolean
   onPlan?: (components: PlannedComponent[], info: PlanInfo) => void
+  /** called once, right before the importer writes: from then on a cancel cannot stop the import */
+  onWriting?: () => void
   onRender?: (event: { rendered: number; total: number; component: string }) => void
   /** a test swaps what reaches a fake Storybook on this machine */
   deps?: StorybookImportDeps
@@ -82,6 +84,7 @@ export async function runStorybookImport(run: StorybookRun): Promise<StorybookRu
   /* the render took minutes: the account may have been demoted, or the request closed, since it began */
   run.signal?.throwIfAborted()
   if (!run.canEdit()) throw new ComponentError('You can no longer edit this canvas, so nothing was imported')
+  run.onWriting?.()
   const context = { canvasId: run.canvasId, actor: run.actor }
   const result = run.dryRun
     ? detached(() =>

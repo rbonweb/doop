@@ -12,6 +12,7 @@ import {
   type StorybookImportDeps,
 } from './storybookImport.ts'
 import { failedBeforeRendering, runStorybookImport, storybookFailure } from './storybookImportRun.ts'
+import { store } from './store.ts'
 import { outsideBudget } from './workBudget.ts'
 
 /**
@@ -28,7 +29,8 @@ const PLAN_WAIT_MS = 10_000
 /** The components a status lists: what an import takes. */
 const MAX_LISTED = 60
 
-export type JobStatus = 'running' | 'done' | 'failed' | 'cancelled'
+/** `cancelling` is what a read shows between cancel_import and the run ending; a job itself is only ever running, done, failed or cancelled. */
+export type JobStatus = 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'
 
 export interface JobPlan {
   /** renders the import will start with, and how many components the Storybook offers in all */
@@ -59,6 +61,10 @@ interface Job {
   error?: JobFailure
   controller: AbortController
   cancelRequested: boolean
+  /** the importer has begun writing components: a cancel can no longer stop it */
+  writing: boolean
+  /** the canvas is held in memory until the job ends */
+  release: () => void
   startedAt: number
   finishedAt?: number
 }
@@ -75,11 +81,19 @@ export interface JobView {
   issues?: ImportIssue[]
   renders?: number
   error?: JobFailure
+  /** the importer is writing the components now: cancel_import is too late */
+  writing?: boolean
+  /** a cancel was asked for but the writes had begun, so the import finished */
+  cancel_too_late?: boolean
 }
 
 const jobs = new Map<string, Job>()
 
-/** The job is not this caller's to see or stop, or is on another canvas. Said the same either way. */
+/** Finished jobs kept per account, and in all, whatever their age. */
+const MAX_FINISHED_PER_OWNER = 5
+const MAX_FINISHED = 500
+
+/** The job is not this caller's to see or stop, or is on another canvas. (An id nothing holds answers `undefined`: the job is gone.) */
 export class JobNotFoundError extends Error {
   constructor() {
     super('No import job with that id on this canvas.')
@@ -103,10 +117,27 @@ function sweep(now: number) {
   }
 }
 
+/** Drops the oldest finished jobs past the per-account and overall caps, so failures that cost nothing cannot pile up. */
+function trimFinished() {
+  const finished = [...jobs.values()].filter((job) => job.finishedAt !== undefined)
+  finished.sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))
+  const perOwner = new Map<string, number>()
+  for (const job of finished) perOwner.set(job.owner, (perOwner.get(job.owner) ?? 0) + 1)
+  let total = finished.length
+  for (const job of finished) {
+    const mine = perOwner.get(job.owner) ?? 0
+    if (mine <= MAX_FINISHED_PER_OWNER && total <= MAX_FINISHED) continue
+    jobs.delete(job.id)
+    perOwner.set(job.owner, mine - 1)
+    total--
+  }
+}
+
 function view(job: Job): JobView {
+  const cancelling = job.status === 'running' && job.cancelRequested
   return {
     job_id: job.id,
-    status: job.status,
+    status: cancelling ? 'cancelling' : job.status,
     rendered: job.rendered,
     total: job.total,
     component: job.component,
@@ -115,6 +146,8 @@ function view(job: Job): JobView {
     ...(job.issues ? { issues: job.issues } : {}),
     ...(job.renders !== undefined ? { renders: job.renders } : {}),
     ...(job.error ? { error: job.error } : {}),
+    ...(job.writing && job.status === 'running' ? { writing: true } : {}),
+    ...(job.cancelRequested && job.status === 'done' ? { cancel_too_late: true } : {}),
   }
 }
 
@@ -149,6 +182,8 @@ export interface StartJobInput {
 export async function startStorybookJob(input: StartJobInput): Promise<JobView> {
   const now = input.now ?? Date.now()
   sweep(now)
+  /* the canvas is read into memory before anything is counted: the checks below and the registration then share one synchronous stretch */
+  await store.load(input.canvasId)
   const checked = checkStorybookUrl(input.url, input.deps)
   if (!checked.ok) throw new ComponentError(checked.message)
   for (const job of jobs.values()) {
@@ -167,6 +202,8 @@ export async function startStorybookJob(input: StartJobInput): Promise<JobView> 
     component: null,
     controller: new AbortController(),
     cancelRequested: false,
+    writing: false,
+    release: store.hold(input.canvasId),
     startedAt: now,
   }
   jobs.set(job.id, job)
@@ -175,6 +212,8 @@ export async function startStorybookJob(input: StartJobInput): Promise<JobView> 
   const planned = new Promise<void>((resolve) => (planKnown = resolve))
   const settle = (status: JobStatus, patch: Partial<Job>) => {
     Object.assign(job, patch, { status, finishedAt: Date.now() })
+    job.release()
+    trimFinished()
     planKnown()
   }
   /* outside the request that started it: no write boundary and no work budget of its own to be charged to */
@@ -190,6 +229,9 @@ export async function startStorybookJob(input: StartJobInput): Promise<JobView> 
         signal: job.controller.signal,
         canEdit: input.canEdit,
         deps: input.deps,
+        onWriting: () => {
+          job.writing = true
+        },
         onPlan: (components, info) => {
           job.planned = planOf(components, info)
           job.total = info.importing
@@ -209,7 +251,8 @@ export async function startStorybookJob(input: StartJobInput): Promise<JobView> 
       settle('done', { result, issues, renders })
     },
     (error: unknown) => {
-      if (job.cancelRequested || job.controller.signal.aborted) {
+      /* cancelled only when the stop came before any write: past that, an error is a failure, with what was kept said by the importer */
+      if (job.cancelRequested && !job.writing) {
         settle('cancelled', {})
         return
       }
@@ -246,7 +289,7 @@ export function readStorybookJob(
   return view(job)
 }
 
-/** Stops a running job through its signal. A job that already ended is left as it is; one past the render (the writes had begun) still finishes. */
+/** Stops a running job through its signal. A job that already ended is left as it is; one whose writes had begun still finishes. */
 export function cancelStorybookJob(
   jobId: string,
   canvasId: string,
@@ -257,7 +300,8 @@ export function cancelStorybookJob(
   const job = jobs.get(jobId)
   if (!job) return undefined
   if (!reachable(job, canvasId, access.owner, access.canEdit)) throw new JobNotFoundError()
-  if (job.status === 'running') {
+  /* once the importer is writing, the signal is no longer read: the import finishes, and says so */
+  if (job.status === 'running' && !job.writing) {
     job.cancelRequested = true
     job.controller.abort(new Error('the import was cancelled'))
   }
