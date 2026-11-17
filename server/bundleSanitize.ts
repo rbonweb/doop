@@ -1,5 +1,5 @@
 import { serialize, type DefaultTreeAdapterTypes as Tree, type Token } from 'parse5'
-import { IF_ATTR, SLOT_ATTR, BIND_ATTR, styleText } from '../shared/components.ts'
+import { IF_ATTR, SLOT_ATTR, BIND_ATTR, USE_TAG, styleText, unsafeBindingTarget } from '../shared/components.ts'
 import { attrOf, isElement, rootFragment } from './componentEngine.ts'
 import { parseCss, serializeNodes, splitTopLevel, type CssNode } from './componentCss.ts'
 
@@ -104,6 +104,24 @@ function urlProblem(value: string): { code: string; message: string } | null {
   return null
 }
 
+/** A data-doop-prop list without the pieces that would bind a prop to an event handler or srcdoc/ping; the rest stays. */
+function cleanBindings(value: string, issues: SanitizeIssue[]): string {
+  const kept: string[] = []
+  for (const piece of value.split(',')) {
+    const at = piece.lastIndexOf(':')
+    const target = at === -1 ? '' : piece.slice(0, at)
+    if (target && (unsafeBindingTarget(target) || DROPPED_ATTRS.has(target.trim().toLowerCase()))) {
+      issues.push({
+        code: 'binding_dropped',
+        message: `the binding “${piece.trim().slice(0, 60)}” was removed: a prop is never bound to ${target.trim()}`,
+      })
+      continue
+    }
+    kept.push(piece)
+  }
+  return kept.join(',').trim()
+}
+
 function cleanAttributes(el: Tree.Element, issues: SanitizeIssue[]) {
   const kept: Token.Attribute[] = []
   for (const attr of el.attrs) {
@@ -111,6 +129,11 @@ function cleanAttributes(el: Tree.Element, issues: SanitizeIssue[]) {
     if (name.startsWith('on')) continue
     if (DROPPED_ATTRS.has(name)) continue
     if (name.startsWith('data-doop-') && !KEPT_DOOP_ATTRS.has(name)) continue
+    if (name === BIND_ATTR && el.tagName.toLowerCase() !== USE_TAG) {
+      const value = cleanBindings(attr.value, issues)
+      if (value) kept.push({ ...attr, value })
+      continue
+    }
     if (name === 'style') {
       const css = sanitizeDeclarations(attr.value, issues)
       if (css) kept.push({ ...attr, value: css })

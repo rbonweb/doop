@@ -15,7 +15,7 @@ import * as actions from '../server/actions.ts'
 import { executableParts } from './executableParts.ts'
 import { prepareComponent } from '../server/bundleVariants.ts'
 import { sanitizeMarkup, sanitizeStylesheet } from '../server/bundleSanitize.ts'
-import { ComponentError, findComponent, updateComponent } from '../server/componentActions.ts'
+import { ComponentError, createComponentFromHtml, findComponent, updateComponent } from '../server/componentActions.ts'
 import {
   guessTokenType,
   IMPORT_PAGE,
@@ -938,3 +938,81 @@ describe('nothing a bundle says can run in the frame it makes', () => {
 function hasMarkupOrControl(text: string): boolean {
   return [...text].some((char) => (char.codePointAt(0) ?? 0) <= 0x1f || '<>"'.includes(char))
 }
+
+/* A prop value is instance data: bound to an event handler or to an address it could become code. Parsed, not matched. */
+describe('bindings never make a prop an event handler or a script address', () => {
+  const frameWith = async (use: string) => {
+    const frame = actions.createFrame(
+      canvasId,
+      { name: 'Screen', html: `<!doctype html><html><head></head><body>${use}</body></html>` },
+      actor,
+    )!
+    await propagation.whenIdle()
+    return store.getFrame(frame.id)!.html
+  }
+
+  it('the importer drops the on* and srcdoc pieces of a binding list and keeps the rest', () => {
+    const result = sanitizeMarkup(
+      '<a data-doop-prop="onclick:x,ONMOUSEOVER:x,href:target,label" href="#">go</a><b data-doop-prop="onfocus:y">b</b><i data-doop-prop="srcdoc:z,title:t">i</i>',
+    )
+    expect(result.html).toBe(
+      '<a data-doop-prop="href:target,label" href="#">go</a><b>b</b><i data-doop-prop="title:t">i</i>',
+    )
+    expect(result.issues.filter((issue) => issue.code === 'binding_dropped')).toHaveLength(4)
+  })
+
+  it('a bundle with on* and href bindings, and an instance whose href is javascript:, stores nothing executable', async () => {
+    const result = run({
+      version: 1,
+      source: { kind: 'agent' },
+      components: [
+        {
+          name: 'Probe',
+          html: '<a class="probe" data-doop-prop="onclick:x,ONMOUSEOVER:x,href:target,label" href="#">go</a>',
+        },
+      ],
+    })
+    const def = findComponent(canvasId, result.created[0]!.id)!
+    expect(executableParts(store.getFrame(def.mainFrameId!)!.html)).toEqual([])
+    expect(def.template).not.toMatch(/onclick|onmouseover/i)
+    expect(result.issues.map((issue) => issue.code)).toContain('binding_dropped')
+    const instance = await frameWith('<doop-use component="Probe" target="javascript:alert(1)" label="hi"></doop-use>')
+    expect(executableParts(instance)).toEqual([])
+    expect(instance).toContain('>hi<')
+    const fine = await frameWith('<doop-use component="Probe" target="https://ok.test/a" label="ok"></doop-use>')
+    expect(fine).toContain('href="https://ok.test/a"')
+    expect(executableParts(fine)).toEqual([])
+  })
+
+  it('the engine refuses an on* target and a script address on every path, create_component included', async () => {
+    runOperation('create', canvasId, () =>
+      createComponentFromHtml(
+        canvasId,
+        {
+          name: 'Btn',
+          html: '<a class="b" data-doop-prop="onclick:x,onmouseover:x,href:target,formaction:go,src:pic,label" href="#">go</a>',
+          props: [{ name: 'pic', type: 'image' }],
+        },
+        actor,
+      ),
+    )
+    const def = findComponent(canvasId, 'Btn')!
+    expect(def.template).toContain('onclick:x')
+    for (const value of [
+      'javascript:alert(1)',
+      ' JaVa\tScript:alert(1)',
+      'vbscript:x',
+      'data:text/html,<script>alert(1)</script>',
+    ])
+      expect(
+        executableParts(
+          await frameWith(
+            `<doop-use component="Btn" x="alert(2)" target="${value}" go="${value}" pic="${value}" label="l"></doop-use>`,
+          ),
+        ),
+      ).toEqual([])
+    const html = await frameWith('<doop-use component="Btn" x="alert(2)" target="/ok" label="l"></doop-use>')
+    expect(executableParts(html)).toEqual([])
+    expect(html).toContain('href="/ok"')
+  })
+})

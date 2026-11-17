@@ -27,6 +27,46 @@ export const BIND_ATTR = 'data-doop-prop'
 /** `showIcon`, `!showIcon`, `tone=ghost` or `tone!=ghost`: the element exists only when this holds. */
 export const IF_ATTR = 'data-doop-if'
 
+/** Attributes that carry a URL: a value bound to one is checked, so a prop can never become a script address. */
+export const URL_TARGETS: ReadonlySet<string> = new Set([
+  'href',
+  'src',
+  'action',
+  'formaction',
+  'poster',
+  'xlink:href',
+  'srcset',
+])
+
+/** A binding target that is never written: an event handler, or an attribute that loads a document or pings an address. */
+export function unsafeBindingTarget(target: string): boolean {
+  const name = target.trim().toLowerCase()
+  return name.startsWith('on') || name === 'srcdoc' || name === 'ping'
+}
+
+/** Whether a value is an address that would run code or open a document when followed: javascript:, vbscript: or data:text/html,
+ *  read the way a browser reads the start of a URL (control characters and spaces ignored, any case). */
+export function unsafeUrl(value: string): boolean {
+  let text = ''
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0
+    if (
+      code > 0x20 &&
+      !(code >= 0x7f && code <= 0xa0) &&
+      code !== 0xad &&
+      !(code >= 0x200b && code <= 0x200f) &&
+      code !== 0x2028 &&
+      code !== 0x2029 &&
+      code !== 0x3000 &&
+      code !== 0xfeff
+    )
+      text += char
+  }
+  return /(?:^|[,;(])(?:javascript|vbscript|livescript|mocha):|^data:(?:text\/html|application\/xhtml|text\/xml)/i.test(
+    text,
+  )
+}
+
 /** Stylesheet text made safe to sit inside a `<style>` element: a `</style` (or `<!--`) in it would end the element and let
  *  what follows run as markup, so its `<` becomes the CSS escape for the same character. Every writer of a component's css
  *  into a frame goes through this. */
@@ -447,6 +487,11 @@ export function propValueProblem(prop: ComponentProp, value: string, lookup?: Co
       }
       return undefined
     }
+    case 'link':
+    case 'image':
+      return unsafeUrl(value)
+        ? 'use a web address, mailto:, tel: or a relative path, not a javascript:, vbscript: or data:text/html address'
+        : undefined
     case 'color':
       return isColorValue(value)
         ? undefined

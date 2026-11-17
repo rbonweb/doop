@@ -44,6 +44,9 @@ import {
   type InstanceOverrides,
   type PartOverride,
   styleText,
+  unsafeBindingTarget,
+  unsafeUrl,
+  URL_TARGETS,
   COMPONENT_REF,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR, isElementId, newElementId } from '../shared/elementId.ts'
@@ -329,7 +332,7 @@ function propValue(def: Revision, overrides: InstanceOverrides, name: string): s
   return overrides.props?.[name] ?? def.props.find((prop) => prop.name === name)?.default
 }
 
-function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides) {
+function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides, ctx: EngineContext) {
   const raw = attrOf(el, BIND_ATTR)
   if (raw === undefined) return
   setAttr(el, BIND_ATTR, null)
@@ -342,6 +345,21 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides)
     }
     const value = overrides.props?.[prop]
     if (value === undefined) continue
+    /* a bound value is instance data: it never becomes an event handler, and an address it sets cannot run code */
+    if (target !== null && el.tagName !== USE_TAG && unsafeBindingTarget(target)) {
+      ctx.issues.push({
+        code: 'ignored_attribute',
+        message: `${prop} is bound to ${target}, which a component never sets (event handlers and srcdoc stay out of instances)`,
+      })
+      continue
+    }
+    if (target !== null && URL_TARGETS.has(target.toLowerCase()) && unsafeUrl(value)) {
+      ctx.issues.push({
+        code: 'invalid_prop_value',
+        message: `"${value.slice(0, 60)}" was not set as ${target}: a javascript:, vbscript: or data:text/html address is refused`,
+      })
+      continue
+    }
     if (target === null) setOwnText(el, value)
     else if (target.startsWith('style.') || target.startsWith('--')) {
       const styles = parseStyle(attrOf(el, 'style'))
@@ -411,7 +429,7 @@ function renderPart(
   part: PartOverride | undefined,
   options: RenderOptions,
 ) {
-  applyBindings(el, def, overrides)
+  applyBindings(el, def, overrides, options.ctx)
   setAttr(el, SLOT_SUGGEST_ATTR, null)
   if (part) applyPartOverride(el, part)
   const isSlot = attrOf(el, SLOT_ATTR) !== undefined
