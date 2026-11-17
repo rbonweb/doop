@@ -1,3 +1,4 @@
+import postcss from 'postcss'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import { moduleClassName, splitComponentCss } from '../server/reactExport/cssSplit.ts'
@@ -221,6 +222,203 @@ describe('splitComponentCss: reading', () => {
 
   it('returns empty sheets for empty input', () => {
     expect(splitComponentCss('')).toEqual({ moduleCss: '', classes: [], globalCss: '', issues: [] })
+  })
+})
+
+describe('splitComponentCss: hardening', () => {
+  it('drops declarations with unbalanced parens, brackets or quotes', () => {
+    for (const css of ['.a{b:c(}', '.a{content:"abc}', '.a{b:c[}', ".a{b:'x}", '.a{b:c)}', '.a{b:c\\ }']) {
+      const out = splitComponentCss(`${css} .z { top: 0 }`)
+      expect(() => postcss.parse(out.moduleCss), css).not.toThrow()
+      expect(out.moduleCss, css).not.toContain('b:')
+      expect(out.issues.length, css).toBeGreaterThan(0)
+    }
+  })
+
+  it('drops a rule or at-rule whose prelude does not balance', () => {
+    const out = splitComponentCss('.a[x { top: 0 } @media (min-width: 1px { .b { top: 0 } } .ok { top: 1px }')
+    expect(() => postcss.parse(out.moduleCss)).not.toThrow()
+    expect(out.moduleCss).not.toContain('.b')
+    expect(out.issues.length).toBeGreaterThan(0)
+  })
+
+  it('keeps an @layer statement only in its plain form', () => {
+    expect(splitComponentCss('@layer a, b.c, d-e;').moduleCss).toBe('@layer a, b.c, d-e;\n')
+    for (const css of [
+      '@layer x ( ; @import url(https://evil/x.css) ; .z{a:b}',
+      '@layer ;',
+      '@layer a, ;',
+      '@layer "x";',
+    ]) {
+      const out = splitComponentCss(css)
+      expect(out.moduleCss, css).not.toContain('@import')
+      expect(out.moduleCss, css).not.toContain('@layer x')
+      expect(out.issues.length, css).toBeGreaterThan(0)
+    }
+  })
+
+  it('refuses preludes that carry a semicolon or a brace', () => {
+    const out = splitComponentCss(
+      '@media (a;b) { .x { top: 0 } } @keyframes a;b { from { top: 0 } } @keyframes ok { from; { top: 0 } 10px { top: 1px } to { top: 2px } }',
+    )
+    expect(flat(out.moduleCss)).toBe('.root b { from { top: 0; } } @keyframes ok { to { top: 2px; } }')
+    expect(out.issues.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it.each([
+    'composes: b from "../../../etc/passwd.css"',
+    'composes: x from global',
+    'compose-with: y',
+    'COMPOSES: z',
+    'comp\\6fses: z',
+  ])('drops %s', (declaration) => {
+    const out = splitComponentCss(`.a { ${declaration}; top: 0 }`)
+    expect(out.moduleCss).toBe('.a {\n  top: 0;\n}\n')
+    expect(out.issues).toHaveLength(1)
+  })
+
+  it.each([
+    ':global(.x) .a',
+    ':global .b',
+    '.c :global(body)',
+    ':local(.d)',
+    '.e:GLOBAL(.f)',
+    '.g:\\67 lobal(.h)',
+    ':global(body)',
+    'html:global(.x)',
+  ])('drops the selector %s', (selector) => {
+    const out = splitComponentCss(`${selector} { color: red } .ok { top: 0 }`)
+    expect(out.moduleCss).toBe('.ok {\n  top: 0;\n}\n')
+    expect(out.globalCss).toBe('')
+    expect(out.issues).toHaveLength(1)
+  })
+
+  it('drops only the bad selector of a list', () => {
+    const out = splitComponentCss('.a, :global(.b), .c { top: 0 }')
+    expect(out.moduleCss).toBe('.a,\n.c {\n  top: 0;\n}\n')
+    expect(out.issues).toHaveLength(1)
+  })
+
+  it.each(['.', '#', '. b', '.a >', '.a + ', '.a > > .b', '.1a', '.-1', 'a.', '.a#', '.a::', '.a >,', '.-'])(
+    'drops the badly formed selector "%s"',
+    (selector) => {
+      const out = splitComponentCss(`${selector} { color: red } .ok { top: 0 }`)
+      expect(out.moduleCss, selector).toBe('.ok {\n  top: 0;\n}\n')
+      expect(out.issues.length, selector).toBeGreaterThan(0)
+    },
+  )
+
+  it('keeps well formed selectors with combinators, pseudos and ids', () => {
+    const out = splitComponentCss('.a > .b ~ .c + #d, .e:nth-child(2n+1) > a::before, .f:not(.g) { top: 0 }')
+    expect(out.issues).toEqual([])
+    expect(out.classes).toEqual(['a', 'b', 'c', 'e', 'f', 'g'])
+  })
+
+  it('drops a nested block with a bad selector or a custom property block', () => {
+    const out = splitComponentCss('.a { top: 0; :global(.x) { color: red } --v: { a: b } &:hover { color: blue } }')
+    expect(flat(out.moduleCss)).toBe('.a { top: 0; &:hover { color: blue; } }')
+    expect(out.issues).toHaveLength(2)
+  })
+})
+
+/** a small seeded generator, so a failure repeats */
+function seeded(seed: number): () => number {
+  let state = seed
+  return () => {
+    state = (state + 0x6d2b79f5) | 0
+    let t = Math.imul(state ^ (state >>> 15), 1 | state)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+const FRAGMENTS = [
+  '.a',
+  '.b',
+  '.',
+  '#',
+  'a',
+  '*',
+  '&',
+  '>',
+  '+',
+  '~',
+  ',',
+  ':',
+  '::',
+  ':hover',
+  ':not(',
+  ':global(',
+  ':global',
+  ':local(',
+  '{',
+  '}',
+  '(',
+  ')',
+  '[',
+  ']',
+  '"',
+  "'",
+  ';',
+  '\\',
+  '/*',
+  '*/',
+  ' ',
+  '\n',
+  '=',
+  '!important',
+  '@media',
+  '@layer',
+  '@keyframes x',
+  '@keyframes',
+  '@font-face',
+  '@import',
+  '@charset "x"',
+  '@supports',
+  '@container',
+  '@property',
+  '@page',
+  'from',
+  'to',
+  '50%',
+  'url(',
+  'url(x.png)',
+  'url(javascript:',
+  'expression(',
+  'composes: a from "x"',
+  'color: red',
+  'content: "',
+  'background: url(',
+  '--x: ',
+  ':root',
+  'html',
+  'body',
+  '[data-a="b"]',
+  '[data-a=',
+  '1',
+  '-',
+  'x',
+]
+
+describe('splitComponentCss: output always parses', () => {
+  it('writes a moduleCss and globalCss that postcss reads, for thousands of random inputs', () => {
+    const random = seeded(20240611)
+    const failures: string[] = []
+    for (let n = 0; n < 6000; n++) {
+      const length = 1 + Math.floor(random() * 28)
+      let css = ''
+      for (let i = 0; i < length; i++) css += FRAGMENTS[Math.floor(random() * FRAGMENTS.length)]!
+      const out = splitComponentCss(css, { rootClass: random() < 0.5 ? 'root' : 'x y' })
+      for (const sheet of [out.moduleCss, out.globalCss]) {
+        try {
+          postcss.parse(sheet)
+        } catch {
+          failures.push(JSON.stringify(css))
+          break
+        }
+      }
+    }
+    expect(failures.slice(0, 5)).toEqual([])
   })
 })
 

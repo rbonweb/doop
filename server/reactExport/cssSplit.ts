@@ -34,7 +34,12 @@ const DROPPED_STATEMENTS = new Set(['import', 'charset', 'namespace'])
 const GLOBAL_START = /^(?::root|html|body)(?![\w-])/i
 const IDENT = /(?:[\w-]|[\u0080-￿]|\\(?:[0-9a-fA-F]{1,6}[ \t\n\r\f]?|[^\n]))+/y
 const PROPERTY_NAME = /^(?:--[^\s:;{}()"'\\]+|-?[A-Za-z_][\w-]*)$/
-const BLOCKED_PROPERTIES = new Set(['behavior', '-moz-binding'])
+/** `composes` makes CSS Modules load the named file at build time, so a collaborator could point it anywhere. */
+const BLOCKED_PROPERTIES = new Set(['behavior', '-moz-binding', 'composes', 'compose-with'])
+const LAYER_ORDER = /^@layer\s+[\w.-]+(?:\s*,\s*[\w.-]+)*\s*$/
+const KEYFRAMES_NAME = /^@(?:-[a-z]+-)?keyframes\s+[\w-]+$/i
+const KEYFRAME_SELECTOR = /^(?:from|to|\d*\.?\d+%)(?:\s*,\s*(?:from|to|\d*\.?\d+%))*$/i
+const SCOPE_ESCAPE = /:(?:global|local)(?![\w-])/i
 
 /** Splits one component's stylesheet (a definition's unscoped `rawCss`) into a CSS Modules sheet and a global sheet. Nothing unsafe survives: `@import`, `@charset`, `expression()`, `behavior`, `-moz-binding` and any `url()` that runs code are dropped and reported. */
 export function splitComponentCss(css: string, options: { rootClass?: string } = {}): CssModuleSplit {
@@ -222,6 +227,27 @@ function clip(text: string): string {
   return flat.length > 80 ? `${flat.slice(0, 77)}...` : flat
 }
 
+/** True when every quote is closed and every `(` and `[` is matched in order, so the text can be written into a stylesheet without swallowing what follows. A `{` or `}` is refused; a `;` too unless `semicolons` allows it (a declaration value may hold one inside `url(data:…;base64,…)`). */
+function balanced(text: string, semicolons: boolean): boolean {
+  const stack: string[] = []
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!
+    if (char === '\\') {
+      if (i + 1 >= text.length) return false
+      i++
+    } else if (char === '"' || char === "'") {
+      let end = i + 1
+      while (end < text.length && text[end] !== char && text[end] !== '\n') end += text[end] === '\\' ? 2 : 1
+      if (text[end] !== char) return false
+      i = end
+    } else if (char === '(' || char === '[') stack.push(char === '(' ? ')' : ']')
+    else if (char === ')' || char === ']') {
+      if (stack.pop() !== char) return false
+    } else if (char === '{' || char === '}' || (char === ';' && !semicolons)) return false
+  }
+  return stack.length === 0
+}
+
 /* ---------- declarations ---------- */
 
 /** The URL inside every `url(...)` of an already decoded value. */
@@ -274,7 +300,7 @@ function emitBody(body: string, context: Context, owner: string): string[] {
         })
         continue
       }
-      const problem = declarationProblem(name, value)
+      const problem = balanced(value, true) ? declarationProblem(name, value) : 'unbalanced brackets or quotes'
       if (problem) {
         context.issues.push({
           kind: 'css',
@@ -286,9 +312,14 @@ function emitBody(body: string, context: Context, owner: string): string[] {
       lines.push(`${name}: ${value};`)
       continue
     }
+    const prelude = tidy(item.prelude)
+    const problem = nestedPreludeProblem(prelude)
+    if (problem) {
+      context.issues.push({ kind: 'css', detail: `dropped nested block "${clip(prelude)}": ${problem}`, path: owner })
+      continue
+    }
     const inner = emitBody(item.body, context, owner)
     if (inner.length === 0) continue
-    const prelude = tidy(item.prelude)
     if (!prelude.startsWith('@')) for (const name of analyzeSelector(prelude).all) context.classes.add(name)
     lines.push(`${prelude} {\n${indent(inner.join('\n'))}\n}`)
   }
@@ -333,6 +364,56 @@ function analyzeSelector(selector: string): SelectorInfo {
   return { top, all }
 }
 
+/** Why a selector cannot be written into a module: it escapes the module's scope, is not well formed, or has unbalanced brackets or quotes. Null when it is fine. */
+function selectorProblem(selector: string): string | null {
+  if (!selector) return 'empty selector'
+  if (!balanced(selector, false)) return 'unbalanced brackets or quotes'
+  if (SCOPE_ESCAPE.test(decodeCssEscapes(selector))) return ':global and :local escape module scoping'
+  let depth = 0
+  let combinator = false
+  for (let i = 0; i < selector.length; i++) {
+    const char = selector[i]!
+    if (char === '\\') {
+      i++
+      combinator = false
+    } else if (char === '"' || char === "'") {
+      i = stringEnd(selector, i) - 1
+      combinator = false
+    } else if (char === '[') {
+      for (i++; i < selector.length && selector[i] !== ']'; i++) {
+        if (selector[i] === '\\') i++
+        else if (selector[i] === '"' || selector[i] === "'") i = stringEnd(selector, i) - 1
+      }
+      combinator = false
+    } else if (char === '(') depth++
+    else if (char === ')') depth = Math.max(0, depth - 1)
+    else if (char === '.' || char === '#') {
+      IDENT.lastIndex = i + 1
+      const name = IDENT.exec(selector)?.[0]
+      if (!name || /^-?\d/.test(name) || name === '-') return `"${char}" is not followed by a valid name`
+      i += name.length
+      combinator = false
+    } else if (char === ':') {
+      const start = selector[i + 1] === ':' ? i + 2 : i + 1
+      IDENT.lastIndex = start
+      const name = IDENT.exec(selector)?.[0]
+      if (!name) return 'a pseudo-class or pseudo-element has no name'
+      i = start + name.length - 1
+      combinator = false
+    } else if (depth === 0 && (char === '>' || char === '+' || char === '~')) {
+      if (combinator) return 'two combinators in a row'
+      combinator = true
+    } else if (!/\s/.test(char)) combinator = false
+  }
+  return combinator ? 'trailing combinator' : null
+}
+
+function nestedPreludeProblem(prelude: string): string | null {
+  if (prelude.startsWith('@')) return balanced(prelude, false) ? null : 'unbalanced brackets or quotes'
+  if (prelude.startsWith('--')) return 'a custom property holding a block is not supported'
+  return splitTopLevel(prelude, ',').map(selectorProblem).find(Boolean) ?? (prelude ? null : 'empty selector')
+}
+
 function escapeIdent(name: string): string {
   return name.replace(/[^\w-]/g, (char) => `\\${char}`)
 }
@@ -361,8 +442,11 @@ function processStatement(prelude: string, context: Context, blocks: Blocks): vo
     return
   }
   const name = atName(prelude)
-  if (name === 'layer') blocks.module.push(`${tidy(prelude)};`)
-  else if (DROPPED_STATEMENTS.has(name)) {
+  if (name === 'layer') {
+    const flat = tidy(prelude)
+    if (LAYER_ORDER.test(flat)) blocks.module.push(`${flat};`)
+    else context.issues.push({ kind: 'css', detail: `dropped malformed @layer statement "${clip(prelude)}"` })
+  } else if (DROPPED_STATEMENTS.has(name)) {
     context.issues.push({ kind: 'css', detail: `dropped @${name}: "${clip(prelude)}"` })
   } else context.issues.push({ kind: 'css', detail: `dropped unsupported at-rule "${clip(prelude)}"` })
 }
@@ -370,10 +454,18 @@ function processStatement(prelude: string, context: Context, blocks: Blocks): vo
 function processAtRule(item: Item & { body: string }, context: Context, blocks: Blocks): void {
   const prelude = tidy(item.prelude)
   const name = atName(prelude)
+  if (!balanced(prelude, false) || (name === 'keyframes' && !KEYFRAMES_NAME.test(prelude))) {
+    context.issues.push({ kind: 'css', detail: `dropped at-rule with a malformed prelude "${clip(prelude)}"` })
+    return
+  }
   if (name === 'keyframes') {
     const frames: string[] = []
     for (const frame of parseItems(item.body)) {
       if (frame.body === null) continue
+      if (!KEYFRAME_SELECTOR.test(tidy(frame.prelude))) {
+        context.issues.push({ kind: 'css', detail: `dropped keyframe "${clip(frame.prelude)}"`, path: prelude })
+        continue
+      }
       const inner = emitBody(frame.body, context, prelude)
       if (inner.length > 0) frames.push(`${tidy(frame.prelude)} {\n${indent(inner.join('\n'))}\n}`)
     }
@@ -391,12 +483,21 @@ function processAtRule(item: Item & { body: string }, context: Context, blocks: 
 
 function processStyleRule(item: Item & { body: string }, context: Context, blocks: Blocks): void {
   const owner = tidy(item.prelude)
+  if (!balanced(owner, false)) {
+    context.issues.push({ kind: 'css', detail: `dropped rule "${clip(owner)}": unbalanced brackets or quotes` })
+    return
+  }
   const declarations = emitBody(item.body, context, owner)
   if (declarations.length === 0) return
   const moduleSelectors: string[] = []
   const globalSelectors: string[] = []
   const classes: string[] = []
-  for (const selector of splitTopLevel(item.prelude, ',').map(tidy)) {
+  for (const selector of splitTopLevel(owner, ',')) {
+    const problem = selectorProblem(selector)
+    if (problem) {
+      context.issues.push({ kind: 'css', detail: `dropped selector "${clip(selector)}": ${problem}`, path: owner })
+      continue
+    }
     const info = analyzeSelector(selector)
     if (info.top.length > 0) {
       moduleSelectors.push(selector)
