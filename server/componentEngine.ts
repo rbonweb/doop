@@ -511,10 +511,32 @@ function forwardingOf(
           })
         continue
       }
+      if (nestsComponent(ctx, value, outer.id)) {
+        if (report)
+          ctx.issues.push({
+            code: 'invalid_prop_value',
+            message: `${outer.name}: "${value}" would put “${outer.name}” inside itself, so ${prop} was ignored and the component written in the template renders`,
+          })
+        continue
+      }
       forward.component = value
     } else forward.props.set(target, { outer: prop, value })
   }
   return forward
+}
+
+/** Does this component, or one it is built from, hold the component `targetId`? */
+function nestsComponent(ctx: EngineContext, ref: string, targetId: string): boolean {
+  const seen = new Set<string>()
+  const stack = [ref]
+  for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+    const def = ctx.find(next)
+    if (!def || seen.has(def.id)) continue
+    if (def.id === targetId) return true
+    seen.add(def.id)
+    for (const match of def.template.matchAll(/component="([^"]+)"/g)) stack.push(match[1]!)
+  }
+  return false
 }
 
 const FORWARD_GRAMMAR =
@@ -538,10 +560,12 @@ function forwardedState(
   for (const [target, { value }] of forward.props) {
     const prop = nested.props.find((candidate) => candidate.name === target)
     if (!prop) {
-      ctx.issues.push({
-        code: 'ignored_attribute',
-        message: `${BIND_ATTR} on <${USE_TAG} component="${nested.name}"> forwards to “${target}”, which “${nested.name}” does not have (it has ${nested.props.map((p) => p.name).join(', ') || 'no props'})`,
-      })
+      /* a swapped-in component need not have every prop the literal one had */
+      if (!swapped)
+        ctx.issues.push({
+          code: 'ignored_attribute',
+          message: `${BIND_ATTR} on <${USE_TAG} component="${nested.name}"> forwards to “${target}”, which “${nested.name}” does not have (it has ${nested.props.map((p) => p.name).join(', ') || 'no props'})`,
+        })
       continue
     }
     const problem = propValueProblem(prop, value, ctx.find)
@@ -806,7 +830,7 @@ function withoutForwarded(
 /** What a template's nested `<doop-use>` says beyond which component it is: forwarded props and a
  *  condition. In a main the instance element stands for the use, so it carries them until the
  *  template is read back from it. */
-const CARRIED_ATTRS = [BIND_ATTR, IF_ATTR]
+export const CARRIED_ATTRS = [BIND_ATTR, IF_ATTR]
 
 const INTERNAL_ATTRS = new Set([INSTANCE_ATTR, REV_ATTR, PROPS_ATTR, OVERRIDES_ATTR, PART_ATTR])
 

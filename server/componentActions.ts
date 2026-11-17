@@ -18,6 +18,7 @@ import {
   componentSignature,
   isDeleted,
   isPropName,
+  parseBindings,
   propValueProblem,
   variantAttrs,
   type ComponentLookup,
@@ -558,8 +559,9 @@ export const createComponentFromElement = atomic(function createComponentFromEle
 const clip = (text: string | undefined) => text?.slice(0, MAX_COMPONENT_DESCRIPTION)
 
 function hasBindings(el: Element): boolean {
-  /* on a <doop-use> it binds nothing, so it is no sign the author named their props */
-  if (el.tagName === USE_TAG) return false
+  /* on a <doop-use> only a forwarding binding (inner:outer) names a prop; a bare name binds nothing */
+  if (el.tagName === USE_TAG)
+    return parseBindings(attrOf(el, BIND_ATTR) ?? '', el.tagName).some(({ target }) => target !== null)
   if (attrOf(el, BIND_ATTR) !== undefined) return true
   return kidsOf(el).some(hasBindings)
 }

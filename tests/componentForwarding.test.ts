@@ -16,7 +16,7 @@ import { store } from '../server/store.ts'
 import * as actions from '../server/actions.ts'
 import { blankComponent, contextFor } from '../server/components.ts'
 import { compactDocument, expandUses } from '../server/componentEngine.ts'
-import { changeInstances, updateComponent } from '../server/componentActions.ts'
+import { changeInstances, createComponentFromHtml, updateComponent } from '../server/componentActions.ts'
 import { COMPONENT_ATTR, isColorValue, type ComponentProp } from '../shared/components.ts'
 import type { Actor } from '../shared/types.ts'
 import { Client, startServer, type Server } from './harness'
@@ -292,6 +292,72 @@ describe('prop forwarding', () => {
       expect(stored).toContain('Go')
       actions.updateFrame(page, { html: stored }, actor)
       expect(html(page)).toBe(stored)
+    })
+  })
+
+  describe('review fixes', () => {
+    it('keeps the carried attributes out of the main’s own markers, and re-saves the main byte-identical', () => {
+      const b = button()
+      const c = makeComponent(
+        'Card',
+        (id) =>
+          `<article ${COMPONENT_ATTR}="${id}"><doop-use component="${b.id}" label="Go" data-doop-prop="label:cta" data-doop-if="show"></doop-use></article>`,
+        [{ name: 'show', type: 'boolean', default: 'true' }],
+      )
+      const first = html(c.frame.id)
+      expect(first).not.toContain('data-doop-overrides')
+      expect(first).toContain('data-doop-prop="label:cta"')
+      expect(first).toContain('data-doop-if="show"')
+      expect(compactDocument(first, contextFor(canvasId))).not.toContain('overrides=')
+      actions.updateFrame(c.frame.id, { html: first }, actor)
+      const second = html(c.frame.id)
+      expect(second).toBe(first)
+      actions.updateFrame(c.frame.id, { html: second }, actor)
+      expect(html(c.frame.id)).toBe(second)
+    })
+
+    it('refuses a component:icon value that would nest the outer one, and the nested element comes back', () => {
+      const star = makeComponent('Star', (id) => `<i ${COMPONENT_ATTR}="${id}">star</i>`)
+      const c = card(`<doop-use component="${star.id}" data-doop-prop="component:icon"></doop-use>`)
+      updateComponent(canvasId, c.id, { props: [{ name: 'icon', type: 'instance' }] }, actor)
+      makeComponent('Wrapper', (id) => `<div ${COMPONENT_ATTR}="${id}"><doop-use component="${c.id}"></doop-use></div>`)
+      const loop = `<doop-use component="${c.id}" icon="Wrapper"></doop-use>`
+      expect(issuesOf(loop).join('\n')).toContain('would put “Card” inside itself')
+      const page = write(loop)
+      expect(bodyOf(page)).toContain('star')
+      actions.updateFrame(page, { html: html(page) }, actor)
+      expect(html(page)).not.toContain('"hidden":true')
+      const instanceId = /<article[^>]*data-doop-id="([^"]+)"/.exec(html(page))![1]!
+      changeInstances(canvasId, page, [{ instanceId, props: { icon: 'Star' } }], actor)
+      expect(bodyOf(page)).toContain('star')
+    })
+
+    it('says nothing when a swapped-in component lacks a forwarded prop', () => {
+      const pill = makeComponent(
+        'Pill',
+        (id) => `<b ${COMPONENT_ATTR}="${id}"><span data-doop-prop="label">pill</span></b>`,
+      )
+      const star = makeComponent('Star', (id) => `<i ${COMPONENT_ATTR}="${id}">star</i>`)
+      const c = card(`<doop-use component="${pill.id}" data-doop-prop="component:icon,label:cta"></doop-use>`)
+      updateComponent(canvasId, c.id, { props: [{ name: 'icon', type: 'instance', accepts: ['Pill', 'Star'] }] }, actor)
+      const swapped = issuesOf(`<doop-use component="${c.id}" icon="Star" cta="x"></doop-use>`)
+      expect(swapped).toEqual([])
+      expect(issuesOf(`<doop-use component="${c.id}" cta="x"></doop-use>`)).toEqual([])
+      expect(star.id).toBeTruthy()
+    })
+
+    it('counts a forwarding binding on a <doop-use> as a binding, so no prop is inferred beside it', () => {
+      const b = button()
+      const made = createComponentFromHtml(
+        canvasId,
+        {
+          name: 'Banner',
+          html: `<div class="banner"><h3>Pro</h3><doop-use component="${b.id}" data-doop-prop="label:cta"></doop-use></div>`,
+        },
+        actor,
+      )
+      expect(made.inferred).toEqual([])
+      expect(made.component.props.map((prop) => prop.name)).toEqual(['cta'])
     })
   })
 
