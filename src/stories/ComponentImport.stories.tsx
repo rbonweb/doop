@@ -41,17 +41,29 @@ function Storybook({ phase, url = 'https://storybook.acme.com' }: { phase: Story
 
 export const StorybookIdle: Story = { render: () => <Storybook phase={{ kind: 'idle' }} url="" /> }
 
+const PLAN = ['Inputs/Button', 'Inputs/Select', 'Inputs/Checkbox', 'Layout/Card', 'Layout/Stack', 'Feedback/Toast'].map(
+  (group) => ({ name: group.split('/')[1]!, group, stories: 3, renders: 7 }),
+)
+
 export const StorybookPreview: Story = {
+  render: () => <Storybook phase={{ kind: 'preview', plan: PLAN, result: RESULT }} />,
+}
+
+/** One component: nothing to narrow, so the preview has no checklist. */
+export const StorybookPreviewSingle: Story = {
+  render: () => <Storybook phase={{ kind: 'preview', plan: PLAN.slice(0, 1), result: RESULT }} />,
+}
+
+export const StorybookStarting: Story = {
+  render: () => <Storybook phase={{ kind: 'running', rendered: 0, total: 0, component: null }} />,
+}
+
+export const StorybookCancelled: Story = { render: () => <Storybook phase={{ kind: 'idle', cancelled: true }} /> }
+
+export const StorybookFailed: Story = {
   render: () => (
     <Storybook
-      phase={{
-        kind: 'preview',
-        plan: [
-          { name: 'Button', stories: 6, renders: 14 },
-          { name: 'Input', stories: 4, renders: 9 },
-        ],
-        result: RESULT,
-      }}
+      phase={{ kind: 'refused', code: 'invalid', message: 'The story “Button/Primary” threw while rendering.' }}
     />
   ),
 }
@@ -66,7 +78,15 @@ export const StorybookPrivate: Story = {
   render: () => <Storybook phase={{ kind: 'refused', code: 'private', message: '' }} url="https://internal.acme.com" />,
 }
 
-const storyComponent = (id: string, rev: number) => ({ id, name: id, rev, props: [], slots: [], history: [] })
+const storyComponent = (id: string, rev: number, origin?: 'cli') => ({
+  id,
+  name: id,
+  rev,
+  props: [],
+  slots: [],
+  history: [],
+  ...(origin ? { code: { exportName: id, origin: { kind: origin } } } : {}),
+})
 
 /* the story answers the ticket route itself, so the card runs its whole flow with no server */
 function Cli({ lifetimeMs, landed = false }: { lifetimeMs: number; landed?: boolean }) {
@@ -93,7 +113,11 @@ function Cli({ lifetimeMs, landed = false }: { lifetimeMs: number; landed?: bool
             useStore.setState({
               canvas: {
                 id: 'canvas',
-                components: [storyComponent('Existing', 1), storyComponent('Button', 1), storyComponent('Card', 1)],
+                components: [
+                  storyComponent('Existing', 1),
+                  storyComponent('Button', 1, 'cli'),
+                  storyComponent('Card', 1, 'cli'),
+                ],
               } as unknown as Canvas,
             }),
           600,
@@ -114,4 +138,5 @@ function Cli({ lifetimeMs, landed = false }: { lifetimeMs: number; landed?: bool
 
 export const CliTicket: Story = { render: () => <Cli lifetimeMs={15 * 60_000} /> }
 export const CliExpired: Story = { render: () => <Cli lifetimeMs={-1000} /> }
+/** The command was used: its components landed, so it shows dimmed and a new one is offered. */
 export const CliComponentsLanded: Story = { render: () => <Cli lifetimeMs={14 * 60_000} landed /> }

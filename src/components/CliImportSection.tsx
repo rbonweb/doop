@@ -17,6 +17,12 @@ type Minted =
 
 const MINUTE = 60_000
 
+/** The components on the open canvas by id and revision: what a command's arrivals are measured against. */
+function snapshot(canvasId: string): Map<string, number> | null {
+  const open = useStore.getState().canvas
+  return open?.id === canvasId ? new Map((open.components ?? []).map((c) => [c.id, c.rev])) : null
+}
+
 async function mintTicket(canvasId: string, fallback: string, fresh: boolean): Promise<Minted> {
   try {
     const ticket = await createImportTicket(canvasId, { fresh })
@@ -62,6 +68,8 @@ export function CliImportSection({
   }, [canvasId, failedText, attempt])
 
   function renew() {
+    /* a new command starts a new count of what arrives */
+    setBaseline(snapshot(canvasId))
     setMinted({ kind: 'loading' })
     setAttempt((n) => n + 1)
   }
@@ -83,10 +91,7 @@ export function CliImportSection({
 
   /* what was on the canvas when this screen opened: anything new or revised after it is what the command sent */
   const components = useStore((s) => (s.canvas?.id === canvasId ? s.canvas.components : undefined))
-  const [baseline] = useState(() => {
-    const open = useStore.getState().canvas
-    return open?.id === canvasId ? new Map((open.components ?? []).map((c) => [c.id, c.rev])) : null
-  })
+  const [baseline, setBaseline] = useState(() => snapshot(canvasId))
   const landed = useMemo(() => {
     if (!baseline || !components) return 0
     return components.filter(
@@ -100,69 +105,82 @@ export function CliImportSection({
   }, [canvasId, landed])
 
   const expired = minted.kind === 'ready' && now >= minted.expiresAt
+  /* a lapsed or a used command no longer works; the card shows it dimmed and offers another */
+  const used = landed > 0
+  const spent = expired || used
 
   return (
-    <>
-      <ImportStepHeader
-        icon={<AppIcon brand="cli" size={40} />}
-        title={t('componentImport.cliHeading')}
-        lede={t('componentImport.cliLede')}
-      />
-      <div className="mt-[22px] flex flex-col gap-2.5" data-slot="cli-import">
-        <span className="text-label font-medium text-ink-soft">{t('componentImport.commandLabel')}</span>
-        {minted.kind === 'loading' && (
-          <div role="status" aria-label={t('componentImport.preparing')}>
-            <Skeleton className="h-[52px] w-full rounded-card" />
-          </div>
-        )}
-        {minted.kind === 'failed' && (
-          <Callout tone="error" className="flex flex-wrap items-center justify-between gap-2" role="alert">
-            <span>{minted.message}</span>
-            <Button size="sm" onClick={renew}>
-              {t('componentImport.newCommand')}
-            </Button>
-          </Callout>
-        )}
-        {minted.kind === 'ready' && (
-          <>
-            <div className={expired ? 'opacity-45' : undefined} aria-disabled={expired || undefined}>
-              <CodeBlock text={minted.ticket.command} />
+    <div className="flex min-h-[440px] flex-col" data-slot="import-screen">
+      <div className="flex-1">
+        <ImportStepHeader
+          icon={<AppIcon brand="cli" size={40} />}
+          title={t('componentImport.cliHeading')}
+          lede={t('componentImport.cliLede')}
+        />
+        <div className="mt-[22px] flex flex-col gap-2.5" data-slot="cli-import">
+          <span className="text-label font-medium text-ink-soft">{t('componentImport.commandLabel')}</span>
+          {minted.kind === 'loading' && (
+            <div role="status" aria-label={t('componentImport.preparing')}>
+              <Skeleton className="h-[52px] w-full rounded-card" />
             </div>
-            <div className="flex items-center justify-between gap-3">
-              <Note data-slot="cli-expiry" tone={expired ? 'error' : 'muted'}>
-                {expired
-                  ? t('componentImport.expired')
-                  : t('componentImport.expiresIn', { time: relativeIn(minted.expiresAt, now) })}
-              </Note>
-              {expired && (
-                <Button size="sm" variant="primary" onClick={renew}>
+          )}
+          {minted.kind === 'failed' && (
+            <Callout tone="error" className="flex flex-wrap items-center justify-between gap-2" role="alert">
+              <span>{minted.message}</span>
+              <Button size="sm" onClick={renew}>
+                {t('componentImport.newCommand')}
+              </Button>
+            </Callout>
+          )}
+          {minted.kind === 'ready' && (
+            <>
+              {spent ? (
+                <div
+                  aria-disabled
+                  data-slot="cli-command-spent"
+                  className="select-none break-all rounded-card bg-code px-3.5 py-3 font-mono text-label text-code-ink opacity-45"
+                >
+                  {minted.ticket.command}
+                </div>
+              ) : (
+                <CodeBlock text={minted.ticket.command} />
+              )}
+              <div className="flex items-center justify-between gap-3">
+                <Note data-slot="cli-expiry" tone={spent ? 'error' : 'muted'}>
+                  {used
+                    ? t('componentImport.used')
+                    : expired
+                      ? t('componentImport.expired')
+                      : t('componentImport.expiresIn', { time: relativeIn(minted.expiresAt, now) })}
+                </Note>
+                <Button size="sm" variant={spent ? 'primary' : 'ghost'} onClick={renew}>
                   {t('componentImport.newCommand')}
                 </Button>
-              )}
-            </div>
-          </>
-        )}
-        <Note size="sm">{t('componentImport.commandNote')}</Note>
-        <div className="flex items-start gap-2 rounded-row bg-sub px-3 py-2.5 text-body text-ink-soft">
-          <BotIcon size="rail" className="mt-0.5 flex-none text-ink-faint" aria-hidden />
-          <span>{t('componentImport.agentLine')}</span>
-        </div>
-        {landed > 0 && (
-          <Callout tone="success" className="flex flex-wrap items-center justify-between gap-2" role="status">
-            <span className="flex items-center gap-2">
-              <CheckIcon size={16} />
-              <span>
-                <b className="font-medium">{t('componentImport.landedHeading', { count: landed })}</b>{' '}
-                {t('componentImport.landedBody')}
+              </div>
+            </>
+          )}
+          <Note size="sm">{t('componentImport.commandNote')}</Note>
+          <div className="flex items-start gap-2 rounded-row bg-sub px-3 py-2.5 text-body text-ink-soft">
+            <BotIcon size="rail" className="mt-0.5 flex-none text-ink-faint" aria-hidden />
+            <span>{t('componentImport.agentLine')}</span>
+          </div>
+          {landed > 0 && (
+            <Callout tone="success" className="flex flex-wrap items-center justify-between gap-2" role="status">
+              <span className="flex items-center gap-2">
+                <CheckIcon size={16} />
+                <span>
+                  <b className="font-medium">{t('componentImport.landedHeading', { count: landed })}</b>{' '}
+                  {t('componentImport.landedBody')}
+                </span>
               </span>
-            </span>
-            <Button size="sm" variant="primary" onClick={() => onOpenPage(null)}>
-              {t('componentImport.openPage')}
-            </Button>
-          </Callout>
-        )}
+              <Button size="sm" variant="primary" onClick={() => onOpenPage(null)}>
+                {t('componentImport.openPage')}
+              </Button>
+            </Callout>
+          )}
+        </div>
       </div>
       <ImportStepFooter note={t('componentImport.cliNote')} onBack={onBack} />
-    </>
+    </div>
   )
 }
