@@ -70,7 +70,7 @@ export const componentImport = {
   ticketFailed: 'O Doop não conseguiu preparar um comando.',
   agentLine:
     'Peça ao seu agente para importar seus componentes. Qualquer agente conectado por MCP pode fazer isso por você.',
-  cliNote: 'O comando vale uma vez e para de funcionar após 15 minutos.',
+  cliNote: 'O comando vale uma vez e para de funcionar quando expira.',
   landedHeading: { one: '{count} componente chegou', other: '{count} componentes chegaram' },
   landedBody: 'Eles estão na página Imported components.',
 }

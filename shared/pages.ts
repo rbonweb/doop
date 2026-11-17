@@ -373,3 +373,6 @@ export function libraryLandingPageId(
   }
   return best?.id
 }
+
+/** The page the component importer puts every imported main on (created on the first import, reused after). */
+export const IMPORTED_COMPONENTS_PAGE = 'Imported components'

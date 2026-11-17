@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ApiError, errorMessage } from '@/lib/api'
-import { createImportTicket, relativeIn, type ImportTicket } from '@/lib/componentImport'
+import { createImportTicket, forgetImportTicket, relativeIn, type ImportTicket } from '@/lib/componentImport'
 import { useT } from '@/lib/i18n'
 import { useStore } from '@/lib/store'
 import { ImportStepFooter, ImportStepHeader } from './ImportSources'
@@ -17,9 +17,9 @@ type Minted =
 
 const MINUTE = 60_000
 
-async function mintTicket(canvasId: string, fallback: string): Promise<Minted> {
+async function mintTicket(canvasId: string, fallback: string, fresh: boolean): Promise<Minted> {
   try {
-    const ticket = await createImportTicket(canvasId)
+    const ticket = await createImportTicket(canvasId, { fresh })
     return { kind: 'ready', ticket, expiresAt: Date.parse(ticket.expires_at) }
   } catch (e) {
     return { kind: 'failed', message: e instanceof ApiError ? errorMessage(e, fallback) : fallback }
@@ -51,7 +51,7 @@ export function CliImportSection({
   /* the ticket is minted when the screen opens; a result that lands after the screen closed is dropped */
   useEffect(() => {
     let live = true
-    void mintTicket(canvasId, failedText).then((result) => {
+    void mintTicket(canvasId, failedText, attempt > 0).then((result) => {
       if (!live) return
       setNow(Date.now())
       setMinted(result)
@@ -89,8 +89,15 @@ export function CliImportSection({
   })
   const landed = useMemo(() => {
     if (!baseline || !components) return 0
-    return components.filter((c) => !c.deletedAt && (baseline.get(c.id) ?? -1) < c.rev).length
+    return components.filter(
+      (c) => !c.deletedAt && c.code?.origin?.kind === 'cli' && (baseline.get(c.id) ?? -1) < c.rev,
+    ).length
   }, [baseline, components])
+
+  /* the command was used: its ticket is spent, so the next opening mints a new one */
+  useEffect(() => {
+    if (landed > 0) forgetImportTicket(canvasId)
+  }, [canvasId, landed])
 
   const expired = minted.kind === 'ready' && now >= minted.expiresAt
 

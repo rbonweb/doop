@@ -13,7 +13,7 @@ import {
   type ComponentProp,
 } from '../shared/components.ts'
 import { MAX_TOKEN_VALUE, normalizeTokenName, type TokenType } from '../shared/designTokens.ts'
-import { canvasPages, pageFrames } from '../shared/pages.ts'
+import { canvasPages, IMPORTED_COMPONENTS_PAGE, pageFrames } from '../shared/pages.ts'
 import type { Actor } from '../shared/types.ts'
 import * as actions from './actions.ts'
 import { prepareComponent } from './bundleVariants.ts'
@@ -32,7 +32,7 @@ import { WorkBudgetError } from './workBudget.ts'
  * before it is written. Spec: .context/specs/components.md ("Importing a React library").
  */
 
-export const IMPORT_PAGE = 'Imported components'
+export const IMPORT_PAGE = IMPORTED_COMPONENTS_PAGE
 
 /** Components written per unit of work when the caller can open one (each gets its own work budget). */
 const BATCH_SIZE = 6

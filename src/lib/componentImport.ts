@@ -1,10 +1,7 @@
 import { ApiError, req } from './api'
 import { getLocale } from './i18n/locale'
 import { useStore } from './store'
-import { canvasPages } from '../../shared/pages'
-
-/** The page the importer puts every main on (`IMPORT_PAGE` in server/componentBundleImport.ts). */
-export const IMPORT_PAGE_NAME = 'Imported components'
+import { canvasPages, IMPORTED_COMPONENTS_PAGE } from '../../shared/pages'
 
 /** What the importer answers, for the dry run and the real run alike (contract: "Result"). */
 export interface ImportResult {
@@ -150,15 +147,46 @@ export interface ImportTicket {
   curl: string
 }
 
-export const createImportTicket = (canvasId: string) =>
+const mintTicket = (canvasId: string) =>
   req<ImportTicket>(`/api/canvases/${canvasId}/component-import/ticket`, { method: 'POST' })
+
+/* one ticket per canvas is in flight or live at a time: a screen that mounts twice (StrictMode in development,
+   a quick close and reopen) reuses it instead of spending another of the five an hour */
+const tickets = new Map<string, Promise<ImportTicket>>()
+const TICKET_MARGIN_MS = 5_000
+
+/** A live ticket for the canvas: the one already minted or being minted, else a new one (`fresh` forces it). */
+export function createImportTicket(
+  canvasId: string,
+  { fresh = false }: { fresh?: boolean } = {},
+): Promise<ImportTicket> {
+  const held = tickets.get(canvasId)
+  if (held && !fresh) {
+    return held.then((ticket) =>
+      Date.parse(ticket.expires_at) - Date.now() > TICKET_MARGIN_MS
+        ? ticket
+        : createImportTicket(canvasId, { fresh: true }),
+    )
+  }
+  const next = mintTicket(canvasId)
+  tickets.set(canvasId, next)
+  next.catch(() => {
+    if (tickets.get(canvasId) === next) tickets.delete(canvasId)
+  })
+  return next
+}
+
+/** Forgets the canvas's ticket: its command was used (a success consumes it), so the next opening mints anew. */
+export function forgetImportTicket(canvasId: string): void {
+  tickets.delete(canvasId)
+}
 
 /** The page the importer made, on the open canvas: the result's id, else the page by its name. */
 export function importedPageId(canvasId: string, pageId?: string | null): string | null {
   const canvas = useStore.getState().canvas
   if (!canvas || canvas.id !== canvasId) return null
   const pages = canvasPages(canvas)
-  return pages.find((p) => p.id === pageId)?.id ?? pages.find((p) => p.name === IMPORT_PAGE_NAME)?.id ?? null
+  return pages.find((p) => p.id === pageId)?.id ?? pages.find((p) => p.name === IMPORTED_COMPONENTS_PAGE)?.id ?? null
 }
 
 /** Shows the imported mains: switches to their page and opens the Components tab. */

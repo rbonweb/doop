@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { act } from 'react'
+import { act, StrictMode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { Canvas } from '../shared/types'
 import type { ComponentDef } from '../shared/components'
@@ -8,6 +8,7 @@ import { CliImportSection } from '../src/components/CliImportSection'
 import { importSources } from '../src/components/importSourceList'
 import { StorybookImportSection } from '../src/components/StorybookImportSection'
 import { Modal } from '../src/components/ui/modal'
+import { forgetImportTicket } from '../src/lib/componentImport'
 import { useStore } from '../src/lib/store'
 
 vi.mock('../src/lib/posthog', () => ({ posthog: { capture: vi.fn() } }))
@@ -23,6 +24,7 @@ let root: Root
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
   fetchMock.mockReset()
+  forgetImportTicket('canvas')
   onBack.mockReset()
   onUseCli.mockReset()
   onOpenPage.mockReset()
@@ -78,6 +80,11 @@ function stream(signal?: AbortSignal | null) {
     send: async (event: object) => {
       await act(async () => {
         controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))
+      })
+    },
+    sendRaw: async (text: string) => {
+      await act(async () => {
+        controller.enqueue(encoder.encode(text))
       })
     },
     end: async () => {
@@ -148,6 +155,25 @@ it('storybook preview: a dry run lists what would be created, updated and skippe
   answerWith(() => real.response)
   await click(button(dialog, /^Import$/))
   expect(sentBody()).toEqual({ url: 'https://storybook.acme.com', package: '@acme/ui' })
+})
+
+it('storybook stream: a line split across two chunks, and a last line with no newline, are both read', async () => {
+  const dry = stream()
+  answerWith(() => dry.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  const plan = JSON.stringify({ type: 'plan', components: [{ name: 'Button', stories: 1, renders: 2 }], renders: 2 })
+  await dry.sendRaw(plan.slice(0, 20))
+  await dry.sendRaw(`${plan.slice(20)}\n`)
+  const result = JSON.stringify({ type: 'result', result: RESULT })
+  await dry.sendRaw(result.slice(0, 30))
+  await dry.sendRaw(result.slice(30))
+  expect(dialog.textContent).toContain('Reading Storybook')
+  await dry.end()
+  expect(dialog.textContent).toContain('What would change')
+  expect(dialog.textContent).toContain('2 renders to read')
+  expect(dialog.textContent).toContain('1 component would be created')
 })
 
 it('storybook running then done: shows rendered of total and the component, then the result and the page button', async () => {
@@ -236,8 +262,16 @@ const TICKET = {
   curl: 'curl -T bundle.json https://doop.test/import/tok',
 }
 
-const component = (id: string, rev = 1): ComponentDef =>
-  ({ id, name: id, rev, props: [], slots: [], history: [] }) as unknown as ComponentDef
+const component = (id: string, rev = 1, origin: 'cli' | 'storybook' | null = 'cli'): ComponentDef =>
+  ({
+    id,
+    name: id,
+    rev,
+    props: [],
+    slots: [],
+    history: [],
+    ...(origin ? { code: { exportName: id, origin: { kind: origin } } } : {}),
+  }) as unknown as ComponentDef
 
 function openCanvas(components: ComponentDef[]) {
   useStore.setState({ canvas: { id: 'canvas', components } as unknown as Canvas })
@@ -301,6 +335,35 @@ it('cli: components arriving over the room show as landed, with a button to open
     openCanvas([component('old', 2), component('new-1'), component('new-2')])
   })
   expect(dialog.textContent).toContain('3 components arrived')
+})
+
+it('cli: a collaborator editing or adding their own components is not the command arriving', async () => {
+  openCanvas([component('mine', 1, null)])
+  answerWith(() => Response.json({ ...TICKET, expires_at: new Date(Date.now() + 15 * 60_000).toISOString() }))
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  await act(async () => {
+    openCanvas([component('mine', 2, null), component('theirs', 1, null), component('from-storybook', 1, 'storybook')])
+  })
+  expect(dialog.textContent).not.toContain('arrived')
+})
+
+it('cli: a screen that mounts twice (StrictMode) mints one ticket, and a reopening reuses it', async () => {
+  answerWith(() => Response.json({ ...TICKET, expires_at: new Date(Date.now() + 15 * 60_000).toISOString() }))
+  await act(async () => {
+    root.render(
+      <StrictMode>
+        <Modal onClose={() => {}}>
+          <CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />
+        </Modal>
+      </StrictMode>,
+    )
+  })
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  await act(async () => root.unmount())
+  root = createRoot(container)
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(dialog.querySelector('[data-slot="code-block"]')?.textContent).toContain(TICKET.command)
 })
 
 it('the picker lists both cards for an editor and neither for a viewer', () => {
