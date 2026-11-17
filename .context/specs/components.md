@@ -33,6 +33,10 @@ component loses nothing visually: deleting writes no frame at all (see Deleting 
 - **Definition** (`components` table, mirrored on `canvas.components`, keyed per canvas so a copied
   canvas's markers stay valid): `template`, scoped `css`, `rawCss`, `head`, `props`, `slots`, `rev`,
   `mainFrameId`, `code`, `source`, and the last 20 revisions inline.
+- **Prop types** (`PROP_TYPES`): `text`, `image`, `link`, `enum`, `boolean`, `number` (`min`, `max`, `step`), `color` (hex, `rgb()`/`hsl()`/`hwb()`/`lab()`/`lch()`/`oklab()`/`oklch()`, named colours, `transparent`, `currentColor`, `var(--token)` with an optional fallback, `color-mix()`; anything holding `url(` is refused) and `instance` (a component named in `accepts`, any component when empty). Values are strings; `propValueProblem` in `shared/components.ts` checks them for the engine, `update_instances`, `insert_instance` and the Design tab, and a bad value on a `<doop-use>` is an `invalid_prop_value` naming what is allowed. Booleans stay lenient (any value but `"false"` is on), so old compact frames round-trip unchanged.
+- **Booleans on attributes**: a `boolean` prop bound to an HTML boolean attribute (`disabled`, `checked`, `hidden`, `open`, â€¦) writes `attr=""` when on and removes it when off; reconcile reads a removed attribute or a stored `"false"` as off. Other attributes (`aria-pressed`) keep the value string. `reflect: true` also puts `data-<name>` on the root, a variant for CSS like an enum's (`variantAttrs`). The fix needs the prop declared `type: boolean`; an undeclared `disabled:disabled` binding stays a text prop.
+- **Text bindings keep siblings**: a bound text prop replaces only the element's own text nodes, so `<a><svg/>Label</a>` keeps its icon. An old instance whose earlier render had wiped such a sibling re-saves with that sibling as a `hidden` override, since old data cannot be told from a deliberate delete.
+- **Code mapping** (`ComponentCode`, `shared/componentCode.ts`, checked by `validCode` in `server/componentCodeMap.ts` on create and update against the component's real props and slots): the legacy `path`, `name`, `snippet`, plus `importFrom`, `exportName`, `defaultExport`, a `props` map (code name, enum and boolean value maps, `omit`), a `slots` map (`children` or a code prop) and `origin` (`manual`, `storybook`, `cli`, `agent`). `get_component` and writes return it whole; `list_components` shows only `importFrom` and `exportName`. Library publish, pull and restore copy it as stored.
 - **Instance**: root attributes `data-doop-instance`, `data-doop-rev`, `data-doop-id`, and when needed
   `data-doop-props` / `data-doop-overrides` as JSON. Every element keeps its `data-doop-part` key.
   Slot content and nested instances are read from the DOM, not repeated in the marker.
@@ -194,7 +198,6 @@ instance; description and make-a-prop / make-a-slot on a main. Right-click and â
 ## Limits
 
 - Variants are styled in CSS, through agents or the HTML tab. There is no visual per-variant editing yet.
-- Placing is by click; no drag from the panel onto the canvas.
 - Selection outlines do not yet distinguish mains and instances; the Layers glyph and Design tab do.
 - The Components page frame for a main made from markup uses a default size until resized.
 - A component made from markup is not placed anywhere; the result says to write `<doop-use>` or call
