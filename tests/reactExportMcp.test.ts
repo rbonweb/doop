@@ -139,6 +139,17 @@ describe('export_react over MCP', () => {
     expect(badStyling.isError).toBe(true)
   })
 
+  it('exports in tailwind mode', async () => {
+    const { canvasId, frameId } = await canvasWithButton()
+    const out = await call(client, 'export_react', { canvas_id: canvasId, frame_ids: [frameId], styling: 'tailwind' })
+    expect(out.isError).toBe(false)
+    expect(out.data.report.styling).toBe('tailwind')
+    const tokens = (out.data.files as { path: string; content: string }[]).find(
+      (file) => file.path === 'src/tokens.css',
+    )!
+    expect(tokens.content.startsWith('@import "tailwindcss";')).toBe(true)
+  })
+
   it('hands a large export over as a zip resource, with the report and a file listing', async () => {
     const canvas = store.createCanvas('Long read', OWNER)
     const paragraphs = Array.from({ length: 1500 }, (_, i) => `<p>${'paragraph text '.repeat(14)}${i}</p>`).join('')

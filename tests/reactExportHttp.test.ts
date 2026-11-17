@@ -314,6 +314,49 @@ describe('json', () => {
   })
 })
 
+describe('tailwind', () => {
+  it('exports a zip whose tokens.css starts with the Tailwind import and has no module sheet for a fully converted component', async () => {
+    const res = await exportReact(owner, canvasId, { pageId: firstPageId, styling: 'tailwind' })
+    expect(res.status).toBe(200)
+    const zip = await JSZip.loadAsync(Buffer.from(await res.arrayBuffer()))
+    const tokens = await zip.file('Shop-front-end-react/src/tokens.css')!.async('string')
+    expect(tokens.startsWith('@import "tailwindcss";')).toBe(true)
+    expect(tokens).toContain('--brand')
+    const report = JSON.parse(await zip.file('Shop-front-end-react/export-report.json')!.async('string')) as {
+      styling: string
+    }
+    expect(report.styling).toBe('tailwind')
+    for (const name of Object.keys(zip.files).filter((entry) => entry.endsWith('.module.css'))) {
+      /* a module sheet is only a leftover the utilities could not say */
+      expect((await zip.file(name)!.async('string')).trim().length, name).toBeGreaterThan(0)
+    }
+  })
+
+  it('answers json in tailwind mode too', async () => {
+    const { files, report } = await jsonFiles(
+      await exportReact(owner, canvasId, { format: 'json', styling: 'tailwind' }),
+    )
+    expect((report as unknown as { styling: string }).styling).toBe('tailwind')
+    expect(files.find((file) => file.path === 'src/tokens.css')?.content.startsWith('@import "tailwindcss";')).toBe(
+      true,
+    )
+  })
+})
+
+describe('the json size limit', () => {
+  it('counts UTF-8 bytes of file content, not characters', async () => {
+    const wide = (await (await owner.post('/api/canvases', { name: 'Wide' })).json()) as { id: string }
+    /* about 110,000 characters but over 330 KB as UTF-8 */
+    const text = '日本語'.repeat(1000)
+    const paragraphs = Array.from({ length: 37 }, (_, i) => `<p>${text}${i}</p>`).join('')
+    expect((await owner.post(`/api/canvases/${wide.id}/frames`, { name: 'Wide', html: doc(paragraphs) })).status).toBe(
+      200,
+    )
+    const json = await exportReact(owner, wide.id, { format: 'json' })
+    expect(json.status).toBe(413)
+  })
+})
+
 describe('the rate limit', () => {
   it('answers 429 with Retry-After once an account has used its minute, and counts accounts apart', async () => {
     const limited = await startServer({ REACT_EXPORTS_PER_MIN: '3' })
