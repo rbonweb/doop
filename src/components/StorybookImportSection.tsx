@@ -75,6 +75,13 @@ function planTitles(plan: PlannedComponent[]): string[] | null {
   return [...new Set(plan.map((c) => c.group as string))]
 }
 
+/** "Component: message", unless the message already begins with the component's name. */
+function noteLine(t: Translate, component: string | undefined, message: string): string {
+  const text = plain(message)
+  if (!component || text.toLowerCase().startsWith(component.toLowerCase())) return text
+  return t('componentImport.issueLine', { component, message: text })
+}
+
 /** A server note as one plain line: no backticks, no run of spaces or line breaks. */
 function plain(message: string): string {
   return message.replace(/`/g, '').replace(/\s+/g, ' ').trim()
@@ -265,6 +272,8 @@ export function StorybookImportSection({
         return t('componentImport.errTooMany')
       case 'busy':
         return t('componentImport.errBusy')
+      case 'needs_worker':
+        return t('componentImport.errNeedsWorker')
       default:
         return message || t('componentImport.errGeneric')
     }
@@ -335,19 +344,22 @@ export function StorybookImportSection({
       result.skipped.length && t('componentImport.skipped', { count: result.skipped.length }),
       result.tokens.created.length && t('componentImport.tokensAdded', { count: result.tokens.created.length }),
     ].filter(Boolean)
-    const groups = groupImportIssues(result.issues)
+    /* a component imported under another name is told apart from the other notes, as the preview did */
+    const renamed = result.issues.filter((i) => i.code === 'renamed' && (i.detail || i.component))
+    const renamedLines = renamed.map((i) =>
+      t('componentImport.renamedLine', {
+        name: i.detail?.from ?? (i.component as string),
+        /* an older server names the new name only in the message */
+        to: i.detail?.to ?? /imported as “([^”]+)”/.exec(i.message)?.[1] ?? i.component ?? '',
+      }),
+    )
+    const groups = groupImportIssues(result.issues.filter((i) => i.code !== 'renamed'))
     const summary = groups.map((group) => issueSummary(t, group.key, group.items.length))
     const needsWorker = groups.some((group) => group.key === 'worker')
     const skippedLines = result.skipped.map((c) =>
       t('componentImport.skippedLine', { name: c.name, reason: plain(c.reason) }),
     )
-    const details = groups.flatMap((group) =>
-      group.items.map((i) =>
-        i.component
-          ? t('componentImport.issueLine', { component: i.component, message: plain(i.message) })
-          : plain(i.message),
-      ),
-    )
+    const details = groups.flatMap((group) => group.items.map((i) => noteLine(t, i.component, i.message)))
     return (
       <Screen
         header={header}
@@ -374,6 +386,21 @@ export function StorybookImportSection({
               </Badge>
             ))}
           </div>
+          {renamedLines.length > 0 && (
+            <div className="flex flex-col gap-1.5" data-slot="storybook-renamed">
+              <span className="text-label font-medium text-ink-soft">
+                {t('componentImport.renamedHeading', { count: renamedLines.length })}
+              </span>
+              <ul className="flex flex-col gap-1 text-label text-ink-soft">
+                {renamedLines.slice(0, SKIPPED_SHOWN).map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+              {renamedLines.length > SKIPPED_SHOWN && (
+                <Note>{t('componentImport.moreNames', { count: renamedLines.length - SKIPPED_SHOWN })}</Note>
+              )}
+            </div>
+          )}
           {skippedLines.length > 0 && (
             <div className="flex flex-col gap-1.5" data-slot="storybook-skipped">
               <span className="text-label font-medium text-ink-soft">
@@ -634,7 +661,7 @@ export function StorybookImportSection({
           {phase.code === 'rate_limited' && phase.retryAfter ? (
             <span>{t('componentImport.retryIn', { time: relativeInSeconds(phase.retryAfter) })}</span>
           ) : null}
-          {(phase.code === 'private' || phase.code === 'too_many') && (
+          {(phase.code === 'private' || phase.code === 'too_many' || phase.code === 'needs_worker') && (
             <Button size="sm" onClick={onUseCli}>
               {t('componentImport.useCli')}
             </Button>

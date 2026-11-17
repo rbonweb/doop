@@ -11,7 +11,7 @@ export interface ImportResult {
   skipped: { name: string; reason: string }[]
   tokens: { created: string[]; skipped: string[] }
   pageId: string | null
-  issues: { component?: string; code: string; message: string }[]
+  issues: { component?: string; code: string; message: string; detail?: { from: string; to: string } }[]
 }
 
 export interface PlannedComponent {
@@ -22,7 +22,7 @@ export interface PlannedComponent {
 }
 
 /** Why the server stopped a Storybook import (contract: "Storybook REST progress"). */
-export type StorybookErrorCode = 'private' | 'unreachable' | 'too_many' | 'busy' | 'invalid'
+export type StorybookErrorCode = 'private' | 'unreachable' | 'too_many' | 'busy' | 'invalid' | 'needs_worker'
 
 export type StorybookEvent =
   | { type: 'plan'; components: PlannedComponent[]; renders: number; total?: number; capped?: boolean }
@@ -38,7 +38,7 @@ export interface StorybookImportInput {
   dryRun?: boolean
 }
 
-const ERROR_CODES: readonly string[] = ['private', 'unreachable', 'too_many', 'busy', 'invalid']
+const ERROR_CODES: readonly string[] = ['private', 'unreachable', 'too_many', 'busy', 'invalid', 'needs_worker']
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
 

@@ -93,6 +93,10 @@ export const componentImport = {
   },
   skippedHeading: { one: '{count} component was skipped', other: '{count} components were skipped' },
   stillRendering: 'Still rendering, {seconds} s since the last update',
+  errNeedsWorker:
+    'It only renders in the project’s own build (its stories need a service worker), so Doop cannot read it from here.',
+  renamedHeading: { one: '{count} component was renamed', other: '{count} components were renamed' },
+  renamedLine: '{name} is now “{to}”: a component named {name} was already on this canvas',
   errGeneric: 'The import did not finish.',
   useCli: 'Use the command line instead',
   tryAgain: 'Try again',
