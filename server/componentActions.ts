@@ -549,7 +549,7 @@ export const createComponentFromElement = atomic(function createComponentFromEle
   /* after the main's write, the props and slots are the ones the template really derives:
      the mapping is checked against those, then kept clean of unknown keys */
   const code = validCode(input.code, saved)
-  if (code) store.saveComponent(canvasId, { ...saved, code })
+  if (code) saveMapping(canvasId, { ...saved, code }, actor)
   const matching = input.replaceMatching
     ? convertMatching(canvasId, shape, saved, actor)
     : { converted: [], stopped: false }
@@ -560,6 +560,14 @@ export const createComponentFromElement = atomic(function createComponentFromEle
     ...(matching.stopped ? { matching_stopped: true as const } : {}),
   }
 })
+
+/** Keep a code mapping that has just been checked against the definition, and tell the room. The
+ *  main's write sent the definition before the mapping was checked, so without this the room (the
+ *  editor that saved it included) would keep the one without it until a reload. */
+function saveMapping(canvasId: string, def: ComponentDef, actor: Actor) {
+  store.saveComponent(canvasId, def)
+  actions.broadcastComponent(canvasId, def, actor)
+}
 
 const clip = (text: string | undefined) => text?.slice(0, MAX_COMPONENT_DESCRIPTION)
 
@@ -648,7 +656,7 @@ export const createComponentFromHtml = atomic(function createComponentFromHtml(
   /* the main's write derived the props and slots: the mapping is checked against those */
   const made = requireComponent(canvasId, def.id)
   const code = validCode(input.code, made)
-  if (code) store.saveComponent(canvasId, { ...made, code })
+  if (code) saveMapping(canvasId, { ...made, code }, actor)
   const component = requireComponent(canvasId, def.id)
   /* the component is made: a note that cannot be worked out within budget is left out */
   if (input.css) optional(() => reportCssNotKept(component, input.css!))
@@ -871,13 +879,7 @@ export const updateComponent = atomic(function updateComponent(
   if (input.code !== undefined && input.code !== null) {
     const current = requireComponent(canvasId, def.id)
     const code = validCode(input.code, current)
-    if (code) {
-      const mapped = { ...current, code }
-      store.saveComponent(canvasId, mapped)
-      /* the broadcasts above went out before the mapping was checked, so the room (this editor's
-         panel included) would keep the definition without it until a reload */
-      actions.broadcastComponent(canvasId, mapped, actor)
-    }
+    if (code) saveMapping(canvasId, { ...current, code }, actor)
   }
   /* new defaults change what instances render even when the main's markup did not move */
   if (propsChanged) actions.queuePropagation(canvasId, [requireComponent(canvasId, def.id)], actor)
@@ -1374,7 +1376,7 @@ export const duplicateComponent = atomic(function duplicateComponent(
   /* the main's write derived the props and slots: the mapping is checked against those */
   const made = requireComponent(canvasId, def.id)
   const code = validCode(source.code, made)
-  if (code) store.saveComponent(canvasId, { ...made, code })
+  if (code) saveMapping(canvasId, { ...made, code }, actor)
   const component = requireComponent(canvasId, def.id)
   actions.logComponent(canvasId, actor, `duplicated component “${source.name}” as “${component.name}”`)
   return { component, source }
