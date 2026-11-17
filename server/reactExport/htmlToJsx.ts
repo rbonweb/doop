@@ -24,6 +24,8 @@ export interface HtmlToJsxOptions {
   visit?: (el: Element, ctx: JsxContext) => string | undefined
   /** turns an element's class list into the JSX value of className; default: a string literal */
   className?: (classes: string[], el: Element) => string
+  /** called for every kept URL value (href, src, each srcset entry, poster, xlink:href, action, formaction, a `url()` in a style attribute) after the safety check, with the attribute name; the result is checked again, dropped with an issue if unsafe, and emitted through jsString */
+  rewriteUrl?: (url: string, attr: string, el: Element) => string
   /** indent unit, default two spaces; output is readable but need not be Prettier-exact */
   indent?: string
 }
@@ -353,11 +355,32 @@ function camel(name: string): string {
 }
 
 /** a style attribute string to a JSX style object expression, `{{ color: "red", "--x": "1" }}`; unsafe declarations reported */
-export function styleToJsx(style: string, issues: ExportIssue[]): string | null {
-  return styleToJsxAt(style, issues, '')
+export function styleToJsx(style: string, issues: ExportIssue[], rewriteUrl?: (url: string) => string): string | null {
+  return styleToJsxAt(style, issues, '', rewriteUrl)
 }
 
-function styleToJsxAt(style: string, issues: ExportIssue[], path: string): string | null {
+const CSS_URL = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi
+
+/** `url()` values passed through `rewrite`; null when a rewritten URL is unsafe */
+function rewriteStyleUrls(value: string, rewrite: (url: string) => string): string | null {
+  let unsafe = false
+  const out = value.replace(CSS_URL, (whole, double?: string, single?: string, bare?: string) => {
+    const url = cssNormalize(double ?? single ?? bare ?? '').trim()
+    const next = rewrite(url)
+    if (next === url) return whole
+    if (isUnsafeUrl(next)) unsafe = true
+    const escaped = next.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\a ').replace(/\r/g, '\\d ')
+    return `url("${escaped}")`
+  })
+  return unsafe ? null : out
+}
+
+function styleToJsxAt(
+  style: string,
+  issues: ExportIssue[],
+  path: string,
+  rewriteUrl?: (url: string) => string,
+): string | null {
   const entries: string[] = []
   for (const [name, raw] of parseStyle(style)) {
     let value = raw
@@ -375,6 +398,14 @@ function styleToJsxAt(style: string, issues: ExportIssue[], path: string): strin
       issue(issues, 'style', `declaration ${quoted(name)} dropped: ${unsafe}`, path)
       continue
     }
+    if (rewriteUrl && value) {
+      const rewritten = rewriteStyleUrls(value, rewriteUrl)
+      if (rewritten === null || unsafeStyleValue(rewritten)) {
+        issue(issues, 'style', `declaration ${quoted(name)} dropped: unsafe url() after rewrite`, path)
+        continue
+      }
+      value = rewritten
+    }
     if (!value) continue
     entries.push(`${key}: ${jsString(value)}`)
   }
@@ -384,7 +415,10 @@ function styleToJsxAt(style: string, issues: ExportIssue[], path: string): strin
 // ---------------------------------------------------------------- attributes
 
 /** the entries of a srcset, minus the unsafe ones; null when nothing was dropped (keep the value as written) */
-function filterSrcset(value: string): { kept: string; dropped: number; total: number } {
+function filterSrcset(
+  value: string,
+  rewrite?: (url: string) => string | null,
+): { kept: string; dropped: number; total: number } {
   const entries: { url: string; descriptor: string }[] = []
   let i = 0
   while (i < value.length) {
@@ -407,7 +441,12 @@ function filterSrcset(value: string): { kept: string; dropped: number; total: nu
     }
     entries.push({ url, descriptor: descriptor.trim() })
   }
-  const safe = entries.filter((entry) => !isUnsafeUrl(entry.url))
+  const safe: typeof entries = []
+  for (const entry of entries) {
+    if (isUnsafeUrl(entry.url)) continue
+    const url = rewrite ? rewrite(entry.url) : entry.url
+    if (url !== null) safe.push({ url, descriptor: entry.descriptor })
+  }
   return {
     kept: safe.map((entry) => (entry.descriptor ? `${entry.url} ${entry.descriptor}` : entry.url)).join(', '),
     dropped: entries.length - safe.length,
@@ -416,9 +455,9 @@ function filterSrcset(value: string): { kept: string; dropped: number; total: nu
 }
 
 /** the React name for an attribute, or null when it cannot be emitted */
-function reactAttrName(name: string, inSvg: boolean): string | null {
+function reactAttrName(name: string, inSvg: boolean, custom = false): string | null {
   if (name === 'class') return 'className'
-  if (name === 'for') return 'htmlFor'
+  if (name === 'for') return custom ? 'for' : 'htmlFor'
   const namespaced = NAMESPACED_ATTR_NAMES.get(name)
   if (namespaced) return namespaced
   if (name.startsWith('data-') || name.startsWith('aria-')) return ATTR_NAME.test(name) ? name : null
@@ -596,6 +635,17 @@ class Converter {
     const hasValueAttr = el.attrs.some((attr) => attr.name === 'value')
     const customElement = isHtml && tag.includes('-')
     const used = new Set<string>()
+    const rewriteUrl = this.options.rewriteUrl
+    /** a kept URL passed through the caller's rewrite and checked again; null (and an issue) when the result is unsafe */
+    const rewrite = (url: string, attrName: string): string | null => {
+      if (!rewriteUrl) return url
+      const next = rewriteUrl(url, attrName, el)
+      if (isUnsafeUrl(next) || (isHtml && EMBEDDING_ELEMENTS.has(tag) && isDataUrl(next))) {
+        issue(this.issues, 'unsafe-url', `${quoted(attrName)} dropped: rewritten to an unsafe URL`, path)
+        return null
+      }
+      return next
+    }
     const add = (attr: JsxAttr, source: string) => {
       if (used.has(attr.name)) {
         issue(
@@ -614,6 +664,7 @@ class Converter {
       const name = fullAttrName(attr)
       const lower = name.toLowerCase()
       const value = attr.value
+      let rewritten: string | null = null
       if (lower.startsWith('data-doop-')) continue
       if (/^on/i.test(name)) {
         issue(this.issues, 'event-handler', `event handler ${quoted(name)} dropped`, path)
@@ -628,7 +679,7 @@ class Converter {
         continue
       }
       if (lower === 'style') {
-        const style = styleToJsxAt(value, this.issues, path)
+        const style = styleToJsxAt(value, this.issues, path, rewriteUrl && ((url) => rewriteUrl(url, 'style', el)))
         if (style) add({ name: 'style', value: style }, name)
         continue
       }
@@ -649,15 +700,27 @@ class Converter {
           issue(this.issues, 'unsafe-url', `${quoted(name)} dropped: ${quoted(value)}`, path)
           continue
         }
+        rewritten = rewrite(value, lower)
+        if (rewritten === null) continue
       } else if (lower === 'ping') {
         if (value.split(/\s+/).some((part) => isUnsafeUrl(part))) {
           issue(this.issues, 'unsafe-url', `${quoted(name)} dropped: ${quoted(value)}`, path)
           continue
         }
+        if (rewriteUrl) {
+          const parts = value
+            .split(/\s+/)
+            .filter(Boolean)
+            .map((part) => rewrite(part, lower))
+          if (parts.includes(null)) continue
+          rewritten = parts.join(' ')
+        }
       } else if (SRCSET_ATTRS.has(lower)) {
-        const result = filterSrcset(value)
-        if (result.dropped) {
-          issue(this.issues, 'unsafe-url', `${result.dropped} unsafe ${quoted(name)} entries dropped`, path)
+        const result = filterSrcset(value, rewriteUrl && ((url) => rewrite(url, lower)))
+        if (result.dropped || rewriteUrl) {
+          if (result.dropped) {
+            issue(this.issues, 'unsafe-url', `${result.dropped} unsafe ${quoted(name)} entries dropped`, path)
+          }
           if (result.dropped === result.total || !result.kept) continue
           add({ name: reactAttrName(lower, inSvg) ?? lower, value: attrValue(result.kept) }, name)
           continue
@@ -679,7 +742,7 @@ class Converter {
         add({ name: 'defaultChecked', value: null }, name)
         continue
       }
-      const reactName = reactAttrName(name, inSvg)
+      const reactName = reactAttrName(name, inSvg, customElement)
       if (reactName === null) {
         issue(this.issues, 'dropped-attribute', `attribute ${quoted(name)} cannot be written as JSX`, path)
         continue
@@ -688,7 +751,7 @@ class Converter {
         add({ name: reactName, value: null }, name)
         continue
       }
-      add({ name: reactName, value: attrValue(value) }, name)
+      add({ name: reactName, value: attrValue(rewritten ?? value) }, name)
     }
 
     if (isHtml && tag === 'textarea') {
