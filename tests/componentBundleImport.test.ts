@@ -15,7 +15,7 @@ import * as actions from '../server/actions.ts'
 import { executableParts } from './executableParts.ts'
 import { prepareComponent } from '../server/bundleVariants.ts'
 import { sanitizeMarkup, sanitizeStylesheet } from '../server/bundleSanitize.ts'
-import { ComponentError, findComponent, updateComponent } from '../server/componentActions.ts'
+import { ComponentError, createComponentFromHtml, findComponent, updateComponent } from '../server/componentActions.ts'
 import {
   guessTokenType,
   IMPORT_PAGE,
@@ -26,7 +26,7 @@ import { blankComponent } from '../server/components.ts'
 import * as propagation from '../server/propagation.ts'
 import { store } from '../server/store.ts'
 import { runOperation } from '../server/workBudget.ts'
-import { activeComponents, MAX_COMPONENTS } from '../shared/components.ts'
+import { activeComponents, MAX_COMPONENTS, unsafeUrl } from '../shared/components.ts'
 import { cleanLabel, qualifierOf } from '../server/componentBundleImport.ts'
 
 const OWNER = 'owner-1'
@@ -958,3 +958,133 @@ describe('nothing a bundle says can run in the frame it makes', () => {
 function hasMarkupOrControl(text: string): boolean {
   return [...text].some((char) => (char.codePointAt(0) ?? 0) <= 0x1f || '<>"'.includes(char))
 }
+
+/* A prop value is instance data: bound to an event handler or to an address it could become code. Parsed, not matched. */
+describe('bindings never make a prop an event handler or a script address', () => {
+  const frameWith = async (use: string) => {
+    const frame = actions.createFrame(
+      canvasId,
+      { name: 'Screen', html: `<!doctype html><html><head></head><body>${use}</body></html>` },
+      actor,
+    )!
+    await propagation.whenIdle()
+    return store.getFrame(frame.id)!.html
+  }
+
+  it('the importer drops the on* and srcdoc pieces of a binding list and keeps the rest', () => {
+    const result = sanitizeMarkup(
+      '<a data-doop-prop="onclick:x,ONMOUSEOVER:x,href:target,label" href="#">go</a><b data-doop-prop="onfocus:y">b</b><i data-doop-prop="srcdoc:z,title:t">i</i>',
+    )
+    expect(result.html).toBe(
+      '<a data-doop-prop="href:target,label" href="#">go</a><b>b</b><i data-doop-prop="title:t">i</i>',
+    )
+    expect(result.issues.filter((issue) => issue.code === 'binding_dropped')).toHaveLength(4)
+  })
+
+  it('a bundle with on* and href bindings, and an instance whose href is javascript:, stores nothing executable', async () => {
+    const result = run({
+      version: 1,
+      source: { kind: 'agent' },
+      components: [
+        {
+          name: 'Probe',
+          html: '<a class="probe" data-doop-prop="onclick:x,ONMOUSEOVER:x,href:target,label" href="#">go</a>',
+        },
+      ],
+    })
+    const def = findComponent(canvasId, result.created[0]!.id)!
+    expect(executableParts(store.getFrame(def.mainFrameId!)!.html)).toEqual([])
+    expect(def.template).not.toMatch(/onclick|onmouseover/i)
+    expect(result.issues.map((issue) => issue.code)).toContain('binding_dropped')
+    const instance = await frameWith('<doop-use component="Probe" target="javascript:alert(1)" label="hi"></doop-use>')
+    expect(executableParts(instance)).toEqual([])
+    expect(instance).toContain('>hi<')
+    const fine = await frameWith('<doop-use component="Probe" target="https://ok.test/a" label="ok"></doop-use>')
+    expect(fine).toContain('href="https://ok.test/a"')
+    expect(executableParts(fine)).toEqual([])
+  })
+
+  it('the engine refuses an on* target and a script address on every path, create_component included', async () => {
+    runOperation('create', canvasId, () =>
+      createComponentFromHtml(
+        canvasId,
+        {
+          name: 'Btn',
+          html: '<a class="b" data-doop-prop="onclick:x,onmouseover:x,href:target,formaction:go,src:pic,label" href="#">go</a>',
+          props: [{ name: 'pic', type: 'image' }],
+        },
+        actor,
+      ),
+    )
+    const def = findComponent(canvasId, 'Btn')!
+    expect(def.template).toContain('onclick:x')
+    for (const value of [
+      'javascript:alert(1)',
+      ' JaVa\tScript:alert(1)',
+      'vbscript:x',
+      'data:text/html,<script>alert(1)</script>',
+    ])
+      expect(
+        executableParts(
+          await frameWith(
+            `<doop-use component="Btn" x="alert(2)" target="${value}" go="${value}" pic="${value}" label="l"></doop-use>`,
+          ),
+        ),
+      ).toEqual([])
+    const html = await frameWith('<doop-use component="Btn" x="alert(2)" target="/ok" label="l"></doop-use>')
+    expect(executableParts(html)).toEqual([])
+    expect(html).toContain('href="/ok"')
+  })
+
+  it('checks every srcset candidate, not only the first', async () => {
+    expect(unsafeUrl('a.png 1x, data:text/html,<b>x</b> 2x')).toBe(true)
+    expect(unsafeUrl('a.png 1x, JaVa\tScript:alert(1) 2x')).toBe(true)
+    expect(unsafeUrl('a.png 1x, b.png 2x')).toBe(false)
+    expect(unsafeUrl('data:image/png;base64,AAAA')).toBe(false)
+    const result = run({
+      version: 1,
+      source: { kind: 'agent' },
+      components: [{ name: 'Pic', html: '<img class="pic" data-doop-prop="srcset:s" src="/a.png" alt="">' }],
+    })
+    expect(result.created).toHaveLength(1)
+    const html = await frameWith(
+      '<doop-use component="Pic" s="a.png 1x, data:text/html,<script>alert(1)</script> 2x"></doop-use>',
+    )
+    expect(executableParts(html)).toEqual([])
+    const fine = await frameWith('<doop-use component="Pic" s="a.png 1x, b.png 2x"></doop-use>')
+    expect(fine).toContain('srcset="a.png 1x, b.png 2x"')
+  })
+
+  it('refuses a bound attributeName on an svg animation, and script values bound to its to, from and values', async () => {
+    const svg = (extra: string) =>
+      `<div class="anim"><svg viewBox="0 0 1 1"><a><set data-doop-prop="${extra}" to="1"/></a></svg></div>`
+    /* through the importer: the attributeName piece is dropped, the others stay and are checked when set */
+    const imported = run({
+      version: 1,
+      source: { kind: 'agent' },
+      components: [{ name: 'Anim', html: svg('attributeName:an,to:tv,from:fr,values:vs') }],
+    })
+    expect(imported.issues.map((issue) => issue.code)).toContain('binding_dropped')
+    expect(findComponent(canvasId, 'Anim')!.template).not.toMatch(/attributename:an/i)
+    /* past the importer, in a template written another way */
+    runOperation('create', canvasId, () =>
+      createComponentFromHtml(
+        canvasId,
+        { name: 'Anim2', html: svg('attributeName:an,to:tv,from:fr,values:vs'), autoProps: false },
+        actor,
+      ),
+    )
+    expect(findComponent(canvasId, 'Anim2')!.template).toMatch(/attributename:an/i)
+    for (const name of ['Anim', 'Anim2'])
+      for (const value of ['javascript:alert(1)', 'vbscript:x'])
+        expect(
+          executableParts(
+            await frameWith(
+              `<doop-use component="${name}" an="href" tv="${value}" fr="${value}" vs="a;${value}"></doop-use>`,
+            ),
+          ),
+        ).toEqual([])
+    const html = await frameWith('<doop-use component="Anim2" an="onclick" tv="alert(1)"></doop-use>')
+    expect(executableParts(html)).toEqual([])
+  })
+})
