@@ -330,7 +330,7 @@ describe('what the room is told when a mapping is saved', () => {
         name: 'Page',
         html: '<!doctype html><html><body><article class="card" data-doop-id="el1"><h3>Title</h3></article></body></html>',
       },
-      { name: 'Tester', kind: 'user' },
+      { name: 'Tester', kind: 'user', color: '#000000' },
     )!
     const heard = await heardDuring(async () => {
       const made = await call('create_component', {
