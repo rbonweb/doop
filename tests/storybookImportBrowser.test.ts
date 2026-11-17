@@ -142,6 +142,38 @@ function phasesPage(id: string): string {
 </script></body></html>`
 }
 
+/* Primer's shape: the component sits inside theme wrappers, marks itself with data-component, and takes its variant from an attribute its own CSS styles. The wrapper carries no variant. */
+function wrappedPage(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+[data-component="Label"] { padding: 2px 8px; border: 1px solid #999; }
+[data-component="Label"][data-variant="danger"] { color: #c00; border-color: #c00; }
+</style></head><body class="sb-show-preparing-story"><div id="storybook-root"></div><script>
+(function () {
+  var args = { variant: 'default', label: 'Label' }
+  /* like Primer's Storybook: the args in the URL are ignored (their argTypes have no type name), only the channel's updateStoryArgs changes the story */
+  var listeners = {}
+  var channel = {
+    on: function (event, listener) { (listeners[event] = listeners[event] || []).push(listener) },
+    emit: function (event, payload) {
+      if (event !== 'updateStoryArgs') return
+      Object.assign(args, payload.updatedArgs)
+      setTimeout(function () { draw(); (listeners.storyRendered || []).forEach(function (listener) { listener() }) }, 20)
+    },
+  }
+  function draw() {
+    document.getElementById('storybook-root').innerHTML =
+      '<div data-component="ThemeProvider" data-color-mode="light"><div data-portal-root="true">' +
+      '<span data-component="Label" data-variant="' + args.variant + '" class="prc-Label-x7Gq">' + args.label + '</span></div></div>'
+  }
+  draw()
+  window.__STORYBOOK_PREVIEW__ = { channel: channel, currentRender: { phase: 'finished', story: { id: 'wrap-label--default',
+    argTypes: { variant: { control: 'select', options: ['default', 'danger'] }, label: { control: 'text' } },
+    initialArgs: { variant: 'default', label: 'Label' } } } }
+  document.body.className = 'sb-show-main'
+})()
+</script></body></html>`
+}
+
 /* A story page that fights back. Its script runs before anything of ours but after the probe, which has already captured the browser's own builtins: it replaces the ones the capture and the probe use (JSON.stringify, Object.keys, String.prototype.slice, the outerHTML and innerHTML getters, getComputedStyle, Function.prototype.call and more) and then hands out 50 MB of text, a 50 MB style rule and a preview object made of traps. */
 function evilIframePage(id: string): string {
   const sabotage = `
@@ -340,6 +372,19 @@ beforeAll(async () => {
     if (url.startsWith('/phases/iframe.html')) {
       return send(200, 'text/html', phasesPage(new URL(url, 'http://x').searchParams.get('id') ?? ''))
     }
+    if (url === '/wrap/index.json') {
+      return send(
+        200,
+        'application/json',
+        JSON.stringify({
+          v: 5,
+          entries: {
+            'wrap-label--default': { type: 'story', id: 'wrap-label--default', name: 'Default', title: 'Wrap/Label' },
+          },
+        }),
+      )
+    }
+    if (url.startsWith('/wrap/iframe.html')) return send(200, 'text/html', wrappedPage())
     if (url === '/huge/index.json') {
       return send(
         200,
@@ -419,7 +464,11 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
       default: 'primary',
       description: 'Look of it',
     })
-    expect(button.props?.[1]).toMatchObject({ reflect: true, default: 'false' })
+    /* the disabled attribute follows the prop, so the prop is bound to the button and the library's own :disabled rule styles it */
+    expect(button.props?.[1]).toMatchObject({ default: 'false' })
+    expect(button.props?.[1]?.reflect).toBeUndefined()
+    expect(button.html).toMatch(/<button[^>]* data-doop-prop="disabled:disabled"/)
+    expect(button.css).toContain(':disabled')
     expect(button.css).toContain('.btn')
     expect(button.css).not.toContain('.sb-show-main')
     expect(button.css).not.toContain('.unused')
@@ -427,7 +476,8 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     expect(button.css).toContain('letter-spacing')
     expect(button.variants?.tone?.secondary?.css).toContain('background-color: rgb(238, 238, 238)')
     expect(button.variants?.tone?.danger?.css).toContain('rgb(204, 0, 0)')
-    expect(button.variants?.disabled?.true?.css).toContain('opacity: 0.5')
+    expect(button.variants?.disabled).toBeUndefined()
+    expect(button.html).not.toContain('data-doop-m-')
     expect(button.variants?.tone?.secondary?.html).toBeUndefined()
     expect(button.code).toEqual({
       exportName: 'Button',
@@ -524,8 +574,11 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     expect(JSON.stringify(bundle)).not.toContain('PWNED')
 
     /* the preview was read by the probe: primitives only, bounded, and the traps and getters did nothing */
-    expect(meta.props?.map((prop) => prop.name).sort()).toEqual(['big', 'toj', 'tone'])
-    expect(meta.props?.find((prop) => prop.name === 'big')?.description).toHaveLength(300)
+    /* the text props were read too, and left out because nothing in the markup follows them */
+    expect(meta.props?.map((prop) => prop.name)).toEqual(['tone'])
+    const unbound = issues.find((issue) => issue.component === 'Meta' && issue.code === 'props_unbound')
+    expect(unbound?.message).toContain('big')
+    expect(unbound?.message).toContain('toj')
     expect(meta.props?.find((prop) => prop.name === 'tone')).toMatchObject({
       type: 'enum',
       options: ['a', 'b'],
@@ -629,12 +682,33 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     /* each of the four versions' sequences ends on a phase that counts as done, none waits out the render timeout */
     expect(bundle.components.map((component) => component.name).sort()).toEqual(['V10', 'V7', 'V8', 'V9'])
     expect(Date.now() - started).toBeLessThan(STORYBOOK_LIMITS.renderMs)
-    const failed = issues.filter((issue) => issue.code === 'story_failed').map((issue) => issue.component)
+    const failed = issues
+      .filter((issue) => issue.code === 'story_failed' || issue.code === 'story_needs_worker')
+      .map((issue) => issue.component)
+    expect(issues.find((issue) => issue.component === 'Msw')?.code).toBe('story_needs_worker')
     expect(failed.sort()).toEqual(['Broken', 'Broken10', 'Msw'])
     expect(issues.find((issue) => issue.component === 'Msw')?.message).toContain('needs a service worker')
     expect(issues.find((issue) => issue.component === 'Broken')?.message).toContain(
       'Storybook shows an error for this story',
     )
+  })
+
+  it('binds a prop to the element whose attribute follows it, not to the decorator around it', async () => {
+    const { bundle, issues } = await storybookBundle(`${storybook.origin}/wrap/`, {}, deps(storybook.origin))
+    const [label] = bundle.components
+    expect(label?.name).toBe('Label')
+    /* the attribute that changes is on the span: the prop is bound there, next to the text binding the span already had */
+    expect(label?.html).toMatch(/<span[^>]* data-doop-prop="label,data-variant:variant"/)
+    expect(label?.html).not.toMatch(/<div[^>]*data-doop-prop/)
+    expect(label?.html).not.toContain('data-doop-m-')
+    /* the library's own rule for the value comes along, and no CSS diff stands in for it */
+    expect(label?.css).toContain('[data-variant="danger"]')
+    expect(label?.variants?.variant).toBeUndefined()
+    expect(label?.props?.find((prop) => prop.name === 'variant')).toMatchObject({ type: 'enum', default: 'default' })
+    /* a class token is never a prop, and the code mapping names only props there are */
+    expect(label?.props?.map((prop) => prop.name).sort()).toEqual(['label', 'variant'])
+    expect(label?.code?.props).toBeUndefined()
+    expect(issues.filter((issue) => issue.code === 'story_failed')).toEqual([])
   })
 
   it('stops the whole import when a story page answers 403', async () => {

@@ -15,7 +15,8 @@ import {
   type StoryCapture,
 } from './capture.ts'
 import type { StoryEntry, StorybookIssue } from './index.ts'
-import { guardCss } from './cssGuard.ts'
+import { bindHtml, findBindings } from './bindings.ts'
+import { guardCss, splitRules } from './cssGuard.ts'
 import { MAX_PROBE_CHARS, probeInstallSource, probeName } from './probe.ts'
 import { captureRefusalSchema, storyCaptureSchema, storyMetaSchema } from './schemas.ts'
 import {
@@ -36,6 +37,12 @@ export interface StoryPage {
   goto(url: string, timeoutMs: number): Promise<void>
   /** asks the probe called `probe` until its state is ready or error; rejects at the timeout */
   waitForState(probe: string, timeoutMs: number): Promise<'ready' | 'error' | 'needs_worker'>
+  /** sets the story's args through Storybook's channel and resolves once it has rendered again (`error` when it did not); a page that cannot do this leaves the args to the story URL */
+  applyArgs?(
+    probe: string,
+    storyId: string,
+    args: Record<string, string | number | boolean>,
+  ): Promise<'ready' | 'error'>
   /** asks the probe for the story's argTypes, initial args and display name: a JSON string of at most MAX_PROBE_CHARS, or null */
   readMeta(probe: string, storyId: string): Promise<unknown>
   /** runs `fn` in the isolated world */
@@ -106,15 +113,24 @@ const MAX_CONTROL_PROBES = 2
 /** One story, rendered and captured. A failure to load, a story that errors or one that never renders is a `capture` with `ok: false`, never a throw (an abort is the only throw). */
 export async function renderStory(page: StoryPage, request: RenderRequest, signal?: AbortSignal): Promise<StoryRender> {
   const issues: StorybookIssue[] = []
-  const fail = (reason: string): StoryRender => ({ capture: { ok: false, reason }, props: [], issues })
+  const fail = (reason: string, code?: string): StoryRender => ({
+    capture: { ok: false, reason, ...(code ? { code } : {}) },
+    props: [],
+    issues,
+  })
   try {
     signal?.throwIfAborted()
     const probe = probeName()
     await page.installProbe(probeInstallSource(probe))
     await page.goto(storyIframeUrl(request.baseUrl, request.storyId, request.args), STORYBOOK_LIMITS.renderMs)
     const state = await page.waitForState(probe, STORYBOOK_LIMITS.renderMs)
-    if (state === 'needs_worker') return fail(NEEDS_WORKER)
+    if (state === 'needs_worker') return fail(NEEDS_WORKER, 'story_needs_worker')
     if (state === 'error') return fail('Storybook shows an error for this story')
+    if (page.applyArgs && Object.keys(request.args).length) {
+      /* the URL's args are dropped for an argType Storybook cannot type: ask the story to take them */
+      if ((await page.applyArgs(probe, request.storyId, request.args)) === 'error')
+        return fail('Storybook did not render this story with those args')
+    }
     await page.evaluateSource(CAPTURE_PRELUDE)
     await page.evaluate(settleStory, 2000)
     let props: ArgProp[] = []
@@ -144,8 +160,11 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     const textArgs = props
       .filter((prop) => prop.type === 'text' && typeof prop.initial === 'string')
       .map((prop) => ({ prop: prop.name, value: String(prop.initial) }))
+    /* the base render marks every element so a binding found later can be put on the right one; a variant render needs no markers */
+    const marker = request.readMeta ? probeName().replace('__doop_probe_', 'data-doop-m-') : undefined
     const result: unknown = await page.evaluate(captureStory, {
       textArgs,
+      ...(marker ? { marker } : {}),
       styleProperties: STYLE_PROPERTIES,
       maxBytes: STORYBOOK_LIMITS.captureBytes,
       maxElements: 300,
@@ -167,6 +186,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     if (!parsed.success) return fail('The page returned a capture Doop could not read')
     const capture = parsed.data
     if (capture.ok) {
+      if (marker) capture.marker = marker
       /* the CSS is text the page chose: only whole, well-formed rules of the kinds the capture emits go on */
       const own = guardCss(capture.css)
       let dropped = own.dropped
@@ -372,11 +392,15 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     const base = await render({ storyId: group.defaultStory.id, args: {}, readMeta: true })
     for (const issue of base.issues) note(issue.code, issue.message)
     renderedCount++
-    input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
+    input.onRender?.({
+      rendered: renderedCount,
+      total: Math.max(plannedTotal, renderedCount),
+      component: group.name,
+    })
     const capture = base.capture
     if (!capture.ok) {
       note(
-        'story_failed',
+        capture.code ?? 'story_failed',
         `${group.name}: the default story "${group.defaultStory.name}" could not be captured: ${capture.reason}`,
       )
       input.onProgress?.(index + 1, grouped.groups.length)
@@ -400,9 +424,14 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       for (const candidate of controlStories(group).slice(0, MAX_CONTROL_PROBES)) {
         if (renders >= STORYBOOK_LIMITS.renders) break
         renders++
+        plannedTotal++
         const probe = await render({ storyId: candidate.id, args: {}, readMeta: true })
         renderedCount++
-        input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
+        input.onRender?.({
+          rendered: renderedCount,
+          total: Math.max(plannedTotal, renderedCount),
+          component: group.name,
+        })
         if (!probe.capture.ok || !probe.props.length) continue
         if (probe.capture.html.length > MAX_BUNDLE_HTML_BYTES || probe.capture.css.length > MAX_BUNDLE_CSS_BYTES)
           continue
@@ -430,11 +459,25 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         readMeta: false,
       })
       renderedCount++
-      input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
+      input.onRender?.({
+        rendered: renderedCount,
+        total: Math.max(plannedTotal, renderedCount),
+        component: group.name,
+      })
       return { variant, result }
     })
     const variants: NonNullable<BundleComponent['variants']> = {}
     const reflected = new Set<string>()
+    /* a prop that an attribute of the real element follows is bound to that element, and the library's own rules for it (they match only while the attribute has the value, so they come from the renders of each value) style it: a CSS diff is only for a prop no attribute follows */
+    const { bindings, bound } = findBindings(
+      controls.base,
+      rendered.flatMap(({ variant, result }) =>
+        result.capture.ok ? [{ prop: variant.prop, value: variant.value, shot: result.capture }] : [],
+      ),
+      props,
+    )
+    const known = new Set(splitRules(shipped.css).rules)
+    const extraRules: string[] = []
     for (const { variant, result } of rendered) {
       const shot = result.capture
       if (!shot.ok) {
@@ -442,6 +485,14 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         continue
       }
       for (const rule of shot.sharedRules) shared.add(rule)
+      if (bound.has(variant.prop)) {
+        for (const rule of splitRules(shot.css).rules) {
+          if (known.has(rule)) continue
+          known.add(rule)
+          extraRules.push(rule)
+        }
+        continue
+      }
       const diff = diffStyles(controls.base, shot)
       let entry: { html?: string; css?: string } | undefined
       if (diff !== undefined) {
@@ -454,7 +505,38 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       ;(variants[variant.prop] ??= {})[variant.value] = entry
       if (entry.css) reflected.add(variant.prop)
     }
-    const outProps = props.map(({ arg: _arg, initial: _initial, ...prop }) => ({
+    let shippedCss = shipped.css
+    if (extraRules.length) {
+      const joined = [shipped.css, ...extraRules].filter(Boolean).join('\n')
+      if (joined.length <= MAX_BUNDLE_CSS_BYTES) shippedCss = joined
+      else
+        note(
+          'variant_css_capped',
+          "The rules for the props' values are over the bundle limit, so only the default look has them",
+        )
+    }
+    const finalHtml = bindHtml(shipped.html, shipped.marker, bindings)
+    /* a prop is something in the markup follows: an enum (it sets data-<name> on the root and the variant rules read it), an attribute or text bound to it, or a boolean whose look is a CSS rule. The rest could never change anything here, and the importer would drop them */
+    const followed = new Set(
+      [...finalHtml.matchAll(/ data-doop-prop="([^"]*)"/g)].flatMap((match) =>
+        (match[1] ?? '').split(',').map((binding) => binding.slice(binding.lastIndexOf(':') + 1).trim()),
+      ),
+    )
+    const useful = props.filter(
+      (prop) =>
+        prop.type === 'enum' || followed.has(prop.name) || (prop.type === 'boolean' && reflected.has(prop.name)),
+    )
+    if (useful.length < props.length) {
+      note(
+        'props_unbound',
+        `${props.length - useful.length} props have nothing in the markup that follows them, so they were left out: ${props
+          .filter((prop) => !useful.includes(prop))
+          .slice(0, 12)
+          .map((prop) => prop.name)
+          .join(', ')}`,
+      )
+    }
+    const outProps = useful.map(({ arg: _arg, initial: _initial, ...prop }) => ({
       ...prop,
       ...(prop.type === 'boolean' && reflected.has(prop.name) ? { reflect: true } : {}),
     }))
@@ -466,14 +548,15 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
           .pop()
           ?.replace(/[^\w$]/g, ''),
       )
+    /* the code mapping names only props the component has */
     const propMapping = Object.fromEntries(
-      props.filter((prop) => prop.arg !== prop.name).map((prop) => [prop.name, { name: prop.arg }]),
+      useful.filter((prop) => prop.arg !== prop.name).map((prop) => [prop.name, { name: prop.arg }]),
     )
     components.push({
       name: group.name,
       group: group.title.slice(0, 200),
-      html: shipped.html,
-      ...(shipped.css ? { css: shipped.css } : {}),
+      html: finalHtml,
+      ...(shippedCss ? { css: shippedCss } : {}),
       ...(outProps.length ? { props: outProps } : {}),
       ...(Object.keys(variants).length ? { variants } : {}),
       code: {
@@ -494,7 +577,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     throw new BundleImportError(
       (
         issues.find((issue) => issue.code === 'renderer_unavailable') ??
-        issues.find((issue) => issue.code === 'story_failed')
+        issues.find((issue) => issue.code === 'story_failed' || issue.code === 'story_needs_worker')
       )?.message ?? 'No component could be imported from this Storybook',
     )
   }

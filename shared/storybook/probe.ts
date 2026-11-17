@@ -15,6 +15,11 @@ export function probeAttribute(name: string): string {
   return 'data-' + name.slice(2).replace(/_/g, '-')
 }
 
+/** The attribute where the probe leaves the outcome of `apply`: `ready` once the story has rendered again with the new args, `error` if it failed or could not be asked. */
+export function probeAppliedAttribute(name: string): string {
+  return probeAttribute(name) + '-applied'
+}
+
 /** The source to give `page.evaluateOnNewDocument`: the probe's installer with a stand-in for the `__name` helper that tsx adds to nested functions. */
 export function probeInstallSource(name: string): string {
   return `(() => { const __name = (target) => target; (${installStoryProbe.toString()})(${JSON.stringify(name)}) })()`
@@ -40,6 +45,9 @@ export function installStoryProbe(name: string): void {
     value: string,
   ) => void
   const attribute = 'data-' + name.slice(2).replace(/_/g, '-')
+  const appliedAttribute = attribute + '-applied'
+  const parse = JSON.parse
+  const removeAttribute = call.bind(Element.prototype.removeAttribute) as (target: Element, key: string) => void
 
   const MAX_CHARS = 262144
   const MAX_DEPTH = 4
@@ -204,8 +212,42 @@ export function installStoryProbe(name: string): void {
     }
   }, 50)
 
+  /**
+   * Sets args on the story through Storybook's own channel (`updateStoryArgs`), as its controls panel does, and leaves `ready` on the document element once the story has rendered again. The `args` in a story URL are not enough: Storybook drops one whose argType has no `type.name`, which is what react-docgen leaves for many components.
+   */
+  const applyArgs = (storyId: string, argsJson: string): void => {
+    const root = document.documentElement
+    const done = (verdict: string) => {
+      try {
+        setAttribute(root, appliedAttribute, verdict)
+      } catch {
+        /* nothing to tell */
+      }
+    }
+    try {
+      removeAttribute(root, appliedAttribute)
+      const channel = field(preview(), 'channel') as
+        | {
+            on?: (event: string, listener: () => void) => void
+            emit?: (event: string, payload: unknown) => void
+          }
+        | undefined
+      const on = channel ? channel.on : undefined
+      const emit = channel ? channel.emit : undefined
+      /* no channel to ask (an old or odd Storybook): the args in the story URL stand */
+      if (!channel || typeof on !== 'function' || typeof emit !== 'function') return done('unsupported')
+      /* the render that follows the update announces itself; listeners are added first so a quick one is not missed */
+      apply(on, channel, ['storyRendered', () => done('ready')])
+      apply(on, channel, ['storyErrored', () => done('error')])
+      apply(on, channel, ['storyThrewException', () => done('error')])
+      apply(emit, channel, ['updateStoryArgs', { storyId, updatedArgs: parse(argsJson) }])
+    } catch {
+      done('error')
+    }
+  }
+
   Object.defineProperty(win, name, {
-    value: Object.freeze({ state, meta }),
+    value: Object.freeze({ state, meta, applyArgs }),
     writable: false,
     configurable: false,
     enumerable: false,

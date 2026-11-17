@@ -2042,8 +2042,10 @@ const UTILITY_CLASS =
   /[:[\]/.]|^-|^(flex|grid|block|inline|hidden|relative|absolute|truncate|uppercase|italic|underline|antialiased)$|^(text|font|bg|border|rounded|shadow|leading|tracking|p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|w|h|min|max|gap|flex|grid|inline|items|justify|opacity|whitespace)-/
 
 /** The name an element gives itself: its `data-name`, else its last class that is not a utility. */
-function ownPropName(el: Element): string | undefined {
-  const classes = (attrOf(el, 'class') ?? '').split(/\s+/).filter((name) => name && !UTILITY_CLASS.test(name))
+function ownPropName(el: Element, fromClasses = true): string | undefined {
+  const classes = (fromClasses ? (attrOf(el, 'class') ?? '') : '')
+    .split(/\s+/)
+    .filter((name) => name && !UTILITY_CLASS.test(name))
   const raw = attrOf(el, 'data-name') ?? classes.at(-1) ?? ''
   const name = raw && raw.length < 30 ? toPropName(raw) : 'value'
   return name === 'value' ? undefined : name
@@ -2064,7 +2066,7 @@ function roleName(el: Element, root: Element): string {
 /** Name what a component would most likely vary: leaf text, image sources, link targets.
  *  Written onto the main as ordinary bindings, so a person or agent can see and change them.
  *  Returns the prop names it made up, in template order. */
-export function inferBindings(root: Element, limit = 12): string[] {
+export function inferBindings(root: Element, limit = 12, { fromClasses = true } = {}): string[] {
   const used = new Set<string>()
   let count = 0
   const take = (base: string) => {
@@ -2085,7 +2087,7 @@ export function inferBindings(root: Element, limit = 12): string[] {
   for (const el of order) {
     if (count >= limit || attrOf(el, BIND_ATTR) !== undefined || attrOf(el, SLOT_ATTR) !== undefined) continue
     const bindings: string[] = []
-    const own = ownPropName(el)
+    const own = ownPropName(el, fromClasses)
     if (el.tagName === 'img' && attrOf(el, 'src')) bindings.push(`src:${take(own ?? 'image')}`)
     /* a link's target is named beside its text: `cta-link` next to `cta` */
     if (el.tagName === 'a' && attrOf(el, 'href')) bindings.push(`href:${take(own ? `${own}-link` : 'link')}`)

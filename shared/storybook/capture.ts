@@ -64,6 +64,8 @@ export interface CaptureOptions {
   styleProperties: readonly string[]
   /** over this many elements no computed styles are read, so a variant cannot be diffed */
   maxElements: number
+  /** a throwaway attribute name Doop chose for this render: when set, every element of `html` carries it with its index (root 0), so a binding found later can be written onto the right element */
+  marker?: string
 }
 
 export interface CapturedStory {
@@ -80,10 +82,14 @@ export interface CapturedStory {
   paths: string[]
   /** computed `STYLE_PROPERTIES` for each element in `html`; null above `maxElements` */
   styles: string[][] | null
+  /** the attributes of each element in `html` that a prop might track (data-*, aria-*, role, disabled and the like; never class, style, id or a URL), by name; null above `maxElements` */
+  attrs?: Record<string, string>[] | null
+  /** the marker attribute the html was written with (set by the importer, not the page) */
+  marker?: string
   issues: StorybookIssue[]
 }
 
-export type StoryCapture = CapturedStory | { ok: false; reason: string }
+export type StoryCapture = CapturedStory | { ok: false; reason: string; code?: string }
 
 /** What `captureStory` answers: the capture as one JSON string of at most `maxBytes` characters, or a small refusal. */
 export type CaptureResult = string | { ok: false; reason: string; bytes?: number }
@@ -182,6 +188,43 @@ export function captureStory(options: CaptureOptions): CaptureResult {
         message: `The text of "${arg.prop}" appears in ${matches.length} elements, so none was bound to it`,
       })
     }
+  }
+
+  /* what a prop can track: the plain attributes of each element, read before the markers go on */
+  const attrNames = /^[a-z][a-z0-9-]*$/
+  const attrs: Record<string, string>[] | null =
+    kept.length <= options.maxElements
+      ? kept.map(({ clone: el }) => {
+          const found: Record<string, string> = {}
+          let count = 0
+          for (const attr of Array.from(el.attributes)) {
+            const name = attr.name.toLowerCase()
+            if (count >= 30) break
+            if (
+              !attrNames.test(name) ||
+              name === 'class' ||
+              name === 'style' ||
+              name === 'id' ||
+              name.startsWith('on') ||
+              name.startsWith('data-doop-') ||
+              urlAttributes.has(name) ||
+              attr.value.length > 120
+            )
+              continue
+            found[name] = attr.value
+            count++
+          }
+          return found
+        })
+      : null
+  if (options.marker && attrs) {
+    kept.forEach(({ clone: el }, index) => {
+      /* the marker goes right before the element's own binding (if any), so the two can be merged as text */
+      const own = el.getAttribute('data-doop-prop')
+      if (own !== null) el.removeAttribute('data-doop-prop')
+      el.setAttribute(options.marker!, String(index))
+      if (own !== null) el.setAttribute('data-doop-prop', own)
+    })
   }
 
   const html = clone.outerHTML
@@ -401,6 +444,7 @@ export function captureStory(options: CaptureOptions): CaptureResult {
     shape,
     paths,
     styles,
+    attrs,
     issues,
   })
   if (text.length > options.maxBytes) return { ok: false, reason: 'too_large', bytes: text.length }

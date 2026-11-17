@@ -2,7 +2,7 @@ import puppeteer, { type Browser, type Page } from 'puppeteer-core'
 import type { ComponentBundle } from '../../../shared/componentBundle.ts'
 import { buildComponentBundle, type StoryPage } from '../../../shared/storybook/bundle.ts'
 import { parseStorybookIndex, type StoryEntry, type StorybookIssue } from '../../../shared/storybook/index.ts'
-import { probeAttribute } from '../../../shared/storybook/probe.ts'
+import { probeAppliedAttribute, probeAttribute } from '../../../shared/storybook/probe.ts'
 import { STORYBOOK_LIMITS, storybookBasePath } from '../../../shared/storybook/plan.ts'
 import { blockedRequest, isLoopbackHost } from './guard.ts'
 
@@ -200,6 +200,18 @@ async function openStoryPage(
         )
         const verdict = await handle.jsonValue()
         return verdict === 'error' || verdict === 'needs_worker' ? verdict : 'ready'
+      },
+      async applyArgs(probe, storyId, args) {
+        await bounded(
+          raw.evaluate(
+            `window[${JSON.stringify(probe)}].applyArgs(${JSON.stringify(storyId)}, ${JSON.stringify(JSON.stringify(args))})`,
+          ),
+        )
+        const handle = await isolatedWorld().waitForFunction(
+          `document.documentElement.getAttribute(${JSON.stringify(probeAppliedAttribute(probe))}) || false`,
+          { timeout: left(), polling: 100 },
+        )
+        return (await handle.jsonValue()) === 'error' ? 'error' : 'ready'
       },
       readMeta: (probe, storyId) =>
         bounded(raw.evaluate(`window[${JSON.stringify(probe)}].meta(${JSON.stringify(storyId)})`)),

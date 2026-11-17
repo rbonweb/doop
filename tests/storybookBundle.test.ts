@@ -242,6 +242,21 @@ describe('buildComponentBundle', () => {
     for (const selector of selectors) expect(selectAll(selector, doc).length, selector).toBeGreaterThan(0)
   })
 
+  it('never reports more renders done than planned, probes for controls included', async () => {
+    const events: { rendered: number; total: number }[] = []
+    await buildComponentBundle({
+      entries: [entry('Kit/Btn', 'Default'), { ...entry('Kit/Btn', 'Playground'), id: 'kit-btn-features--playground' }],
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withPage([], { withoutControls: (id) => id === 'kit-btn--default' }),
+      onRender: (event) => events.push(event),
+    })
+    expect(events.length).toBeGreaterThan(3)
+    for (const event of events) expect(event.total).toBeGreaterThanOrEqual(event.rendered)
+    const totals = events.map((event) => event.total)
+    expect(totals).toEqual([...totals].sort((a, b) => a - b))
+  })
+
   it('leaves a failing story out and throws when nothing imports', async () => {
     const log: string[] = []
     const some = await buildComponentBundle({

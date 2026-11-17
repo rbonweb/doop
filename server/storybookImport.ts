@@ -9,7 +9,7 @@ import {
   type StoryPage,
 } from '../shared/storybook/bundle.ts'
 import { parseStorybookIndex, type StoryEntry } from '../shared/storybook/index.ts'
-import { probeAttribute } from '../shared/storybook/probe.ts'
+import { probeAppliedAttribute, probeAttribute } from '../shared/storybook/probe.ts'
 import { groupStories, MAX_PLANNED_COMPONENTS, STORYBOOK_LIMITS, storybookBasePath } from '../shared/storybook/plan.ts'
 import { env } from './env.ts'
 import { fetchPinnedPublicUrl, guardPublicPageRequests, parsePublicHttpUrl } from './publicUrl.ts'
@@ -312,6 +312,23 @@ async function openStoryPage(
           })
         const verdict = await handle.jsonValue()
         return verdict === 'error' || verdict === 'needs_worker' ? verdict : 'ready'
+      },
+      async applyArgs(probe, storyId, args) {
+        /* both strings are ours: the random probe name, and the args as JSON text embedded as a string literal */
+        await bounded(
+          raw.evaluate(
+            `window[${JSON.stringify(probe)}].applyArgs(${JSON.stringify(storyId)}, ${JSON.stringify(JSON.stringify(args))})`,
+          ),
+        )
+        const handle = await isolatedWorld()
+          .waitForFunction(
+            `document.documentElement.getAttribute(${JSON.stringify(probeAppliedAttribute(probe))}) || false`,
+            { timeout: Math.min(STORYBOOK_LIMITS.renderMs, left()), polling: 100 },
+          )
+          .catch(() => {
+            throw new KnownRenderError('The story did not render again with those args in time')
+          })
+        return (await handle.jsonValue()) === 'error' ? 'error' : 'ready'
       },
       async readMeta(probe, storyId) {
         /* a plain Runtime.evaluate of an expression: it needs nothing from the page's builtins */

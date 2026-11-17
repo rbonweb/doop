@@ -67,6 +67,8 @@ export interface ImportContext {
   actor: Actor
   /** Run a unit of writes as an operation of its own, so a long import is not one budget (the upload route). Default: in place. */
   batch?: <T>(work: () => T) => T
+  /** the bundle was captured from a rendered page: its class names are the library's (hashed, scoped), so no prop is named after one */
+  captured?: boolean
 }
 
 class DryRunDone extends Error {
@@ -416,11 +418,11 @@ function propsForUpdate(bundled: BundleComponent['props'], existing: readonly Co
 
 /** The markup as a new component would store it: with no bindings of its own, the text, image and link props a main infers.
  *  An update sends the same, so an unchanged bundle leaves the definition as it was. */
-function withInferredBindings(html: string): string {
+function withInferredBindings(html: string, fromClasses = true): string {
   if (html.includes('data-doop-prop')) return html
   const roots = kidsOf(rootFragment(html.trim()))
   if (roots.length !== 1) return html
-  inferBindings(roots[0]!)
+  inferBindings(roots[0]!, undefined, { fromClasses })
   return serializeOuter(roots[0]!)
 }
 
@@ -436,6 +438,39 @@ function missingNested(def: ComponentDef): string[] {
 
 type Outcome =
   { kind: 'created' | 'updated' | 'unchanged'; id: string; name: string } | { kind: 'skipped'; reason: string }
+
+/** A code mapping that names a prop the component does not have (a control no attribute follows is not a prop here) is the mapping's fault, never the component's: those entries are dropped, one by one, with an issue, and the component is written with the rest. */
+function withCodeMapping<T>(
+  name: string,
+  code: Plan['code'],
+  issues: ImportIssue[],
+  write: (code: Plan['code']) => T,
+): T {
+  const dropped: string[] = []
+  let mapping = code
+  for (;;) {
+    const mark = savepoint()
+    try {
+      const result = write(mapping)
+      if (dropped.length) {
+        issues.push({
+          component: name,
+          code: 'code_mapping_dropped',
+          message: `the code mapping of ${dropped.length} ${dropped.length === 1 ? 'prop' : 'props'} the component does not have was left out: ${dropped.join(', ')}`,
+        })
+      }
+      return result
+    } catch (error) {
+      const key =
+        error instanceof ComponentError ? /^code\.props “([^”]+)” is not a prop/.exec(error.message)?.[1] : undefined
+      if (!key || !mapping.props || !(key in mapping.props) || dropped.length >= 64) throw error
+      mark.undo()
+      dropped.push(key)
+      const { [key]: _gone, ...rest } = mapping.props
+      mapping = { ...mapping, props: Object.keys(rest).length ? rest : undefined }
+    }
+  }
+}
 
 function writeOne(
   ctx: ImportContext,
@@ -458,17 +493,19 @@ function writeOne(
   if (match) {
     const before = fingerprint(match)
     const mark = savepoint()
-    const result = updateComponent(
-      ctx.canvasId,
-      match.id,
-      {
-        description: component.description,
-        props: propsForUpdate(prepared.props, match.props),
-        code,
-        html: withInferredBindings(prepared.html),
-        css: prepared.css,
-      },
-      ctx.actor,
+    const result = withCodeMapping(component.name, code, issues, (mapping) =>
+      updateComponent(
+        ctx.canvasId,
+        match.id,
+        {
+          description: component.description,
+          props: propsForUpdate(prepared.props, match.props),
+          code: mapping,
+          html: withInferredBindings(prepared.html, !ctx.captured),
+          css: prepared.css,
+        },
+        ctx.actor,
+      ),
     )
     const same = fingerprint(result.component) === before
     if (same || dryRun) mark.undo()
@@ -483,20 +520,22 @@ function writeOne(
       reason: `a component named “${component.name}” is already on this canvas and was not imported from ${code.origin?.kind ?? 'a bundle'}: rename one of them`,
     }
   if (dryRun) return { kind: 'created', id: '', name: component.name }
-  const { component: def } = createComponentFromHtml(
-    ctx.canvasId,
-    {
-      name: component.name,
-      description: component.description,
-      props: prepared.props as ComponentProp[] | undefined,
-      code,
-      html: prepared.html,
-      css: prepared.css,
-      width: MAIN_WIDTH,
-      height: MAIN_HEIGHT,
-      ...(where && pageId ? { place: { pageId, ...where } } : {}),
-    },
-    ctx.actor,
+  const { component: def } = withCodeMapping(component.name, code, issues, (mapping) =>
+    createComponentFromHtml(
+      ctx.canvasId,
+      {
+        name: component.name,
+        description: component.description,
+        props: prepared.props as ComponentProp[] | undefined,
+        code: mapping,
+        html: ctx.captured ? withInferredBindings(prepared.html, false) : prepared.html,
+        css: prepared.css,
+        width: MAIN_WIDTH,
+        height: MAIN_HEIGHT,
+        ...(where && pageId ? { place: { pageId, ...where } } : {}),
+      },
+      ctx.actor,
+    ),
   )
   const missing = missingNested(def)
   if (missing.length)
@@ -571,6 +610,7 @@ export function importComponentBundle(
   { dryRun = false }: { dryRun?: boolean } = {},
 ): ImportResult {
   const bundle = parseBundle(raw)
+  ctx = { ...ctx, captured: bundle.source.kind !== 'agent' }
   if (!store.getCanvas(ctx.canvasId)) throw new ComponentError('canvas not found')
   const defs = activeComponents(store.getComponents(ctx.canvasId))
   const plans = planFor(bundle, defs)

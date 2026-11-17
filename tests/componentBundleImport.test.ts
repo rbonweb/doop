@@ -186,6 +186,63 @@ describe('importing a component bundle', () => {
     expect(() => run({ version: 1, source: { kind: 'agent' }, components: [] })).toThrow(/components/)
   })
 
+  it('drops the code mapping of props the component does not have, keeps the rest, and still imports it', () => {
+    /* what a real Storybook sends: every control is mapped, but only the ones something follows are props here */
+    const mapped = [
+      'show-dividers',
+      'class-name',
+      'auto-size',
+      'visually-hidden',
+      'hide-remove-button',
+      'max-width',
+      'label-wrap',
+    ]
+    const result = run({
+      version: 1,
+      source: { kind: 'storybook', url: 'https://sb.example/' },
+      components: [
+        {
+          name: 'Button',
+          html: '<button class="btn">Go</button>',
+          props: [{ name: 'tone', type: 'enum', options: ['a', 'b'] }],
+          code: {
+            exportName: 'Button',
+            props: {
+              tone: { name: 'kind' },
+              ...Object.fromEntries(
+                mapped.map((name) => [name, { name: name.replace(/-(\w)/g, (_m, c: string) => c.toUpperCase()) }]),
+              ),
+            },
+          },
+        },
+      ],
+    })
+    expect(result.created.map((entry) => entry.name)).toEqual(['Button'])
+    expect(result.skipped).toEqual([])
+    const issue = result.issues.find((entry) => entry.code === 'code_mapping_dropped')
+    expect(issue?.component).toBe('Button')
+    for (const name of mapped) expect(issue?.message).toContain(name)
+    const def = activeComponents(store.getComponents(canvasId))[0]!
+    expect(def.template).toContain('Go')
+    expect(def.code?.exportName).toBe('Button')
+    expect(def.code?.props).toEqual({ tone: { name: 'kind' } })
+  })
+
+  it('names no prop after a class of a captured component, and keeps doing so for an agent bundle', () => {
+    const html = '<span class="prc-Label-pTQ3x">Label</span>'
+    const names = (kind: 'storybook' | 'agent') => {
+      const out = run({ version: 1, source: { kind }, components: [{ name: `Label ${kind}`, html }] })
+      expect(out.created).toHaveLength(1)
+      return activeComponents(store.getComponents(canvasId))
+        .find((def) => def.name === `Label ${kind}`)!
+        .props.map((prop) => prop.name)
+    }
+    const captured = names('storybook')
+    expect(captured).toEqual(['label'])
+    expect(captured.join()).not.toContain('prc')
+    expect(names('agent').join()).toContain('prc')
+  })
+
   it('makes tokens only of the :root variables a captured component reaches, through var() chains', () => {
     const result = run({
       version: 1,

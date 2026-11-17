@@ -23,6 +23,12 @@ export const capturedStorySchema = z
       .array(z.array(z.string().max(MAX_CELL)).length(STYLE_PROPERTIES.length))
       .max(MAX_ELEMENTS)
       .nullable(),
+    marker: z.string().max(100).optional(),
+    attrs: z
+      .array(z.record(z.string().max(100), z.string().max(MAX_CELL)))
+      .max(MAX_ELEMENTS)
+      .nullable()
+      .optional(),
     issues: z.array(issue).max(20),
   })
   .refine((captured) => captured.styles === null || captured.styles.length === captured.paths.length, {
