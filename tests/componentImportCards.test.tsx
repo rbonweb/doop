@@ -258,7 +258,8 @@ it('storybook refused before streaming: a 4xx JSON error is shown as it is', asy
 const TICKET = {
   upload_url: 'https://doop.test/import/tok',
   expires_at: '',
-  command: 'npx doop-import --storybook ./storybook-static --ticket https://doop.test/import/tok',
+  command:
+    'npx --yes --allow-remote=all https://doop.test/cli/doop-import-0.1.0.tgz --storybook ./storybook-static --ticket https://doop.test/import/tok',
   curl: 'curl -T bundle.json https://doop.test/import/tok',
 }
 

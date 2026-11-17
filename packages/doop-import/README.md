@@ -4,11 +4,11 @@ Imports a React team's Storybook into a Doop canvas as components. It renders yo
 
 It uploads only the rendered HTML and CSS of each component, its props and its variants. Nothing of your source code, your repository or your `node_modules` leaves the machine.
 
-This package is not published to npm yet. Build it from the Doop repository with `bun run build:doop-import`, which writes `packages/doop-import/dist/cli.mjs`, and run that file with Node 20 or newer.
+doop-import is not on npm. Your Doop instance serves it: the import picker (the command-line card) and an agent's `create_import_ticket` give you the whole command, which downloads the CLI from `<your Doop>/cli/doop-import-<version>.tgz` and runs it with Node 20.3 or newer. The command carries `--allow-remote=all` because npm 12 refuses to install from a URL without it (older npm just warns that it does not know the flag). The tarball is built with the app (`bun run build`, or `bun run dev`, which packs it once at start; restart `bun run dev` after changing the CLI), and `<your Doop>/cli/doop-import.tgz` redirects to the current one.
 
 ## Get a ticket
 
-Open the import picker on a canvas in Doop and choose the CLI, or ask your agent to call `create_import_ticket`. Either gives you an upload URL that works once, for 15 minutes, and a command to run.
+Open the import picker on a canvas in Doop and choose the CLI, or ask your agent to call `create_import_ticket`. Either gives you a command to run, with the upload URL that works once, for 15 minutes, already in it. The examples below show the same command with `<your Doop>` and `<version>` for what your instance filled in.
 
 Use only a ticket URL you copied from Doop: whoever answers at that address receives your components. A ticket must be `https` (plain `http` is accepted only for this machine, such as a local Doop). It is single use, and because it sits on the command line it shows in the process list of a shared machine, so treat it like a short-lived password.
 
@@ -17,19 +17,19 @@ Use only a ticket URL you copied from Doop: whoever answers at that address rece
 A `storybook build` directory (it is served on `127.0.0.1` at a random port while the import runs):
 
 ```bash
-npx doop-import --storybook ./storybook-static --ticket <upload url>
+npx --yes --allow-remote=all <your Doop>/cli/doop-import-<version>.tgz --storybook ./storybook-static --ticket <upload url>
 ```
 
 A Storybook dev server running on this machine (`localhost`, `127.0.0.1` or `[::1]`):
 
 ```bash
-npx doop-import --storybook http://localhost:6006 --ticket <upload url> --package @acme/ui
+npx --yes --allow-remote=all <your Doop>/cli/doop-import-<version>.tgz --storybook http://localhost:6006 --ticket <upload url> --package @acme/ui
 ```
 
 A dry run: renders, checks the bundle with Doop and says what would be created or updated. Nothing is written and the ticket stays usable:
 
 ```bash
-npx doop-import --storybook ./storybook-static --ticket <upload url> --dry-run
+npx --yes --allow-remote=all <your Doop>/cli/doop-import-<version>.tgz --storybook ./storybook-static --ticket <upload url> --dry-run
 ```
 
 ## Flags

@@ -93,6 +93,7 @@ import {
 } from './access.ts'
 import { deckRouter } from './deckRoutes.ts'
 import { reactExportRouter } from './reactExportRoutes.ts'
+import { serveCli } from './cliDownload.ts'
 import { uploadComponentBundle } from './componentImportRoutes.ts'
 import { createImportTicket, ImportTicketLimitError, ticketAnswer } from './componentImportTickets.ts'
 import { importStorybookRoute } from './storybookRoutes.ts'
@@ -580,6 +581,9 @@ if (NOINDEX) {
 }
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }))
+
+/* the doop-import CLI this instance serves (server/cliDownload.ts): public, one fixed file, before the static bundle and the app shell */
+app.get('/cli/:file', (req, res) => serveCli(req, res))
 
 /* how many canvases have their frame HTML in memory (store.load / evictIdle) */
 app.get('/healthz/store', (_req, res) => {

@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import type { Actor } from '../shared/types.ts'
+import { importCommand } from './cliDownload.ts'
 import { env } from './env.ts'
 
 /**
@@ -115,7 +116,7 @@ export function ticketAnswer(ticket: Pick<ImportTicket, 'token' | 'expiresAt'>) 
   return {
     upload_url,
     expires_at: new Date(ticket.expiresAt).toISOString(),
-    command: `npx doop-import --storybook ./storybook-static --ticket ${upload_url}`,
+    command: importCommand(upload_url),
     curl: `curl -T bundle.json ${upload_url}`,
     curl_gzip: `curl -T bundle.json.gz -H 'Content-Encoding: gzip' ${upload_url}`,
   }
