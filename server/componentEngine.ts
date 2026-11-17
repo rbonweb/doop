@@ -33,6 +33,7 @@ import {
   parseBindings,
   parseCondition,
   parseStyle,
+  propValueProblem,
   serializeStyle,
   stableJson,
   toPropName,
@@ -95,6 +96,58 @@ const elementKids = (node: ParentNode): Element[] => node.childNodes.filter(isEl
 function setText(el: Element, value: string) {
   el.childNodes = [{ nodeName: '#text', value, parentNode: el } as Tree.TextNode]
 }
+
+/** A bound text prop's value: the element's own text nodes only, so `<a><svg/>Label</a>` keeps its
+ *  icon. The value takes the place of the first text node with something in it (else it is appended)
+ *  and other text with something in it goes; spaces between children stay. With no element inside
+ *  this is `setText`. */
+function setOwnText(el: Element, value: string) {
+  if (!el.childNodes.some(isElement)) return setText(el, value)
+  const node = { nodeName: '#text', value, parentNode: el } as Tree.TextNode
+  const hasText = (child: ChildNode) => child.nodeName === '#text' && (child as Tree.TextNode).value.trim() !== ''
+  const at = el.childNodes.findIndex(hasText)
+  const kept: ChildNode[] = []
+  el.childNodes.forEach((child, index) => {
+    if (index === at) kept.push(node)
+    else if (!hasText(child)) kept.push(child)
+  })
+  if (at === -1) kept.push(node)
+  el.childNodes = kept
+}
+
+/** HTML's boolean attributes: present means on, absent means off, and a value of "false" still means on. */
+const BOOLEAN_ATTRS = new Set([
+  'allowfullscreen',
+  'async',
+  'autofocus',
+  'autoplay',
+  'checked',
+  'controls',
+  'default',
+  'defer',
+  'disabled',
+  'formnovalidate',
+  'hidden',
+  'inert',
+  'ismap',
+  'itemscope',
+  'loop',
+  'multiple',
+  'muted',
+  'nomodule',
+  'novalidate',
+  'open',
+  'playsinline',
+  'readonly',
+  'required',
+  'reversed',
+  'selected',
+])
+
+/** A boolean prop's state as an instance carries it: "false" is off, anything else on. */
+const isOn = (value: string) => (value === 'false' ? 'false' : 'true')
+
+const reflects = (prop: ComponentProp) => prop.type === 'enum' || (prop.type === 'boolean' && prop.reflect === true)
 
 function directText(el: Element): string {
   return el.childNodes
@@ -272,16 +325,21 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides)
   if (raw === undefined) return
   setAttr(el, BIND_ATTR, null)
   for (const { target, prop } of parseBindings(raw, el.tagName)) {
+    if (target !== null && BOOLEAN_ATTRS.has(target) && def.props.find((p) => p.name === prop)?.type === 'boolean') {
+      /* present when on, gone when off: the value string of a boolean attribute means nothing */
+      const on = propValue(def, overrides, prop)
+      if (on !== undefined) setAttr(el, target, on === 'false' ? null : '')
+      continue
+    }
     const value = overrides.props?.[prop]
     if (value === undefined) continue
-    if (target === null) setText(el, value)
+    if (target === null) setOwnText(el, value)
     else if (target.startsWith('style.') || target.startsWith('--')) {
       const styles = parseStyle(attrOf(el, 'style'))
       styles.set(target.startsWith('--') ? target : target.slice('style.'.length), value)
       setAttr(el, 'style', serializeStyle(styles))
     } else setAttr(el, target, value)
   }
-  void def
 }
 
 const TAG_NAME = /^[a-z][a-z0-9-]*$/
@@ -387,9 +445,9 @@ function markRoot(root: Element, def: Revision, instanceId: string, overrides: I
   setAttr(root, REV_ATTR, String(def.rev))
   setAttr(root, ELEMENT_ID_ATTR, instanceId)
   for (const prop of def.props) {
-    if (prop.type !== 'enum') continue
+    if (!reflects(prop)) continue
     const value = propValue(def, overrides, prop.name)
-    if (value !== undefined) setAttr(root, `data-${prop.name}`, value)
+    if (value !== undefined) setAttr(root, `data-${prop.name}`, prop.type === 'boolean' ? isOn(value) : value)
   }
   const props = overrides.props ?? {}
   setAttr(root, PROPS_ATTR, Object.keys(props).length ? stableJson(props) : null)
@@ -625,11 +683,18 @@ function diffAttrs(
     const before = attrOf(base, name)
     const after = attrOf(incoming, name)
     if (before === after) continue
-    const enumProp =
+    const boundName = info?.attrProps.get(name)
+    if (boundName && BOOLEAN_ATTRS.has(name) && def.props.find((prop) => prop.name === boundName)?.type === 'boolean') {
+      /* a removed attribute is off, a present one on, except the old `disabled="false"` */
+      ;(state.props ??= {})[boundName] = after === undefined ? 'false' : isOn(after)
+      continue
+    }
+    const reflected =
       isRoot && name.startsWith('data-')
-        ? def.props.find((prop) => prop.type === 'enum' && `data-${prop.name}` === name)
+        ? def.props.find((prop) => reflects(prop) && `data-${prop.name}` === name)
         : undefined
-    if (enumProp && after !== undefined) (state.props ??= {})[enumProp.name] = after
+    if (reflected && after !== undefined)
+      (state.props ??= {})[reflected.name] = reflected.type === 'boolean' ? isOn(after) : after
     else if (info?.attrProps.has(name) && after !== undefined) (state.props ??= {})[info.attrProps.get(name)!] = after
     else (into.attrs ??= {})[name] = after ?? null
   }
@@ -704,13 +769,17 @@ function diffPart(
     order = at + 1
     return true
   })
-  if (!keysKnown || !inOrder || directText(base) !== directText(incoming)) {
+  /* the text a prop fills, edited beside children that stayed: the prop takes it, not an html override */
+  const textEdited = directText(base) !== directText(incoming)
+  const textProp = textEdited && keysKnown && inOrder ? info?.textProp : undefined
+  if (!keysKnown || !inOrder || (textEdited && !textProp)) {
     /* moved, added or rewritten children: keep exactly what they made,
        for this element alone. The instance stays linked everywhere else. */
     into.html = compactChildren(incoming, ctx)
     mergeInto(state, key, into)
     return
   }
+  if (textProp) (state.props ??= {})[textProp] = directText(incoming)
   mergeInto(state, key, into)
   for (const baseKid of baseKids) {
     const kidKey = attrOf(baseKid, PART_ATTR)
@@ -780,7 +849,14 @@ function pruneOverrides(overrides: InstanceOverrides, parts: Map<string, PartInf
   for (const [name, value] of Object.entries(overrides.props ?? {})) {
     const prop = def.props.find((candidate) => candidate.name === name)
     if (prop?.default !== undefined && prop.default === value) continue
-    if (prop && (prop.type === 'text' || prop.type === 'image' || prop.type === 'link')) {
+    if (
+      prop &&
+      (prop.type === 'text' ||
+        prop.type === 'image' ||
+        prop.type === 'link' ||
+        prop.type === 'number' ||
+        prop.type === 'color')
+    ) {
       if (templateValueOf(name, parts) === value) continue
     }
     props[name] = value
@@ -967,10 +1043,11 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
     }
     const prop = def.props.find((candidate) => candidate.name === name)
     if (prop) {
-      if (prop.type === 'enum' && prop.options?.length && !prop.options.includes(attr.value)) {
+      const problem = propValueProblem(prop, attr.value, ctx.find)
+      if (problem) {
         ctx.issues.push({
           code: 'invalid_prop_value',
-          message: `${def.name}: "${attr.value}" is not a value of ${name} — use ${prop.options.join(' | ')}`,
+          message: `${def.name}: "${attr.value}" is not a value of ${name} — ${problem}`,
         })
         continue
       }
@@ -1498,7 +1575,8 @@ export function derivePropsAndSlots(
 ): { props: ComponentProp[]; slots: ComponentSlot[] } {
   const root = parseTemplateRoot(template)
   const props = new Map<string, ComponentProp>()
-  for (const prop of declared) if (prop.type === 'enum' && isPropName(prop.name)) props.set(prop.name, prop)
+  /* an enum or a reflected boolean needs no binding: its effect is `data-<name>` on the root */
+  for (const prop of declared) if (reflects(prop) && isPropName(prop.name)) props.set(prop.name, prop)
   const slots: ComponentSlot[] = []
   if (!root) return { props: [...props.values()], slots }
   const stack: Element[] = [root]
@@ -1515,8 +1593,8 @@ export function derivePropsAndSlots(
       props.set(prop, {
         name: prop,
         type: known?.type ?? type,
-        /* a boolean's default decides what its conditions show; text-like ones are the template's own content */
-        ...(known?.type === 'boolean' && known.default !== undefined ? { default: known.default } : {}),
+        /* a typed prop's default decides what its conditions show; text-like ones are the template's own content */
+        ...typedFieldsOf(known),
         ...descriptionOf(known),
       })
     }
@@ -1528,6 +1606,7 @@ export function derivePropsAndSlots(
         type: known?.type ?? 'boolean',
         default: known?.default ?? 'true',
         ...(known?.options ? { options: known.options } : {}),
+        ...typedFieldsOf(known, false),
         ...descriptionOf(known),
       })
     }
@@ -1543,6 +1622,19 @@ export function derivePropsAndSlots(
     }
   }
   return { props: [...props.values()], slots }
+}
+
+/** What a declared prop says beyond its name and type: kept for a prop the template still uses. */
+function typedFieldsOf(prop: ComponentProp | undefined, withDefault = true): Partial<ComponentProp> {
+  if (!prop || prop.type === 'text' || prop.type === 'image' || prop.type === 'link' || prop.type === 'enum') return {}
+  return {
+    ...(withDefault && prop.default !== undefined ? { default: prop.default } : {}),
+    ...(prop.min !== undefined ? { min: prop.min } : {}),
+    ...(prop.max !== undefined ? { max: prop.max } : {}),
+    ...(prop.step !== undefined ? { step: prop.step } : {}),
+    ...(prop.accepts?.length ? { accepts: prop.accepts } : {}),
+    ...(prop.reflect ? { reflect: true } : {}),
+  }
 }
 
 const descriptionOf = (prop: ComponentProp | undefined) => (prop?.description ? { description: prop.description } : {})

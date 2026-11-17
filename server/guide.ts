@@ -290,6 +290,13 @@ needs a reusable piece the system lacks, add it, then use it.
 - Vary with props, not copies. An enum prop sets data-<name> on the root, so a variant is plain
   CSS: .btn[data-tone="ghost"] { … }. Hover and focus are ordinary CSS too. You do not need a
   component per state, or per size.
+- Prop types: text, image, link, enum, boolean, plus number (min, max, step), color (#hex, rgb(), hsl(),
+  oklch() or var(--token)) and instance (accepts: the components that may be chosen). A value that does
+  not fit comes back as a COMPONENT note naming what does. A boolean bound to an HTML boolean attribute
+  (data-doop-prop="disabled:disabled", also checked, hidden, required, open, selected, muted…) writes the
+  bare attribute when on and removes it when off. Set reflect=true on a boolean to put
+  data-<name>="true"|"false" on the root, so CSS can key on it like an enum. A text binding on an element
+  with children (<a><svg/>Label</a>) changes only the element's own text and keeps the children.
 - For one instance that must differ: use update_instances, or just edit it; edits inside an instance
   are captured as overrides on that element alone and survive every later change to the main. Do
   not detach to make a small change.
