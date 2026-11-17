@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { activeComponents, type ComponentDef } from '../../shared/components'
-import { api, type ComponentLibrary } from '../lib/api'
+import { api, errorMessage, type ComponentLibrary } from '../lib/api'
 import { COMPONENT_DRAG_TYPE, goToMain, placeComponent, removeComponent, renameComponent } from '../lib/components'
 import { useT } from '../lib/i18n'
 import { useCanvasLibrary } from '../lib/library'
@@ -54,6 +54,32 @@ function ComponentNameInput({ def, onDone }: { def: ComponentDef; onDone: () => 
   )
 }
 
+/** A copy of the component, with a main frame of its own (the room delivers the frame). Not undoable, like
+ *  rename and delete: component definitions have no entry in the frame history. */
+async function duplicateComponent(canvasId: string, def: ComponentDef, t: ReturnType<typeof useT>) {
+  const state = useStore.getState()
+  try {
+    const { component } = await api.duplicateComponent(canvasId, def.id)
+    if (useStore.getState().canvas?.id === canvasId) useStore.getState().setComponentLocal(component.id, component)
+    state.pushNotice(t('components.duplicated', { name: def.name, copy: component.name }))
+  } catch (error) {
+    state.pushNotice(errorMessage(error, t('components.duplicateFailed')))
+  }
+}
+
+/** Make a library-linked component local. The server answers with the component and its new main. No client-side
+ *  inverse exists (the link to the library is gone), so nothing is recorded in the undo history. */
+async function detachFromLibrary(canvasId: string, def: ComponentDef, t: ReturnType<typeof useT>) {
+  const state = useStore.getState()
+  try {
+    const { component } = await api.detachComponentFromLibrary(canvasId, def.id)
+    if (useStore.getState().canvas?.id === canvasId) useStore.getState().setComponentLocal(component.id, component)
+    state.pushNotice(t('components.detachedLibrary', { name: component.name }))
+  } catch (error) {
+    state.pushNotice(errorMessage(error, t('components.detachLibraryFailed')))
+  }
+}
+
 /** The library rail: what this canvas has, what it could turn into components,
  *  and what other canvases offer. */
 export function ComponentsPanel() {
@@ -81,6 +107,7 @@ export function ComponentsPanel() {
   const [libraries, setLibraries] = useState<ComponentLibrary[] | null>(null)
   const [picking, setPicking] = useState<ComponentLibrary | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<ComponentDef | null>(null)
+  const [confirmDetach, setConfirmDetach] = useState<ComponentDef | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
   /* Rename picked from the menu opens the field once the menu has closed, in
      place of the focus it would hand back to its trigger, which would blur the
@@ -228,6 +255,11 @@ export function ComponentsPanel() {
                         {t('components.rename')}
                       </DropdownMenuItem>
                     )}
+                    {canEdit && (
+                      <DropdownMenuItem onSelect={() => void duplicateComponent(canvasId, def, t)}>
+                        {t('components.duplicate')}
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuItem onSelect={() => goToMain(def)}>
                       {def.source?.library ? t('components.libraryOpen') : t('components.goToMain')}
                     </DropdownMenuItem>
@@ -256,6 +288,11 @@ export function ComponentsPanel() {
                         }}
                       >
                         {t('components.pullUpdate')}
+                      </DropdownMenuItem>
+                    )}
+                    {canEdit && def.source?.library && (
+                      <DropdownMenuItem onSelect={() => setConfirmDetach(def)}>
+                        {t('components.detachLibrary')}
                       </DropdownMenuItem>
                     )}
                     {canEdit && (
@@ -310,6 +347,18 @@ export function ComponentsPanel() {
             }}
           />
         )}
+        <ConfirmDialog
+          open={!!confirmDetach}
+          onOpenChange={(open) => !open && setConfirmDetach(null)}
+          title={t('components.detachLibraryTitle', { name: confirmDetach?.name ?? '' })}
+          description={t('components.detachLibraryDescription')}
+          confirmLabel={t('components.detachLibrary')}
+          onConfirm={() => {
+            const target = confirmDetach
+            setConfirmDetach(null)
+            if (target) void detachFromLibrary(canvasId, target, t)
+          }}
+        />
         <ConfirmDialog
           open={!!confirmDelete}
           onOpenChange={(open) => !open && setConfirmDelete(null)}
