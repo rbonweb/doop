@@ -5,6 +5,7 @@ import { parseCss, type CssNode } from '../server/componentCss.ts'
 import { describe, expect, it } from 'vitest'
 import { componentBundleSchema } from '../shared/componentBundle.ts'
 import {
+  BundleImportError,
   buildComponentBundle,
   diffStyles,
   isEmittedPath,
@@ -179,6 +180,31 @@ describe('buildComponentBundle', () => {
     expect(issues.some((issue) => issue.code === 'variants_skipped')).toBe(true)
   })
 
+  it('fails with the needs_worker code when every story needs a service worker, and the component stays out of the issue text', async () => {
+    const page = { ...fakePage([]), waitForState: async () => 'needs_worker' as const }
+    const error = await buildComponentBundle({
+      entries: [entry('Inputs/Button')],
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: async (use) => use(page),
+    }).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(BundleImportError)
+    expect((error as BundleImportError).code).toBe('needs_worker')
+    expect((error as BundleImportError).message).toContain('needs a service worker')
+  })
+
+  it('does not start an issue with the component name, since the card names it', async () => {
+    const { issues } = await buildComponentBundle({
+      entries: [entry('A/Button'), entry('B/Broken')],
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withPage([], { fail: (url) => url.includes('broken') }),
+    })
+    const failed = issues.find((issue) => issue.code === 'story_failed')
+    expect(failed?.component).toBe('Broken')
+    for (const issue of issues) if (issue.component) expect(issue.message.startsWith(`${issue.component}:`)).toBe(false)
+  })
+
   it('stops at the 10 minute limit with what it has, and says so', async () => {
     let clock = 0
     const entries = [entry('A/One'), entry('A/Two'), entry('A/Three')]
@@ -270,7 +296,7 @@ describe('buildComponentBundle', () => {
       expect.objectContaining({
         component: 'Bad',
         code: 'story_failed',
-        message: expect.stringMatching(/^Bad: the default story/),
+        message: expect.stringMatching(/^The default story/),
       }),
     )
     await expect(

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ArgProp } from '../shared/storybook/argTypes.ts'
 import type { StoryEntry } from '../shared/storybook/index.ts'
 import {
+  describeSkipped,
   argsParam,
   groupStories,
   pickDefaultStory,
@@ -225,7 +226,9 @@ describe('planVariants', () => {
     )
     expect(renders.map((render) => render.value)).toEqual(['ok'])
     expect(skipped).toHaveLength(3)
-    expect(skipped[0]).toContain('size: "a.b" cannot be written in a story URL')
+    expect(describeSkipped(skipped)).toEqual([
+      '3 values cannot be written in a story URL, so they were not rendered: size "a.b", size "full/width", size "x+"',
+    ])
   })
 
   it('stops at 4 axes and 8 values per axis', () => {
@@ -235,8 +238,10 @@ describe('planVariants', () => {
     const { renders, skipped } = planVariants(axes, 1000)
     expect(new Set(renders.map((render) => render.prop)).size).toBe(STORYBOOK_LIMITS.axes)
     expect(renders.filter((render) => render.prop === 'a')).toHaveLength(STORYBOOK_LIMITS.values)
-    expect(skipped.join()).toContain('e: only 4 props are varied')
-    expect(skipped.join()).toContain('a: only 8 values are rendered')
+    expect(describeSkipped(skipped)).toEqual([
+      'Only the first 4 props get variants; 1 keeps the default value: e',
+      'Only the first 8 values of a prop get a variant; the rest are not shown for 4 props: a, b, c, d',
+    ])
   })
 
   it('stays inside the render budget', () => {
@@ -245,7 +250,7 @@ describe('planVariants', () => {
       3,
     )
     expect(renders).toHaveLength(3)
-    expect(skipped.join()).toContain('over the render budget')
+    expect(describeSkipped(skipped)[0]).toContain('reached its limit of renders')
     expect(planVariants([prop({ name: 'on', type: 'boolean' })], 0).renders).toEqual([])
   })
 })

@@ -226,40 +226,83 @@ export interface VariantRender {
 
 export interface VariantPlan {
   renders: VariantRender[]
-  /** props that could not be varied, with why */
-  skipped: string[]
+  /** props or values that could not be varied, with why */
+  skipped: SkippedVariant[]
+}
+
+export interface SkippedVariant {
+  prop: string
+  why: 'axes' | 'values' | 'budget' | 'url'
+  /** the value, for `url` */
+  option?: string
+}
+
+const listOf = (names: string[]): string => {
+  const unique = [...new Set(names)]
+  return unique.length > 6 ? `${unique.slice(0, 6).join(', ')} and ${unique.length - 6} more` : unique.join(', ')
+}
+
+/** The skipped variants in plain words, one sentence for each reason and never one per prop: how many, and which. */
+export function describeSkipped(skipped: SkippedVariant[]): string[] {
+  const of = (why: SkippedVariant['why']) => skipped.filter((entry) => entry.why === why)
+  const messages: string[] = []
+  const axes = of('axes')
+  if (axes.length) {
+    messages.push(
+      `Only the first ${STORYBOOK_LIMITS.axes} props get variants; ${axes.length} ${axes.length === 1 ? 'keeps' : 'keep'} the default value: ${listOf(axes.map((entry) => entry.prop))}`,
+    )
+  }
+  const values = of('values')
+  if (values.length) {
+    messages.push(
+      `Only the first ${STORYBOOK_LIMITS.values} values of a prop get a variant; the rest are not shown for ${values.length} ${values.length === 1 ? 'prop' : 'props'}: ${listOf(values.map((entry) => entry.prop))}`,
+    )
+  }
+  const budget = of('budget')
+  if (budget.length) {
+    messages.push(
+      `The import reached its limit of renders, so ${budget.length === 1 ? 'a prop has' : 'some props have'} fewer variants: ${listOf(budget.map((entry) => entry.prop))}`,
+    )
+  }
+  const url = of('url')
+  if (url.length) {
+    messages.push(
+      `${url.length} ${url.length === 1 ? 'value' : 'values'} cannot be written in a story URL, so ${url.length === 1 ? 'it was' : 'they were'} not rendered: ${listOf(url.map((entry) => `${entry.prop} "${(entry.option ?? '').slice(0, 30)}"`))}`,
+    )
+  }
+  return messages
 }
 
 /** What a component can be rendered as: every option of an enum (up to values per axis), and the other value of a boolean, on at most `axes` props, never more than `maxRenders` renders in all. Enums go first, then booleans, each in the story's own order. */
 export function planVariants(props: ArgProp[], maxRenders: number): VariantPlan {
   const renders: VariantRender[] = []
-  const skipped: string[] = []
+  const skipped: SkippedVariant[] = []
   const axes = [...props.filter((prop) => prop.type === 'enum'), ...props.filter((prop) => prop.type === 'boolean')]
   for (const [index, prop] of axes.entries()) {
     if (index >= STORYBOOK_LIMITS.axes) {
-      skipped.push(`${prop.name}: only ${STORYBOOK_LIMITS.axes} props are varied`)
+      skipped.push({ prop: prop.name, why: 'axes' })
       continue
     }
     if (prop.type === 'boolean') {
       const next = prop.default === 'true' ? 'false' : 'true'
-      if (renders.length >= maxRenders) skipped.push(`${prop.name}: over the render budget`)
+      if (renders.length >= maxRenders) skipped.push({ prop: prop.name, why: 'budget' })
       else renders.push({ prop: prop.name, value: next, arg: prop.arg, argValue: next === 'true' })
       continue
     }
     const options = (prop.options ?? []).filter((option) => option !== prop.default).slice(0, STORYBOOK_LIMITS.values)
     if ((prop.options?.length ?? 0) - (prop.default !== undefined ? 1 : 0) > options.length) {
-      skipped.push(`${prop.name}: only ${STORYBOOK_LIMITS.values} values are rendered`)
+      skipped.push({ prop: prop.name, why: 'values' })
     }
     for (const option of options) {
       if (renders.length >= maxRenders) {
-        skipped.push(`${prop.name}: over the render budget`)
+        skipped.push({ prop: prop.name, why: 'budget' })
         break
       }
       const numeric = Number(option)
       const argValue = option.trim() !== '' && Number.isFinite(numeric) && String(numeric) === option ? numeric : option
       /* a value Storybook's args syntax cannot carry would render as the default, so it is not rendered at all */
       if (argsParam({ [prop.arg]: argValue }) === undefined) {
-        skipped.push(`${prop.name}: "${option.slice(0, 30)}" cannot be written in a story URL`)
+        skipped.push({ prop: prop.name, why: 'url', option })
         continue
       }
       renders.push({ prop: prop.name, value: option, arg: prop.arg, argValue })

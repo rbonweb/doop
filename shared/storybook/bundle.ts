@@ -20,6 +20,7 @@ import { guardCss, splitRules } from './cssGuard.ts'
 import { MAX_PROBE_CHARS, probeInstallSource, probeName } from './probe.ts'
 import { captureRefusalSchema, storyCaptureSchema, storyMetaSchema } from './schemas.ts'
 import {
+  describeSkipped,
   groupStories,
   MAX_PLANNED_COMPONENTS,
   planVariants,
@@ -93,7 +94,11 @@ const reasonOf = (error: unknown): string =>
 
 /** The import itself could not produce a bundle (nothing could be captured, or what was captured is not a valid bundle). The message is written for the person, never taken raw from an exception. */
 export class BundleImportError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** why, when a caller can act on it (`needs_worker`: the Storybook can only be imported with the CLI) */
+    readonly code?: 'needs_worker',
+  ) {
     super(message)
     this.name = 'BundleImportError'
   }
@@ -401,7 +406,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     if (!capture.ok) {
       note(
         capture.code ?? 'story_failed',
-        `${group.name}: the default story "${group.defaultStory.name}" could not be captured: ${capture.reason}`,
+        `The default story "${group.defaultStory.name}" could not be captured: ${capture.reason}`,
       )
       input.onProgress?.(index + 1, grouped.groups.length)
       continue
@@ -440,7 +445,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         shipped = probe.capture
         note(
           'controls_from_story',
-          `${group.name}: the default story has no controls, so the component comes from the story "${candidate.name}", which has them`,
+          `The default story has no controls, so the component comes from the story "${candidate.name}", which has them`,
         )
         props = probe.props.map((prop) => ({ ...prop }))
         controls = { storyId: candidate.id, base: probe.capture }
@@ -449,7 +454,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       }
     }
     const plan = planVariants(props, variantAllowance(renders, grouped.groups.length - index - 1))
-    for (const reason of plan.skipped) note('variants_skipped', reason)
+    for (const message of describeSkipped(plan.skipped)) note('variants_skipped', message)
     renders += plan.renders.length
     plannedTotal += plan.renders.length
     const rendered = await inPool(plan.renders, concurrency, async (variant) => {
@@ -582,11 +587,16 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   }
 
   if (!components.length) {
+    const stories = issues.filter((issue) => issue.code === 'story_failed' || issue.code === 'story_needs_worker')
+    /* only when every story that failed needs the worker is the CLI the way in */
+    const allNeedWorker = stories.length > 0 && stories.every((issue) => issue.code === 'story_needs_worker')
+    const failure = issues.find((issue) => issue.code === 'renderer_unavailable') ?? stories[0]
+    /* the error is not a card row, so it names its component itself */
     throw new BundleImportError(
-      (
-        issues.find((issue) => issue.code === 'renderer_unavailable') ??
-        issues.find((issue) => issue.code === 'story_failed' || issue.code === 'story_needs_worker')
-      )?.message ?? 'No component could be imported from this Storybook',
+      failure
+        ? `${failure.component ? `${failure.component}: ` : ''}${failure.message}`
+        : 'No component could be imported from this Storybook',
+      failure?.code === 'story_needs_worker' && allNeedWorker ? 'needs_worker' : undefined,
     )
   }
   let css = ''

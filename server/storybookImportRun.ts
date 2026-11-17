@@ -141,7 +141,7 @@ export async function planStorybookImport(
   }
 }
 
-export type StorybookFailureCode = 'private' | 'unreachable' | 'too_many' | 'busy' | 'invalid'
+export type StorybookFailureCode = 'private' | 'unreachable' | 'too_many' | 'busy' | 'invalid' | 'needs_worker'
 
 /** An error from the import as the code and message a caller shows. Only errors this import raised on purpose carry their own message; anything else (a browser or network failure, a bug) is logged and answered with a fixed line, since its text can name internal addresses. */
 export function storybookFailure(error: unknown): { code: StorybookFailureCode; message: string; status: number } {
@@ -152,7 +152,7 @@ export function storybookFailure(error: unknown): { code: StorybookFailureCode; 
   }
   if (error instanceof StorybookRateLimitError) return { code: 'too_many', message: error.message, status: 429 }
   if (error instanceof StorybookIndexError) return { code: 'unreachable', message: error.message, status: 400 }
-  if (error instanceof BundleImportError) return { code: 'invalid', message: error.message, status: 400 }
+  if (error instanceof BundleImportError) return { code: error.code ?? 'invalid', message: error.message, status: 400 }
   if (error instanceof ComponentError || error instanceof WorkBudgetError) {
     return { code: /holds at most/.test(error.message) ? 'too_many' : 'invalid', message: error.message, status: 400 }
   }

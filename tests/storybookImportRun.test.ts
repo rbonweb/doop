@@ -88,6 +88,11 @@ describe('what a failure says', () => {
       status: 400,
     })
     expect(storybookFailure(new BundleImportError('No component could be imported'))).toMatchObject({ code: 'invalid' })
+    expect(storybookFailure(new BundleImportError('Msw: needs the CLI', 'needs_worker'))).toMatchObject({
+      code: 'needs_worker',
+      message: 'Msw: needs the CLI',
+      status: 400,
+    })
     expect(storybookFailure(new StorybookBusyError())).toMatchObject({ code: 'busy', status: 503 })
   })
 
