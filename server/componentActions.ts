@@ -630,6 +630,8 @@ export interface CreateFromHtml {
   width?: number
   height?: number
   autoProps?: boolean
+  /** where the main goes when it is not the Components page's next free spot (the component importer's own page) */
+  place?: { pageId: string; x: number; y: number }
 }
 
 /** A new design with nowhere to live yet: its main goes on the Components page, as a frame of its own. */
@@ -652,7 +654,7 @@ export const createComponentFromHtml = atomic(function createComponentFromHtml(
   const root = singleRoot(input.html)
   const inferred = input.autoProps !== false && !hasBindings(root) ? inferBindings(root) : []
   setAttr(root, COMPONENT_ATTR, def.id)
-  writeNewMain(canvasId, def, serializeOuter(root), input.css ?? '', actor, input.width, input.height)
+  writeNewMain(canvasId, def, serializeOuter(root), input.css ?? '', actor, input.width, input.height, input.place)
   /* the main's write derived the props and slots: the mapping is checked against those */
   const made = requireComponent(canvasId, def.id)
   const code = validCode(input.code, made)

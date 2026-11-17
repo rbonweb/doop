@@ -55,7 +55,8 @@ export const bundleComponentSchema = z
     const props = new Map((component.props ?? []).map((prop) => [prop.name, prop]))
     for (const [name, values] of axes) {
       const prop = props.get(name)
-      if (!prop || (prop.type !== 'enum' && prop.type !== 'boolean')) {
+      const type = prop && (prop.type ?? (prop.options?.length ? 'enum' : 'text'))
+      if (!prop || (type !== 'enum' && type !== 'boolean')) {
         ctx.addIssue({
           code: 'custom',
           path: ['variants', name],
@@ -70,14 +71,14 @@ export const bundleComponentSchema = z
           path: ['variants', name],
           message: `at most ${MAX_VARIANT_VALUES} values per variant prop (got ${keys.length})`,
         })
-      const allowed = prop.type === 'boolean' ? ['true', 'false'] : (prop.options ?? [])
+      const allowed = type === 'boolean' ? ['true', 'false'] : (prop.options ?? [])
       for (const key of keys)
         if (!allowed.includes(key))
           ctx.addIssue({
             code: 'custom',
             path: ['variants', name, key],
             message:
-              prop.type === 'boolean'
+              type === 'boolean'
                 ? `a boolean variant value is "true" or "false", not “${key}”`
                 : `“${key}” is not an option of enum prop “${name}”`,
           })
