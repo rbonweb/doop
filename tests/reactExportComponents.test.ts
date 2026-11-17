@@ -935,3 +935,32 @@ describe('review fixes', () => {
     expect(fileOf(inline, 'README.md')).toContain('full screen')
   })
 })
+
+describe('empty stylesheets', () => {
+  const PLAIN = def('Plain', '<div data-doop-part="r">plain</div>')
+  const INKED = def('Inked', '<div class="i" data-doop-part="r">inked</div>', {
+    rawCss: '.i { animation: pulse 1s infinite }\n@keyframes pulse { from { opacity: .4 } to { opacity: 1 } }',
+  })
+  const spin = '<style>@keyframes spin { from { opacity: 0 } to { opacity: 1 } }</style>'
+
+  for (const styling of ['modules', 'tailwind'] as const) {
+    it(`writes and imports a stylesheet only when there are styles (${styling})`, () => {
+      const bare = exportOf([PLAIN], frame(instance(PLAIN, [PLAIN])), { styling, componentIds: [PLAIN.id] })
+      const paths = bare.files.map((file) => file.path)
+      expect(paths).not.toContain('src/components/Plain.module.css')
+      expect(paths).not.toContain('src/pages/Home.css')
+      expect(fileOf(bare, 'src/pages/Home.tsx')).not.toContain('Home.css')
+      expect(componentOf(bare, 'Plain')).not.toContain('.module.css')
+
+      const styled = exportOf([PLAIN], frame(instance(PLAIN, [PLAIN]), spin), { styling, componentIds: [PLAIN.id] })
+      const styledPaths = styled.files.map((file) => file.path)
+      expect(styledPaths).toContain('src/pages/Home.css')
+      expect(fileOf(styled, 'src/pages/Home.tsx')).toContain("import './Home.css'")
+      expect(styledPaths).not.toContain('src/components/Plain.module.css')
+
+      const inked = exportOf([INKED], [], { styling, componentIds: [INKED.id] })
+      expect(inked.files.map((file) => file.path)).toContain('src/components/Inked.module.css')
+      expect(componentOf(inked, 'Inked')).toContain("import styles from './Inked.module.css'")
+    })
+  }
+})
