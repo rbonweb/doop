@@ -321,9 +321,15 @@ const fingerprint = (def: ComponentDef) =>
 
 /** The props a re-import sends: the bundle's, plus the text-like props an earlier import inferred from the markup, which the bundle never named. */
 function propsForUpdate(bundled: BundleComponent['props'], existing: readonly ComponentProp[]): ComponentProp[] {
-  const named = new Set((bundled ?? []).map((prop) => prop.name))
-  const inferred = existing.filter((prop) => !named.has(prop.name) && ['text', 'image', 'link'].includes(prop.type))
-  return [...(bundled ?? []), ...inferred] as ComponentProp[]
+  const byName = new Map((bundled ?? []).map((prop) => [prop.name, prop as ComponentProp]))
+  /* the component's own order is kept, so props that did not change are not seen as a change */
+  const kept = existing.flatMap((prop) => {
+    const sent = byName.get(prop.name)
+    if (sent) return [sent]
+    return ['text', 'image', 'link'].includes(prop.type) ? [prop] : []
+  })
+  const known = new Set(existing.map((prop) => prop.name))
+  return [...kept, ...[...byName.values()].filter((prop) => !known.has(prop.name))]
 }
 
 /** The components a new main names in a <doop-use> that resolved to nothing. */

@@ -45,6 +45,9 @@ import { transaction } from './journal.ts'
 import { exportCanvasReact, MAX_INLINE_EXPORT_BYTES, reactExportRequest } from './reactExport/canvasExport.ts'
 import { zipExport } from './reactExport/zip.ts'
 import { batchScope } from './responseShaping.ts'
+import { componentBundleSchema, MAX_INLINE_BUNDLE_BYTES } from '../shared/componentBundle.ts'
+import { importComponentBundle } from './componentBundleImport.ts'
+import { createImportTicket, ImportTicketLimitError, ticketAnswer } from './componentImportTickets.ts'
 
 export { codeSchema, propSchema }
 
@@ -806,6 +809,69 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     },
   },
   {
+    name: 'import_components',
+    title: 'Import a component bundle',
+    description: `Import a bundle of React components into this canvas as Doop components, in one call: the way to bring a design system in when you already have each component's markup (html, css, props, variants, code mapping). Small bundles only (up to ${MAX_INLINE_BUNDLE_BYTES / 1000} KB inline): for a published Storybook use import_storybook, for a bundle the CLI made or one too big to send here use create_import_ticket. Components land on the "Imported components" page; importing again updates them in place (same id, history kept, instances follow). Pass dry_run=true first to see what would change without writing.`,
+    readOnly: false,
+    shape: {
+      bundle: componentBundleSchema.describe(
+        'A component bundle: { version: 1, source: { kind: "agent" }, components: [...] }',
+      ),
+      dry_run: z.boolean().optional().describe('Report what would be created, updated or refused, and write nothing'),
+    },
+    run(input, { canvas, actor }) {
+      const size = Buffer.byteLength(JSON.stringify(input.bundle ?? null))
+      if (size > MAX_INLINE_BUNDLE_BYTES)
+        throw new ComponentError(
+          `the bundle is ${Math.round(size / 1000)} KB, over the ${MAX_INLINE_BUNDLE_BYTES / 1000} KB an inline import takes: call create_import_ticket and send the file with the curl command it returns`,
+        )
+      const dryRun = input.dry_run === true
+      const result = importComponentBundle({ canvasId: canvas.id, actor }, input.bundle, { dryRun })
+      const defs = [...result.created, ...result.updated].flatMap(({ id }) => {
+        const def = id ? findComponent(canvas.id, id) : undefined
+        return def ? [def] : []
+      })
+      const counts = `${result.created.length} created, ${result.updated.length} updated, ${result.unchanged.length} unchanged, ${result.skipped.length} refused`
+      return {
+        data: { ok: true, dry_run: dryRun, ...result },
+        note: [
+          dryRun
+            ? `Dry run, nothing was written: ${counts}.`
+            : `Imported: ${counts}. The mains are on the "Imported components" page; compose screens from them with <doop-use component="Name">. Check one with get_component_preview.`,
+          ...(result.skipped.length
+            ? [`Refused: ${result.skipped.map((entry) => `${entry.name} (${entry.reason})`).join('; ')}`]
+            : []),
+          ...(result.issues.length
+            ? [
+                `${result.issues.length} issue${result.issues.length === 1 ? '' : 's'} are listed in issues: unsafe markup and css was removed, and anything a condition could not express was kept as the default.`,
+              ]
+            : []),
+        ].join('\n'),
+        frames: defs.flatMap((def) => outcomeFrames({ canvas } as ToolContext, def)),
+      }
+    },
+  },
+  {
+    name: 'create_import_ticket',
+    title: 'Get an upload URL for a component bundle',
+    description:
+      'Get a one-time upload URL (15 minutes, one use) for a component bundle too big to send through import_components, or one the doop-import CLI makes from a Storybook build. Returns the URL, the CLI command and a curl command; the bundle goes straight to the server and the import result comes back from that request.',
+    readOnly: false,
+    shape: {},
+    run(_input, { canvas, actor, userId }) {
+      try {
+        const ticket = createImportTicket({ canvasId: canvas.id, userId, actor })
+        return {
+          data: { ok: true, ...ticketAnswer(ticket) },
+          note: 'Run command (the CLI, for a Storybook build) or curl (for a bundle.json you have) within 15 minutes. Add ?dry_run=1 to the URL to preview the import without using the ticket up. The answer to the request is the import result.',
+        }
+      } catch (error) {
+        if (error instanceof ImportTicketLimitError) throw new ComponentError(error.message)
+        throw error
+      }
+    },
+  },
+  {
     name: 'export_react',
     title: 'Export as React code',
     description:
@@ -936,7 +1002,11 @@ export async function runComponentTool(
 ): Promise<{ ok: true; result: ToolResult } | { ok: false; error: string }> {
   const tool = COMPONENT_TOOLS.find((candidate) => candidate.name === name)
   if (!tool) return { ok: false, error: `unknown tool ${name}` }
-  const inline = inlineDataRefusal(submittedText(input), currentMarkup(input, context), context.surface)
+  /* a bundle is sanitized by its importer, which strips base64 data and says so, rather than refused whole */
+  const inline =
+    name === 'import_components'
+      ? null
+      : inlineDataRefusal(submittedText(input), currentMarkup(input, context), context.surface)
   if (inline) return { ok: false, error: inline }
   try {
     /* one unit (server/journal.ts): a refusal comes back as this call's error, not as a
