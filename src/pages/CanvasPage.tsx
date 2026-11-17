@@ -56,9 +56,11 @@ import { IosAppPrompt } from '../components/NativeAppPromo'
 import { Onboarding } from '../components/Onboarding'
 import { AccessBanner } from '../components/AccessBanner'
 import { ShareModal } from '../components/ShareModal'
+import { ExportReactDialog } from '../components/ExportReactDialog'
 import { FrameExportModal } from '../components/FrameExportModal'
 import { AppIcon } from '../components/ui/brand-mark'
-import { pageFrames } from '../../shared/pages'
+import { activeComponents } from '../../shared/components'
+import { canvasPages, pageFrames } from '../../shared/pages'
 import type { Frame } from '../../shared/types'
 import { ImportStepFooter, ImportStepHeader, SourcePicker } from '../components/ImportSources'
 import { importSources } from '../components/importSourceList'
@@ -353,6 +355,7 @@ export function CanvasPage({
     url.searchParams.delete('import')
     history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`)
   }, [])
+  const [reactExportOpen, setReactExportOpen] = useState(false)
   const [showImport, setShowImport] = useState(!!ghInstallPass || !!ghInstallError || !!importRequested)
   const [showMobileActions, setShowMobileActions] = useState(false)
   const [showMobileLayers, setShowMobileLayers] = useState(false)
@@ -675,6 +678,7 @@ export function CanvasPage({
         setFindStep({ dir, at: Date.now() })
       },
       openExport,
+      openExportReact: () => setReactExportOpen(true),
       openImport: () => setShowImport(true),
       openVersionHistory: () => {
         const s = useStore.getState()
@@ -758,6 +762,18 @@ export function CanvasPage({
     [canvas, activePageId],
   )
   const exportFrame = exportTargets[0] ?? exportPageFrames[0]
+  /* Export to React: the selection on this page, the page itself, the canvas's components */
+  const reactExportProps = useMemo(() => {
+    if (!canvas) return null
+    const pages = canvasPages(canvas)
+    const page = pages.find((p) => p.id === activePageId) ?? pages[0]
+    const onPage = new Set(exportPageFrames.map((f) => f.id))
+    return {
+      frames: selectedFrames.filter((f) => onPage.has(f.id)),
+      page: page ? { id: page.id, name: page.name, frameCount: exportPageFrames.length } : null,
+      components: activeComponents(canvas.components),
+    }
+  }, [canvas, activePageId, exportPageFrames, selectedFrames])
   /* the panel only shows when a frame-name click (or deep link) opened it —
      selecting a frame by clicking its surface must not slide it in */
   const inspectorOpen = useStore((s) => s.inspectorOpen)
@@ -1480,6 +1496,9 @@ export function CanvasPage({
           pageFrames={exportPageFrames}
           onClose={() => useStore.getState().closeExport()}
         />
+      )}
+      {reactExportOpen && reactExportProps && (
+        <ExportReactDialog canvasId={canvasId} {...reactExportProps} onClose={() => setReactExportOpen(false)} />
       )}
       {showImport && editorReady && (
         <ImportModal

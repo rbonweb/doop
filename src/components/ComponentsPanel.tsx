@@ -5,6 +5,7 @@ import { COMPONENT_DRAG_TYPE, goToMain, placeComponent, removeComponent, renameC
 import { useT } from '../lib/i18n'
 import { useCanvasLibrary } from '../lib/library'
 import { useLibraryResume } from '../lib/libraryResume'
+import { copyComponentAsReact } from '../lib/reactExport'
 import { cn } from '@/lib/utils'
 import { canEditOpenCanvas, useStore } from '../lib/store'
 import { ImportCanvasList, ImportComponentsModal } from './ComponentImport'
@@ -246,6 +247,9 @@ export function ComponentsPanel() {
                         {t('components.insertInstance')}
                       </DropdownMenuItem>
                     )}
+                    <DropdownMenuItem onSelect={() => void copyComponentAsReact(canvasId, def)}>
+                      {t('reactExport.copyAsReact')}
+                    </DropdownMenuItem>
                     {canEdit && !def.source?.library && (
                       <DropdownMenuItem
                         onSelect={() => {
