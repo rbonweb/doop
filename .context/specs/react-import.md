@@ -1,6 +1,6 @@
 # React import
 
-Status: built (S10 importer and tickets, S11 Storybook, S12 CLI, S13 agent path and picker). Plan: Phase C of the component-upgrades plan; contract in `/tmp/react-components/c/contract.md` at the time of writing, code is the source of truth.
+Status: built. The code is the source of truth; this page says how the parts fit.
 
 ## Goal
 
@@ -14,7 +14,7 @@ A Storybook, a bundle and an upload are all untrusted, and the importer may run 
 - A base64 `data:` URI becomes an empty `src` with an `inline_data` issue, as `server/inlineData.ts` does for agent writes; `<style>` elements move out as CSS.
 - CSS drops `@import`, `expression(`, `behavior:`, `-moz-binding`, and `javascript:`/`vbscript:`/`data:text/html` URLs after CSS escapes are decoded and comments removed; a `url()` is kept only for `http(s):`, `#fragment` and non-base64 `data:image` (anything else becomes `url("")` with an issue). Sanitized style text is re-serialized with `styleText`, which escapes `<` before `/style` or `!--` so a stylesheet can never close a `<style>` element.
 - A prop option or default holding `< > " \ { } ;` or a control character would end an attribute, a selector or a style block, so `unsafePropValue` makes the importer skip that one component with a reason; the rest of the bundle still lands.
-- The Storybook path never runs page JavaScript: story pages load in the hardened renderer (`openIsolatedPage` plus `guardPublicPageRequests`), no cookies or credentials are sent, and a private or authenticated Storybook is refused before anything is captured. The CLI renders on the team's own machine, so no repository code touches the server at all.
+- The Storybook's own JavaScript runs only in the hardened renderer, never in the Doop process: story pages load through `openIsolatedPage` behind `guardPublicPageRequests`, the capture runs in an isolated world the page's scripts cannot reach, no cookies or credentials are sent, and a private or authenticated Storybook is refused before anything is captured. The CLI renders on the team's own machine, so no repository code touches the server at all.
 
 ## The bundle (`shared/componentBundle.ts`)
 
