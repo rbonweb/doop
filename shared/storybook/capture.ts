@@ -1,8 +1,11 @@
+import { isFollowableAttribute } from './bindings.ts'
 import type { StorybookIssue } from './index.ts'
 
 /** Pure: no node or server imports, since the CLI bundles it. The functions below run INSIDE a Storybook story page, in an ISOLATED world (`frame.isolatedRealm()`): they see the page's DOM and CSSOM but none of its JavaScript, so page script cannot replace `JSON.stringify`, a DOM getter or `getComputedStyle` under them. Each is self-contained: it may use only what the page has and its own arguments, and helpers live inside it. The result is serialized there and measured there, so the server never receives more than the cap, and it validates what arrives again. The caller runs `CAPTURE_PRELUDE` in that world first, since tsx annotates nested functions with `__name`. Storybook's preview object lives in the page's own world and is read by probe.ts instead. */
 
-export const CAPTURE_PRELUDE = 'globalThis.__name = (target) => target'
+export const FOLLOWABLE_GLOBAL = '__doopFollowableAttribute'
+
+export const CAPTURE_PRELUDE = `globalThis.__name = (target) => target\nglobalThis.${FOLLOWABLE_GLOBAL} = ${isFollowableAttribute.toString()}`
 
 /** The computed properties a variant is diffed on, in the order `styles` lists them. */
 export const STYLE_PROPERTIES = [
@@ -191,26 +194,16 @@ export function captureStory(options: CaptureOptions): CaptureResult {
   }
 
   /* what a prop can track: the plain attributes of each element, read before the markers go on */
-  const attrNames = /^[a-z][a-z0-9-]*$/
+  const followable = (globalThis as unknown as Record<string, (name: string) => boolean>)['__doopFollowableAttribute']!
   const attrs: Record<string, string>[] | null =
     kept.length <= options.maxElements
       ? kept.map(({ clone: el }) => {
           const found: Record<string, string> = {}
           let count = 0
           for (const attr of Array.from(el.attributes)) {
-            const name = attr.name.toLowerCase()
+            const name = attr.name
             if (count >= 30) break
-            if (
-              !attrNames.test(name) ||
-              name === 'class' ||
-              name === 'style' ||
-              name === 'id' ||
-              name.startsWith('on') ||
-              name.startsWith('data-doop-') ||
-              urlAttributes.has(name) ||
-              attr.value.length > 120
-            )
-              continue
+            if (!followable(name) || urlAttributes.has(name) || attr.value.length > 120) continue
             found[name] = attr.value
             count++
           }

@@ -128,12 +128,15 @@ function signature(node: Node, memo: Map<Node, string>): string {
   return value
 }
 
+/** A binding says what follows a prop, not what the element is: a render without it is the same element, and the default's binding stays. */
+const PROP_ATTR = 'data-doop-prop'
+
 function sameShell(a: Tree.Element, b: Tree.Element): boolean {
   if (a.tagName !== b.tagName) return false
   const shell = (el: Tree.Element) =>
     JSON.stringify(
       el.attrs
-        .filter((attr) => attr.name !== IF_ATTR)
+        .filter((attr) => attr.name !== IF_ATTR && attr.name !== PROP_ATTR)
         .map((attr) => [attr.name, attr.value])
         .sort(),
     )

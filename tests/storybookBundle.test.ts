@@ -298,6 +298,70 @@ describe('buildComponentBundle', () => {
   })
 })
 
+describe('bindings on a variant that changes the markup', () => {
+  /** A button inside a wrapper, with a `variant` that sets data-variant on the button and an `icon` that adds a child to it. */
+  function buttonPage(): StoryPage {
+    let url = ''
+    return {
+      installProbe: async () => {},
+      goto: async (next) => {
+        url = next
+      },
+      waitForState: async () => 'ready',
+      readMeta: async () =>
+        JSON.stringify({
+          argTypes: {
+            variant: { control: 'select', options: ['default', 'primary'] },
+            icon: { control: 'select', options: ['none', 'eye'] },
+          },
+          initialArgs: { variant: 'default', icon: 'none' },
+          displayName: 'Button',
+        }),
+      evaluateSource: async () => undefined,
+      evaluate: (async (fn: unknown, options: { marker?: string }) => {
+        if (fn === settleStory) return undefined
+        if (fn !== captureStory) throw new Error('unexpected evaluate')
+        const given = new URL(url).searchParams.get('args') ?? ''
+        const variant = given.includes('variant:primary') ? 'primary' : 'default'
+        const eye = given.includes('icon:eye')
+        const mark = (index: number) => (options.marker ? ` ${options.marker}="${index}"` : '')
+        const styles = STYLE_PROPERTIES.map(() => '')
+        return JSON.stringify(
+          shot({
+            html: `<div class="w"${mark(0)}><button data-variant="${variant}"${mark(1)}>${eye ? `<svg${mark(2)}></svg>` : ''}<span${mark(eye ? 3 : 2)}>Go</span></button></div>`,
+            shape: eye ? '0div,1button,2svg,2span' : '0div,1button,2span',
+            paths: eye
+              ? [
+                  'div.w',
+                  'button:nth-child(1)',
+                  'button:nth-child(1) > svg:nth-child(1)',
+                  'button:nth-child(1) > span:nth-child(2)',
+                ]
+              : ['div.w', 'button:nth-child(1)', 'button:nth-child(1) > span:nth-child(1)'],
+            styles: eye ? [styles, styles, styles, styles] : [styles, styles, styles],
+            attrs: eye ? [{}, { 'data-variant': variant }, {}, {}] : [{}, { 'data-variant': variant }, {}],
+          }),
+        )
+      }) as StoryPage['evaluate'],
+    }
+  }
+
+  it('puts the default binding on the button of the variant that adds a child', async () => {
+    const { bundle } = await buildComponentBundle({
+      entries: [entry('A/Button')],
+      source: { kind: 'storybook', url: 'https://sb.test/' },
+      baseUrl: 'https://sb.test/',
+      withPage: async (use) => use(buttonPage()),
+    })
+    const component = bundle.components[0]!
+    expect(component.html).toContain('<button data-variant="default" data-doop-prop="data-variant:variant">')
+    const eye = component.variants?.icon?.eye?.html ?? ''
+    expect(eye).toContain('<button data-variant="default" data-doop-prop="data-variant:variant"><svg>')
+    expect(eye).not.toContain('data-doop-m-')
+    expect(component.html).not.toContain('data-doop-m-')
+  })
+})
+
 describe('diffStyles against a page that writes its own paths and values', () => {
   const variantWith = (property: string, value: string, paths = ['button.btn']) =>
     shot({ paths, styles: [STYLE_PROPERTIES.map((p) => (p === property ? value : ''))] })

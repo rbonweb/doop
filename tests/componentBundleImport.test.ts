@@ -634,6 +634,26 @@ describe('variants', () => {
     expect(out.props?.[0]?.reflect).toBe(true)
   })
 
+  it('branches only the child that differs, and keeps the default binding on an element a variant renders unbound', () => {
+    const props = [
+      { name: 'variant', type: 'enum', options: ['default', 'primary'] },
+      { name: 'icon', type: 'enum', options: ['none', 'eye'] },
+    ]
+    const bound =
+      '<button class="b" data-variant="default" data-doop-prop="data-variant:variant"><span>Go</span></button>'
+    const unbound = '<button class="b" data-variant="default"><svg></svg><span>Go</span></button>'
+    const out = prepareComponent({
+      name: 'Button',
+      html: `<div class="w">${bound}</div>`,
+      props,
+      variants: { icon: { eye: { html: `<div class="w">${unbound}</div>` } } },
+    } as never)
+    expect(out.html).toBe(
+      '<div class="w"><button class="b" data-variant="default" data-doop-prop="data-variant:variant"><svg data-doop-if="icon=eye"></svg><span>Go</span></button></div>',
+    )
+    expect(out.html.match(/<button/g)).toHaveLength(1)
+  })
+
   it('expresses an alternative render with data-doop-if and keeps the default when it cannot', () => {
     const props = [{ name: 'size', type: 'enum', options: ['sm', 'lg'] }]
     const out = prepareComponent({

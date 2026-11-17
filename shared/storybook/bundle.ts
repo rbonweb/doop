@@ -15,7 +15,7 @@ import {
   type StoryCapture,
 } from './capture.ts'
 import type { StoryEntry, StorybookIssue } from './index.ts'
-import { bindHtml, findBindings } from './bindings.ts'
+import { bindHtml, findBindings, mapBindings } from './bindings.ts'
 import { guardCss, splitRules } from './cssGuard.ts'
 import { MAX_PROBE_CHARS, probeInstallSource, probeName } from './probe.ts'
 import { captureRefusalSchema, storyCaptureSchema, storyMetaSchema } from './schemas.ts'
@@ -160,11 +160,11 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     const textArgs = props
       .filter((prop) => prop.type === 'text' && typeof prop.initial === 'string')
       .map((prop) => ({ prop: prop.name, value: String(prop.initial) }))
-    /* the base render marks every element so a binding found later can be put on the right one; a variant render needs no markers */
-    const marker = request.readMeta ? probeName().replace('__doop_probe_', 'data-doop-m-') : undefined
+    /* every render marks its elements so a binding found later can be put on the right one, in the default's markup and in a variant's own */
+    const marker = probeName().replace('__doop_probe_', 'data-doop-m-')
     const result: unknown = await page.evaluate(captureStory, {
       textArgs,
-      ...(marker ? { marker } : {}),
+      marker,
       styleProperties: STYLE_PROPERTIES,
       maxBytes: STORYBOOK_LIMITS.captureBytes,
       maxElements: 300,
@@ -186,7 +186,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     if (!parsed.success) return fail('The page returned a capture Doop could not read')
     const capture = parsed.data
     if (capture.ok) {
-      if (marker) capture.marker = marker
+      capture.marker = marker
       /* the CSS is text the page chose: only whole, well-formed rules of the kinds the capture emits go on */
       const own = guardCss(capture.css)
       let dropped = own.dropped
@@ -497,10 +497,18 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       let entry: { html?: string; css?: string } | undefined
       if (diff !== undefined) {
         if (diff) entry = { css: diff }
-      } else if (shot.html.length <= MAX_BUNDLE_HTML_BYTES && shot.css.length <= MAX_BUNDLE_CSS_BYTES) {
-        entry = { html: shot.html, css: shot.css }
-      } else
-        note('variant_failed', `${variant.prop}=${variant.value} renders more than a bundle holds, so it was left out`)
+      } else {
+        /* the variant's own markup carries the bindings found on the default, so only what differs is branched */
+        const html = bindHtml(shot.html, shot.marker, mapBindings(controls.base, shot, bindings))
+        if (html.length <= MAX_BUNDLE_HTML_BYTES && shot.css.length <= MAX_BUNDLE_CSS_BYTES) {
+          entry = { html, css: shot.css }
+        } else {
+          note(
+            'variant_failed',
+            `${variant.prop}=${variant.value} renders more than a bundle holds, so it was left out`,
+          )
+        }
+      }
       if (!entry || (entry.css ?? '').length > MAX_BUNDLE_CSS_BYTES) continue
       ;(variants[variant.prop] ??= {})[variant.value] = entry
       if (entry.css) reflected.add(variant.prop)

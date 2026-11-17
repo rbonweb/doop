@@ -17,16 +17,13 @@ const PRESENCE = new Set([
   'inert',
 ])
 
-const ATTRIBUTE_NAME = /^[a-z][a-z0-9-]*$/
-/** Attributes no prop may follow: they style or address the element, run script, or carry a URL. */
-const DENIED = new Set(['class', 'style', 'id', 'href', 'src', 'action', 'formaction', 'poster', 'data', 'srcset'])
-
-/** Whether a prop may follow this attribute: a plain lowercase name, and none the capture never reads (the isolated world applies the same rule when it reads them; the server applies it again, since the answer is text a page produced). */
+/** Whether a prop may follow this attribute: a plain lowercase name, and none the capture never reads. One definition serves both sides: the server calls it on what a page answered, and `CAPTURE_PRELUDE` installs its source in the isolated world, where the capture calls it as it reads attributes, so the two cannot drift. It must stay self-contained (no outer names), since only its source travels. Attributes no prop may follow style or address the element, run script, or carry a URL. */
 export function isFollowableAttribute(name: string): boolean {
+  const denied = ['class', 'style', 'id', 'href', 'src', 'action', 'formaction', 'poster', 'data', 'srcset']
   return (
     name.length <= 100 &&
-    ATTRIBUTE_NAME.test(name) &&
-    !DENIED.has(name) &&
+    /^[a-z][a-z0-9-]*$/.test(name) &&
+    !denied.includes(name) &&
     !name.startsWith('on') &&
     !name.startsWith('data-doop-')
   )
@@ -109,6 +106,23 @@ export function findBindings(
     bound.add(prop.name)
   }
   return { bindings, bound }
+}
+
+/** The base's bindings placed on a variant render's own elements, by element path: an element is the same one when its path is, and only a path that is unique in the render counts. A variant whose markup differs (an icon added to the button) then still carries the bindings, so the importer branches only what really differs. */
+export function mapBindings(
+  base: CapturedStory,
+  shot: CapturedStory,
+  bindings: Map<number, string[]>,
+): Map<number, string[]> {
+  const mapped = new Map<number, string[]>()
+  for (const [index, list] of bindings) {
+    const path = base.paths[index]
+    if (path === undefined) continue
+    const hits = shot.paths.flatMap((candidate, at) => (candidate === path ? [at] : []))
+    const only = hits[0]
+    if (hits.length === 1 && only !== undefined) mapped.set(only, list)
+  }
+  return mapped
 }
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
