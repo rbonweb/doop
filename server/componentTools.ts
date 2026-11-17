@@ -13,6 +13,8 @@ import {
   createComponentFromHtml,
   deleteComponent,
   detachAllInstances,
+  detachFromLibrary,
+  duplicateComponent,
   findComponent,
   findDeletedComponent,
   importableEntry,
@@ -676,6 +678,39 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           main === 'written'
             ? 'Its old main was gone, so a new one was written on the Components page (main_frame_id).'
             : 'Its instances follow it again.',
+        frames: outcomeFrames({ canvas } as ToolContext, def),
+      }
+    },
+  },
+  {
+    name: 'duplicate_component',
+    title: 'Duplicate a component',
+    description:
+      'Make a second component from an existing one: the same design, props, slots and code mapping, named "<name> copy" ("copy 2", … when taken), with a main of its own beside the original\'s (or on the Components page when the original has none). Use it to start a variant or a divergent version without disturbing the original: the original and every instance of it stay exactly as they are, and the copy has no instances yet. A component linked from a workspace library is duplicated into a plain local one, which you can edit here. The copy starts at revision 1 with no history. Rename it with update_component.',
+    readOnly: false,
+    shape: { component: COMPONENT_REF },
+    run({ component }, { canvas, actor }) {
+      const { component: def, source } = duplicateComponent(canvas.id, String(component), actor)
+      return {
+        data: { ok: true, component: summary(canvas, def), source: source.name, main_frame_id: def.mainFrameId },
+        note: `“${source.name}” is unchanged. The copy's main is frame main_frame_id on the Components page. No instance was placed: use it with ${usageExample(def)}, and rename it with update_component.`,
+        frames: outcomeFrames({ canvas } as ToolContext, def),
+      }
+    },
+  },
+  {
+    name: 'detach_from_library',
+    title: 'Detach a component from its workspace library',
+    description:
+      "Make a component linked from a workspace library this canvas's own. It keeps its id, so every instance stays linked and none of them changes; the link to the library is dropped, a main is written on the Components page from the design it has now, and from then on it is edited here with update_component and sync_component no longer applies. Use it only when the human wants this canvas to diverge from the shared library: later library updates will not reach it. Refused for a component that is already local. For a separate copy that leaves the linked one alone, use duplicate_component.",
+    readOnly: false,
+    destructive: true,
+    shape: { component: COMPONENT_REF },
+    run({ component }, { canvas, actor }) {
+      const { component: def } = detachFromLibrary(canvas.id, String(component), actor)
+      return {
+        data: { ok: true, component: summary(canvas, def), main_frame_id: def.mainFrameId },
+        note: 'It is local now: its main is frame main_frame_id on the Components page, and every instance still follows it. Later library publications will not reach it.',
         frames: outcomeFrames({ canvas } as ToolContext, def),
       }
     },
