@@ -16,6 +16,8 @@ import {
   type StoryCapture,
 } from './capture.ts'
 import type { StoryEntry, StorybookIssue } from './index.ts'
+import { guardCss } from './cssGuard.ts'
+import { storyCaptureSchema, storyMetaSchema } from './schemas.ts'
 import { groupStories, planVariants, STORYBOOK_LIMITS, storyIframeUrl, variantAllowance } from './plan.ts'
 
 /** Pure: no node or server imports, since the CLI bundles it. Turns a Storybook's stories into a ComponentBundle through a page it is handed, so the server (the hardened renderer) and the CLI (the team's own browser) run the same capture and build the same bundle. */
@@ -58,12 +60,13 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     let props: ArgProp[] = []
     let displayName: string | undefined
     if (request.readMeta) {
-      const meta = await page.evaluate(readStoryMeta, request.storyId).catch(() => null)
-      if (meta) {
-        const read = readArgTypes(meta.argTypes, meta.initialArgs)
+      const raw = await page.evaluate(readStoryMeta, request.storyId).catch(() => null)
+      const meta = raw === null ? undefined : storyMetaSchema.safeParse(raw)
+      if (meta?.success) {
+        const read = readArgTypes(meta.data.argTypes, meta.data.initialArgs)
         props = read.props
         issues.push(...read.issues)
-        displayName = meta.displayName
+        displayName = meta.data.displayName
       } else {
         issues.push({
           code: 'argtypes_unavailable',
@@ -74,12 +77,35 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     const textArgs = props
       .filter((prop) => prop.type === 'text' && typeof prop.initial === 'string')
       .map((prop) => ({ prop: prop.name, value: String(prop.initial) }))
-    const capture = await page.evaluate(captureStory, {
+    const result = await page.evaluate(captureStory, {
       textArgs,
       styleProperties: STYLE_PROPERTIES,
       maxBytes: STORYBOOK_LIMITS.captureBytes,
       maxElements: 300,
     })
+    /* the page can return anything, so nothing is read before the schema has parsed it */
+    const parsed = storyCaptureSchema.safeParse(result)
+    if (!parsed.success) return fail('The page returned a capture Doop could not read')
+    const capture = parsed.data
+    if (capture.ok) {
+      /* the CSS is text the page chose: only whole, well-formed rules of the kinds the capture emits go on */
+      const own = guardCss(capture.css)
+      let dropped = own.dropped
+      const sharedRules: string[] = []
+      for (const rule of capture.sharedRules) {
+        const guarded = guardCss(rule)
+        dropped += guarded.dropped
+        if (guarded.css) sharedRules.push(guarded.css)
+      }
+      capture.css = own.css
+      capture.sharedRules = sharedRules
+      if (dropped) {
+        capture.issues.push({
+          code: 'css_rules_dropped',
+          message: `${dropped} CSS rules were left out because they were malformed or unsafe`,
+        })
+      }
+    }
     return { capture, props, displayName, issues }
   } catch (error) {
     if (signal?.aborted) throw error
@@ -87,26 +113,49 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
   }
 }
 
-const DECLARATION_UNSAFE = /[{}<>\n\r]/
+/** a class as `CSS.escape` writes it: plain characters, a backslash and one character, or a backslash and hex digits */
+const CSS_IDENT = String.raw`(?:[A-Za-z0-9_-]|\\[^\n\r0-9a-fA-F]|\\[0-9a-fA-F]{1,6} ?)+`
+const TAG = '[a-z][a-z0-9-]*'
+/** the root path `capture` writes: its tag and up to six classes */
+const ROOT_PATH = new RegExp(`^${TAG}(?:\\.${CSS_IDENT}){0,6}$`)
+/** a descendant path: `tag:nth-child(n)` steps from the root's children down */
+const CHILD_PATH = new RegExp(`^${TAG}:nth-child\\(\\d{1,4}\\)(?: > ${TAG}:nth-child\\(\\d{1,4}\\)){0,30}$`)
+/** the only url() a computed value may keep: a quoted http(s) address */
+const HTTP_URL = /url\(\s*"https?:\/\/[^"\\\s()]{1,1000}"\s*\)/gi
+const VALUE_CHARS = /^[\p{L}\p{N}\s.,%#()/+\-"'*_]*$/u
 
-/** The CSS that turns the default render into a variant's, from the computed styles of both: for each element whose look differs, one rule on its path. Only when the two trees have the same shape; undefined otherwise. */
+/** Whether `path` is a selector `capture` could have written for the element at `index` (0 is the root). */
+export function isEmittedPath(path: string, index: number): boolean {
+  return (index === 0 ? ROOT_PATH : CHILD_PATH).test(path)
+}
+
+/** A computed value that is safe to write into a rule: no way to end the declaration or the rule, open a comment or an at-rule, escape, or fetch from anywhere but http(s). */
+export function safeDeclarationValue(value: string): boolean {
+  if (!value || value.length > 500) return false
+  const bare = value.replace(HTTP_URL, 'url_')
+  if (/url\s*\(|expression|javascript|behavior|image-set|\/\*/i.test(bare)) return false
+  if (!VALUE_CHARS.test(bare)) return false
+  return (bare.match(/"/g)?.length ?? 0) % 2 === 0 && (bare.match(/'/g)?.length ?? 0) % 2 === 0
+}
+
+/** The CSS that turns the default render into a variant's, from the computed styles of both: for each element whose look differs, one rule on its path. Only when the two trees have the same shape, and every path is one `capture` could have written; undefined otherwise. Both captures are page-controlled, so paths and values are checked against the exact grammar emitted, whatever the importer does after. */
 export function diffStyles(base: CapturedStory, variant: CapturedStory): string | undefined {
   if (!base.styles || !variant.styles || base.shape !== variant.shape) return undefined
   const rules: string[] = []
   for (const [index, baseValues] of base.styles.entries()) {
     const values = variant.styles[index]
     const path = base.paths[index]
-    if (!values || !path) return undefined
+    if (!values || !path || !isEmittedPath(path, index)) return undefined
     const declarations: string[] = []
     for (const [column, property] of STYLE_PROPERTIES.entries()) {
       const next = values[column]
-      if (next !== undefined && next !== baseValues[column] && next !== '' && !DECLARATION_UNSAFE.test(next)) {
+      if (next !== undefined && next !== baseValues[column] && next !== '' && safeDeclarationValue(next)) {
         declarations.push(`  ${property}: ${next};`)
       }
     }
     if (declarations.length) rules.push(`${path} {\n${declarations.join('\n')}\n}`)
   }
-  return rules.join('\n')
+  return guardCss(rules.join('\n')).css
 }
 
 function identifier(raw: string | undefined): string | undefined {
@@ -163,11 +212,32 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   const shared = new Set<string>()
   let renders = 0
 
-  const render = (request: Omit<RenderRequest, 'baseUrl'>) =>
-    input.withPage((page) => renderStory(page, { ...request, baseUrl: input.baseUrl }, input.signal))
+  /* a page that cannot be opened (the renderer is busy, the browser would not start) is not a story that failed: the import carries on without that render, and gives up with what it has after a few in a row */
+  let openFailures = 0
+  const render = async (request: Omit<RenderRequest, 'baseUrl'>): Promise<StoryRender> => {
+    try {
+      const result = await input.withPage((page) =>
+        renderStory(page, { ...request, baseUrl: input.baseUrl }, input.signal),
+      )
+      openFailures = 0
+      return result
+    } catch (error) {
+      if (input.signal?.aborted) throw error
+      openFailures++
+      const reason = error instanceof Error ? error.message.slice(0, 200) : 'a page could not be opened'
+      return { capture: { ok: false, reason }, props: [], issues: [] }
+    }
+  }
 
   for (const [index, group] of grouped.groups.entries()) {
     input.signal?.throwIfAborted()
+    if (openFailures >= 3) {
+      issues.push({
+        code: 'renderer_unavailable',
+        message: `Doop's renderer could not open pages (${components.length} components were imported before that); try again shortly`,
+      })
+      break
+    }
     const note = (code: string, message: string) => issues.push({ component: group.name, code, message })
     if (now() - started > STORYBOOK_LIMITS.importMs) {
       issues.push({
@@ -270,8 +340,10 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
 
   if (!components.length) {
     throw new Error(
-      issues.find((issue) => issue.code === 'story_failed')?.message ??
-        'No component could be imported from this Storybook',
+      (
+        issues.find((issue) => issue.code === 'renderer_unavailable') ??
+        issues.find((issue) => issue.code === 'story_failed')
+      )?.message ?? 'No component could be imported from this Storybook',
     )
   }
   let css = ''

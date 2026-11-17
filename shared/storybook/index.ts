@@ -86,7 +86,15 @@ export function parseStorybookIndex(json: unknown): ParsedIndex {
   let docs = 0
   let dropped = 0
   let overflow = 0
-  for (const [key, value] of Object.entries(table)) {
+  /* a hostile index can list hundreds of thousands of entries: look at a bounded number of keys, and stop parsing once the cap is reached */
+  const keys = Object.keys(table)
+  if (keys.length > MAX_INDEX_ENTRIES * 2) overflow += keys.length - MAX_INDEX_ENTRIES * 2
+  for (const key of keys.slice(0, MAX_INDEX_ENTRIES * 2)) {
+    if (entries.length >= MAX_INDEX_ENTRIES) {
+      overflow++
+      continue
+    }
+    const value = table[key]
     const parsed = rawEntry.safeParse(value)
     if (!parsed.success) {
       dropped++
@@ -110,10 +118,6 @@ export function parseStorybookIndex(json: unknown): ParsedIndex {
     }
     if (title.length > MAX_TITLE || name.length > MAX_NAME) {
       dropped++
-      continue
-    }
-    if (entries.length >= MAX_INDEX_ENTRIES) {
-      overflow++
       continue
     }
     seen.add(id)

@@ -99,6 +99,16 @@ describe('planVariants', () => {
     expect(renders.map((render) => render.argValue)).toEqual([1, 2, '3x'])
   })
 
+  it('says so when an option cannot be written in a story URL, and does not render it as the default', () => {
+    const { renders, skipped } = planVariants(
+      [prop({ name: 'size', type: 'enum', options: ['a.b', 'full/width', 'x+', 'ok'] })],
+      10,
+    )
+    expect(renders.map((render) => render.value)).toEqual(['ok'])
+    expect(skipped).toHaveLength(3)
+    expect(skipped[0]).toContain('size: "a.b" cannot be written in a story URL')
+  })
+
   it('stops at 4 axes and 8 values per axis', () => {
     const axes = ['a', 'b', 'c', 'd', 'e'].map((name) =>
       prop({ name, type: 'enum', options: Array.from({ length: 12 }, (_, i) => `v${i}`), default: 'v0' }),

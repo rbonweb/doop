@@ -130,6 +130,15 @@ describe('parseStorybookIndex', () => {
     expect(parsed.issues.map((issue) => issue.code)).toContain('index_too_large')
   })
 
+  it('looks at a bounded number of keys before parsing, and says so', () => {
+    const entries: Record<string, unknown> = {}
+    for (let i = 0; i < MAX_INDEX_ENTRIES * 2 + 500; i++) entries[`junk${i}`] = 'not an entry'
+    entries.late = { type: 'story', id: 'late', name: 'L', title: 'T' }
+    const parsed = parseStorybookIndex({ v: 5, entries })
+    expect(parsed.entries).toEqual([])
+    expect(parsed.issues.map((issue) => issue.code)).toContain('index_too_large')
+  })
+
   it('keeps the first of a repeated id', () => {
     const { entries } = parseStorybookIndex({
       v: 5,

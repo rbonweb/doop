@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { componentBundleSchema } from '../shared/componentBundle.ts'
 import { STORYBOOK_LIMITS } from '../shared/storybook/plan.ts'
+import * as screenshot from '../server/screenshot.ts'
 import { findBrowserPath, getBrowser } from '../server/screenshot.ts'
 import {
   StorybookAccessError,
@@ -13,6 +14,12 @@ import {
 } from '../server/storybookImport.ts'
 
 /* A tiny Storybook with no React and no build: an index.json, and an iframe.html whose script renders the story named by ?id=…&args=… and sets the body classes and __STORYBOOK_PREVIEW__ the way Storybook does. Its Button page is hostile on purpose (script, iframe, handlers, javascript: links, requests to hosts the import must never reach). */
+
+/* every page an import opens is recorded, so the test can see what priority it asked for */
+vi.mock('../server/screenshot.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../server/screenshot.ts')>()
+  return { ...actual, openIsolatedPage: vi.fn(actual.openIsolatedPage) }
+})
 
 const ENTRIES = {
   'inputs-button--primary': { type: 'story', id: 'inputs-button--primary', name: 'Primary', title: 'Inputs/Button' },
@@ -164,6 +171,18 @@ beforeAll(async () => {
         }),
       )
     }
+    if (url === '/loginframe/index.json') {
+      return send(
+        200,
+        'application/json',
+        JSON.stringify({
+          v: 5,
+          entries: { 'x--default': { type: 'story', id: 'x--default', name: 'Default', title: 'X' } },
+        }),
+      )
+    }
+    if (url.startsWith('/loginframe/iframe.html')) return send(302, 'text/plain', '', { location: '/loginframe/login' })
+    if (url === '/loginframe/login') return send(200, 'text/html', '<html>sign in</html>')
     if (url === '/lockedframe/iframe.html' || url.startsWith('/lockedframe/iframe.html?'))
       return send(403, 'text/plain', 'no')
     if (url === '/slow/index.json') {
@@ -215,6 +234,14 @@ afterAll(async () => {
 })
 
 describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer', { timeout: 120_000 }, () => {
+  it('opens every page as a background render, so an import never starves an interactive one', async () => {
+    const opened = vi.mocked(screenshot.openIsolatedPage)
+    opened.mockClear()
+    await storybookBundle(`${storybook.origin}/sb/`, { include: ['data'] }, deps(storybook.origin))
+    expect(opened.mock.calls.length).toBeGreaterThan(1)
+    for (const call of opened.mock.calls) expect(call[0]).toEqual({ priority: 'background' })
+  })
+
   it('turns a fake Storybook into a valid bundle and keeps every request inside its origin', async () => {
     const result = await storybookBundle(`${storybook.origin}/sb/`, { package: '@acme/ui' }, deps(storybook.origin))
     const { bundle, issues } = result
@@ -309,7 +336,9 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     )
     expect(bundle.components.map((component) => component.name)).toEqual(['Badge'])
     expect(issues.find((issue) => issue.component === 'Slow')?.code).toBe('story_failed')
-    expect(Date.now() - started).toBeLessThan(STORYBOOK_LIMITS.renderMs + 15_000)
+    expect(Date.now() - started).toBeLessThan(STORYBOOK_LIMITS.renderMs + 6_000)
+    /* the per-step timers are cleared, not left to run out */
+    expect(process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length).toBeLessThan(10)
   })
 
   it('refuses a story whose capture is over 2 MB', async () => {
@@ -323,15 +352,36 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     await expect(storybookBundle(`${storybook.origin}/redirect/`, {}, deps(storybook.origin))).rejects.toBeInstanceOf(
       StorybookAccessError,
     )
-    await expect(storybookBundle(`${storybook.origin}/away/`, {}, deps(storybook.origin))).rejects.toBeInstanceOf(
-      StorybookAccessError,
+    /* another address is a redirect to follow by hand, not a sign-in */
+    const away = await storybookBundle(`${storybook.origin}/away/`, {}, deps(storybook.origin)).catch(
+      (error: unknown) => error,
     )
+    expect(away).toBeInstanceOf(StorybookIndexError)
+    expect(away).not.toBeInstanceOf(StorybookAccessError)
+    expect((away as Error).message).toContain('redirects to another address (https://elsewhere.test)')
     await expect(storybookBundle(`${storybook.origin}/html/`, {}, deps(storybook.origin))).rejects.toBeInstanceOf(
       StorybookIndexError,
     )
     await expect(storybookBundle(`${storybook.origin}/nothing/`, {}, deps(storybook.origin))).rejects.toBeInstanceOf(
       StorybookIndexError,
     )
+  })
+
+  it('stops the whole import when a story page redirects to a sign-in path', async () => {
+    await expect(storybookBundle(`${storybook.origin}/loginframe/`, {}, deps(storybook.origin))).rejects.toBeInstanceOf(
+      StorybookAccessError,
+    )
+  })
+
+  it('notices a signal that is already aborted, and gives the slot back', async () => {
+    const indexFetches = () => storybook.requests.filter((request) => request.url === '/sb/index.json').length
+    const before = indexFetches()
+    const controller = new AbortController()
+    controller.abort(new Error('cancelled before it began'))
+    await expect(
+      storybookBundle(`${storybook.origin}/sb/`, { signal: controller.signal }, deps(storybook.origin)),
+    ).rejects.toThrow('cancelled before it began')
+    expect(indexFetches()).toBe(before)
   })
 
   it('stops the whole import when a story page answers 403', async () => {

@@ -139,12 +139,13 @@ export function planVariants(props: ArgProp[], maxRenders: number): VariantPlan 
         break
       }
       const numeric = Number(option)
-      renders.push({
-        prop: prop.name,
-        value: option,
-        arg: prop.arg,
-        argValue: option.trim() !== '' && Number.isFinite(numeric) && String(numeric) === option ? numeric : option,
-      })
+      const argValue = option.trim() !== '' && Number.isFinite(numeric) && String(numeric) === option ? numeric : option
+      /* a value Storybook's args syntax cannot carry would render as the default, so it is not rendered at all */
+      if (argsParam({ [prop.arg]: argValue }) === undefined) {
+        skipped.push(`${prop.name}: "${option.slice(0, 30)}" cannot be written in a story URL`)
+        continue
+      }
+      renders.push({ prop: prop.name, value: option, arg: prop.arg, argValue })
     }
   }
   return { renders, skipped }

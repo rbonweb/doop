@@ -1,6 +1,14 @@
+import postcss, { type AtRule, type Rule } from 'postcss'
 import { describe, expect, it } from 'vitest'
 import { componentBundleSchema } from '../shared/componentBundle.ts'
-import { buildComponentBundle, diffStyles, type StoryPage } from '../shared/storybook/bundle.ts'
+import {
+  buildComponentBundle,
+  diffStyles,
+  isEmittedPath,
+  renderStory,
+  safeDeclarationValue,
+  type StoryPage,
+} from '../shared/storybook/bundle.ts'
 import {
   captureStory,
   readStoryMeta,
@@ -10,6 +18,8 @@ import {
 } from '../shared/storybook/capture.ts'
 import type { StoryEntry } from '../shared/storybook/index.ts'
 import { STORYBOOK_LIMITS } from '../shared/storybook/plan.ts'
+import { guardCss, splitRules } from '../shared/storybook/cssGuard.ts'
+import { isBoundedJson } from '../shared/storybook/schemas.ts'
 
 const entry = (title: string, name = 'Default'): StoryEntry => ({
   id: `${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}--${name.toLowerCase()}`,
@@ -205,5 +215,317 @@ describe('buildComponentBundle', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow('cancelled')
+  })
+})
+
+describe('diffStyles against a page that writes its own paths and values', () => {
+  const variantWith = (property: string, value: string, paths = ['button.btn']) =>
+    shot({ paths, styles: [STYLE_PROPERTIES.map((p) => (p === property ? value : ''))] })
+
+  it.each([
+    'b{}@import url(//evil)',
+    'button.btn{}x',
+    'button.btn, a',
+    'button > a',
+    'button.btn[data-x]',
+    'button.btn:hover',
+    '',
+    'button.' + 'a'.repeat(5) + '.b.c.d.e.f.g.h',
+  ])('refuses the root path %j', (path) => {
+    expect(diffStyles(shot({ paths: [path] }), variantWith('color', 'red', [path]))).toBeUndefined()
+  })
+
+  it('refuses a descendant path that is not tag:nth-child steps', () => {
+    const base = (paths: string[]) =>
+      shot({ shape: '0a,1b', paths, styles: [STYLE_PROPERTIES.map(() => ''), STYLE_PROPERTIES.map(() => '')] })
+    const next = (paths: string[]) =>
+      shot({
+        shape: '0a,1b',
+        paths,
+        styles: [STYLE_PROPERTIES.map(() => ''), STYLE_PROPERTIES.map((p) => (p === 'color' ? 'red' : ''))],
+      })
+    for (const bad of ['b', 'b:nth-child(1) {} @import x', 'b:nth-child(1), i', 'b:nth-child(x)']) {
+      expect(diffStyles(base(['a.root', bad]), next(['a.root', bad])), bad).toBeUndefined()
+    }
+    const good = ['a.root', 'b:nth-child(1) > i:nth-child(12)']
+    expect(diffStyles(base(good), next(good))).toBe('b:nth-child(1) > i:nth-child(12) {\n  color: red;\n}')
+  })
+
+  it('accepts the escaped classes capture writes', () => {
+    const path = String.raw`button.md\:flex.w-1\/2.\31 23`
+    expect(diffStyles(shot({ paths: [path] }), variantWith('color', 'red', [path]))).toContain('color: red;')
+  })
+
+  it.each([
+    'red; background:url(javascript:x)',
+    'red}body{x:y',
+    'a/*b',
+    'url(javascript:alert(1))',
+    'url("data:image/svg+xml;base64,AAAA")',
+    'url(https://x.test/a.png)',
+    'x\\9',
+    '@import "x"',
+    'expression(alert(1))',
+    '"unbalanced',
+    'red !important',
+    '<b>',
+    '',
+    'x'.repeat(501),
+  ])('drops the declaration value %j', (value) => {
+    expect(safeDeclarationValue(value)).toBe(false)
+    expect(diffStyles(shot(), variantWith('color', value))).toBe('')
+  })
+
+  it.each([
+    'rgb(0, 128, 85)',
+    'rgb(0 0 0 / 50%)',
+    '"Helvetica Neue", Arial, sans-serif',
+    '0px 1px 2px rgba(0, 0, 0, 0.2)',
+    'matrix(1, 0, 0, 1, 0, 0)',
+    'url("https://cdn.test/a.png")',
+    'linear-gradient(rgb(1, 2, 3), rgb(4, 5, 6))',
+    '微软雅黑',
+  ])('keeps the declaration value %j', (value) => {
+    expect(safeDeclarationValue(value)).toBe(true)
+  })
+})
+
+describe('renderStory against a page that lies', () => {
+  const pageReturning = (capture: unknown, meta: unknown = { argTypes: {}, initialArgs: {} }): StoryPage => ({
+    goto: async () => {},
+    waitForState: async () => 'ready',
+    evaluateSource: async () => undefined,
+    evaluate: (async (fn: unknown) => {
+      if (fn === readStoryMeta) return meta
+      if (fn === captureStory) return capture
+      return undefined
+    }) as StoryPage['evaluate'],
+  })
+  const request = { baseUrl: 'https://sb.test/', storyId: 'a--b', args: {}, readMeta: true }
+
+  it.each([
+    ['styles that are not an array', { ...shot(), styles: {} }],
+    ['styles that do not line up with paths', { ...shot(), paths: ['a', 'b'] }],
+    ['a style row of the wrong length', { ...shot(), styles: [['x']] }],
+    ['an html that is not a string', { ...shot(), html: 5 }],
+    ['an html over 2 MB', { ...shot(), html: 'x'.repeat(2_000_001) }],
+    ['a huge shape', { ...shot(), shape: 'x'.repeat(20_001) }],
+    ['too many shared rules', { ...shot(), sharedRules: Array.from({ length: 501 }, () => 'a{}') }],
+    ['a null result', null],
+    ['a string', 'ok'],
+  ])('turns %s into a failed capture, never a throw', async (_name, result) => {
+    const rendered = await renderStory(pageReturning(result), request)
+    expect(rendered.capture).toEqual({ ok: false, reason: 'The page returned a capture Doop could not read' })
+  })
+
+  it('ignores a meta that is not what it should be, and says so', async () => {
+    for (const meta of [
+      { argTypes: {}, initialArgs: {}, displayName: 5 },
+      'x',
+      { argTypes: { a: 'y'.repeat(401) }, initialArgs: {} },
+    ]) {
+      const rendered = await renderStory(pageReturning(shot(), meta), request)
+      expect(rendered.capture.ok).toBe(true)
+      expect(rendered.props).toEqual([])
+      expect(rendered.displayName).toBeUndefined()
+      expect(rendered.issues.map((issue) => issue.code)).toContain('argtypes_unavailable')
+    }
+  })
+
+  it('keeps unknown keys out of what it returns', async () => {
+    const rendered = await renderStory(pageReturning({ ...shot(), extra: 'x' }), request)
+    expect(rendered.capture).not.toHaveProperty('extra')
+  })
+})
+
+describe('isBoundedJson', () => {
+  it('limits nodes, depth and strings, and refuses functions and non-finite numbers', () => {
+    expect(isBoundedJson({ a: [1, 'x', null, true, { b: 2 }] })).toBe(true)
+    expect(isBoundedJson('x'.repeat(401))).toBe(false)
+    expect(isBoundedJson(Array.from({ length: 20_001 }, () => 1))).toBe(false)
+    let deep: unknown = 1
+    for (let i = 0; i < 10; i++) deep = { deep }
+    expect(isBoundedJson(deep)).toBe(false)
+    expect(isBoundedJson({ f: () => 1 })).toBe(false)
+    expect(isBoundedJson(Infinity)).toBe(false)
+    expect(isBoundedJson(undefined)).toBe(false)
+  })
+})
+
+describe('a renderer that cannot open pages', () => {
+  it('returns what it has with a renderer_unavailable issue after three failures in a row', async () => {
+    let opened = 0
+    const result = await buildComponentBundle({
+      entries: ['One', 'Two', 'Three', 'Four', 'Five', 'Six'].map((name) => entry(`A/${name}`)),
+      source: { kind: 'storybook' },
+      baseUrl: 'https://sb.test/',
+      withPage: async (use) => {
+        if (++opened > 1 + 8 + 1) throw new Error('The renderer is busy, try again in a moment')
+        return use(fakePage([]))
+      },
+    })
+    expect(result.bundle.components.map((component) => component.name)).toEqual(['One'])
+    expect(result.issues.map((issue) => issue.code)).toContain('renderer_unavailable')
+  })
+
+  it('throws the renderer error when nothing could be imported', async () => {
+    await expect(
+      buildComponentBundle({
+        entries: [entry('A/One'), entry('A/Two'), entry('A/Three'), entry('A/Four')],
+        source: { kind: 'storybook' },
+        baseUrl: 'https://sb.test/',
+        withPage: async () => {
+          throw new Error('The renderer is busy, try again in a moment')
+        },
+      }),
+    ).rejects.toThrow("Doop's renderer could not open pages")
+  })
+})
+
+/** The CSS of a bundle, parsed: what a stylesheet would really contain, not what it looks like as a string. */
+function assertOnlySafeCss(css: string | undefined, selectors: 'emitted' | 'any'): void {
+  if (!css) return
+  const root = postcss.parse(css)
+  root.walk((node) => {
+    if (node.type === 'atrule') {
+      expect(
+        ['media', 'supports', 'container', 'layer', 'font-face', 'keyframes'],
+        `@${(node as AtRule).name}`,
+      ).toContain((node as AtRule).name)
+    } else if (node.type === 'rule' && selectors === 'emitted') {
+      for (const selector of (node as Rule).selectors)
+        expect(
+          isEmittedPath(selector, selector.includes(' > ') || selector.includes(':nth-child') ? 1 : 0),
+          selector,
+        ).toBe(true)
+    } else if (node.type === 'decl') {
+      const value = node.value
+      for (const match of value.matchAll(/url\(\s*["']?([^"')]*)/gi)) expect(match[1], value).toMatch(/^https?:\/\//i)
+      expect(value).not.toMatch(/javascript|expression|<|@import/i)
+    }
+  })
+  expect(css).not.toMatch(/<\/style|@import|<script/i)
+}
+
+describe('a page that hands back hostile CSS', () => {
+  const HOSTILE_VALUE =
+    'red; background:url(javascript:alert(1)); } @import url(//evil.test/x.css); </style><script>alert(1)</script>'
+  const OK_RULES = '.a { color: red; }\n@media (min-width: 10px) { .a { color: blue; } }'
+
+  function hostilePage(): StoryPage {
+    let url = ''
+    return {
+      goto: async (next) => {
+        url = next
+      },
+      waitForState: async () => 'ready',
+      evaluateSource: async () => undefined,
+      evaluate: (async (fn: unknown) => {
+        if (fn === settleStory) return undefined
+        if (fn === readStoryMeta)
+          return { argTypes: { tone: { control: 'select', options: ['a', 'b'] } }, initialArgs: { tone: 'a' } }
+        if (fn !== captureStory) throw new Error('unexpected evaluate')
+        const variant = url.includes('args=')
+        const badPaths = url.includes('hostile-paths')
+        return shot({
+          css: [
+            OK_RULES,
+            '.x { background: url(javascript:alert(1)); }',
+            '.y { background: url("https://cdn.test/ok.png"); }',
+            '@import url(//evil.test/x.css);',
+            '.z { color: red; } </style><script>alert(1)</script>',
+          ].join('\n'),
+          sharedRules: [
+            '@import url(//evil.test/y.css);',
+            'body { margin: 0; }',
+            'a{}b{',
+            ':root { --x: 1 } @charset "x"; ',
+          ],
+          paths: badPaths ? ['b{}@import url(//evil.test)'] : ['button.btn'],
+          styles: [
+            STYLE_PROPERTIES.map((property) =>
+              variant && property === 'color' ? HOSTILE_VALUE : variant && property === 'cursor' ? 'pointer' : '',
+            ),
+          ],
+        })
+      }) as StoryPage['evaluate'],
+    }
+  }
+
+  async function bundleOf(title: string) {
+    return buildComponentBundle({
+      entries: [entry(title)],
+      source: { kind: 'storybook' },
+      baseUrl: 'https://sb.test/',
+      withPage: async (use) => use(hostilePage()),
+    })
+  }
+
+  it('leaves only whole, safe rules in the component, shared and variant CSS, as a parser sees them', async () => {
+    for (const title of ['A/Clean', 'A/Hostile paths']) {
+      const { bundle, issues } = await bundleOf(title)
+      const component = bundle.components[0]!
+      assertOnlySafeCss(bundle.css, 'any')
+      assertOnlySafeCss(component.css, 'any')
+      expect(component.css).toContain('.a { color: red; }')
+      expect(component.css).toContain('.y { background: url("https://cdn.test/ok.png"); }')
+      expect(component.css).not.toContain('javascript')
+      expect(bundle.css).toContain('body { margin: 0; }')
+      expect(bundle.css).not.toContain('@')
+      expect(issues.map((issue) => issue.code)).toContain('css_rules_dropped')
+      const variants = Object.values(component.variants ?? {}).flatMap((values) => Object.values(values))
+      expect(variants.length).toBeGreaterThan(0)
+      for (const variant of variants) assertOnlySafeCss(variant.css, title === 'A/Clean' ? 'emitted' : 'any')
+    }
+  })
+
+  it('writes the variant rule with the safe declarations only, on the emitted path', async () => {
+    const { bundle } = await bundleOf('A/Clean')
+    expect(bundle.components[0]?.variants?.tone?.b?.css).toBe('button.btn {\n  cursor: pointer;\n}')
+  })
+
+  it('falls back to the variant render, not to the hostile path, when the paths are not ones the capture writes', async () => {
+    const { bundle } = await bundleOf('A/Hostile paths')
+    const variant = bundle.components[0]?.variants?.tone?.b
+    expect(variant?.html).toBeDefined()
+    expect(variant?.css).not.toContain('@import')
+    expect(variant?.css).not.toContain('b{}')
+  })
+})
+
+describe('guardCss', () => {
+  it.each([
+    ['@import url(//evil.test/x.css);', ''],
+    ['a{} }', 'a{}'],
+    ['a{', ''],
+    ['a { content: "unterminated }', ''],
+    ['a{}b', 'a{}'],
+    ['@namespace x url(y);', ''],
+    ['@page { margin: 0 }', ''],
+    ['@font-face { src: url(javascript:alert(1)) }', ''],
+    ['a { background: url(data:text/html,<script>) }', ''],
+    ['a { background: url(java\\73 cript:x) }', ''],
+    ['a { background: image-set("x.png" 1x) }', ''],
+    ['a { width: expression(alert(1)) }', ''],
+    ['a { -moz-binding: url("https://x.test/#y") }', ''],
+    ['a { color: red } </style><script>x</script>', 'a { color: red }'],
+    ['a { content: "</style>" }', ''],
+    ['@media screen { @import url(x); }', ''],
+  ])('%j keeps %j', (css, kept) => {
+    expect(guardCss(css).css).toBe(kept)
+  })
+
+  it('keeps well-formed rules of the kinds the capture writes', () => {
+    const css =
+      '/* c */ .a:hover > b { color: red }\n@media (min-width: 1px) { .a { margin: 0 } }\n@font-face { font-family: X; src: url("https://f.test/x.woff2") }\n@keyframes k { to { opacity: 0 } }\n.m { background: url("data:image/svg+xml;utf8,<svg/>") }'
+    const { css: kept, dropped } = guardCss(css)
+    expect(dropped).toBe(0)
+    expect(splitRules(kept).rules).toHaveLength(5)
+  })
+
+  it('keeps the good rules around a bad one', () => {
+    const { css, dropped } = guardCss('.a{color:red}\n.b{background:url(javascript:x)}\n.c{color:blue}')
+    expect(dropped).toBe(1)
+    expect(css).toBe('.a{color:red}\n.c{color:blue}')
   })
 })
