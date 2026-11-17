@@ -1,3 +1,6 @@
+import { selectAll } from 'css-select'
+import { parse } from 'parse5'
+import { adapter } from 'parse5-htmlparser2-tree-adapter'
 import { parseCss, type CssNode } from '../server/componentCss.ts'
 import { describe, expect, it } from 'vitest'
 import { componentBundleSchema } from '../shared/componentBundle.ts'
@@ -45,7 +48,7 @@ function shot(overrides: Partial<CapturedStory> = {}): CapturedStory {
 /** A page that renders every story as one button with a tone enum, and counts renders. */
 function fakePage(
   log: string[],
-  options: { fail?: (url: string) => boolean; withoutControls?: (storyId: string) => boolean } = {},
+  options: { fail?: (url: string) => boolean; withoutControls?: (storyId: string) => boolean; perStory?: boolean } = {},
 ): StoryPage {
   let url = ''
   return {
@@ -78,7 +81,18 @@ function fakePage(
             property === 'color' ? `tone-${tone}` : property === 'opacity' && on ? '0.5' : '',
           ),
         ]
-        return JSON.stringify(shot({ styles }))
+        /* with perStory, each story is its own markup: the default a div, the Playground a button */
+        const playground = options.perStory && new URL(url).searchParams.get('id')?.includes('features')
+        return JSON.stringify(
+          options.perStory
+            ? shot({
+                styles,
+                html: playground ? '<button class="pg">play</button>' : '<div class="df">default</div>',
+                paths: [playground ? 'button.pg' : 'div.df'],
+                shape: playground ? '0button' : '0div',
+              })
+            : shot({ styles }),
+        )
       }
       throw new Error('unexpected evaluate')
     }) as StoryPage['evaluate'],
@@ -201,6 +215,30 @@ describe('buildComponentBundle', () => {
     const variantUrls = log.filter((url) => url.includes('args='))
     expect(variantUrls.length).toBeGreaterThan(0)
     for (const url of variantUrls) expect(url).toContain(`id=${entries[1]!.id}`)
+  })
+
+  it('ships the story that has the controls, so every variant rule matches an element of the markup', async () => {
+    const entries = [
+      entry('Kit/Btn', 'Default'),
+      { ...entry('Kit/Btn', 'Playground'), id: 'kit-btn-features--playground' },
+    ]
+    const result = await buildComponentBundle({
+      entries,
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withPage([], { withoutControls: (id) => id === 'kit-btn--default', perStory: true }),
+    })
+    const [component] = result.bundle.components
+    expect(component?.html).toBe('<button class="pg">play</button>')
+    expect(component?.code?.origin?.storyId).toBe('kit-btn--default')
+    expect(result.issues).toContainEqual(expect.objectContaining({ code: 'controls_from_story', component: 'Btn' }))
+    const doc = parse(component!.html, { treeAdapter: adapter })
+    const selectors = Object.values(component?.variants ?? {})
+      .flatMap((values) => Object.values(values))
+      .flatMap((variant) => parseCss(variant.css ?? ''))
+      .flatMap((node) => (node.kind === 'rule' ? [node.selector] : []))
+    expect(selectors.length).toBeGreaterThan(0)
+    for (const selector of selectors) expect(selectAll(selector, doc).length, selector).toBeGreaterThan(0)
   })
 
   it('leaves a failing story out and throws when nothing imports', async () => {

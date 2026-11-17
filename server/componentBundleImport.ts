@@ -272,10 +272,14 @@ function tokenCandidates(bundle: ComponentBundle, sharedCss: string, issues: Imp
     const variables = rootVariables(parseCss(sharedCss))
     const wanted = new Set<string>()
     const byName = new Map(variables.map((variable) => [variable.name, variable.value]))
-    const visit = (name: string) => {
-      if (wanted.has(name) || !byName.has(name)) return
-      wanted.add(name)
-      for (const next of varRefs(byName.get(name) ?? '')) visit(next)
+    /* an explicit stack, bounded by the variables there are: a page with thousands of chained variables must not overflow the call stack */
+    const visit = (first: string) => {
+      const stack = [first]
+      for (let name = stack.pop(); name !== undefined; name = stack.pop()) {
+        if (wanted.has(name) || !byName.has(name)) continue
+        wanted.add(name)
+        for (const next of varRefs(byName.get(name) ?? '')) stack.push(next)
+      }
     }
     for (const name of reached ?? []) visit(name)
     for (const variable of variables)

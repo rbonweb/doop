@@ -204,6 +204,19 @@ describe('importing a component bundle', () => {
     expect(result.tokens.created.sort()).toEqual(['--bg', '--fg', '--ink', '--page'])
   })
 
+  it('reads a 15,000-variable var() chain without overflowing the stack', () => {
+    const count = 15_000
+    const root = Array.from({ length: count }, (_, n) => `--v${n}:var(--v${n + 1});`).join('')
+    const result = run({
+      version: 1,
+      source: { kind: 'storybook', url: 'https://sb.example/' },
+      css: `:root { ${root} --v${count}: #111 }`,
+      components: [{ name: 'Chip', html: '<p class="chip">c</p>', css: '.chip { color: var(--v0) }' }],
+    })
+    /* every link of the chain was reached: made a token, or skipped for having no type of its own */
+    expect(result.tokens.created.length + result.tokens.skipped.length).toBe(count + 1)
+  })
+
   it('makes tokens from :root variables and the tokens list, leaving existing ones alone', () => {
     runOperation('seed', canvasId, () =>
       actions.createTokens(canvasId, [{ name: '--brand', type: 'color', value: '#000' }], actor),

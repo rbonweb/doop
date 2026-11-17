@@ -394,6 +394,8 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     /* the story whose controls are varied, and what it looks like at its own resting args: the default story, unless it has no controls and a sibling (a Playground) does */
     let controls = { storyId: group.defaultStory.id, base: capture }
     let displayNameOf = base.displayName
+    /* what the component ships: the story whose controls it has, so its variant rules and text bindings match the markup */
+    let shipped = capture
     if (!props.length) {
       for (const candidate of controlStories(group).slice(0, MAX_CONTROL_PROBES)) {
         if (renders >= STORYBOOK_LIMITS.renders) break
@@ -402,6 +404,15 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         renderedCount++
         input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
         if (!probe.capture.ok || !probe.props.length) continue
+        if (probe.capture.html.length > MAX_BUNDLE_HTML_BYTES || probe.capture.css.length > MAX_BUNDLE_CSS_BYTES)
+          continue
+        for (const issue of probe.capture.issues) note(issue.code, issue.message)
+        for (const rule of probe.capture.sharedRules) shared.add(rule)
+        shipped = probe.capture
+        note(
+          'controls_from_story',
+          `${group.name}: the default story has no controls, so the component comes from the story "${candidate.name}", which has them`,
+        )
         props = probe.props.map((prop) => ({ ...prop }))
         controls = { storyId: candidate.id, base: probe.capture }
         displayNameOf ??= probe.displayName
@@ -461,8 +472,8 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     components.push({
       name: group.name,
       group: group.title.slice(0, 200),
-      html: capture.html,
-      ...(capture.css ? { css: capture.css } : {}),
+      html: shipped.html,
+      ...(shipped.css ? { css: shipped.css } : {}),
       ...(outProps.length ? { props: outProps } : {}),
       ...(Object.keys(variants).length ? { variants } : {}),
       code: {
