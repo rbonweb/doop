@@ -2,7 +2,7 @@ import { compile } from '@tailwindcss/node'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import { splitComponentCss } from '../server/reactExport/cssSplit.ts'
-import { cssToTailwind, tailwindClassName } from '../server/reactExport/tailwind.ts'
+import { CONVERTED_PROPERTIES, cssToTailwind, tailwindClassName } from '../server/reactExport/tailwind.ts'
 
 const flat = (css: string) => css.replace(/\s+/g, ' ').trim()
 
@@ -508,5 +508,190 @@ describe('end to end with Tailwind', () => {
     expect(left).toContain('.root:not(:disabled):active')
     expect(left).toContain('outline: 2px solid var(--color-focus)')
     expect(left).not.toContain('border-radius')
+  })
+})
+
+describe('cssToTailwind: guards', () => {
+  const VALUES = [
+    '0',
+    '1px',
+    '4px',
+    '13px',
+    '-4px',
+    '-13px',
+    '8px',
+    '16px',
+    '24px',
+    '12px',
+    '9999px',
+    '100%',
+    '50%',
+    '33.3333%',
+    'auto',
+    'none',
+    '100vh',
+    '100vw',
+    '100dvh',
+    'fit-content',
+    'min-content',
+    'max-content',
+    'calc(1px + 2px)',
+    'var(--x)',
+    'var(--x, #fff)',
+    '#fff',
+    '#abc',
+    '#000',
+    'rgb(0 0 0 / 50%)',
+    'red',
+    'transparent',
+    'currentColor',
+    'inherit',
+    '1',
+    '0.5',
+    '0.35',
+    '600',
+    'bold',
+    '1.5',
+    '1.7',
+    '0.05em',
+    '1px 2px',
+    '1px 2px 3px',
+    '1px 2px 3px 4px',
+    '4px auto',
+    '1px solid red',
+    '2px dashed #ccc',
+    'solid',
+    'dashed',
+    'center',
+    'flex-start',
+    'flex-end',
+    'start',
+    'end',
+    'stretch',
+    'baseline',
+    'space-between',
+    'row',
+    'column',
+    'wrap',
+    'nowrap',
+    'wrap-reverse',
+    '150ms',
+    '1s',
+    '1s ease',
+    'opacity 1s',
+    'all 0.3s',
+    'color 1s, opacity 2s',
+    'opacity, transform',
+    'cubic-bezier(0.4, 0, 0.2, 1)',
+    'ease-in',
+    'linear',
+    'repeat(3, minmax(0, 1fr))',
+    '200px 1fr',
+    '16 / 9',
+    '4 / 3',
+    '1 / 1',
+    'hidden',
+    'visible',
+    'absolute',
+    'relative',
+    'sticky',
+    'pointer',
+    'uppercase',
+    'underline',
+    'line-through',
+    'italic',
+    'ellipsis',
+    'clip',
+    'cover',
+    'contain',
+    'fill',
+    'scale-down',
+    'left',
+    'right',
+    'top',
+    'bottom',
+    'justify',
+    '0 1px 2px rgba(0, 0, 0, .1)',
+    'Inter, sans-serif',
+    '1 1 0%',
+    '2 1 0%',
+    'dense',
+    'column dense',
+    'linear-gradient(to right, #fff, #000)',
+    'border-box',
+    'content-box',
+    'scroll',
+    'block',
+    'inline-block',
+    'flex',
+    'inline-flex',
+    'grid',
+    'contents',
+    'normal',
+    'break-spaces',
+    'pre-wrap',
+    'no-repeat',
+    'repeat-x',
+    'text',
+    'all',
+    '""',
+    '10',
+    '999',
+    '2.25rem',
+    '0.875rem',
+    '48rem',
+    '1200px',
+    '40rem',
+    '5px',
+    '3px',
+    '1.25rem',
+  ]
+
+  it('every utility the mapper emits for any property and value compiles to CSS in Tailwind', async () => {
+    const emitted = new Map<string, string>()
+    for (const property of CONVERTED_PROPERTIES) {
+      for (const value of VALUES) {
+        const out = cssToTailwind(`.x { ${property}: ${value}; line-height: 1.5 }`)
+        for (const utility of out.utilities.get('x') ?? []) emitted.set(utility, `${property}: ${value}`)
+      }
+    }
+    expect(emitted.size).toBeGreaterThan(400)
+    const built = flat((await compiler()).build([...emitted.keys()]))
+    const escape = (utility: string) => utility.replace(/[^A-Za-z0-9_-]/g, (char) => `\\${char}`)
+    const missing = [...emitted].filter(
+      ([utility]) => !built.includes(`.${escape(utility)} {`) && !built.includes(`.${escape(utility)}:`),
+    )
+    expect(missing).toEqual([])
+  })
+
+  it("writes box shorthands with Tailwind's own names", async () => {
+    const out = cssToTailwind(
+      '.x { inset: 4px 8px } .y { inset: 4px 8px 12px 16px } .z { margin: 4px 8px 12px } .w { padding: 1px 2px 3px 4px }',
+    )
+    expect(out.utilities.get('x')).toEqual(['inset-y-1', 'inset-x-2'])
+    expect(out.utilities.get('y')).toEqual(['top-1', 'right-2', 'bottom-3', 'left-4'])
+    expect(out.utilities.get('z')).toEqual(['mt-1', 'mr-2', 'mb-3', 'ml-2'])
+    const built = await build([...out.utilities.values()].flat())
+    expect(built).toContain('inset-block: var(--spacing)')
+    expect(built).toContain('top: var(--spacing)')
+  })
+
+  it('leaves max-width and max-height auto, which Tailwind has no utility for, in the leftover', () => {
+    const out = cssToTailwind('.x { max-width: auto; max-height: auto; color: #111 }')
+    expect(out.utilities.get('x')).toEqual(['text-[#111]'])
+    expect(flat(out.leftover.moduleCss)).toBe('.x { max-width: auto; max-height: auto; }')
+  })
+
+  it('keeps the last declaration of a property across rules of one class, per variant', async () => {
+    const out = cssToTailwind(
+      '.x { color: red; padding: 4px } .x { color: blue } .x:hover { color: red } .x:hover { color: green } @media (min-width: 48rem) { .x { color: #111 } }',
+    )
+    expect(out.utilities.get('x')).toEqual(['p-1', 'text-[color:blue]', 'hover:text-[color:green]', 'md:text-[#111]'])
+    expect(await build(out.utilities.get('x')!)).not.toContain('color: red')
+  })
+
+  it('an earlier !important declaration is not replaced by a later plain one', () => {
+    const out = cssToTailwind('.x { color: red !important } .x { color: blue }')
+    expect(out.utilities.get('x')).toEqual(['text-[color:red]!'])
   })
 })
