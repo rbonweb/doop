@@ -123,6 +123,25 @@ describe('a legacy code value', () => {
   })
 })
 
+const MAPPING = {
+  importFrom: '@acme/ui',
+  exportName: 'Card',
+  props: { tone: { name: 'variant' } },
+  slots: { actions: 'children' },
+}
+
+describe('what a write returns', () => {
+  it('returns the code as stored, the full legacy value and the full mapping', async () => {
+    const canvas = newCanvas()
+    const created = await card(canvas.id, LEGACY)
+    expect(created.data.component.code).toEqual(LEGACY)
+    const updated = await call('update_component', { canvas_id: canvas.id, component: 'Card', code: MAPPING })
+    expect(updated.data.component.code).toEqual(MAPPING)
+    const mapped = await card(newCanvas().id, MAPPING)
+    expect(mapped.data.component.code).toEqual(MAPPING)
+  })
+})
+
 describe('a structured code mapping', () => {
   const MAPPING = {
     importFrom: '@acme/ui',

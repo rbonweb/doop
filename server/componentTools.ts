@@ -6,6 +6,7 @@ import {
   catalog,
   catalogEntry,
   changeInstances,
+  codeSummary,
   componentDetail,
   ComponentError,
   createComponentFromElement,
@@ -213,7 +214,9 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
       const wanted = typeof query === 'string' ? query.toLowerCase() : ''
       const matches = (def: ComponentDef) =>
         !wanted || def.name.toLowerCase().includes(wanted) || def.description.toLowerCase().includes(wanted)
-      const components = catalog(canvas, activeComponents(canvas.components).filter(matches))
+      const components = catalog(canvas, activeComponents(canvas.components).filter(matches)).map(
+        ({ code, ...entry }) => ({ ...entry, ...codeSummary({ code }) }),
+      )
       const shared = libraryCatalog(canvas)
         .map((library) => ({
           ...library,

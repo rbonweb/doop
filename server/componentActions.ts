@@ -347,14 +347,14 @@ export function catalogEntry(canvas: Canvas, def: ComponentDef, usage = usageOf(
     usage: usageExample(def),
     instances: usage.instances,
     ...(def.source?.library ? libraryLink(def) : def.mainFrameId ? {} : { main_missing: true }),
-    ...codeLink(def),
+    ...(def.code ? { code: def.code } : {}),
     ...updateAvailable(canvas, def),
   }
 }
 
 /** What a list shows of a component's code: the export it is, not the whole prop mapping,
- *  which get_component returns. Omitted when neither is set (a legacy path/name too). */
-function codeLink(def: ComponentDef) {
+ *  which get_component and a write return. Omitted when neither is set (a legacy path/name too). */
+export function codeSummary(def: Pick<ComponentDef, 'code'>) {
   const importFrom = def.code?.importFrom
   const exportName = def.code?.exportName
   if (!importFrom && !exportName) return {}
@@ -410,8 +410,6 @@ export function componentDetail(canvas: Canvas, def: ComponentDef) {
   const usage = usageOf(canvas, def.id)
   return {
     ...catalogEntry(canvas, def, usage),
-    /* the whole mapping here, where an agent reads one component, not list's export summary */
-    ...(def.code ? { code: def.code } : {}),
     rev: def.rev,
     props: def.props,
     slots: def.slots,
