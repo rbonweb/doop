@@ -12,7 +12,7 @@ export const USAGE = `doop-import: import a React team's Storybook into a Doop c
 Usage
   npx doop-import --storybook <dir|url> --ticket <upload url> [options]
 
-  --storybook <dir|url>   a \`storybook build\` directory (served on 127.0.0.1 while it runs) or the URL of a running Storybook
+  --storybook <dir|url>   a \`storybook build\` directory (served on 127.0.0.1 while it runs) or the URL of a Storybook dev server on this machine (localhost)
   --ticket <url>          the upload URL from Doop's import picker (or an agent's create_import_ticket)
   --package <name>        the npm package the components are imported from in code, for example @acme/ui
   --include <prefix>      only components whose Storybook title starts with this (repeat for several)
@@ -119,7 +119,7 @@ async function storybookSource(value: string, io: Io): Promise<{ url: URL; serve
   const info = await stat(directory).catch(() => undefined)
   if (!info?.isDirectory()) {
     throw new UsageError(
-      `--storybook "${value}" is not a directory. For a running Storybook give its full URL, for example http://localhost:6006.`,
+      `--storybook "${value}" is not a directory. For a Storybook dev server on this machine give its full URL, for example http://localhost:6006.`,
     )
   }
   if (!(await stat(path.join(directory, 'iframe.html')).catch(() => undefined))?.isFile()) {
