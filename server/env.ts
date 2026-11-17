@@ -351,6 +351,8 @@ const schema = {
   /* render the default /i/ image after a frame is saved (server/renderWarm.ts); false turns it off */
   DOOP_RENDER_WARM: bool({ default: true }),
   DECK_PDFS_PER_MIN: perMinute({ default: 4 }),
+  /* React code exports per account per minute (server/reactExport/canvasExport.ts) */
+  REACT_EXPORTS_PER_MIN: perMinute({ default: 20 }),
   /* image descriptions (server/imageDescriptions.ts): a day's budget per
      canvas, and how many describe calls run at once */
   DESCRIBE_PER_CANVAS_PER_DAY: nonNegativeInt({ default: 200 }),

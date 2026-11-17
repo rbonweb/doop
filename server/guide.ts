@@ -36,7 +36,7 @@ export const GUIDE_TOPIC_SUMMARIES: Record<GuideTopic, string> = {
   prototypes: 'wiring screens into a clickable flow',
   redesigns: 'redesigning an existing site or page: import, audit, two directions',
   'comments-and-agents': "comment threads, and the built-in Doop Agent's roles",
-  export: 'images and PDF of a frame or one element',
+  export: 'images, PDF and React code (export_react)',
   'imported-frames': 'frames imported from a GitHub repo or synced from a live app',
   'editing-tools': 'part of a frame or many frames: sections, patches, search, bulk, claims, compose',
   'checking-tools': 'measure, lint, targeted screenshots, compare, snapshot',
@@ -830,7 +830,7 @@ canvas Memory. Writing is metered only when a reply @mentions a resident role, e
 like a comment left in the browser. Reading does not claim work or resolve it; task
 feedback is separate (get_feedback).
 `,
-  export: `# Exporting frames (images, PDF)
+  export: `# Exporting (images, PDF, React code)
 
 Every frame response includes an image_url — a public, hotlinkable render of the frame's
 CURRENT html (/i/<frameId>.png?scale=2; use .jpg?quality=90 for JPEG, append &download
@@ -843,6 +843,19 @@ at the frame's own size. Pass frame_ids to bind several frames of one canvas int
 PDF; pages follow the order given (frame_id first, then frame_ids as listed).
 For one element of a frame (a card, a logo, a chart) use export_layer: the frame renders whole and is
 cut to that element's box. Name it by element_id (its data-doop-id) or a CSS selector.
+
+## React code — export_react
+
+When a human wants the design as code for their app, export_react turns the canvas's components and screens into React with TypeScript: one .tsx per component and per exported frame, styled with CSS Modules (styling "modules", the default) or Tailwind (styling "tailwind"), plus the canvas's design tokens as src/tokens.css and src/tokens.json. It is deterministic (no model): the same canvas gives the same files, so exporting again after a change gives a clean diff. Doop stays the source of truth; the export is a one-way copy.
+
+- Say what to export: frame_ids for screens, page_id for every visible screen on a page (reading order; hidden frames, drawings on the paper and demo frames are skipped; a frame that holds a component's main counts as a screen, so ask for component_ids when you want the components alone), component_ids (ids or names) for components, with or without screens. Components a screen uses always come along. With none of the three, the canvas's first page goes out with the components it uses. tokens: false leaves the token files out.
+- The answer is { files: [{ path, content }], report }. Write each file at its path in the project, keeping the folders (src/components, src/pages, src/tokens.css, src/cx.ts, src/css-modules.d.ts, src/components/index.ts). When the files total more than 300 KB the answer is the report, a file listing with sizes and one zip of everything as an embedded application/zip resource: save it and unzip it. The resident agent gets no zip: it narrows the scope instead.
+- Always read report. report.issues is everything that did not carry over, each with a kind (script, event-handler, comment, unsafe-url, dropped-element, dropped-attribute, style, css, name), a detail and the file; report.inlined lists instances exported as plain markup because a part inside them was overridden, which no longer follow their component; report.components shows each component's file, or the package it is imported from. Tell the human what was left out and what to do about it; never claim a full-fidelity export when issues is not empty.
+- A component with a code mapping (importFrom and exportName, see get_guide components) is imported from its package, with its props renamed and value-mapped, and gets no file. Map the components the team already has in code first and the export reuses them.
+- Props follow the component's definition: text, image and link props are strings, enums string unions, booleans and numbers as such, slots and instance props ReactNode. An enum or a reflected boolean becomes data-<name> on the root, which is what the CSS keys on.
+- Asset URLs (/a/, /icons/, /photos/, /i/, /fonts/) are rewritten to this server's address so the exported app shows the same images; for production the team uploads them to its own hosting.
+- Nothing from the canvas is ever pasted into code as markup: text and attribute values are string literals, there is no dangerouslySetInnerHTML, scripts and event handlers are dropped. Do not add any by hand to the exported files.
+- People get the same export in the app (File, Export to React…) as a zip, and Copy as React on a component.
 `,
   'imported-frames': `# Imported frames\n\n## From a GitHub repo — the repo is the source of truth
 

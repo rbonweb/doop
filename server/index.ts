@@ -92,6 +92,7 @@ import {
   type AccessUser,
 } from './access.ts'
 import { deckRouter } from './deckRoutes.ts'
+import { reactExportRouter } from './reactExportRoutes.ts'
 import { MAX_SPEAKER_NOTES_CHARS } from '../shared/slides.ts'
 import {
   accessUserOf,
@@ -1340,6 +1341,7 @@ app.use('/api/notifications', notificationsRouter)
 app.use('/api/webhooks', webhooksRouter)
 app.use('/api/canvases', seenRouter)
 app.use('/api/canvases', deckRouter)
+app.use('/api/canvases', reactExportRouter)
 app.use('/api/fonts', fontsRouter)
 app.use('/api/agents', customAgentsRouter)
 

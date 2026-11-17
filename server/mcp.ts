@@ -2796,11 +2796,18 @@ export function buildMcpServer(
           userId: ownerId,
         })
         if (!outcome.ok) return err(outcome.error)
-        const { data, note, frames } = outcome.result
+        const { data, note, frames, attachment } = outcome.result
         const libraryEvent = libraryFeatureEvent(tool.name, raw, data)
         if (libraryEvent) captureFeature(ownerId, libraryEvent, 'mcp', { canvas_id: canvasId })
         const result = note ? textWithNudge(data, note) : text(data)
         for (const frame of frames ?? []) withComponentNotes(result, frame)
+        if (attachment) {
+          /* a file that rides beside the answer, as export_frame's PDF does: an embedded resource behind the same canvas gate */
+          result.content.push({
+            type: 'resource',
+            resource: { uri: attachment.uri, mimeType: attachment.mimeType, blob: attachment.bytes.toString('base64') },
+          } as never)
+        }
         return tool.readOnly
           ? withFeedbackNotice(result, canvasId, agent ? actor : undefined)
           : withFeedback(result, canvasId, actor)
