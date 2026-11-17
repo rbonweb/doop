@@ -42,15 +42,9 @@ import { store } from './store.ts'
 import { inlineDataRefusal, type Surface } from './inlineData.ts'
 import { optional, WorkBudgetError } from './workBudget.ts'
 import { transaction } from './journal.ts'
-import {
-  contentBytes,
-  exportCanvasReact,
-  MAX_INLINE_EXPORT_BYTES,
-  reactExportRequest,
-  reactExportRetryAfter,
-  takeReactExportSlot,
-} from './reactExport/canvasExport.ts'
+import { exportCanvasReact, MAX_INLINE_EXPORT_BYTES, reactExportRequest } from './reactExport/canvasExport.ts'
 import { zipExport } from './reactExport/zip.ts'
+import { batchScope } from './responseShaping.ts'
 
 /**
  * The component tools every agent gets, over MCP (server/mcp.ts) or in the server
@@ -138,6 +132,8 @@ export interface ToolContext {
   userId: string | undefined
   /** which agent is calling, for the tools a refusal may point it at */
   surface?: Surface
+  /** whose per-minute budget a metered tool spends: the account the call is made for (the signed-in user over MCP, the payer of a resident run), never a name the caller chose */
+  budgetKey?: string
 }
 
 /** A file that travels beside the answer: over MCP an embedded resource, as export_frame's PDF does. The resident agent has no use for one and never gets it. */
@@ -175,6 +171,8 @@ export const MAX_BATCH_COMPONENTS = 12
 
 /** The largest zip an export_react call carries as an embedded resource (export_frame's PDF cap). */
 const MAX_ZIP_BYTES = 15_000_000
+/** A resident run reads the answer in its model context: past this it is told to narrow the scope instead. */
+const MAX_RESIDENT_INLINE_BYTES = 100 * 1024
 
 const COMPONENT_REF = z.string().describe('Component name or id')
 const FRAME_ID = z.string().describe('Frame id from get_canvas')
@@ -889,7 +887,12 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
       styling: z.enum(['modules', 'tailwind']).optional().describe('modules (default) or tailwind'),
       tokens: z.boolean().optional().describe('Include src/tokens.css and src/tokens.json (default true)'),
     },
-    async run(input, { canvas, actor, userId, surface }) {
+    async run(input, { canvas, userId, surface, budgetKey }) {
+      if (batchScope.getStore()) {
+        throw new ComponentError(
+          'export_react cannot run inside run_batch: its answer can carry a whole zip. Call export_react directly.',
+        )
+      }
       const request = reactExportRequest.safeParse({
         frameIds: input.frame_ids,
         pageId: input.page_id,
@@ -903,19 +906,22 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           `invalid export_react arguments: ${issue?.path.join('.') || 'input'} ${issue?.message ?? ''}`.trim(),
         )
       }
-      const key = userId ?? `agent:${actor.name}`
-      if (!takeReactExportSlot(key))
+      /* one bucket per account; a call with no account known spends the canvas's, never a name the caller picked */
+      const exported = exportCanvasReact(canvas, request.data, budgetKey ?? userId ?? `canvas:${canvas.id}`)
+      if (!exported.ok) {
         throw new ComponentError(
-          `React export rate limit: wait ${reactExportRetryAfter(key)} seconds before exporting again`,
+          exported.retryAfter
+            ? `React export rate limit: wait ${exported.retryAfter} seconds before exporting again`
+            : exported.error,
         )
-      const exported = exportCanvasReact(canvas, request.data)
-      if (!exported.ok) throw new ComponentError(exported.error)
+      }
       const { result } = exported
       const issues = result.report.issues.length
       const issuesNote = issues
         ? `${issues} thing${issues === 1 ? '' : 's'} did not carry over: read report.issues and tell the human.`
         : 'Everything carried over.'
-      if (contentBytes(result) <= MAX_INLINE_EXPORT_BYTES) {
+      const inlineCap = surface === 'resident' ? MAX_RESIDENT_INLINE_BYTES : MAX_INLINE_EXPORT_BYTES
+      if (exported.bytes <= inlineCap) {
         return {
           data: { files: result.files, report: result.report },
           note: `Write each file at its path in the project (for example under the app's src/). ${issuesNote}`,
@@ -928,7 +934,13 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           note: `The files total ${Math.round(exported.bytes / 1024)} KB, too much to return here. Export a narrower scope (one page_id, fewer frame_ids or component_ids). ${issuesNote}`,
         }
       }
-      const zip = await zipExport(result, exported.rootDir)
+      let zip: Buffer
+      try {
+        zip = await zipExport(result, exported.rootDir)
+      } catch (e) {
+        console.error(`[react-export] zip failed on canvas ${canvas.id}: ${e instanceof Error ? e.message : String(e)}`)
+        throw new ComponentError('The export failed')
+      }
       if (zip.length > MAX_ZIP_BYTES) {
         throw new ComponentError(
           'The export is too large to return: narrow it with page_id, frame_ids or component_ids',

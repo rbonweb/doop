@@ -2713,6 +2713,7 @@ async function runResidentTool(
             reader ? canvasesFor(reader).flatMap((meta) => store.getCanvas(meta.id) ?? []) : [canvas],
           /* publishing is the requester's to do; a run nobody asked for publishes only where everyone may */
           userId: runState.requesterId,
+          budgetKey: runState.payerId ?? runState.requesterId,
           surface: 'resident',
         })
         if (!outcome.ok) return fail(outcome.error)

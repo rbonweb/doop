@@ -179,6 +179,36 @@ describe('export_react over MCP', () => {
   })
 })
 
+describe('export_react limits', () => {
+  it('is refused inside run_batch, with a pointer to call it directly', async () => {
+    const { canvasId } = await canvasWithButton()
+    const out = await call(client, 'run_batch', {
+      ops: [{ tool: 'export_react', args: { canvas_id: canvasId, component_ids: ['Button'], agent_name: 'Tester' } }],
+    })
+    const text = out.texts.join('\n')
+    expect(text).toContain('export_react cannot run inside run_batch')
+    expect(out.blocks.some((block) => block.type === 'resource')).toBe(false)
+  })
+
+  it('refuses a request whose input is over the conversion bound before converting anything', async () => {
+    const { canvasId, frameId } = await canvasWithButton()
+    store.getFrame(frameId)!.html = doc(`<p>${'x'.repeat(8 * 1024 * 1024 + 1)}</p>`)
+    const out = await call(client, 'export_react', { canvas_id: canvasId, frame_ids: [frameId] })
+    expect(out.isError).toBe(true)
+    expect(out.texts.join('\n')).toMatch(/too large to convert at once/)
+  })
+
+  it('does not spend the budget on a request that fails validation', async () => {
+    const { canvasId } = await canvasWithButton()
+    for (let i = 0; i < 30; i++) {
+      const bad = await call(client, 'export_react', { canvas_id: canvasId, frame_ids: ['nope'] })
+      expect(bad.texts.join('\n')).toContain('is not on this canvas')
+    }
+    const good = await call(client, 'export_react', { canvas_id: canvasId, component_ids: ['Button'] })
+    expect(good.isError).toBe(false)
+  })
+})
+
 describe('the resident twin', () => {
   it('is a tool of resident runs under the same name, in the same shape', () => {
     expect(COMPONENT_TOOL_NAMES).toContain('export_react')
@@ -219,6 +249,35 @@ describe('the resident twin', () => {
     expect(out.result.attachment).toBeUndefined()
     expect(out.result.data).toMatchObject({ too_large: true })
     expect(out.result.note).toMatch(/narrower scope/)
+  })
+
+  it('keeps one bucket per account whatever name the agent gives, and a different account its own', async () => {
+    const { canvasId } = await canvasWithButton()
+    const as = (name: string, budgetKey: string) => ({
+      ...context(canvasId),
+      actor: { name, kind: 'agent' as const, color: '#000' },
+      userId: undefined,
+      budgetKey,
+    })
+    let refused = ''
+    for (let i = 0; i < 25 && !refused; i++) {
+      const out = await runComponentTool('export_react', { component_ids: ['Button'] }, as(`Agent ${i}`, 'payer-1'))
+      if (!out.ok) refused = out.error
+    }
+    expect(refused).toMatch(/rate limit/)
+    const other = await runComponentTool('export_react', { component_ids: ['Button'] }, as('Agent 0', 'payer-2'))
+    expect(other.ok).toBe(true)
+  })
+
+  it('answers inline only up to 100 KB where an MCP agent gets up to 300 KB', async () => {
+    const canvas = store.createCanvas('Mid read', OWNER)
+    const paragraphs = Array.from({ length: 700 }, (_, i) => `<p>${'paragraph text '.repeat(14)}${i}</p>`).join('')
+    await call(client, 'create_frame', { canvas_id: canvas.id, name: 'Mid', html: doc(paragraphs) })
+    const viaMcp = await call(client, 'export_react', { canvas_id: canvas.id })
+    expect(viaMcp.data.files[0].content).toBeDefined()
+    expect(viaMcp.blocks.some((block) => block.type === 'resource')).toBe(false)
+    const resident = await runComponentTool('export_react', {}, context(canvas.id))
+    expect(resident.ok && resident.result.data).toMatchObject({ too_large: true })
   })
 
   it('turns a bad argument into an error the agent can read', async () => {

@@ -5,8 +5,6 @@ import {
   exportCanvasReact,
   MAX_INLINE_EXPORT_BYTES,
   reactExportRequest,
-  reactExportRetryAfter,
-  takeReactExportSlot,
 } from './reactExport/canvasExport.ts'
 import { zipExport } from './reactExport/zip.ts'
 import { requireCanvas } from './sharing.ts'
@@ -28,13 +26,11 @@ reactExportRouter.post('/:id/export/react', async (req, res) => {
       .status(400)
       .json({ error: `invalid export request: ${issue?.path.join('.') || 'body'} ${issue?.message ?? ''}`.trim() })
   }
-  const key = req.user?.id ?? clientIp(req)
-  if (!takeReactExportSlot(key)) {
-    res.set('Retry-After', String(reactExportRetryAfter(key)))
-    return res.status(429).json({ error: 'React export rate limit — try again in a minute' })
+  const exported = exportCanvasReact(canvas, body.data, req.user?.id ?? clientIp(req))
+  if (!exported.ok) {
+    if (exported.retryAfter) res.set('Retry-After', String(exported.retryAfter))
+    return res.status(exported.status).json({ error: exported.error })
   }
-  const exported = exportCanvasReact(canvas, body.data)
-  if (!exported.ok) return res.status(exported.status).json({ error: exported.error })
   const { result } = exported
   res.set('Cache-Control', 'private, no-store')
   res.set('X-Content-Type-Options', 'nosniff')
@@ -55,7 +51,8 @@ reactExportRouter.post('/:id/export/react', async (req, res) => {
       [ISSUE_COUNT_HEADER]: String(result.report.issues.length),
     })
     return res.send(zip)
-  } catch {
+  } catch (e) {
+    console.error(`[react-export] zip failed on canvas ${canvas.id}: ${e instanceof Error ? e.message : String(e)}`)
     return res.status(500).json({ error: 'The export failed' })
   }
 })

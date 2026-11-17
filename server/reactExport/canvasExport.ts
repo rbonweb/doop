@@ -13,6 +13,8 @@ import { fileBase, NameAllocator } from './names.ts'
 export const MAX_INLINE_EXPORT_BYTES = 300 * 1024
 /** The most file content one export may hold at all, zip or not: a canvas past it needs a narrower scope. */
 export const MAX_EXPORT_BYTES = 20 * 1024 * 1024
+/** The most input one export converts: the selected frames' HTML plus the canvas's component templates and CSS. The converter runs on the server's one thread, so a request past this is refused before it starts. */
+export const MAX_EXPORT_INPUT_BYTES = 8 * 1024 * 1024
 /** At most this many frames and components in one request. */
 export const MAX_EXPORT_ITEMS = 200
 
@@ -50,7 +52,7 @@ export function resetReactExportBudget(): void {
 
 export type CanvasExport =
   | { ok: true; result: ReactExportResult; rootDir: string; fileName: string; bytes: number }
-  | { ok: false; status: 400 | 404 | 413 | 500; error: string }
+  | { ok: false; status: 400 | 404 | 413 | 429 | 500; error: string; retryAfter?: number }
 
 const STANDALONE_SHAPE = /<body\b[^>]*\bdata-doop-canvas-element=/i
 
@@ -105,9 +107,10 @@ export const contentBytes = (result: ReactExportResult): number =>
 /**
  * Select what the request names on a canvas the caller may already view, and export it. With no frame, page or component named,
  * the canvas's first page (the PDF export's default) goes out with the components it uses; component ids alone export only those components.
- * Never throws for canvas content: what could not be carried is in the report.
+ * Never throws for canvas content: what could not be carried is in the report. A request that names nothing real or is too big is refused
+ * before it costs anything; only one that will run takes a slot of `budgetKey`'s per-minute budget (the account, never a name the caller chose).
  */
-export function exportCanvasReact(canvas: Canvas, request: ReactExportRequest): CanvasExport {
+export function exportCanvasReact(canvas: Canvas, request: ReactExportRequest, budgetKey: string): CanvasExport {
   const components = activeComponents(store.getComponents(canvas.id))
   const frames = selectFrames(canvas, request)
   if (!frames.ok) return { ok: false, status: frames.status, error: frames.error }
@@ -118,6 +121,31 @@ export function exportCanvasReact(canvas: Canvas, request: ReactExportRequest): 
       ok: false,
       status: 400,
       error: 'There is nothing to export: no screens on that page and no components named',
+    }
+  }
+  const inputBytes =
+    frames.frames.reduce((sum, frame) => sum + Buffer.byteLength(frame.html, 'utf8'), 0) +
+    components.reduce(
+      (sum, def) =>
+        sum +
+        Buffer.byteLength(def.template, 'utf8') +
+        Buffer.byteLength(def.css, 'utf8') +
+        Buffer.byteLength(def.rawCss, 'utf8'),
+      0,
+    )
+  if (inputBytes > MAX_EXPORT_INPUT_BYTES) {
+    return {
+      ok: false,
+      status: 413,
+      error: 'This export is too large to convert at once: export one page, fewer frames or fewer components at a time',
+    }
+  }
+  if (!takeReactExportSlot(budgetKey)) {
+    return {
+      ok: false,
+      status: 429,
+      error: 'React export rate limit: try again in a minute',
+      retryAfter: reactExportRetryAfter(budgetKey),
     }
   }
   const styling: ReactStyling = request.styling ?? 'modules'
@@ -135,7 +163,7 @@ export function exportCanvasReact(canvas: Canvas, request: ReactExportRequest): 
       assetOrigin: assetOrigin(),
     })
   } catch (e) {
-    console.error('[react-export] export failed', e)
+    console.error(`[react-export] export failed on canvas ${canvas.id}: ${e instanceof Error ? e.message : String(e)}`)
     return { ok: false, status: 500, error: 'The export failed' }
   }
   const bytes = contentBytes(result)

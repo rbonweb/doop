@@ -2794,6 +2794,7 @@ export function buildMcpServer(
           readableCanvases: () =>
             workspaces.canvasesFor(ownerId ?? '').flatMap((meta) => store.getCanvas(meta.id) ?? []),
           userId: ownerId,
+          budgetKey: ownerId,
         })
         if (!outcome.ok) return err(outcome.error)
         const { data, note, frames, attachment } = outcome.result
