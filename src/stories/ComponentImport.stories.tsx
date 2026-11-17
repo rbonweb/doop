@@ -139,7 +139,8 @@ function Cli({ lifetimeMs, landed = false }: { lifetimeMs: number; landed?: bool
       return Response.json({
         upload_url: 'https://doop.design/import/Zk3x9P',
         expires_at: new Date(Date.now() + lifetimeMs).toISOString(),
-        command: 'npx doop-import --storybook ./storybook-static --ticket https://doop.design/import/Zk3x9P',
+        command:
+          'npx --yes --allow-remote=root --package=https://doop.design/cli/doop-import-0.1.0-0123456789ab.tgz doop-import --storybook ./storybook-static --ticket https://doop.design/import/Zk3x9P',
         curl: 'curl -T bundle.json https://doop.design/import/Zk3x9P',
       })
     }

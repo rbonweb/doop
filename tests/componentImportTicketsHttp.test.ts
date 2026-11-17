@@ -116,7 +116,11 @@ describe('the ticket and the upload', () => {
     const answer = await restTicket()
     first = answer
     expect(answer.upload_url).toMatch(/\/import\/[A-Za-z0-9_-]{43,}$/)
-    expect(answer.command).toBe(`npx doop-import --storybook ./storybook-static --ticket ${answer.upload_url}`)
+    expect(answer.command).toMatch(
+      new RegExp(
+        `^npx --yes --allow-remote=root --package=${server.base}/cli/doop-import(-[\\d.]+-[0-9a-f]{12})?\\.tgz doop-import --storybook ./storybook-static --ticket ${answer.upload_url}$`,
+      ),
+    )
     expect(answer.curl).toBe(`curl -T bundle.json ${answer.upload_url}`)
     expect(Date.parse(answer.expires_at) - Date.now()).toBeGreaterThan(14 * 60_000)
     expect(Date.parse(answer.expires_at) - Date.now()).toBeLessThanOrEqual(15 * 60_000)

@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import type { Actor } from '../shared/types.ts'
+import { commandFields } from './cliDownload.ts'
 import { env } from './env.ts'
 
 /**
@@ -109,13 +110,13 @@ export function endImportUpload(token: string, success: boolean) {
   }
 }
 
-/** What a ticket's holder is told: the URL, when it stops working and the two ways to use it. */
+/** What a ticket's holder is told: the URL, when it stops working and the ways to use it: the CLI command (null, with the reason, when this server is plain http) and curl. */
 export function ticketAnswer(ticket: Pick<ImportTicket, 'token' | 'expiresAt'>) {
   const upload_url = `${env.BETTER_AUTH_URL}/import/${ticket.token}`
   return {
     upload_url,
     expires_at: new Date(ticket.expiresAt).toISOString(),
-    command: `npx doop-import --storybook ./storybook-static --ticket ${upload_url}`,
+    ...commandFields(upload_url),
     curl: `curl -T bundle.json ${upload_url}`,
     curl_gzip: `curl -T bundle.json.gz -H 'Content-Encoding: gzip' ${upload_url}`,
   }
