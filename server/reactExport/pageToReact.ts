@@ -318,7 +318,7 @@ const themeOnHtml = (css: string): string =>
   css.replace(/(^|[,{};]\s*)(\[data-doop-theme(?:[~|^$*]?=[^\]]*)?\])(?=\s)/gi, '$1html$2')
 
 const GROUPING_AT_RULES = new Set(['media', 'supports', 'container', 'layer', 'starting-style'])
-const ROOT_SELECTOR = /^:root(?![\w-])/i
+const ROOT_COMPOUND = /^:root(?![\w-])/i
 const BODY_COMPOUND = /^body(?![\w-])/i
 const HTML_COMPOUND = /^html(?![\w-])/i
 const THEME_COMPOUND = /^\[data-doop-theme(?:[~|^$*]?=[^\]]*)?\]/i
@@ -362,10 +362,10 @@ function compoundsOf(selector: string): { compounds: string[]; combinators: stri
 }
 
 /** One selector placed under the page's root class. The page's `<body>` is the root element, so the `body` compound becomes the root class and whatever sits before it (`html.dark`, `[data-doop-theme=dark]`) stays, since the theme lives on the app's `<html>`: `html.dark body .x` is `html.dark .page-x .x`, `body.dark .x` is `.page-x.dark .x`. A selector that names `html` or a theme attribute but no `body` gets the root class after it (`html[data-doop-theme=dark] .x` is `html[data-doop-theme=dark] .page-x .x`); `:root` stays; anything else becomes a descendant of the root. */
-function scopeSelector(selector: string, rootClass: string): string {
+function scopeSelector(selector: string, rootClass: string, customOnly = false): string {
   const root = `.${rootClass}`
   const sel = selector.trim()
-  if (!sel || ROOT_SELECTOR.test(sel)) return sel
+  if (!sel) return sel
   if (sel.startsWith(root) && !/[\w-]/.test(sel.charAt(root.length))) return sel
   const { compounds, combinators } = compoundsOf(sel)
   const join = (from: number, to: number): string =>
@@ -379,11 +379,22 @@ function scopeSelector(selector: string, rootClass: string): string {
     return `${join(0, bodyAt)}${root}${rest}${bodyAt < compounds.length - 1 ? (combinators[bodyAt] ?? ' ') : ''}${join(bodyAt + 1, compounds.length)}`
   }
   const first = compounds[0] ?? ''
-  if (THEME_COMPOUND.test(first) || HTML_COMPOUND.test(first)) {
-    if (compounds.length === 1) return HTML_COMPOUND.test(first) ? `${root}${first.slice(4)}` : `${first} ${root}`
-    return `${first} ${root} ${join(1, compounds.length)}`
+  const isRoot = ROOT_COMPOUND.test(first)
+  const isHtml = HTML_COMPOUND.test(first)
+  if (isRoot || isHtml || THEME_COMPOUND.test(first)) {
+    if (compounds.length > 1) return `${first} ${root} ${join(1, compounds.length)}`
+    if (isRoot) return first.length === 5 || customOnly ? sel : `${first} ${root}`
+    return isHtml && first.length === 4 ? root : `${first} ${root}`
   }
   return `${root} ${sel}`
+}
+
+/** Does a rule body declare nothing but custom properties? Those stay global on `:root`. */
+const onlyCustomProperties = (body: string): boolean => {
+  const declarations = splitTopLevel(body, ';')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+  return declarations.length > 0 && declarations.every((entry) => entry.startsWith('--'))
 }
 
 function scopeItems(items: Item[], rootClass: string): string[] {
@@ -401,7 +412,9 @@ function scopeItems(items: Item[], rootClass: string): string[] {
           : `${prelude} {${item.body}}`,
       )
     } else {
-      const selectors = splitTopLevel(prelude, ',').map((selector) => scopeSelector(selector, rootClass))
+      const selectors = splitTopLevel(prelude, ',').map((selector) =>
+        scopeSelector(selector, rootClass, onlyCustomProperties(item.body ?? '')),
+      )
       out.push(`${selectors.join(',\n')} {${item.body}}`)
     }
   }

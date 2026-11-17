@@ -630,7 +630,12 @@ describe('review fixes', () => {
     const sheet = fileOf(out, 'src/pages/Home.css')
     const selectors = [...sheet.matchAll(/^([^\s@}{][^{]*)\{/gm)].flatMap((m) => m[1]!.split(',').map((s) => s.trim()))
     for (const selector of selectors) {
-      expect(selector === ':root' || selector.startsWith('.page-Home') || /^(from|to)$/.test(selector)).toBe(true)
+      expect(
+        selector === ':root' ||
+          selector.startsWith('.page-Home') ||
+          selector === 'html.dark .page-Home' ||
+          /^(from|to)$/.test(selector),
+      ).toBe(true)
     }
     expect(sheet).toContain('.page-Home:not(.a)')
     expect(sheet).toContain('.page-Home > .a')
@@ -639,7 +644,8 @@ describe('review fixes', () => {
     expect(sheet).toContain('.page-Home nav a.active')
     expect(sheet).toContain(':root')
     expect(sheet).toContain('@keyframes spin')
-    expect(sheet).not.toMatch(/^body|^BODY|^html/im)
+    expect(sheet).not.toMatch(/^(body|html)\s*[,{]/im)
+    expect(sheet).not.toMatch(/^body/im)
   })
 
   it('suffixes component names that are Windows device names', () => {
@@ -851,5 +857,42 @@ describe('review fixes', () => {
       expect(fileOf(out, 'src/pages/Home.tsx')).not.toContain(importFrom)
       expect(out.files.some((file) => file.path === 'src/components/Btn.tsx')).toBe(true)
     }
+  })
+
+  it('keeps :root and html theme rules as ancestors of the page root', () => {
+    const css = [
+      ':root[data-doop-theme=dark] .x { color: white }',
+      ':root.dark .x { color: red }',
+      'html[data-doop-theme=dark] { background: black }',
+      'html.dark { color: white }',
+      ':root[data-doop-theme=dark] { --bg: black }',
+      ':root.dark { color: white }',
+      ':root { --x: 1 }',
+    ].join('\n')
+    const out = exportOf([], frame('<p class="x">x</p>', `<style>${css}</style>`))
+    const sheet = fileOf(out, 'src/pages/Home.css')
+    expect(sheet).toContain(':root[data-doop-theme=dark] .page-Home .x')
+    expect(sheet).toContain(':root.dark .page-Home .x')
+    expect(sheet).toContain('html[data-doop-theme=dark] .page-Home {')
+    expect(sheet).toContain('html.dark .page-Home {')
+    expect(sheet).toContain(':root[data-doop-theme=dark] {\n  --bg')
+    expect(sheet).toContain(':root.dark .page-Home {')
+    expect(sheet).toMatch(/^:root \{/m)
+    const dom = parse(
+      '<!doctype html><html data-doop-theme="dark" class="dark"><body><div class="page-Home"><p class="x">x</p></div></body></html>',
+      { treeAdapter: adapter },
+    )
+    const matches = (selector: string) => selectAll(selector, dom as never).length
+    expect(matches(':root[data-doop-theme=dark] .page-Home .x')).toBe(1)
+    expect(matches('html.dark .page-Home')).toBe(1)
+  })
+
+  it('reports a <style> in a component head that the export ignores', () => {
+    const styled = def('Styled', '<div data-doop-part="r"></div>', {
+      head: ['<style>.x{color:red}</style>', '<style data-doop-tokens>:root{--a:1}</style>'],
+    })
+    const out = exportOf([styled], [], { componentIds: [styled.id] })
+    const hits = out.report.issues.filter((issue) => issue.detail.includes('<style> in the component head'))
+    expect(hits).toHaveLength(1)
   })
 })
