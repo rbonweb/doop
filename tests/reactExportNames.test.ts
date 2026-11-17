@@ -140,6 +140,20 @@ describe('fileBase', () => {
     }
   })
 
+  it('skips Windows device names when suffixing', () => {
+    const names = new NameAllocator({ caseInsensitive: true })
+    const results = [
+      ...Array.from({ length: 5 }, () => fileBase('com', names)),
+      ...Array.from({ length: 5 }, () => fileBase('lpt', names)),
+    ]
+    const device = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\..*)?$/i
+    for (const base of results) {
+      expect(base).not.toMatch(device)
+      expect(base).toMatch(/^[A-Za-z0-9_-]+$/)
+    }
+    expect(new Set(results.map((base) => base.toLowerCase())).size).toBe(results.length)
+  })
+
   it('caps the length at 64 characters', () => {
     const names = new NameAllocator({ caseInsensitive: true })
     const base = fileBase('a'.repeat(200), names)
