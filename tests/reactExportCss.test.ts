@@ -490,6 +490,98 @@ describe('splitComponentCss: url() read like CSS', () => {
   })
 })
 
+describe('splitComponentCss: one URL text for validation and output', () => {
+  it('removes a backslash-newline before checking, so the checked url is the written url', () => {
+    const out = splitComponentCss('.a { background: url(ht\\\ntp://ok/x) }')
+    expect(out.issues).toEqual([])
+    expect(out.moduleCss).toBe('.a {\n  background: url(http://ok/x);\n}\n')
+  })
+
+  it('reads a line continuation in a quoted url as the string does', () => {
+    const out = splitComponentCss('.a { background: url("/\\\n/cdn.test/x") }')
+    expect(out.issues).toEqual([])
+    expect(out.moduleCss).toBe('.a {\n  background: url("//cdn.test/x");\n}\n')
+  })
+
+  it('does not eat an escaped backslash in front of a newline: that string is unterminated and is dropped', () => {
+    const out = splitComponentCss('.a { top: 0; content: "a\\\\\nb" }')
+    expect(out.moduleCss).toBe('.a {\n  top: 0;\n}\n')
+    expect(out.issues).toHaveLength(1)
+  })
+
+  it.each([
+    'url(ht\\ tp://ok/x)',
+    'url("ht\\ tp://ok/x")',
+    'url("ht\\9 tp://ok/x")',
+    'url("/a/x\\a y")',
+    'url("\\9 /a/x/../../y")',
+  ])('does not let whitespace or a control character turn %s into an allowed url', (value) => {
+    const out = splitComponentCss(`.a { top: 0; background: ${value} }`)
+    expect(out.moduleCss).not.toContain('background')
+    expect(out.issues).toHaveLength(1)
+  })
+
+  it('keeps a space inside a path as written', () => {
+    const out = splitComponentCss('.a { background: url("/a/x\\ y.png") }')
+    expect(out.issues).toEqual([])
+    expect(out.moduleCss).toContain('url("/a/x\\ y.png")')
+  })
+})
+
+describe('splitComponentCss: rewriteUrl', () => {
+  const absolute = (url: string) => (url.startsWith('/') && !url.startsWith('//') ? `https://doop.design${url}` : url)
+
+  it('rewrites url() and image-function addresses and writes them as quoted strings', () => {
+    const out = splitComponentCss(
+      '.a { background: url(/a/x.png) } .b { background: url("/photos/y.jpeg?w=1") } .c { background-image: image-set("/a/z.png" 1x, "/a/w.png" 2x) } @font-face { font-family: X; src: url(/fonts/x.woff2) format("woff2") } .d { background: url(https://x.test/k.png), url(#grad) }',
+      { rewriteUrl: absolute },
+    )
+    expect(out.issues).toEqual([])
+    expect(out.moduleCss).toContain('background: url("https://doop.design/a/x.png");')
+    expect(out.moduleCss).toContain('background: url("https://doop.design/photos/y.jpeg?w=1");')
+    expect(out.moduleCss).toContain('image-set("https://doop.design/a/z.png" 1x, "https://doop.design/a/w.png" 2x)')
+    expect(out.globalCss).toContain('src: url("https://doop.design/fonts/x.woff2") format("woff2");')
+    expect(out.moduleCss).toContain('url("https://x.test/k.png"), url("#grad")')
+    expect(() => postcss.parse(out.moduleCss)).not.toThrow()
+    expect(() => postcss.parse(out.globalCss)).not.toThrow()
+  })
+
+  it('calls it only for urls that passed the safety check', () => {
+    const seen: string[] = []
+    splitComponentCss(
+      '.a { background: url(/a/x.png) } .b { background: url(../x.png) } .c { background: url(javascript:x) } .d { color: red }',
+      {
+        rewriteUrl: (url) => {
+          seen.push(url)
+          return url
+        },
+      },
+    )
+    expect(seen).toEqual(['/a/x.png'])
+  })
+
+  it('drops a declaration whose rewritten url is not allowed, with an issue', () => {
+    for (const bad of ['javascript:alert(1)', '../x.png', 'x.png', 'data:text/html,x', '///x', '']) {
+      const out = splitComponentCss('.a { top: 0; background: url(/a/x.png) }', { rewriteUrl: () => bad })
+      expect(out.moduleCss, bad).toBe('.a {\n  top: 0;\n}\n')
+      expect(out.issues, bad).toHaveLength(1)
+    }
+  })
+
+  it('escapes quotes and backslashes in the rewritten address', () => {
+    const out = splitComponentCss('.a { background: url(/a/x.png) } .z { top: 0 }', {
+      rewriteUrl: () => 'https://x.test/a"b\\c.png',
+    })
+    expect(out.moduleCss).toContain('url("https://x.test/a\\"b\\\\c.png")')
+    expect(() => postcss.parse(out.moduleCss)).not.toThrow()
+    expect(out.classes).toEqual(['a', 'z'])
+  })
+
+  it('leaves everything as written without it', () => {
+    expect(splitComponentCss('.a { background: url(/a/x.png) }').moduleCss).toContain('url(/a/x.png)')
+  })
+})
+
 /** a small seeded generator, so a failure repeats */
 function seeded(seed: number): () => number {
   let state = seed
@@ -502,6 +594,10 @@ function seeded(seed: number): () => number {
 }
 
 const FRAGMENTS = [
+  '\\\n',
+  'url(/a/x.png)',
+  'url("/a/x")',
+  '"/a/x"',
   '.a',
   '.b',
   '.',
@@ -577,7 +673,10 @@ describe('splitComponentCss: output always parses', () => {
       const length = 1 + Math.floor(random() * 28)
       let css = ''
       for (let i = 0; i < length; i++) css += FRAGMENTS[Math.floor(random() * FRAGMENTS.length)]!
-      const out = splitComponentCss(css, { rootClass: random() < 0.5 ? 'root' : 'x y' })
+      const out = splitComponentCss(css, {
+        rootClass: random() < 0.5 ? 'root' : 'x y',
+        rewriteUrl: random() < 0.5 ? (url) => (url.startsWith('/') ? `https://doop.design${url}` : url) : undefined,
+      })
       for (const sheet of [out.moduleCss, out.globalCss]) {
         try {
           postcss.parse(sheet).walkAtRules('import', () => {
