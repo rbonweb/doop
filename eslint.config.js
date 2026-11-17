@@ -20,6 +20,7 @@ const LEGACY_CHROME = [
   'src/components/Cursors.tsx',
   'src/components/DesktopTabs.tsx',
   'src/components/ElementPanel.tsx',
+  'src/components/TokenMenu.tsx',
   'src/components/FlowOverlay.tsx',
   'src/components/FollowFrame.tsx',
   'src/components/FrameView.tsx',
