@@ -505,8 +505,12 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       } else {
         /* the variant's own markup carries the bindings found on the default, so only what differs is branched */
         const html = bindHtml(shot.html, shot.marker, mapBindings(controls.base, shot, bindings))
-        if (html.length <= MAX_BUNDLE_HTML_BYTES && shot.css.length <= MAX_BUNDLE_CSS_BYTES) {
-          entry = { html, css: shot.css }
+        /* its rules are scoped under the prop's value, which outranks the default's own: a rule the default already has (the base look, the theme variables) would beat the library's variant rules, so only the rules the default lacks go along */
+        const own = splitRules(shot.css)
+          .rules.filter((rule) => !known.has(rule))
+          .join('\n')
+        if (html.length <= MAX_BUNDLE_HTML_BYTES && own.length <= MAX_BUNDLE_CSS_BYTES) {
+          entry = { html, css: own }
         } else {
           note(
             'variant_failed',
@@ -516,7 +520,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       }
       if (!entry || (entry.css ?? '').length > MAX_BUNDLE_CSS_BYTES) continue
       ;(variants[variant.prop] ??= {})[variant.value] = entry
-      if (entry.css) reflected.add(variant.prop)
+      if (entry.css || entry.html) reflected.add(variant.prop)
     }
     let shippedCss = shipped.css
     if (extraRules.length) {

@@ -313,19 +313,25 @@ describe.skipIf(!findBrowserPath())(
 )
 
 describe('a server that has not opted in', () => {
+  let plain: Server
+
+  /* a whole server starts here, which can outlast a test's default 5 s under a loaded full run */
+  beforeAll(async () => {
+    plain = await startServer()
+  }, 90_000)
+
+  afterAll(() => {
+    plain?.stop()
+  })
+
   it('refuses a private Storybook address as private, before anything streams', async () => {
-    const plain = await startServer()
-    try {
-      const client = await new Client(plain).signUp('plain@storybook.test', 'Plain')
-      const id = ((await (await client.post('/api/canvases', { name: 'Plain' })).json()) as { id: string }).id
-      const res = await client.post(`/api/canvases/${id}/import/storybook`, {
-        url: `${storybook.origin}/sb/`,
-        dryRun: true,
-      })
-      expect(res.status).toBe(400)
-      expect(((await res.json()) as { code: string }).code).toBe('private')
-    } finally {
-      plain.stop()
-    }
+    const client = await new Client(plain).signUp('plain@storybook.test', 'Plain')
+    const id = ((await (await client.post('/api/canvases', { name: 'Plain' })).json()) as { id: string }).id
+    const res = await client.post(`/api/canvases/${id}/import/storybook`, {
+      url: `${storybook.origin}/sb/`,
+      dryRun: true,
+    })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { code: string }).code).toBe('private')
   })
 })

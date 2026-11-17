@@ -5,6 +5,7 @@ import { componentBundleSchema } from '../shared/componentBundle.ts'
 import { CAPTURE_PRELUDE, captureStory, STYLE_PROPERTIES } from '../shared/storybook/capture.ts'
 import { MAX_PROBE_CHARS } from '../shared/storybook/probe.ts'
 import { STORYBOOK_LIMITS } from '../shared/storybook/plan.ts'
+import { prepareComponent } from '../server/bundleVariants.ts'
 import { failedBeforeRendering } from '../server/storybookImportRun.ts'
 import * as screenshot from '../server/screenshot.ts'
 import { findBrowserPath, getBrowser } from '../server/screenshot.ts'
@@ -169,6 +170,41 @@ function wrappedPage(): string {
   window.__STORYBOOK_PREVIEW__ = { channel: channel, currentRender: { phase: 'finished', story: { id: 'wrap-label--default',
     argTypes: { variant: { control: 'select', options: ['default', 'danger'] }, label: { control: 'text' } },
     initialArgs: { variant: 'default', label: 'Label' } } } }
+  document.body.className = 'sb-show-main'
+})()
+</script></body></html>`
+}
+
+/* Primer's Button: colours are custom properties on a theme wrapper (`[data-color-mode]`), the variant is an attribute on the button that rules keyed on the class style, and an icon adds a child and drops `data-no-visuals`, so that render is a different tree. */
+function themedPage(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+[data-color-mode="light"] { --btn-primary-bg: #00aa55; --btn-primary-fg: #ffffff; }
+.btn { background-color: transparent; color: #222222; border: 0; padding: 4px 8px; }
+.btn:where([data-variant="primary"]) { background-color: var(--btn-primary-bg, #1f883d); color: var(--btn-primary-fg, #fff); }
+.btn:where([data-no-visuals]) { padding: 8px; }
+</style></head><body class="sb-show-preparing-story"><div id="storybook-root"></div><script>
+(function () {
+  var args = { variant: 'default', icon: 'none' }
+  var listeners = {}
+  var channel = {
+    on: function (event, listener) { (listeners[event] = listeners[event] || []).push(listener) },
+    emit: function (event, payload) {
+      if (event !== 'updateStoryArgs') return
+      Object.assign(args, payload.updatedArgs)
+      setTimeout(function () { draw(); (listeners.storyRendered || []).forEach(function (listener) { listener() }) }, 20)
+    },
+  }
+  function draw() {
+    var eye = args.icon === 'eye'
+    document.getElementById('storybook-root').innerHTML =
+      '<div data-component="ThemeProvider" data-color-mode="light"><button data-component="Button" class="btn"' +
+      (eye ? '' : ' data-no-visuals="true"') + ' data-variant="' + args.variant + '">' +
+      (eye ? '<svg width="8" height="8"></svg>' : '') + '<span>Go</span></button></div>'
+  }
+  draw()
+  window.__STORYBOOK_PREVIEW__ = { channel: channel, currentRender: { phase: 'finished', story: { id: 'themed-button--default',
+    argTypes: { variant: { control: 'select', options: ['default', 'primary'] }, icon: { control: 'select', options: ['none', 'eye'] } },
+    initialArgs: { variant: 'default', icon: 'none' } } } }
   document.body.className = 'sb-show-main'
 })()
 </script></body></html>`
@@ -385,6 +421,24 @@ beforeAll(async () => {
       )
     }
     if (url.startsWith('/wrap/iframe.html')) return send(200, 'text/html', wrappedPage())
+    if (url === '/themed/index.json') {
+      return send(
+        200,
+        'application/json',
+        JSON.stringify({
+          v: 5,
+          entries: {
+            'themed-button--default': {
+              type: 'story',
+              id: 'themed-button--default',
+              name: 'Default',
+              title: 'Themed/Button',
+            },
+          },
+        }),
+      )
+    }
+    if (url.startsWith('/themed/iframe.html')) return send(200, 'text/html', themedPage())
     if (url === '/huge/index.json') {
       return send(
         200,
@@ -709,6 +763,43 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     expect(label?.props?.map((prop) => prop.name).sort()).toEqual(['label', 'variant'])
     expect(label?.code?.props).toBeUndefined()
     expect(issues.filter((issue) => issue.code === 'story_failed')).toEqual([])
+  })
+
+  it('keeps the library variant look when an icon makes the render a different tree', async () => {
+    const { bundle } = await storybookBundle(`${storybook.origin}/themed/`, {}, deps(storybook.origin))
+    const button = bundle.components[0]!
+    expect(button.name).toBe('Button')
+    /* the other tree's stylesheet carries only what the default's does not, or its scoped copy of the base rule outranks the variant rule */
+    const withIcon = button.variants?.icon?.eye
+    expect(withIcon?.html).toContain('<svg')
+    expect(withIcon?.css ?? '').not.toContain('background-color: transparent')
+    const prepared = prepareComponent(button, bundle.css ?? '')
+    const page = await (await getBrowser()).newPage()
+    try {
+      for (const icon of ['none', 'eye']) {
+        await page.setContent(`<!doctype html><style>${prepared.css}</style>${prepared.html}`)
+        const background = await page.evaluate(
+          (chosen, base) => {
+            /* an instance: the enum is reflected on the root, a condition shows or hides its element, the bound attribute follows the prop */
+            const root = document.body.firstElementChild!
+            root.setAttribute('data-icon', chosen)
+            for (const el of Array.from(document.querySelectorAll('[data-doop-if]'))) {
+              const [name = '', value = ''] = (el.getAttribute('data-doop-if') ?? '').split(/!?=/)
+              const negated = (el.getAttribute('data-doop-if') ?? '').includes('!=')
+              if (name === 'icon' && (value === chosen) === negated) el.remove()
+            }
+            const target = document.querySelector('[data-component="Button"]')!
+            target.setAttribute('data-variant', 'primary')
+            return base + getComputedStyle(target).backgroundColor
+          },
+          icon,
+          `${icon}:`,
+        )
+        expect(background).toBe(`${icon}:rgb(0, 170, 85)`)
+      }
+    } finally {
+      await page.close()
+    }
   })
 
   it('stops the whole import when a story page answers 403', async () => {
