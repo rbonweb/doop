@@ -1,0 +1,1108 @@
+import type { DefaultTreeAdapterTypes as Tree } from 'parse5'
+import {
+  BIND_ATTR,
+  IF_ATTR,
+  SLOT_ATTR,
+  USE_TAG,
+  isPropName,
+  parseBindings,
+  parseCondition,
+  parseStyle,
+  serializeStyle,
+  type Binding,
+  type ComponentDef,
+  type ComponentProp,
+  type Condition,
+  type InstanceOverrides,
+} from '../../shared/components.ts'
+import type { ComponentCode } from '../../shared/componentCode.ts'
+import {
+  attrOf,
+  isElement,
+  parseTemplateRoot,
+  partsOf,
+  stateFromUseAttrs,
+  type EngineContext,
+  type InstanceState,
+} from '../componentEngine.ts'
+import { moduleClassName, splitComponentCss, type CssModuleSplit } from './cssSplit.ts'
+import { nodeToJsx, htmlToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
+import { isUnsafeUrl, jsString, type ExportIssue } from './issues.ts'
+import { NameAllocator, componentName, isIdentifier, propName } from './names.ts'
+import type { UrlRewriter } from './urls.ts'
+
+type Element = Tree.Element
+
+/* ------------------------------------------------------------------ */
+/* Kinds: how a Doop prop is typed in the generated code               */
+/* ------------------------------------------------------------------ */
+
+export type Kind =
+  { k: 'string' } | { k: 'enum'; options: string[] } | { k: 'boolean' } | { k: 'number' } | { k: 'node' }
+
+export function kindOf(prop: Pick<ComponentProp, 'type' | 'options'>): Kind {
+  switch (prop.type) {
+    case 'enum':
+      return prop.options?.length ? { k: 'enum', options: [...prop.options] } : { k: 'string' }
+    case 'boolean':
+      return { k: 'boolean' }
+    case 'number':
+      return { k: 'number' }
+    case 'instance':
+      return { k: 'node' }
+    default:
+      return { k: 'string' }
+  }
+}
+
+export function tsType(kind: Kind): string {
+  switch (kind.k) {
+    case 'enum':
+      return kind.options.map((option) => jsString(option)).join(' | ')
+    case 'boolean':
+      return 'boolean'
+    case 'number':
+      return 'number'
+    case 'node':
+      return 'ReactNode'
+    default:
+      return 'string'
+  }
+}
+
+const sameKind = (a: Kind, b: Kind): boolean =>
+  a.k === b.k && (a.k !== 'enum' || (b.k === 'enum' && a.options.join('\u0000') === b.options.join('\u0000')))
+
+/** An expression of kind `from` as an expression of kind `to`; `defined` says the value can never be undefined. Returns null when the two cannot meet. */
+export function convertExpr(expr: string, from: Kind, to: Kind, defined: boolean): string | null {
+  if (sameKind(from, to)) return expr
+  const guard = (body: string) => (defined ? body : `${expr} === undefined ? undefined : ${body}`)
+  if (to.k === 'string') {
+    if (from.k === 'enum') return expr
+    if (from.k === 'number' || from.k === 'boolean') return guard(`String(${expr})`)
+    return null
+  }
+  if (to.k === 'enum') {
+    if (from.k === 'string' || from.k === 'enum') return `(${expr}) as ${tsType(to)} | undefined`
+    return null
+  }
+  if (to.k === 'number') {
+    if (from.k === 'string' || from.k === 'enum') return guard(`Number(${expr})`)
+    return null
+  }
+  if (to.k === 'boolean') {
+    if (from.k === 'string' || from.k === 'enum') return `${expr} !== undefined && ${expr} !== "false"`
+    return null
+  }
+  return from.k === 'node' ? expr : `(${expr})`
+}
+
+/* ------------------------------------------------------------------ */
+/* The plan: what a component becomes                                  */
+/* ------------------------------------------------------------------ */
+
+export interface PropPlan {
+  prop: ComponentProp
+  /** the identifier in the generated code */
+  ts: string
+  kind: Kind
+  /** a value the component falls back to, so the prop is never undefined inside it */
+  hasDefault: boolean
+  /** the template's own content for a text-like prop with no declared default */
+  derived?: string
+}
+
+export interface SlotPlan {
+  name: string
+  ts: string
+}
+
+export interface MappedImport {
+  importFrom: string
+  exportName: string
+  defaultExport: boolean
+  code: ComponentCode
+}
+
+export interface ComponentPlan {
+  def: ComponentDef
+  /** the identifier components import and render; for a mapped component the local name of the import */
+  name: string
+  propsName: string
+  /** `src/components/<name>.tsx`, absent for a mapped component */
+  file?: string
+  mapped?: MappedImport
+  props: PropPlan[]
+  propByName: Map<string, PropPlan>
+  slots: SlotPlan[]
+  slotByName: Map<string, SlotPlan>
+  split: CssModuleSplit
+  moduleClasses: Set<string>
+  rootClass: string
+  /** the identifier a file other than the component's own imports its module as */
+  stylesIdent: string
+  /** props bound to URL attributes in the template, and the nested props forwarded to */
+  directUrlProps: Set<string>
+  forwards: { outer: string; nestedRef: string; inner: string }[]
+}
+
+const TEXT_LIKE = new Set(['text', 'image', 'link', 'color'])
+const URL_BINDING_TARGETS = new Set([
+  'href',
+  'src',
+  'poster',
+  'action',
+  'formaction',
+  'data',
+  'cite',
+  'background',
+  'ping',
+  'srcset',
+  'xlink:href',
+])
+const LOCAL_NAMES = [
+  'styles',
+  'cx',
+  'React',
+  'ReactNode',
+  'Fragment',
+  'String',
+  'Number',
+  'Boolean',
+  'Object',
+  'Array',
+  'JSON',
+  'Math',
+  'Symbol',
+  'Date',
+  'Promise',
+]
+
+export interface SessionOptions {
+  components: readonly ComponentDef[]
+  urls: UrlRewriter
+}
+
+/** One export's shared state: which components exist, the names handed out, the plans made on demand and the files they need. */
+export class ExportSession {
+  readonly names = new NameAllocator({ caseInsensitive: true, reserved: ['index', ...LOCAL_NAMES] })
+  readonly urls: UrlRewriter
+  readonly customElements = new Set<string>()
+  /** components in the order they were first needed: files are emitted in this order */
+  readonly order: ComponentPlan[] = []
+  private readonly defs: readonly ComponentDef[]
+  private readonly plans = new Map<string, ComponentPlan>()
+  private readonly urlMemo = new Map<string, boolean>()
+
+  constructor(options: SessionOptions) {
+    this.defs = options.components
+    this.urls = options.urls
+  }
+
+  /** A component by id, then by name (exact, then case-insensitive): how the canvas resolves a reference. */
+  find = (ref: string): ComponentDef | undefined => {
+    const wanted = ref.trim().toLowerCase()
+    return (
+      this.defs.find((def) => def.id === ref) ??
+      this.defs.find((def) => def.name === ref) ??
+      this.defs.find((def) => def.name.toLowerCase() === wanted)
+    )
+  }
+
+  engine(): EngineContext {
+    const defs = this.defs
+    return {
+      find: this.find,
+      atRev(id, rev) {
+        const def = defs.find((candidate) => candidate.id === id)
+        if (!def) return undefined
+        if (def.rev === rev) return def
+        const snapshot = def.history.find((entry) => entry.rev === rev)
+        return snapshot ? { id, name: def.name, rev, template: snapshot.template, props: snapshot.props } : undefined
+      },
+      issues: [],
+    }
+  }
+
+  plan(def: ComponentDef): ComponentPlan {
+    const known = this.plans.get(def.id)
+    if (known) return known
+    const plan = this.makePlan(def)
+    this.plans.set(def.id, plan)
+    this.order.push(plan)
+    return plan
+  }
+
+  /** Does a value given for this prop end up in a URL attribute of the generated code? Then it is held to the URL safety rules. */
+  isUrlProp(plan: ComponentPlan, name: string, seen = new Set<string>()): boolean {
+    const key = `${plan.def.id}\u0000${name}`
+    const memo = this.urlMemo.get(key)
+    if (memo !== undefined) return memo
+    if (seen.has(key)) return false
+    seen.add(key)
+    const prop = plan.propByName.get(name)?.prop
+    let result = prop?.type === 'image' || prop?.type === 'link' || plan.directUrlProps.has(name)
+    if (!result) {
+      for (const forward of plan.forwards) {
+        if (forward.outer !== name) continue
+        const nested = this.find(forward.nestedRef)
+        if (nested && this.isUrlProp(this.plan(nested), forward.inner, seen)) {
+          result = true
+          break
+        }
+      }
+    }
+    this.urlMemo.set(key, result)
+    return result
+  }
+
+  private makePlan(def: ComponentDef): ComponentPlan {
+    const mapped = mappedImport(def)
+    const name = componentName(mapped ? mapped.exportName : def.name, this.names)
+    const propsName = mapped ? '' : this.names.take(`${name}Props`)
+    const locals = new NameAllocator({ reserved: LOCAL_NAMES })
+    const root = parseTemplateRoot(def.template)
+    const derived = new Map<string, string>()
+    const directUrlProps = new Set<string>()
+    const forwards: ComponentPlan['forwards'] = []
+    if (root) collectBindings(root, derived, directUrlProps, forwards)
+
+    const props: PropPlan[] = []
+    const seenProps = new Set<string>()
+    for (const prop of def.props) {
+      if (!isPropName(prop.name) || seenProps.has(prop.name)) continue
+      seenProps.add(prop.name)
+      const kind = kindOf(prop)
+      const declared = declaredDefault(prop, kind)
+      const component = prop.type === 'instance' && prop.default ? this.find(prop.default) : undefined
+      const text = TEXT_LIKE.has(prop.type) && prop.default === undefined ? derived.get(prop.name) : undefined
+      props.push({
+        prop,
+        ts: mapped ? prop.name : propName(prop.name, locals),
+        kind,
+        hasDefault: prop.type === 'instance' ? component !== undefined : declared !== undefined || text !== undefined,
+        ...(text !== undefined ? { derived: text } : {}),
+      })
+    }
+    const slots: SlotPlan[] = []
+    const seenSlots = new Set<string>()
+    for (const slot of def.slots) {
+      if (seenSlots.has(slot.name)) continue
+      seenSlots.add(slot.name)
+      slots.push({ name: slot.name, ts: mapped ? slot.name : propName(slot.name || 'children', locals) })
+    }
+
+    const rootClass = /root/i.test(def.rawCss) || /root/i.test(def.template) ? 'doop-root' : 'root'
+    const split = splitComponentCss(def.rawCss ? this.urls.css(def.rawCss) : '', { rootClass })
+    const plan: ComponentPlan = {
+      def,
+      name,
+      propsName,
+      ...(mapped ? { mapped } : { file: `src/components/${name}.tsx` }),
+      props,
+      propByName: new Map(props.map((entry) => [entry.prop.name, entry])),
+      slots,
+      slotByName: new Map(slots.map((entry) => [entry.name, entry])),
+      split,
+      moduleClasses: new Set(split.classes),
+      rootClass,
+      stylesIdent: mapped ? '' : this.names.take(`${name}Styles`),
+      directUrlProps,
+      forwards,
+    }
+    return plan
+  }
+}
+
+function mappedImport(def: ComponentDef): MappedImport | undefined {
+  const code = def.code
+  if (!code?.importFrom || !code.exportName || !isIdentifier(code.exportName)) return undefined
+  return { importFrom: code.importFrom, exportName: code.exportName, defaultExport: code.defaultExport === true, code }
+}
+
+/** A declared default as the TypeScript expression it becomes, or undefined when there is none or it does not fit the prop. */
+function declaredDefault(prop: ComponentProp, kind: Kind): string | undefined {
+  const value = prop.default
+  if (value === undefined || prop.type === 'instance') return undefined
+  switch (kind.k) {
+    case 'enum':
+      return kind.options.includes(value) ? jsString(value) : undefined
+    case 'boolean':
+      return value === 'false' ? 'false' : 'true'
+    case 'number': {
+      const number = Number(value)
+      return value.trim() !== '' && Number.isFinite(number) ? String(number) : undefined
+    }
+    default:
+      return jsString(value)
+  }
+}
+
+/** What the template says about each prop where it is bound: its first literal content (a text-like prop's default), the props that land in URL attributes, and what is forwarded to nested components. */
+function collectBindings(
+  root: Element,
+  derived: Map<string, string>,
+  urlProps: Set<string>,
+  forwards: ComponentPlan['forwards'],
+): void {
+  const stack: Element[] = [root]
+  for (let el = stack.pop(); el; el = stack.pop()) {
+    const raw = attrOf(el, BIND_ATTR)
+    if (raw !== undefined) {
+      const isUse = el.tagName === USE_TAG
+      for (const { target, prop } of parseBindings(raw, el.tagName)) {
+        if (isUse) {
+          if (target) forwards.push({ outer: prop, nestedRef: attrOf(el, 'component') ?? '', inner: target })
+          continue
+        }
+        if (target === null) {
+          if (!derived.has(prop)) {
+            const text = ownText(el)
+            if (text) derived.set(prop, text)
+          }
+          continue
+        }
+        if (URL_BINDING_TARGETS.has(target)) urlProps.add(prop)
+        if (derived.has(prop)) continue
+        const literal = target.startsWith('style.')
+          ? parseStyle(attrOf(el, 'style')).get(target.slice(6))
+          : target.startsWith('--')
+            ? parseStyle(attrOf(el, 'style')).get(target)
+            : attrOf(el, target)
+        if (literal) derived.set(prop, literal)
+      }
+    }
+    for (let i = el.childNodes.length - 1; i >= 0; i--) {
+      const child = el.childNodes[i]
+      if (child && isElement(child)) stack.push(child)
+    }
+  }
+}
+
+/** An element's own text, the way a text binding replaces it: the first text with something in it. */
+function ownText(el: Element): string {
+  for (const child of el.childNodes) {
+    if (child.nodeName === '#text') {
+      const value = (child as Tree.TextNode).value.replace(/\s+/g, ' ').trim()
+      if (value) return value
+    }
+  }
+  return ''
+}
+
+/* ------------------------------------------------------------------ */
+/* Per-file state                                                      */
+/* ------------------------------------------------------------------ */
+
+export interface FileInlined {
+  component: string
+  reason: string
+}
+
+/** What one generated file used, so its imports can be written, and what the converter found in it. */
+export class FileCtx {
+  readonly generated = new Set<ComponentPlan>()
+  readonly mapped = new Set<ComponentPlan>()
+  /** module sheets this file refers to by `styles[...]` */
+  readonly styleUses = new Set<ComponentPlan>()
+  usesCx = false
+  usesNode = false
+  usesCssProps = false
+  readonly issues: ExportIssue[] = []
+  readonly inlined: FileInlined[] = []
+
+  constructor(
+    readonly session: ExportSession,
+    readonly file: string,
+  ) {}
+
+  use(plan: ComponentPlan): void {
+    ;(plan.mapped ? this.mapped : this.generated).add(plan)
+  }
+
+  note(kind: ExportIssue['kind'], detail: string): void {
+    this.issues.push({ kind, detail })
+  }
+
+  /** the className value for classes inside `plan`'s own markup */
+  className(plan: ComponentPlan, classes: string[], own: boolean, withRoot: boolean): string {
+    const list = withRoot && plan.moduleClasses.has(plan.rootClass) ? [plan.rootClass, ...classes] : classes
+    const ident = own ? 'styles' : plan.stylesIdent
+    const value = moduleClassName(list, plan.moduleClasses, { styles: ident, cx: 'cx' })
+    if (value.startsWith('{cx(')) this.usesCx = true
+    if (value.includes(`${ident}[`)) this.styleUses.add(plan)
+    return value
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Calls: one component used inside another file                       */
+/* ------------------------------------------------------------------ */
+
+export interface CallValue {
+  /** a JavaScript expression of the inner prop's kind */
+  expr: string
+  /** the Doop value when it is a literal; mapped components need it to apply a value map */
+  literal?: string
+}
+
+export interface UseCall {
+  plan: ComponentPlan
+  /** inner Doop prop name -> value */
+  values: Map<string, CallValue>
+  /** inner slot name -> a JSX expression */
+  slots: Map<string, string>
+}
+
+const JS_NAME = /^[A-Za-z_$][\w$]*$/
+
+/** One literal Doop value as an expression of the target prop's kind; null when it does not fit (the engine ignores such a value too). */
+export function literalValue(fc: FileCtx, plan: ComponentPlan, name: string, raw: string): CallValue | null {
+  const entry = plan.propByName.get(name)
+  if (!entry) return null
+  const { kind } = entry
+  switch (kind.k) {
+    case 'enum':
+      return kind.options.includes(raw) ? { expr: jsString(raw), literal: raw } : null
+    case 'boolean':
+      return { expr: raw === 'false' ? 'false' : 'true', literal: raw }
+    case 'number': {
+      const number = Number(raw)
+      return raw.trim() !== '' && Number.isFinite(number) ? { expr: String(number), literal: raw } : null
+    }
+    case 'node': {
+      const def = fc.session.find(raw)
+      if (!def) {
+        fc.note('dropped-attribute', `instance prop ${jsString(name)} names a component that is not in the export`)
+        return null
+      }
+      const target = fc.session.plan(def)
+      fc.use(target)
+      return { expr: renderUseCall(fc, { plan: target, values: new Map(), slots: new Map() }), literal: raw }
+    }
+    default: {
+      let value = raw
+      if (fc.session.isUrlProp(plan, name)) {
+        if (isUnsafeUrl(value)) {
+          fc.note('unsafe-url', `value of ${jsString(name)} dropped: it is a URL that would run code`)
+          return null
+        }
+        value = fc.session.urls.url(value)
+      }
+      return { expr: jsString(value), literal: raw }
+    }
+  }
+}
+
+export function deepReasons(overrides: InstanceOverrides): string[] {
+  const reasons: string[] = []
+  for (const [key, part] of Object.entries(overrides.parts ?? {})) {
+    const kinds: string[] = []
+    if (part.attrs && Object.keys(part.attrs).length) kinds.push('attributes')
+    if (part.style && Object.keys(part.style).length) kinds.push('styles')
+    if (part.tag) kinds.push('tag')
+    if (part.text !== undefined) kinds.push('text')
+    if (part.html !== undefined) kinds.push('markup')
+    if (part.hidden) kinds.push('hidden')
+    if (part.swap) kinds.push('swap')
+    if (part.use && (Object.keys(part.use.props ?? {}).length || Object.keys(part.use.parts ?? {}).length)) {
+      kinds.push('nested instance')
+    }
+    if (kinds.length) reasons.push(`${key}: ${kinds.join(', ')}`)
+  }
+  return reasons
+}
+
+/** The slot name a template part key stands for. */
+export function slotNameOf(plan: ComponentPlan, key: string): string | undefined {
+  const el = partsOf(plan.def.template).get(key)?.el
+  if (!el || attrOf(el, SLOT_ATTR) === undefined) return undefined
+  return attrOf(el, SLOT_ATTR) ?? ''
+}
+
+const indentText = (text: string, unit = '  '): string => text.replace(/^(?=.)/gm, unit)
+
+/** `<Name a={…} slot={…} />`, or the mapped component's import form. */
+export function renderUseCall(fc: FileCtx, call: UseCall): string {
+  const { plan } = call
+  fc.use(plan)
+  const attrs: string[] = []
+  const children: string[] = []
+  const mapped = plan.mapped
+  const addValue = (target: string, value: string, isBare: boolean) => {
+    if (target === 'children') children.push(`{${value}}`)
+    else if (isBare) attrs.push(target)
+    else attrs.push(`${target}={${value}}`)
+  }
+  if (!mapped) {
+    for (const entry of plan.props) {
+      const value = call.values.get(entry.prop.name)
+      if (value) {
+        if (entry.kind.k === 'node') fc.usesNode = true
+        addValue(entry.ts, value.expr, value.expr === 'true' && entry.kind.k === 'boolean')
+      }
+    }
+    for (const slot of plan.slots) {
+      const value = call.slots.get(slot.name)
+      if (value !== undefined) addValue(slot.ts, value, false)
+    }
+  } else {
+    const code = mapped.code
+    for (const entry of plan.props) {
+      const value = call.values.get(entry.prop.name)
+      if (!value) continue
+      const rule = code.props?.[entry.prop.name]
+      if (rule?.omit) continue
+      const target = rule?.name && JS_NAME.test(rule.name) ? rule.name : entry.prop.name
+      if (!JS_NAME.test(target) && !/^[a-z][a-z0-9-]*$/.test(target)) continue
+      const mappedValue = mapValue(entry, rule?.values, value)
+      addValue(target, mappedValue, mappedValue === 'true')
+    }
+    for (const slot of plan.slots) {
+      const value = call.slots.get(slot.name)
+      if (value === undefined) continue
+      const target = code.slots?.[slot.name] ?? slot.name
+      if (target === 'children') children.push(`{${value}}`)
+      else if (JS_NAME.test(target)) attrs.push(`${target}={${value}}`)
+    }
+  }
+  const open = [plan.name, ...attrs]
+  const oneLine = open.join(' ')
+  const head = oneLine.length > 90 && attrs.length > 1 ? `${plan.name}\n${indentText(attrs.join('\n'))}\n` : oneLine
+  if (children.length === 0) return `<${head}${head.endsWith('\n') ? '' : ' '}/>`
+  return `<${head}>\n${indentText(children.join('\n'))}\n</${plan.name}>`
+}
+
+/** The expression passed for a value a mapping may rewrite: literals go through the map directly, a runtime value through a lookup that covers every option. */
+function mapValue(
+  entry: PropPlan,
+  values: Record<string, string | number | boolean> | undefined,
+  value: CallValue,
+): string {
+  if (!values) return value.expr
+  const asJs = (mapped: string | number | boolean): string =>
+    typeof mapped === 'string' ? jsString(mapped) : String(mapped)
+  if (value.literal !== undefined) {
+    const mapped = values[value.literal]
+    return mapped === undefined ? value.expr : asJs(mapped)
+  }
+  if (entry.kind.k === 'enum') {
+    const table = entry.kind.options
+      .map((option) => `${jsString(option)}: ${asJs(values[option] ?? option)}`)
+      .join(', ')
+    return entry.hasDefault
+      ? `({ ${table} } as const)[${value.expr}]`
+      : `${value.expr} === undefined ? undefined : ({ ${table} } as const)[${value.expr}]`
+  }
+  if (entry.kind.k === 'boolean') {
+    const on = values.true ?? true
+    const off = values.false ?? false
+    return `(${value.expr}) ? ${asJs(on)} : ${asJs(off)}`
+  }
+  return value.expr
+}
+
+/* ------------------------------------------------------------------ */
+/* Conditions and bindings                                             */
+/* ------------------------------------------------------------------ */
+
+export function condExpr(plan: ComponentPlan, condition: Condition): string {
+  const entry = plan.propByName.get(condition.prop)
+  const wrap = (holds: string): string => {
+    if (!condition.negate) return holds
+    if (holds === 'true' || holds === 'false') return holds === 'true' ? 'false' : 'true'
+    if (/^[\w$]+$/.test(holds)) return `!${holds}`
+    const equality = /^([\w$]+) === (.+)$/.exec(holds)
+    return equality ? `${equality[1]} !== ${equality[2]}` : `!(${holds})`
+  }
+  if (!entry) return wrap('false')
+  const { ts, kind } = entry
+  if (condition.equals !== undefined) {
+    const equals = condition.equals
+    switch (kind.k) {
+      case 'enum':
+        return wrap(kind.options.includes(equals) ? `${ts} === ${jsString(equals)}` : 'false')
+      case 'boolean':
+        return wrap(equals === 'true' || equals === 'false' ? `${ts} === ${equals}` : 'false')
+      case 'number':
+        return wrap(`String(${ts}) === ${jsString(equals)}`)
+      case 'node':
+        return wrap('false')
+      default:
+        return wrap(`${ts} === ${jsString(equals)}`)
+    }
+  }
+  switch (kind.k) {
+    case 'boolean':
+      return wrap(ts)
+    case 'number':
+      return wrap(`${ts} !== undefined`)
+    case 'node':
+      return wrap(`${ts} !== undefined && ${ts} !== null`)
+    case 'enum':
+      return wrap(kind.options.includes('false') ? `${ts} !== undefined && ${ts} !== "false"` : `${ts} !== undefined`)
+    default:
+      return wrap(`${ts} !== undefined && ${ts} !== "false"`)
+  }
+}
+
+/** A style attribute holding custom properties as a JSX attribute override: React's `CSSProperties` has no `--x` keys, so the object is asserted to it. */
+export function customPropertyStyle(fc: FileCtx, el: Element): Record<string, string> | undefined {
+  const style = attrOf(el, 'style')
+  if (!style || !style.includes('--')) return undefined
+  const object = styleToJsx(style, [])
+  if (!object || !object.includes('"--')) return undefined
+  fc.usesCssProps = true
+  return { style: `{${object.slice(1, -1)} as CSSProperties}` }
+}
+
+/** a JSX child written as an expression: `{x}` becomes `x`, an element stays */
+export const exprOf = (rendered: string): string =>
+  rendered.startsWith('{') && rendered.endsWith('}') ? rendered.slice(1, -1) : rendered
+
+export function wrapCondition(rendered: string, expr: string): string {
+  if (expr === 'true') return rendered
+  if (expr === 'false') return ''
+  return `{${expr} && (\n${indentText(exprOf(rendered))}\n)}`
+}
+
+const ATTR_RENAMES = new Map([
+  ['class', 'className'],
+  ['for', 'htmlFor'],
+  ['tabindex', 'tabIndex'],
+  ['readonly', 'readOnly'],
+  ['maxlength', 'maxLength'],
+  ['minlength', 'minLength'],
+  ['colspan', 'colSpan'],
+  ['rowspan', 'rowSpan'],
+  ['autocomplete', 'autoComplete'],
+  ['autofocus', 'autoFocus'],
+  ['crossorigin', 'crossOrigin'],
+  ['srcset', 'srcSet'],
+  ['datetime', 'dateTime'],
+  ['enctype', 'encType'],
+  ['novalidate', 'noValidate'],
+  ['playsinline', 'playsInline'],
+  ['spellcheck', 'spellCheck'],
+  ['contenteditable', 'contentEditable'],
+  ['allowfullscreen', 'allowFullScreen'],
+  ['formaction', 'formAction'],
+  ['inputmode', 'inputMode'],
+  ['accesskey', 'accessKey'],
+  ['hreflang', 'hrefLang'],
+])
+
+/** HTML's boolean attributes: bound to a boolean prop they are present or absent. */
+const BOOLEAN_ATTRS = new Set([
+  'allowfullscreen',
+  'async',
+  'autofocus',
+  'autoplay',
+  'checked',
+  'controls',
+  'default',
+  'defer',
+  'disabled',
+  'formnovalidate',
+  'hidden',
+  'inert',
+  'ismap',
+  'itemscope',
+  'loop',
+  'multiple',
+  'muted',
+  'nomodule',
+  'novalidate',
+  'open',
+  'playsinline',
+  'readonly',
+  'required',
+  'reversed',
+  'selected',
+])
+
+const camelStyle = (name: string): string | null => {
+  if (name.startsWith('--')) return /^--[A-Za-z0-9_-]+$/.test(name) ? jsString(name) : null
+  if (!/^-?[a-z][a-z0-9-]*$/.test(name)) return null
+  const camel = (text: string) => text.replace(/-([a-z0-9])/g, (_all, char: string) => char.toUpperCase())
+  if (name.startsWith('-ms-')) return camel(`ms-${name.slice(4)}`)
+  const base = camel(name.startsWith('-') ? name.slice(1) : name)
+  return name.startsWith('-') ? `${base.charAt(0).toUpperCase()}${base.slice(1)}` : base
+}
+
+/** `prop` as the JSX attribute expression for an attribute binding, falling back to the template's own literal when the prop has no default. */
+function attrValueExpr(entry: PropPlan, literal: string | undefined, boolAttr: boolean): string | null {
+  const { ts, kind } = entry
+  if (kind.k === 'node') return null
+  if (kind.k === 'boolean') {
+    if (boolAttr) return literal !== undefined && !entry.hasDefault ? `${ts} ?? true` : ts
+    return entry.hasDefault
+      ? `String(${ts})`
+      : `${ts} === undefined ? ${literal === undefined ? 'undefined' : jsString(literal)} : String(${ts})`
+  }
+  if (kind.k === 'number') {
+    if (entry.hasDefault) return `String(${ts})`
+    return `${ts} === undefined ? ${literal === undefined ? 'undefined' : jsString(literal)} : String(${ts})`
+  }
+  return literal !== undefined && !entry.hasDefault ? `${ts} ?? ${jsString(literal)}` : ts
+}
+
+export interface BoundElement {
+  attrs: Record<string, string | null>
+  /** set when the element's text is bound: the marker that stands in the converted text, and the JSX it becomes */
+  text?: { marker: string; jsx: string }
+}
+
+/** Resolve an element's `data-doop-prop` bindings against its component into JSX attribute overrides. Mutates the element's children when the text is bound. */
+export function bindElement(
+  fc: FileCtx,
+  plan: ComponentPlan,
+  el: Element,
+  markerBase: string,
+  reportPath: string,
+): BoundElement {
+  const result: BoundElement = { attrs: {} }
+  const raw = attrOf(el, BIND_ATTR)
+  if (raw === undefined) return result
+  const bindings: Binding[] = parseBindings(raw, el.tagName)
+  const styleEntries: { key: string; expr: string; name: string }[] = []
+  let counter = 0
+  for (const { target, prop } of bindings) {
+    const entry = plan.propByName.get(prop)
+    if (!entry) continue
+    if (target === null) {
+      if (entry.kind.k === 'node') continue
+      const marker = `${markerBase}${counter++}`
+      el.childNodes = textChildren(el, marker)
+      const jsx = entry.kind.k === 'boolean' ? `{String(${entry.ts})}` : `{${entry.ts}}`
+      result.text = { marker, jsx }
+      continue
+    }
+    if (target.startsWith('style.') || target.startsWith('--')) {
+      const name = target.startsWith('--') ? target : target.slice(6)
+      const key = camelStyle(name)
+      if (key === null || !/^[A-Za-z0-9_-]+$/.test(name.replace(/^--/, ''))) {
+        fc.note('style', `binding to style ${jsString(name)} dropped: not a style property name`)
+        continue
+      }
+      const literal = parseStyle(attrOf(el, 'style')).get(name)
+      const expr = attrValueExpr(entry, literal, false)
+      if (expr) styleEntries.push({ key, expr, name })
+      continue
+    }
+    if (!/^[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*)?$/.test(target) || target === 'style' || /^on/.test(target)) {
+      fc.note(
+        'dropped-attribute',
+        `binding to ${jsString(target)} dropped: not an attribute name that can be written as JSX ${reportPath}`,
+      )
+      continue
+    }
+    const isForm =
+      (el.tagName === 'input' || el.tagName === 'textarea' || el.tagName === 'select') &&
+      el.namespaceURI === 'http://www.w3.org/1999/xhtml'
+    const name =
+      isForm && target === 'value'
+        ? 'defaultValue'
+        : isForm && target === 'checked'
+          ? 'defaultChecked'
+          : (ATTR_RENAMES.get(target) ?? target)
+    const boolAttr = BOOLEAN_ATTRS.has(target) && entry.kind.k === 'boolean'
+    const literal = attrOf(el, target)
+    const expr = attrValueExpr(entry, boolAttr ? (literal === undefined ? undefined : '') : literal, boolAttr)
+    if (!expr) continue
+    result.attrs[name] = `{${expr}}`
+  }
+  if (styleEntries.length) {
+    const rest = parseStyle(attrOf(el, 'style'))
+    for (const { name } of styleEntries) rest.delete(name)
+    const issues: ExportIssue[] = []
+    const staticStyle = rest.size ? styleToJsx(serializeStyle(rest), issues) : null
+    fc.issues.push(...issues)
+    const dynamic = styleEntries.map(({ key, expr }) => `${key}: ${expr}`).join(', ')
+    fc.usesCssProps = true
+    result.attrs.style = `{${staticStyle ? `${staticStyle.slice(1, -3)}, ${dynamic} }` : `{ ${dynamic} }`} as CSSProperties}`
+  }
+  return result
+}
+
+/** The element's children with its own text replaced by `marker`, as the engine's text binding does (other element children stay). */
+function textChildren(el: Element, marker: string): Tree.ChildNode[] {
+  const node = { nodeName: '#text', value: marker, parentNode: el } as Tree.TextNode
+  if (!el.childNodes.some(isElement)) return [node]
+  const hasText = (child: Tree.ChildNode) => child.nodeName === '#text' && (child as Tree.TextNode).value.trim() !== ''
+  const at = el.childNodes.findIndex(hasText)
+  const kept: Tree.ChildNode[] = []
+  el.childNodes.forEach((child, index) => {
+    if (index === at) kept.push(node)
+    else if (!hasText(child)) kept.push(child)
+  })
+  if (at === -1) kept.push(node)
+  return kept
+}
+
+/** A marker no text of the template contains: the same template always gets the same one. */
+export function markerFor(source: string): string {
+  let marker = 'DOOPBIND'
+  while (source.includes(marker)) marker += 'X'
+  return marker
+}
+
+/* ------------------------------------------------------------------ */
+/* A component's own file                                              */
+/* ------------------------------------------------------------------ */
+
+export interface ComponentFiles {
+  tsx: string
+  css: string
+  fc: FileCtx
+}
+
+const isCustomTag = (el: Element): boolean =>
+  el.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+  el.tagName.includes('-') &&
+  el.tagName !== USE_TAG &&
+  /^[a-z][a-z0-9]*(-[a-z0-9]+)+$/.test(el.tagName)
+
+/** The default expression a destructured prop gets, or undefined. */
+function defaultExpr(fc: FileCtx, plan: ComponentPlan, entry: PropPlan): string | undefined {
+  const { prop, kind } = entry
+  if (prop.type === 'instance') {
+    const def = prop.default ? fc.session.find(prop.default) : undefined
+    if (!def) return undefined
+    return renderUseCall(fc, { plan: fc.session.plan(def), values: new Map(), slots: new Map() })
+  }
+  if (kind.k !== 'string') return declaredDefault(prop, kind)
+  const raw = prop.default ?? entry.derived
+  if (raw === undefined) return undefined
+  if (!fc.session.isUrlProp(plan, prop.name)) return jsString(raw)
+  if (isUnsafeUrl(raw)) {
+    fc.note('unsafe-url', `default of ${jsString(prop.name)} dropped: it is a URL that would run code`)
+    return undefined
+  }
+  return jsString(fc.session.urls.url(raw))
+}
+
+export function emitComponent(session: ExportSession, plan: ComponentPlan): ComponentFiles {
+  const def = plan.def
+  const file = plan.file ?? `src/components/${plan.name}.tsx`
+  const fc = new FileCtx(session, file)
+  const root = parseTemplateRoot(def.template)
+  fc.issues.push(...plan.split.issues)
+  let body = 'null'
+  const marker = markerFor(def.template)
+  if (root) {
+    session.urls.tree({ childNodes: [root], nodeName: '#document-fragment' } as unknown as Tree.ParentNode)
+    const options = componentOptions(fc, plan, root, marker)
+    const result = nodeToJsx(root, options)
+    fc.issues.push(...result.issues)
+    body = result.jsx
+  } else {
+    fc.note('dropped-element', 'the component has no markup, so it renders nothing')
+  }
+
+  const params: string[] = []
+  const members: string[] = []
+  for (const entry of plan.props) {
+    const expr = defaultExpr(fc, plan, entry)
+    if (entry.kind.k === 'node') fc.usesNode = true
+    members.push(`  ${entry.ts}?: ${tsType(entry.kind)}`)
+    params.push(expr === undefined ? entry.ts : `${entry.ts} = ${expr}`)
+  }
+  for (const slot of plan.slots) {
+    fc.usesNode = true
+    members.push(`  ${slot.ts}?: ReactNode`)
+    params.push(slot.ts)
+  }
+
+  const lines: string[] = importLines(fc, plan, 'component')
+  lines.push('')
+  lines.push(`export interface ${plan.propsName} {`)
+  lines.push(...members)
+  lines.push('}')
+  lines.push('')
+  const signature = params.length ? `{ ${params.join(', ')} }: ${plan.propsName}` : `_props: ${plan.propsName}`
+  lines.push(`export function ${plan.name}(${signature}) {`)
+  lines.push(body === 'null' ? '  return null' : `  return (\n${indentText(body, '    ')}\n  )`)
+  lines.push('}')
+  const css = [plan.split.moduleCss, plan.split.globalCss].filter(Boolean).join('\n') || '/* no styles */\n'
+  return { tsx: `${lines.join('\n')}\n`, css, fc }
+}
+
+/** The import block of a generated file, sorted so two runs agree. `from` says where the file lives. */
+export function importLines(fc: FileCtx, self: ComponentPlan | null, from: 'component' | 'page'): string[] {
+  const lines: string[] = []
+  const reactTypes = [fc.usesCssProps ? 'CSSProperties' : '', fc.usesNode ? 'ReactNode' : ''].filter(Boolean)
+  if (reactTypes.length) lines.push(`import type { ${reactTypes.join(', ')} } from 'react'`)
+  const rel = from === 'component' ? '.' : '../components'
+  const sheets = [...fc.styleUses].sort((a, b) => (a.name < b.name ? -1 : 1))
+  if (self && fc.styleUses.has(self)) lines.push(`import styles from './${self.name}.module.css'`)
+  else if (self && self.split.moduleCss) lines.push(`import './${self.name}.module.css'`)
+  for (const plan of sheets)
+    if (plan !== self) lines.push(`import ${plan.stylesIdent} from '${rel}/${plan.name}.module.css'`)
+  if (fc.usesCx) lines.push(`import { cx } from '../cx'`)
+  const generated = [...fc.generated].filter((plan) => plan !== self).sort((a, b) => (a.name < b.name ? -1 : 1))
+  if (from === 'component') {
+    for (const plan of generated) lines.push(`import { ${plan.name} } from './${plan.name}'`)
+  } else if (generated.length) {
+    lines.push(`import { ${generated.map((plan) => plan.name).join(', ')} } from '../components'`)
+  }
+  const packages = new Map<string, { named: string[]; defaults: string[] }>()
+  for (const plan of fc.mapped) {
+    const mapped = plan.mapped
+    if (!mapped) continue
+    const group = packages.get(mapped.importFrom) ?? { named: [], defaults: [] }
+    if (mapped.defaultExport) group.defaults.push(plan.name)
+    else group.named.push(plan.name === mapped.exportName ? plan.name : `${mapped.exportName} as ${plan.name}`)
+    packages.set(mapped.importFrom, group)
+  }
+  for (const [pkg, group] of [...packages].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    for (const name of group.defaults.sort()) lines.push(`import ${name} from ${jsString(pkg)}`)
+    if (group.named.length) lines.push(`import { ${group.named.sort().join(', ')} } from ${jsString(pkg)}`)
+  }
+  return lines
+}
+
+/** The htmlToJsx hooks for a component's template: bindings, conditions, slots, nested uses and the root's variant attributes. */
+function componentOptions(fc: FileCtx, plan: ComponentPlan, root: Element, marker: string): HtmlToJsxOptions {
+  const own = (classes: string[]) => fc.className(plan, classes, true, false)
+  const options: HtmlToJsxOptions = {
+    className: (classes) => own(classes),
+    visit: (el, ctx) => {
+      if (isCustomTag(el)) fc.session.customElements.add(el.tagName)
+      if (el.tagName === USE_TAG) return visitUse(fc, plan, el, ctx, options)
+      const isRoot = el === root
+      const condRaw = isRoot ? undefined : attrOf(el, IF_ATTR)
+      const slotName = attrOf(el, SLOT_ATTR)
+      const special = isRoot || attrOf(el, BIND_ATTR) !== undefined || slotName !== undefined
+      const styled = customPropertyStyle(fc, el)
+      if (!special && condRaw === undefined && !styled) return undefined
+      let rendered = special
+        ? renderCustomized(fc, plan, el, ctx, options, isRoot, slotName, marker)
+        : ctx.element(styled)
+      const condition = condRaw === undefined ? undefined : parseCondition(condRaw)
+      if (condition) rendered = wrapCondition(rendered, condExpr(plan, condition))
+      return rendered
+    },
+  }
+  return options
+}
+
+function renderCustomized(
+  fc: FileCtx,
+  plan: ComponentPlan,
+  el: Element,
+  ctx: JsxContext,
+  options: HtmlToJsxOptions,
+  isRoot: boolean,
+  slotName: string | undefined,
+  marker: string,
+): string {
+  const bound =
+    slotName === undefined ? bindElement(fc, plan, el, marker, '') : { attrs: {} as Record<string, string | null> }
+  const attrs = { ...customPropertyStyle(fc, el), ...bound.attrs }
+  if (isRoot) {
+    for (const entry of plan.props) {
+      const reflects = entry.prop.type === 'enum' || (entry.prop.type === 'boolean' && entry.prop.reflect === true)
+      if (!reflects) continue
+      attrs[`data-${entry.prop.name}`] =
+        entry.kind.k === 'boolean'
+          ? entry.hasDefault
+            ? `{String(${entry.ts})}`
+            : `{${entry.ts} === undefined ? undefined : String(${entry.ts})}`
+          : `{${entry.ts}}`
+    }
+    const classes = (attrOf(el, 'class') ?? '').split(/[ \t\n\f\r]+/).filter(Boolean)
+    const className = fc.className(plan, classes, true, true)
+    if (className !== '{""}') attrs.className = className
+  }
+  let children: string | undefined
+  if (slotName !== undefined) {
+    const slot = plan.slotByName.get(slotName)
+    if (slot) {
+      fc.usesNode = true
+      const fragment = { nodeName: '#document-fragment', childNodes: el.childNodes } as unknown as Tree.DocumentFragment
+      const inner = nodeToJsx(fragment, options)
+      ctx.issues.push(...inner.issues)
+      children = inner.jsx === 'null' ? `{${slot.ts}}` : `{${slot.ts} ?? (\n${indentText(inner.jsx)}\n)}`
+    }
+  }
+  let rendered = ctx.element(attrs, children)
+  if (bound.text) rendered = rendered.replace(`{${jsString(bound.text.marker)}}`, bound.text.jsx)
+  return rendered
+}
+
+/** A nested `<doop-use>` of a template as the component it renders: forwarded props passed through, literal attributes as props, slots as props. */
+function visitUse(fc: FileCtx, plan: ComponentPlan, use: Element, ctx: JsxContext, options: HtmlToJsxOptions): string {
+  const ref = attrOf(use, 'component') ?? ''
+  const condRaw = attrOf(use, IF_ATTR)
+  const condition = condRaw === undefined ? undefined : parseCondition(condRaw)
+  const nestedDef = fc.session.find(ref)
+  if (!nestedDef) {
+    ctx.issues.push({ kind: 'dropped-element', detail: '<doop-use> dropped: its component is not in the export' })
+    return ''
+  }
+  if (nestedDef.id === plan.def.id) {
+    ctx.issues.push({ kind: 'dropped-element', detail: '<doop-use> dropped: a component cannot render itself' })
+    return ''
+  }
+  const target = fc.session.plan(nestedDef)
+  const engine = fc.session.engine()
+  const state: InstanceState = stateFromUseAttrs(use, nestedDef, engine, true)
+  for (const issue of engine.issues) ctx.issues.push({ kind: 'dropped-attribute', detail: issue.message })
+  const values = new Map<string, CallValue>()
+  for (const [name, raw] of Object.entries(state.overrides.props ?? {})) {
+    const value = literalValue(fc, target, name, raw)
+    if (value) values.set(name, value)
+  }
+  let componentProp: PropPlan | undefined
+  const rawBind = attrOf(use, BIND_ATTR)
+  for (const { target: inner, prop: outerName } of rawBind === undefined ? [] : parseBindings(rawBind, USE_TAG)) {
+    const outer = plan.propByName.get(outerName)
+    if (!outer || inner === null) continue
+    if (inner === 'component') {
+      if (outer.kind.k === 'node') componentProp = outer
+      continue
+    }
+    const innerEntry = target.propByName.get(inner)
+    if (!innerEntry) {
+      ctx.issues.push({
+        kind: 'dropped-attribute',
+        detail: `forwarding to ${jsString(inner)} dropped: the component has no such prop`,
+      })
+      continue
+    }
+    const converted = convertExpr(outer.ts, outer.kind, innerEntry.kind, outer.hasDefault)
+    if (converted === null) {
+      ctx.issues.push({
+        kind: 'dropped-attribute',
+        detail: `forwarding ${jsString(outerName)} to ${jsString(inner)} dropped: the types do not meet`,
+      })
+      continue
+    }
+    const literal = values.get(inner)
+    const grouped = /^[\w$.]+$/.test(converted) ? converted : `(${converted})`
+    values.set(inner, { expr: literal && !outer.hasDefault ? `${grouped} ?? ${literal.expr}` : converted })
+  }
+  const slots = new Map<string, string>()
+  const reasons = deepReasons(state.overrides)
+  for (const [key, part] of Object.entries(state.overrides.parts ?? {})) {
+    if (part.slot === undefined) continue
+    const name = slotNameOf(target, key)
+    if (name === undefined || !target.slotByName.has(name)) continue
+    const inner = htmlToJsx(part.slot, options)
+    ctx.issues.push(...inner.issues)
+    slots.set(name, inner.jsx === 'null' ? '<></>' : inner.jsx)
+  }
+  if (reasons.length) {
+    ctx.issues.push({
+      kind: 'dropped-attribute',
+      detail: `part overrides on the nested ${jsString(target.name)} could not be carried into the component and were dropped (${reasons.join('; ')})`,
+    })
+  }
+  let element = renderUseCall(fc, { plan: target, values, slots })
+  if (componentProp) {
+    fc.usesNode = true
+    element = `{${componentProp.ts} ?? ${element}}`
+  }
+  return condition ? wrapCondition(element, condExpr(plan, condition)) : element
+}
