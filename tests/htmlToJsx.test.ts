@@ -525,3 +525,94 @@ describe('a realistic component body', () => {
     expect(textOf(firstElement(markup))).toContain('Title — “quoted”')
   })
 })
+
+describe('security review regressions', () => {
+  it('treats names that exist on Object.prototype as ordinary attributes', () => {
+    const { jsx } = convert('<div constructor="x" __proto__="y" tostring="z" hasownproperty="w"></div>')
+    expect(jsx).not.toMatch(/function|Object/)
+    expect(jsx).toBe('<div constructor="x" tostring="z" hasownproperty="w" />')
+    expectParses(jsx)
+  })
+
+  it('never lets ctx.element emit a script, style or invalid tag', () => {
+    const viaElement = { visit: (_el: Tree.Element, ctx: { element(): string }) => ctx.element() }
+    for (const html of [
+      '<script>alert(1)</script>',
+      '<style>@import "x"</style>',
+      '<svg><style>@import url(//evil)</style></svg>',
+      '<a{b>x</a{b>',
+      '<foo:bar>x</foo:bar>',
+      '<link rel="stylesheet" href="x">',
+    ]) {
+      const { jsx, issues } = convert(`<div>${html}</div>`, viaElement)
+      expect(jsx).not.toMatch(/script|style|a\{b|foo:bar|link|alert|@import/)
+      expect(issues.length).toBeGreaterThan(0)
+      expectParses(jsx)
+    }
+  })
+
+  it('refuses dangerous override names in ctx.element', () => {
+    const { jsx, issues } = convert('<p>x</p>', {
+      visit: (_el, ctx) =>
+        ctx.element({
+          onClick: '{evil}',
+          ONERROR: '{evil}',
+          dangerouslySetInnerHTML: '{{ __html: x }}',
+          DangerouslySetInnerHTML: '{{ __html: x }}',
+          key: '{1}',
+          ref: '{r}',
+          'a b': '"x"',
+          'x{y': '"x"',
+          title: '"ok"',
+        }),
+    })
+    expect(jsx).toContain('title="ok"')
+    expect(jsx).not.toMatch(/onClick|ONERROR|dangerously|key=|ref=|a b|x\{y/i)
+    expect(issues.filter((i) => i.kind === 'dropped-attribute')).toHaveLength(8)
+    expectParses(jsx)
+  })
+
+  it('drops svg style elements', () => {
+    const { jsx, issues } = convert('<svg><style>@import url(//evil/x.css); .a{fill:red}</style><path d="M0 0"/></svg>')
+    expect(jsx).not.toMatch(/style|import|evil/)
+    expect(kinds(issues)).toEqual(['dropped-element'])
+  })
+
+  it('treats every data: url on an embedding element as unsafe, and keeps data:image on img', () => {
+    const svg = 'data:image/svg+xml,%3Csvg onload=alert(1)%3E'
+    const { jsx, issues } = convert(`<iframe src="${svg}"></iframe><frame src="${svg}"><img src="${svg}">`)
+    expect(jsx.match(/src=/g)).toHaveLength(1)
+    expect(jsx).toMatch(/<img src=/)
+    expect(jsx).not.toMatch(/<iframe src/)
+    expect(kinds(issues)).toEqual(['unsafe-url'])
+    expect(convert('<iframe src=" DaTa:image/png;base64,AA"></iframe>').jsx).toBe('<iframe />')
+    expect(convert('<iframe src="https://example.com/x"></iframe>').jsx).toBe('<iframe src="https://example.com/x" />')
+  })
+
+  it('drops animate and set elements that target a handler or a link', () => {
+    const html =
+      '<svg><animate attributeName="onclick" to="x"/><set attributeName="href" to="#a"/><animate attributeName="xlink:href" values="a"/><animate attributeName="opacity" from="0" to="1"/></svg>'
+    const { jsx, issues } = convert(html)
+    expect(jsx).toBe('<svg>\n  <animate attributeName="opacity" from="0" to="1" />\n</svg>')
+    expect(kinds(issues)).toEqual(['dropped-element', 'dropped-element', 'dropped-element'])
+  })
+
+  it('does not emit one React name twice', () => {
+    const { jsx, issues } = convert('<form accept-charset="a" acceptcharset="b" data-x="1"></form>')
+    expect(jsx.match(/acceptCharset/g)).toHaveLength(1)
+    expect(jsx).toContain('acceptCharset="a"')
+    expect(kinds(issues)).toEqual(['dropped-attribute'])
+    const multi = convert('<input value="1" checked CHECKED="checked">')
+    expect(multi.jsx.match(/defaultChecked/g)).toHaveLength(1)
+    expectParses(jsx)
+  })
+
+  it('writes class, not className, on custom elements', () => {
+    const { jsx } = convert('<my-card class="a b"><p class="c"></p></my-card>')
+    expect(jsx).toContain('<my-card class="a b">')
+    expect(jsx).toContain('<p className="c" />')
+    const hooked = convert('<my-card class="a"></my-card>', { className: (c) => `{x(${jsString(c.join(' '))})}` })
+    expect(hooked.jsx).toBe('<my-card class={x("a")} />')
+    expectParses(jsx)
+  })
+})

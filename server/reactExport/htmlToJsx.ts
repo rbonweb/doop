@@ -135,6 +135,7 @@ const SVG_TEXT_PARENTS = new Set(['text', 'tspan', 'textPath', 'title', 'desc', 
 const PRESERVE_WHITESPACE = new Set(['pre', 'textarea', 'code'])
 
 const TAG_NAME = /^[a-z][a-zA-Z0-9]*(-[a-z0-9]+)*$/
+const JSX_ATTR_NAME = /^[A-Za-z_][A-Za-z0-9_-]*(:[A-Za-z_][A-Za-z0-9_-]*)?$/
 const ATTR_NAME = /^[a-z_][a-z0-9_-]*$/i
 const PLAIN_ATTR_VALUE = /^[A-Za-z0-9 _\-.,:;/#%()+=?!@]*$/
 const REACT_RESERVED = new Set([
@@ -144,6 +145,7 @@ const REACT_RESERVED = new Set([
   'dangerouslysetinnerhtml',
   'suppresshydrationwarning',
   'suppresscontenteditablewarning',
+  '__proto__',
 ])
 const URL_ATTRS = new Set([
   'href',
@@ -163,9 +165,17 @@ const URL_ATTRS = new Set([
   'profile',
   'icon',
 ])
+/** elements that load a document: every data: URL is a script risk there, not only the non-image ones */
+const EMBEDDING_ELEMENTS = new Set(['iframe', 'frame', 'embed', 'object'])
+const isDataUrl = (value: string): boolean =>
+  Array.from(value)
+    .filter((char) => char.charCodeAt(0) > 0x20 && char.charCodeAt(0) !== 0x7f)
+    .join('')
+    .toLowerCase()
+    .startsWith('data:')
 const SRCSET_ATTRS = new Set(['srcset', 'imagesrcset'])
 /** HTML attributes whose React name is not the lowercase one (`class` and `for` are handled apart) */
-const HTML_ATTR_NAMES: Record<string, string> = Object.fromEntries(
+const HTML_ATTR_NAMES = new Map<string, string>(
   [
     'acceptCharset',
     'accessKey',
@@ -227,22 +237,22 @@ const HTML_ATTR_NAMES: Record<string, string> = Object.fromEntries(
     'useMap',
   ].map((name) => [name.toLowerCase(), name] as const),
 )
-HTML_ATTR_NAMES['accept-charset'] = 'acceptCharset'
-HTML_ATTR_NAMES['http-equiv'] = 'httpEquiv'
+HTML_ATTR_NAMES.set('accept-charset', 'acceptCharset')
+HTML_ATTR_NAMES.set('http-equiv', 'httpEquiv')
 /** namespaced attributes React spells in camelCase */
-const NAMESPACED_ATTR_NAMES: Record<string, string> = {
-  'xlink:actuate': 'xlinkActuate',
-  'xlink:arcrole': 'xlinkArcrole',
-  'xlink:href': 'xlinkHref',
-  'xlink:role': 'xlinkRole',
-  'xlink:show': 'xlinkShow',
-  'xlink:title': 'xlinkTitle',
-  'xlink:type': 'xlinkType',
-  'xml:base': 'xmlBase',
-  'xml:lang': 'xmlLang',
-  'xml:space': 'xmlSpace',
-  'xmlns:xlink': 'xmlnsXlink',
-}
+const NAMESPACED_ATTR_NAMES = new Map<string, string>([
+  ['xlink:actuate', 'xlinkActuate'],
+  ['xlink:arcrole', 'xlinkArcrole'],
+  ['xlink:href', 'xlinkHref'],
+  ['xlink:role', 'xlinkRole'],
+  ['xlink:show', 'xlinkShow'],
+  ['xlink:title', 'xlinkTitle'],
+  ['xlink:type', 'xlinkType'],
+  ['xml:base', 'xmlBase'],
+  ['xml:lang', 'xmlLang'],
+  ['xml:space', 'xmlSpace'],
+  ['xmlns:xlink', 'xmlnsXlink'],
+])
 /** boolean attributes React knows, by lowercase HTML name; bare when the value is empty or the name itself */
 const BOOLEAN_ATTRS = new Set([
   'allowfullscreen',
@@ -409,10 +419,10 @@ function filterSrcset(value: string): { kept: string; dropped: number; total: nu
 function reactAttrName(name: string, inSvg: boolean): string | null {
   if (name === 'class') return 'className'
   if (name === 'for') return 'htmlFor'
-  const namespaced = NAMESPACED_ATTR_NAMES[name]
+  const namespaced = NAMESPACED_ATTR_NAMES.get(name)
   if (namespaced) return namespaced
   if (name.startsWith('data-') || name.startsWith('aria-')) return ATTR_NAME.test(name) ? name : null
-  const mapped = HTML_ATTR_NAMES[name]
+  const mapped = HTML_ATTR_NAMES.get(name)
   if (mapped) return mapped
   if (inSvg && /^[a-z]+(-[a-z]+)+$/.test(name)) return camel(name)
   return ATTR_NAME.test(name) ? name : null
@@ -425,6 +435,25 @@ interface JsxAttr {
 }
 
 // ---------------------------------------------------------------- conversion
+
+/** why an element is never emitted, whoever asks: script, style, anything outside the allowed tag names and the SMIL elements that could set an event handler or a link */
+function blockedElement(el: Element): { kind: ExportIssue['kind']; detail: string } | null {
+  const tag = el.tagName
+  if (tag === 'script') return { kind: 'script', detail: '<script> dropped' }
+  if (!TAG_NAME.test(tag) || tag === 'this') {
+    return { kind: 'dropped-element', detail: `<${quoted(tag)}> dropped with its contents` }
+  }
+  if (tag === 'style' || (DROPPED_ELEMENTS.has(tag) && !isSvg(el))) {
+    return { kind: 'dropped-element', detail: `<${tag}> dropped` }
+  }
+  if (isSvg(el) && (tag === 'animate' || tag === 'set')) {
+    const target = el.attrs.find((attr) => attr.name === 'attributeName')?.value.trim() ?? ''
+    if (/^on/i.test(target) || /^(xlink:)?href$/i.test(target)) {
+      return { kind: 'dropped-element', detail: `<${tag}> dropped: it targets ${quoted(target)}` }
+    }
+  }
+  return null
+}
 
 class Converter {
   readonly issues: ExportIssue[] = []
@@ -499,25 +528,20 @@ class Converter {
       attrsMemo ??= this.attributes(el, path)
       return attrsMemo
     }
-    const element = (overrides?: Record<string, string | null>, childrenText?: string): string =>
-      this.defaultElement(el, attrs(), overrides, childrenText, children)
+    const blocked = blockedElement(el)
+    let reported = false
+    const element = (overrides?: Record<string, string | null>, childrenText?: string): string => {
+      if (blocked) {
+        if (!reported) issue(this.issues, blocked.kind, blocked.detail, path)
+        reported = true
+        return ''
+      }
+      return this.defaultElement(el, attrs(), overrides, childrenText, children, path)
+    }
 
     const ctx: JsxContext = { issues: this.issues, inSvg: isSvg(el), children, element }
     const visited = this.options.visit?.(el, ctx)
     if (visited !== undefined) return visited
-
-    if (el.tagName === 'script') {
-      issue(this.issues, 'script', '<script> dropped', path)
-      return ''
-    }
-    if (!TAG_NAME.test(el.tagName) || el.tagName === 'this') {
-      issue(this.issues, 'dropped-element', `<${quoted(el.tagName)}> dropped with its contents`, path)
-      return ''
-    }
-    if (DROPPED_ELEMENTS.has(el.tagName) && !isSvg(el)) {
-      issue(this.issues, 'dropped-element', `<${el.tagName}> dropped`, path)
-      return ''
-    }
     return element()
   }
 
@@ -527,14 +551,17 @@ class Converter {
     overrides: Record<string, string | null> | undefined,
     childrenOverride: string | undefined,
     children: () => string,
+    path: string,
   ): string {
     let list = attrs
     const extra: JsxAttr[] = []
     if (overrides) {
       const merged = new Map<string, JsxAttr | null>(list.map((attr) => [attr.name, attr]))
       for (const [name, value] of Object.entries(overrides)) {
-        if (!/^[A-Za-z_][A-Za-z0-9_:-]*$/.test(name))
-          throw new Error(`invalid JSX attribute name ${JSON.stringify(name)}`)
+        if (!JSX_ATTR_NAME.test(name) || /^on/i.test(name) || REACT_RESERVED.has(name.toLowerCase())) {
+          issue(this.issues, 'dropped-attribute', `override ${quoted(name)} refused`, path)
+          continue
+        }
         if (value === null) merged.delete(name)
         else if (merged.has(name)) merged.set(name, { name, value })
         else extra.push({ name, value })
@@ -567,6 +594,21 @@ class Converter {
     const formValue = isHtml && VALUE_ELEMENTS.has(tag)
     const animation = inSvg && (tag === 'animate' || tag === 'set')
     const hasValueAttr = el.attrs.some((attr) => attr.name === 'value')
+    const customElement = isHtml && tag.includes('-')
+    const used = new Set<string>()
+    const add = (attr: JsxAttr, source: string) => {
+      if (used.has(attr.name)) {
+        issue(
+          this.issues,
+          'dropped-attribute',
+          `attribute ${quoted(source)} dropped: ${attr.name} is already set`,
+          path,
+        )
+        return
+      }
+      used.add(attr.name)
+      out.push(attr)
+    }
 
     for (const attr of el.attrs) {
       const name = fullAttrName(attr)
@@ -587,17 +629,23 @@ class Converter {
       }
       if (lower === 'style') {
         const style = styleToJsxAt(value, this.issues, path)
-        if (style) out.push({ name: 'style', value: style })
+        if (style) add({ name: 'style', value: style }, name)
         continue
       }
       if (lower === 'class') {
         const classes = value.split(/[ \t\n\f\r]+/).filter(Boolean)
         if (!classes.length) continue
-        out.push({ name: 'className', value: this.options.className?.(classes, el) ?? attrValue(classes.join(' ')) })
+        add(
+          {
+            name: customElement ? 'class' : 'className',
+            value: this.options.className?.(classes, el) ?? attrValue(classes.join(' ')),
+          },
+          name,
+        )
         continue
       }
       if (URL_ATTRS.has(lower)) {
-        if (isUnsafeUrl(value)) {
+        if (isUnsafeUrl(value) || (isHtml && EMBEDDING_ELEMENTS.has(tag) && isDataUrl(value))) {
           issue(this.issues, 'unsafe-url', `${quoted(name)} dropped: ${quoted(value)}`, path)
           continue
         }
@@ -611,7 +659,7 @@ class Converter {
         if (result.dropped) {
           issue(this.issues, 'unsafe-url', `${result.dropped} unsafe ${quoted(name)} entries dropped`, path)
           if (result.dropped === result.total || !result.kept) continue
-          out.push({ name: reactAttrName(lower, inSvg) ?? lower, value: attrValue(result.kept) })
+          add({ name: reactAttrName(lower, inSvg) ?? lower, value: attrValue(result.kept) }, name)
           continue
         }
       } else if (animation && ANIMATION_VALUE_ATTRS.has(lower) && value.split(';').some((part) => isUnsafeUrl(part))) {
@@ -624,11 +672,11 @@ class Converter {
         issue(this.issues, 'dropped-attribute', '`selected` kept: the option is not inside a select', path)
       }
       if (formValue && lower === 'value') {
-        out.push({ name: 'defaultValue', value: attrValue(value) })
+        add({ name: 'defaultValue', value: attrValue(value) }, name)
         continue
       }
       if (isHtml && tag === 'input' && lower === 'checked') {
-        out.push({ name: 'defaultChecked', value: null })
+        add({ name: 'defaultChecked', value: null }, name)
         continue
       }
       const reactName = reactAttrName(name, inSvg)
@@ -637,22 +685,22 @@ class Converter {
         continue
       }
       if (BOOLEAN_ATTRS.has(lower) && (value === '' || value.toLowerCase() === lower)) {
-        out.push({ name: reactName, value: null })
+        add({ name: reactName, value: null }, name)
         continue
       }
-      out.push({ name: reactName, value: attrValue(value) })
+      add({ name: reactName, value: attrValue(value) }, name)
     }
 
     if (isHtml && tag === 'textarea') {
       const text = el.childNodes.map((node) => (isText(node) ? node.value : '')).join('')
-      if (text && !hasValueAttr) out.push({ name: 'defaultValue', value: `{${jsString(text)}}` })
+      if (text && !hasValueAttr) add({ name: 'defaultValue', value: `{${jsString(text)}}` }, 'textarea text')
     }
     if (isHtml && tag === 'select' && !hasValueAttr) {
       const selected = selectedValues(el)
       if (selected.length) {
         const multiple = el.attrs.some((attr) => attr.name === 'multiple')
-        if (multiple) out.push({ name: 'defaultValue', value: `{[${selected.map(jsString).join(', ')}]}` })
-        else out.push({ name: 'defaultValue', value: attrValue(selected[selected.length - 1] ?? '') })
+        if (multiple) add({ name: 'defaultValue', value: `{[${selected.map(jsString).join(', ')}]}` }, 'selected')
+        else add({ name: 'defaultValue', value: attrValue(selected[selected.length - 1] ?? '') }, 'selected')
       }
     }
     return out
