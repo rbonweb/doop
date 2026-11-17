@@ -18,7 +18,8 @@ const URL_ATTRS = new Set([
   'background',
   'data',
 ])
-const SCHEME = /^(?:javascript|vbscript|data:text\/html)/
+/** at the start of the value or of any comma-separated candidate (srcset, values) */
+const SCHEME = /(?:^|[,;])(?:javascript|vbscript|data:text\/html)/
 
 /** Whitespace and control characters out, lower case: how a browser reads the start of a URL. */
 function compact(value: string): string {
