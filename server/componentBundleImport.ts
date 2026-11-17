@@ -7,6 +7,7 @@ import {
 import type { ComponentCode } from '../shared/componentCode.ts'
 import {
   activeComponents,
+  MAX_COMPONENT_NAME,
   MAX_COMPONENTS,
   USE_TAG,
   type ComponentDef,
@@ -116,24 +117,45 @@ function codeOf(bundle: ComponentBundle, component: BundleComponent): ComponentC
 }
 
 /** The live component a bundle entry is a new version of: the same package export, else the same name from the same kind of import. */
-function matchOf(code: ComponentCode, name: string, defs: readonly ComponentDef[]): ComponentDef | undefined {
+function matchOf(
+  code: ComponentCode,
+  name: string,
+  qualifier: string,
+  defs: readonly ComponentDef[],
+): ComponentDef | undefined {
   if (code.importFrom && code.exportName)
     return defs.find((def) => def.code?.importFrom === code.importFrom && def.code?.exportName === code.exportName)
+  /* an earlier import of the same kind may have given it the qualified name ("Button (Primer)", "Button (Primer) 2") */
+  const escaped = `${name.trim()} (${qualifier})`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const renamed = new RegExp(`^${escaped}(?: \\d+)?$`, 'i')
   return defs.find(
-    (def) => def.name.toLowerCase() === name.trim().toLowerCase() && def.code?.origin?.kind === code.origin?.kind,
+    (def) =>
+      def.code?.origin?.kind === code.origin?.kind &&
+      (def.name.toLowerCase() === name.trim().toLowerCase() || renamed.test(def.name)),
   )
+}
+
+/** The word a renamed component carries: the package's scope or name, else the source's name, else "Imported". */
+export function qualifierOf(bundle: Pick<ComponentBundle, 'package' | 'source'>): string {
+  const pkg = bundle.package?.trim()
+  const word = pkg ? (pkg.startsWith('@') ? pkg.slice(1) : pkg).split('/')[0] : bundle.source.name
+  const clean = cleanLabel(word ?? '', 40)
+  return clean ? clean[0]!.toUpperCase() + clean.slice(1) : 'Imported'
 }
 
 interface Plan {
   component: BundleComponent
   code: ComponentCode
   match: ComponentDef | undefined
+  /** the word a clash with a component of another origin is told apart by */
+  qualifier: string
 }
 
 function planFor(bundle: ComponentBundle, defs: readonly ComponentDef[]): Plan[] {
+  const qualifier = qualifierOf(bundle)
   const plans = bundle.components.map((component) => {
     const code = codeOf(bundle, component)
-    return { component, code, match: matchOf(code, component.name, defs) }
+    return { component, code, match: matchOf(code, component.name, qualifier, defs), qualifier }
   })
   /* nesting needs the nested one first: a component that names others goes after those that name none */
   return [...plans].sort(
@@ -434,6 +456,20 @@ function missingNested(def: ComponentDef): string[] {
   return [...new Set(refs)]
 }
 
+const lowered = (name: string) => name.replace(/["<>]/g, '').trim().toLowerCase()
+
+/** The name itself when nothing holds it, else "Name (Qualifier)", "Name (Qualifier) 2", … within the name limit. */
+function distinctName(canvasId: string, name: string, qualifier: string, reserved: ReadonlySet<string>): string {
+  const held = new Set(activeComponents(store.getComponents(canvasId)).map((def) => def.name.toLowerCase()))
+  const taken = (candidate: string) => held.has(lowered(candidate)) || reserved.has(lowered(candidate))
+  if (!taken(name)) return name
+  for (let n = 1; ; n++) {
+    const suffix = ` (${qualifier})${n === 1 ? '' : ` ${n}`}`
+    const candidate = `${cleanLabel(name, MAX_COMPONENT_NAME - suffix.length)}${suffix}`
+    if (!taken(candidate)) return cleanLabel(candidate, MAX_COMPONENT_NAME)
+  }
+}
+
 type Outcome =
   { kind: 'created' | 'updated' | 'unchanged'; id: string; name: string } | { kind: 'skipped'; reason: string }
 
@@ -445,6 +481,7 @@ function writeOne(
   issues: ImportIssue[],
   dryRun: boolean,
   sharedCss: string,
+  reserved: Set<string>,
 ): Outcome {
   const { component, code, match } = plan
   /* an enum option becomes an attribute value and a selector: one with a character that could end either is not imported */
@@ -474,19 +511,22 @@ function writeOne(
     if (same || dryRun) mark.undo()
     return { kind: same ? 'unchanged' : 'updated', id: match.id, name: match.name }
   }
-  const taken = activeComponents(store.getComponents(ctx.canvasId)).some(
-    (def) => def.name.toLowerCase() === component.name.replace(/["<>]/g, '').trim().toLowerCase(),
-  )
-  if (taken)
-    return {
-      kind: 'skipped',
-      reason: `a component named “${component.name}” is already on this canvas and was not imported from ${code.origin?.kind ?? 'a bundle'}: rename one of them`,
-    }
-  if (dryRun) return { kind: 'created', id: '', name: component.name }
+  /* a name another component holds, one that is not this import's own, is told apart rather than refused */
+  const name = distinctName(ctx.canvasId, component.name, plan.qualifier, reserved)
+  if (name !== component.name)
+    issues.push({
+      component: component.name,
+      code: 'renamed',
+      message: `a component named “${component.name}” is already on this canvas, so this one was imported as “${name}” (its code export is still ${code.exportName ?? component.name})`,
+    })
+  if (dryRun) {
+    reserved.add(name.toLowerCase())
+    return { kind: 'created', id: '', name }
+  }
   const { component: def } = createComponentFromHtml(
     ctx.canvasId,
     {
-      name: component.name,
+      name,
       description: component.description,
       props: prepared.props as ComponentProp[] | undefined,
       code,
@@ -518,11 +558,12 @@ function runUnit(
   issues: ImportIssue[],
   dryRun: boolean,
   sharedCss: string,
+  reserved: Set<string>,
 ): Outcome {
   const own: ImportIssue[] = []
   try {
     /* each entry is its own unit: a refused one leaves nothing behind and the rest go on */
-    const outcome = transaction(() => writeOne(ctx, plan, where, pageId, own, dryRun, sharedCss))
+    const outcome = transaction(() => writeOne(ctx, plan, where, pageId, own, dryRun, sharedCss, reserved))
     issues.push(...own)
     return outcome
   } catch (error) {
@@ -582,6 +623,8 @@ export function importComponentBundle(
   const shared = sanitizeStylesheet(bundle.css ?? '')
   /* what each component's stylesheet starts with: the shared css less the :root variables that are tokens (set once tokens are made) */
   let sharedCss = shared.value
+  /* names a dry run has given components it did not make, so two planned names cannot be the same */
+  const reserved = new Set<string>()
   issues.push(...shared.issues)
   const claimed = new Set<string>()
   const runnable = plans.filter((plan) => {
@@ -615,7 +658,7 @@ export function importComponentBundle(
       transaction(() => {
         writes()
         for (const plan of runnable)
-          record(result, plan, runUnit(ctx, plan, undefined, result.pageId, issues, true, sharedCss))
+          record(result, plan, runUnit(ctx, plan, undefined, result.pageId, issues, true, sharedCss, reserved))
         throw new DryRunDone(finish())
       })
     } catch (error) {
@@ -641,7 +684,7 @@ export function importComponentBundle(
     try {
       batch(() => {
         for (const plan of chunk)
-          record(local, plan, runUnit(ctx, plan, spots.get(plan), result.pageId, found, false, sharedCss))
+          record(local, plan, runUnit(ctx, plan, spots.get(plan), result.pageId, found, false, sharedCss, reserved))
       })
     } catch (error) {
       /* in one operation the whole import is one unit and a failure is the caller's */
