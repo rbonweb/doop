@@ -263,13 +263,14 @@ describe('the zip', () => {
       'src/cx.ts',
       'src/css-modules.d.ts',
       'src/components/Tag.tsx',
-      'src/components/Tag.module.css',
       'src/components/index.ts',
       'src/pages/Home.tsx',
       'src/pages/Home.css',
     ]) {
       expect(names, path).toContain(`Shop-front-end-react/${path}`)
     }
+    /* Tag has no styles of its own, so the export writes no empty module for it */
+    expect(names).not.toContain('Shop-front-end-react/src/components/Tag.module.css')
     expect(names.every((name) => name.startsWith('Shop-front-end-react/'))).toBe(true)
     const report = JSON.parse(await zip.file('Shop-front-end-react/export-report.json')!.async('string')) as {
       issues: unknown[]
