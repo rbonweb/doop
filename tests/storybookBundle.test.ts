@@ -210,8 +210,8 @@ describe('buildComponentBundle', () => {
     const [component] = result.bundle.components
     expect(component?.props?.map((prop) => prop.name)).toEqual(['tone', 'on'])
     expect(Object.keys(component?.variants ?? {})).toContain('tone')
-    /* the resting look is the default story's; the variants were rendered from the Playground */
-    expect(component?.code?.origin?.storyId).toBe('kit-btn--default')
+    /* the markup and the variants both come from the Playground, and the origin says so */
+    expect(component?.code?.origin?.storyId).toBe(entries[1]!.id)
     const variantUrls = log.filter((url) => url.includes('args='))
     expect(variantUrls.length).toBeGreaterThan(0)
     for (const url of variantUrls) expect(url).toContain(`id=${entries[1]!.id}`)
@@ -230,7 +230,8 @@ describe('buildComponentBundle', () => {
     })
     const [component] = result.bundle.components
     expect(component?.html).toBe('<button class="pg">play</button>')
-    expect(component?.code?.origin?.storyId).toBe('kit-btn--default')
+    expect(component?.code?.origin?.storyId).toBe('kit-btn-features--playground')
+    expect(component?.code?.origin?.url).toContain('id=kit-btn-features--playground')
     expect(result.issues).toContainEqual(expect.objectContaining({ code: 'controls_from_story', component: 'Btn' }))
     const doc = parse(component!.html, { treeAdapter: adapter })
     const selectors = Object.values(component?.variants ?? {})
