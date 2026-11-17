@@ -26,6 +26,7 @@ interface Context {
   issues: ExportIssue[]
   classes: Set<string>
   rootClass: string
+  rewriteUrl?: (url: string) => string
 }
 
 const GROUPING_AT_RULES = new Set(['media', 'container', 'supports', 'layer', 'starting-style'])
@@ -41,9 +42,17 @@ const KEYFRAMES_NAME = /^@(?:-[a-z]+-)?keyframes\s+[\w-]+$/i
 const KEYFRAME_SELECTOR = /^(?:from|to|\d*\.?\d+%)(?:\s*,\s*(?:from|to|\d*\.?\d+%))*$/i
 const SCOPE_ESCAPE = /:(?:global|local)(?![\w-])/i
 
-/** Splits one component's stylesheet (a definition's unscoped `rawCss`) into a CSS Modules sheet and a global sheet. Nothing unsafe survives: `@import`, `@charset`, `expression()`, `behavior`, `-moz-binding` and any `url()` that runs code are dropped and reported. */
-export function splitComponentCss(css: string, options: { rootClass?: string } = {}): CssModuleSplit {
-  const context: Context = { issues: [], classes: new Set(), rootClass: options.rootClass ?? 'root' }
+/** Splits one component's stylesheet (a definition's unscoped `rawCss`) into a CSS Modules sheet and a global sheet. `rewriteUrl` is called with every `url()` and image-function address that passed the safety check (decoded, quotes removed); its answer is checked again and written back as a quoted string. Nothing unsafe survives: `@import`, `@charset`, `expression()`, `behavior`, `-moz-binding` and any `url()` that runs code are dropped and reported. */
+export function splitComponentCss(
+  css: string,
+  options: { rootClass?: string; rewriteUrl?: (url: string) => string } = {},
+): CssModuleSplit {
+  const context: Context = {
+    issues: [],
+    classes: new Set(),
+    rootClass: options.rootClass ?? 'root',
+    rewriteUrl: options.rewriteUrl,
+  }
   const blocks = processItems(parseItems(stripComments(css)), context)
   return {
     moduleCss: join(blocks.module),
@@ -355,11 +364,24 @@ interface ValueTokens {
   functions: Set<string>
   /** a `:` outside every bracket, string and url: no standard property value has one, and a CSS parser reads it as the start of the next declaration */
   colon: boolean
+  /** where each url token and string sits in the value, for rewriting */
+  refs: ValueRef[]
+}
+
+interface ValueRef {
+  start: number
+  end: number
+  /** the decoded address or string content */
+  url: string
+  /** a whole unquoted `url(…)` token, rewritten as `url("…")`, or a string, rewritten as a string */
+  token: boolean
+  /** the string is the argument of `url(`, so it is an address whatever else the value holds */
+  urlArgument: boolean
 }
 
 /** Reads a declaration value as CSS tokens: strings, unquoted `url()` tokens, identifiers and functions, and brackets. */
 function tokenizeValue(value: string): ValueTokens {
-  const result: ValueTokens = { ok: true, urls: [], strings: [], functions: new Set(), colon: false }
+  const result: ValueTokens = { ok: true, urls: [], strings: [], functions: new Set(), colon: false, refs: [] }
   const stack: string[] = []
   let urlString = false
   let i = 0
@@ -368,7 +390,10 @@ function tokenizeValue(value: string): ValueTokens {
     const url = urlTokenAt(value, i)
     if (url) {
       if (url.arg === null) result.ok = false
-      else result.urls.push(url.arg)
+      else {
+        result.urls.push(url.arg)
+        result.refs.push({ start: i, end: url.end, url: url.arg, token: true, urlArgument: true })
+      }
       urlString = false
       i = url.end
       continue
@@ -378,6 +403,7 @@ function tokenizeValue(value: string): ValueTokens {
       if (!string.closed) result.ok = false
       const content = decodeCssEscapes(value.slice(i + 1, string.closed ? string.end - 1 : string.end))
       result.strings.push(content)
+      result.refs.push({ start: i, end: string.end, url: content, token: false, urlArgument: urlString })
       if (urlString) result.urls.push(content)
       urlString = false
       i = string.end
@@ -421,12 +447,26 @@ function tokenizeValue(value: string): ValueTokens {
   return result
 }
 
+function isControl(char: string): boolean {
+  const code = char.charCodeAt(0)
+  return code <= 0x1f || code === 0x7f
+}
+
+/** Without the control characters and spaces a URL parser trims from both ends. */
+function trimControls(text: string): string {
+  const chars = Array.from(text)
+  let start = 0
+  let end = chars.length
+  while (start < end && chars[start]!.charCodeAt(0) <= 0x20) start++
+  while (end > start && chars[end - 1]!.charCodeAt(0) <= 0x20) end--
+  return chars.slice(start, end).join('')
+}
+
 /** True for a CSS URL that is safe to leave in an exported stylesheet: absolute `http(s)`, protocol-relative, root-relative without a `..` segment, a fragment, or a raster or SVG data image. Anything else (a relative path, `~pkg`, `file:`) is something a bundler would resolve to a file on the exporter's machine, so it is refused. */
 function isKeptUrl(raw: string): boolean {
-  const value = Array.from(raw.trim().replace(/["']+$/, ''))
-    .filter((char) => char.charCodeAt(0) > 0x20 && char.charCodeAt(0) !== 0x7f)
-    .join('')
-  if (!value || isUnsafeUrl(value)) return false
+  /* A URL parser trims the ends and deletes tab and newlines inside, so a URL with a control character inside is read differently from how it is written: refuse it rather than guess. */
+  const value = trimControls(raw)
+  if (!value || Array.from(value).some(isControl) || isUnsafeUrl(value)) return false
   if (/^https?:\/\/(?!\/)/i.test(value) || /^\/\/(?!\/)/.test(value) || value.startsWith('#')) return true
   if (/^data:image\//i.test(value)) return true
   if (!value.startsWith('/') || value.startsWith('//') || value.includes('\\')) return false
@@ -455,6 +495,41 @@ function declarationProblem(name: string, value: string): string | null {
   return null
 }
 
+/** Removes backslash-newline, which a string reads as a line continuation and nothing else reads as an escape, so the text that is checked is the text that is written. An escaped backslash before a newline is kept. */
+function stripContinuations(text: string): string {
+  return text.replace(/\\(?:(\r\n|[\n\r\f])|[^])/g, (match, newline: string | undefined) =>
+    newline === undefined ? match : '',
+  )
+}
+
+/** A CSS string literal holding `value`. */
+function cssString(value: string): string {
+  const escaped = Array.from(value)
+    .map((char) => {
+      if (char === '\\' || char === '"') return `\\${char}`
+      return isControl(char) ? `\\${char.charCodeAt(0).toString(16)} ` : char
+    })
+    .join('')
+  return `"${escaped}"`
+}
+
+/** The value with every address handed to `rewriteUrl` and written back as a quoted string, or the reason the rewritten address cannot be kept. The result is read again and must pass the same checks. */
+function rewriteUrls(name: string, value: string, rewriteUrl: (url: string) => string): string | { problem: string } {
+  const tokens = tokenizeValue(value)
+  const imageValue = IMAGE_FUNCTIONS.some((fn) => tokens.functions.has(fn))
+  let out = ''
+  let at = 0
+  for (const ref of tokens.refs) {
+    if (!ref.urlArgument && !imageValue) continue
+    const next = rewriteUrl(ref.url)
+    if (!isKeptUrl(next)) return { problem: 'the rewritten url is not allowed' }
+    out += value.slice(at, ref.start) + (ref.token ? `url(${cssString(next)})` : cssString(next))
+    at = ref.end
+  }
+  out += value.slice(at)
+  return declarationProblem(name, out) ? { problem: 'the rewritten value is not allowed' } : out
+}
+
 /** The declarations and nested blocks of a rule body, each as one block of text. */
 function emitBody(body: string, context: Context, owner: string): string[] {
   const lines: string[] = []
@@ -462,7 +537,7 @@ function emitBody(body: string, context: Context, owner: string): string[] {
     if (item.body === null) {
       const colon = item.prelude.indexOf(':')
       const name = colon === -1 ? '' : item.prelude.slice(0, colon).trim()
-      const value = tidy(item.prelude.slice(colon + 1))
+      const value = tidy(stripContinuations(item.prelude.slice(colon + 1)))
       if (!PROPERTY_NAME.test(name) || !value) {
         context.issues.push({
           kind: 'css',
@@ -480,7 +555,20 @@ function emitBody(body: string, context: Context, owner: string): string[] {
         })
         continue
       }
-      lines.push(`${name}: ${value};`)
+      let kept = value
+      if (context.rewriteUrl) {
+        const rewritten = rewriteUrls(name, value, context.rewriteUrl)
+        if (typeof rewritten !== 'string') {
+          context.issues.push({
+            kind: 'css',
+            detail: `dropped declaration "${clip(item.prelude)}": ${rewritten.problem}`,
+            path: owner,
+          })
+          continue
+        }
+        kept = rewritten
+      }
+      lines.push(`${name}: ${kept};`)
       continue
     }
     const prelude = tidy(item.prelude)
