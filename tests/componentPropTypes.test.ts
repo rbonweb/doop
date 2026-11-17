@@ -16,11 +16,12 @@ import { store } from '../server/store.ts'
 import * as actions from '../server/actions.ts'
 import { blankComponent, contextFor } from '../server/components.ts'
 import { compactDocument, expandUses } from '../server/componentEngine.ts'
-import { validProps } from '../server/componentActions.ts'
+import { changeInstances, insertInstance, updateComponent, validProps } from '../server/componentActions.ts'
 import {
   COMPONENT_ATTR,
   INSTANCE_ATTR,
   componentSignature,
+  variantAttrs,
   propValueProblem,
   type ComponentProp,
 } from '../shared/components.ts'
@@ -99,6 +100,8 @@ describe('component prop types', () => {
     })
 
     it('accepts good values on a <doop-use>', () => {
+      makeComponent('Icon', (id) => `<i ${COMPONENT_ATTR}="${id}">*</i>`)
+      makeComponent('Avatar', (id) => `<i ${COMPONENT_ATTR}="${id}">@</i>`)
       const { def } = make()
       const markup = `<doop-use component="${def.id}" count="4" accent="#0af" icon="avatar"></doop-use>`
       expect(issuesOf(markup)).toEqual([])
@@ -112,7 +115,7 @@ describe('component prop types', () => {
       ['count', '12', 'use a number from 0 to 10 in steps of 2'],
       ['count', '3', 'use a number from 0 to 10 in steps of 2'],
       ['count', '', 'use a number from 0 to 10 in steps of 2'],
-      ['accent', 'blue', 'use a hex colour'],
+      ['accent', 'blu', 'use a hex colour'],
       ['accent', '#12', 'use a hex colour'],
       ['accent', 'rgb(1,2,3); background: red', 'use a hex colour'],
       ['icon', 'Logo', 'use Icon | Avatar'],
@@ -144,7 +147,7 @@ describe('component prop types', () => {
         'var(--brand)',
       ])
         expect(propValueProblem(colour, good), good).toBeUndefined()
-      for (const bad of ['', 'red', '#ff', '#fffff', 'rgb(0,0,0', 'var(brand)', 'url(x)', 'rgb(expression(1))'])
+      for (const bad of ['', 'redd', '#ff', '#fffff', 'rgb(0,0,0', 'var(brand)', 'url(x)', 'rgb(expression(1))'])
         expect(propValueProblem(colour, bad), bad).toBeDefined()
       expect(propValueProblem({ name: 'i', type: 'instance' }, 'Anything')).toBeUndefined()
       expect(propValueProblem({ name: 'i', type: 'instance' }, '')).toBeDefined()
@@ -162,7 +165,7 @@ describe('component prop types', () => {
       expect(() => validProps([{ name: 'n', type: 'number', max: 3, default: '9' }])).toThrow(
         /default “9” does not fit/,
       )
-      expect(() => validProps([{ name: 'c', type: 'color', default: 'blue' }])).toThrow(/default “blue” does not fit/)
+      expect(() => validProps([{ name: 'c', type: 'color', default: 'blu' }])).toThrow(/default “blu” does not fit/)
       expect(() => validProps([{ name: 'i', type: 'instance', accepts: ['Icon'], default: 'Logo' }])).toThrow(
         /does not fit/,
       )
@@ -185,6 +188,109 @@ describe('component prop types', () => {
       expect(html(page)).toContain('data-doop-props')
       actions.updateFrame(page, { html: html(page).replace('>4</span>', '>1</span>') }, actor)
       expect(html(page)).not.toContain('data-doop-props')
+    })
+  })
+
+  describe('review fixes', () => {
+    const lookupOf = () => {
+      const ctx = contextFor(canvasId)
+      return (ref: string) => ctx.find(ref)
+    }
+
+    it('shares one list of variant attributes: enums and reflected booleans', () => {
+      expect(
+        variantAttrs([
+          { name: 'tone', type: 'enum', options: ['a'] },
+          { name: 'on', type: 'boolean', reflect: true },
+          { name: 'off', type: 'boolean' },
+          { name: 'label', type: 'text' },
+        ]),
+      ).toEqual(['data-tone', 'data-on'])
+    })
+
+    it('does not call CSS keyed on a reflected boolean unused', () => {
+      const { def } = makeComponent('Chip', (id) => `<span ${COMPONENT_ATTR}="${id}">x</span>`, [
+        { name: 'selected', type: 'boolean', reflect: true },
+      ])
+      expect(def.mainFrameId).toBeTruthy()
+      updateComponent(canvasId, def.id, { css: '[data-selected="true"] { color: red }' }, actor)
+      expect(actions.peekComponentIssues(def.mainFrameId!).map((issue) => issue.code)).not.toContain('css_not_kept')
+      /* a boolean that does not reflect puts nothing on the root, so that rule would never match */
+      updateComponent(canvasId, def.id, { props: [{ name: 'selected', type: 'boolean' }] }, actor)
+      updateComponent(canvasId, def.id, { css: '[data-selected="true"] { color: blue }' }, actor)
+      expect(actions.peekComponentIssues(def.mainFrameId!).map((issue) => issue.code)).toContain('css_not_kept')
+    })
+
+    it('refuses a bad typed value from update_instances and insert_instance with the engine message', () => {
+      const { def } = makeComponent(
+        'Badge',
+        (id) => `<div ${COMPONENT_ATTR}="${id}"><span data-doop-prop="count">1</span></div>`,
+        [{ name: 'count', type: 'number', min: 0, max: 10 }],
+      )
+      const page = write(`<doop-use component="${def.id}"></doop-use>`)
+      const id = /data-doop-id="([^"]+)"/.exec(html(page))![1]!
+      const message = /"99" is not a value of count — use a number from 0 to 10/
+      expect(() => changeInstances(canvasId, page, [{ instanceId: id, props: { count: '99' } }], actor)).toThrow(
+        message,
+      )
+      expect(() =>
+        insertInstance(canvasId, { frameId: page, component: def.id, props: { count: '99' } }, actor),
+      ).toThrow(message)
+      /* an empty value still clears it back to the component's own */
+      expect(() => changeInstances(canvasId, page, [{ instanceId: id, props: { count: '' } }], actor)).not.toThrow()
+    })
+
+    it('matches an instance value and accepts by name or id, and refuses unknown components', () => {
+      const icon = makeComponent('Icon', (id) => `<i ${COMPONENT_ATTR}="${id}">*</i>`).def
+      makeComponent('Avatar', (id) => `<i ${COMPONENT_ATTR}="${id}">@</i>`)
+      const lookup = lookupOf()
+      const byId: ComponentProp = { name: 'icon', type: 'instance', accepts: [icon.id] }
+      expect(propValueProblem(byId, 'icon', lookup)).toBeUndefined()
+      expect(propValueProblem(byId, icon.id, lookup)).toBeUndefined()
+      expect(propValueProblem(byId, 'Avatar', lookup)).toBe('use Icon')
+      const byName: ComponentProp = { name: 'icon', type: 'instance', accepts: ['Icon'] }
+      expect(propValueProblem(byName, icon.id, lookup)).toBeUndefined()
+      const any: ComponentProp = { name: 'icon', type: 'instance' }
+      expect(propValueProblem(any, 'Avatar', lookup)).toBeUndefined()
+      expect(propValueProblem(any, 'Nope', lookup)).toMatch(/name or id of a component/)
+      const { def } = makeComponent('Host', (id) => `<div ${COMPONENT_ATTR}="${id}" data-doop-prop="--i:icon"></div>`, [
+        byId,
+      ])
+      expect(issuesOf(`<doop-use component="${def.id}" icon="Icon"></doop-use>`)).toEqual([])
+      expect(issuesOf(`<doop-use component="${def.id}" icon="Avatar"></doop-use>`)[0]?.message).toContain('use Icon')
+    })
+
+    it('accepts the wider set of colours', () => {
+      const colour: ComponentProp = { name: 'c', type: 'color' }
+      for (const good of [
+        'transparent',
+        'currentColor',
+        'CURRENTCOLOR',
+        'Red',
+        'rebeccapurple',
+        'var(--x, #fff)',
+        'var(--x, rgb(0 0 0))',
+        'color-mix(in srgb, red 50%, blue)',
+        'hwb(200 10% 10%)',
+        'lab(50% 40 59)',
+        'lch(50% 40 59)',
+        'oklab(0.5 0.1 0.1)',
+      ])
+        expect(propValueProblem(colour, good), good).toBeUndefined()
+      for (const bad of ['notacolour', 'var(--x, red', 'color-mix(in srgb, red', 'var(--x, red;)', 'var(x, red)'])
+        expect(propValueProblem(colour, bad), bad).toBeDefined()
+    })
+
+    it('reads numbers as decimals only, and steps with a relative tolerance', () => {
+      const plain: ComponentProp = { name: 'n', type: 'number' }
+      for (const bad of ['0x10', '0b11', '0o7', ' ', '', '1,5', '1_0', '--1'])
+        expect(propValueProblem(plain, bad), bad).toBeDefined()
+      for (const good of ['0', '-1.5', '.5', '5.', '1e3', ' 7 '])
+        expect(propValueProblem(plain, good), good).toBeUndefined()
+      const fine: ComponentProp = { name: 'n', type: 'number', min: 0, step: 0.001 }
+      expect(propValueProblem(fine, '10000000.001')).toBeUndefined()
+      expect(propValueProblem(fine, '123456.789')).toBeUndefined()
+      expect(propValueProblem(fine, '0.0005')).toBeDefined()
     })
   })
 

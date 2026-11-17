@@ -348,13 +348,60 @@ export function stableJson(value: unknown): string {
 
 const HEX_COLOR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
 /* a shape check, not a CSS parser: a function name and the characters a colour's arguments use */
-const COLOR_FUNCTION = /^(?:rgba?|hsla?|oklch)\(\s*[0-9a-z.,%+\-/\s]*\)$/i
+const COLOR_FUNCTION = /^(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(\s*[0-9a-z.,%+\-/\s]*\)$/i
 const TOKEN_COLOR = /^var\(\s*--[a-z0-9_-]+\s*\)$/i
+/* a token with a fallback, and color-mix(): arguments may hold names, colours and one more level of calls */
+const LOOSE_COLOR = /^(?:var\(\s*--[a-z0-9_-]+\s*,|color-mix\()[0-9a-z.,%+\-/\s#()]*\)$/i
+const NAMED_COLORS = new Set(
+  (
+    'transparent currentcolor aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue ' +
+    'blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue ' +
+    'darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid ' +
+    'darkred darksalmon darkseagreen darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink ' +
+    'deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold ' +
+    'goldenrod gray green greenyellow grey honeydew hotpink indianred indigo ivory khaki lavender lavenderblush ' +
+    'lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey ' +
+    'lightpink lightsalmon lightseagreen lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime ' +
+    'limegreen linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen ' +
+    'mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin ' +
+    'navajowhite navy oldlace olive olivedrab orange orangered orchid palegoldenrod palegreen paleturquoise ' +
+    'palevioletred papayawhip peachpuff peru pink plum powderblue purple rebeccapurple red rosybrown royalblue ' +
+    'saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue slategray slategrey snow ' +
+    'springgreen steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke yellow yellowgreen'
+  ).split(' '),
+)
+
+function balanced(text: string): boolean {
+  let depth = 0
+  for (const char of text) {
+    if (char === '(') depth++
+    else if (char === ')' && --depth < 0) return false
+  }
+  return depth === 0
+}
 
 export function isColorValue(value: string): boolean {
   const text = value.trim()
-  return HEX_COLOR.test(text) || COLOR_FUNCTION.test(text) || TOKEN_COLOR.test(text)
+  return (
+    HEX_COLOR.test(text) ||
+    COLOR_FUNCTION.test(text) ||
+    TOKEN_COLOR.test(text) ||
+    NAMED_COLORS.has(text.toLowerCase()) ||
+    (LOOSE_COLOR.test(text) && balanced(text))
+  )
 }
+
+/** `data-<name>` for each prop that shows on an instance's root for CSS to key on: enums, and booleans with `reflect`. */
+export function variantAttrs(props: readonly ComponentProp[]): string[] {
+  return props
+    .filter((prop) => prop.type === 'enum' || (prop.type === 'boolean' && prop.reflect))
+    .map((prop) => `data-${prop.name}`)
+}
+
+/** A component by name or id, as the canvas resolves it. */
+export type ComponentLookup = (ref: string) => Pick<ComponentDef, 'id' | 'name'> | undefined
+
+const DECIMAL = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i
 
 function numberRange(prop: Pick<ComponentProp, 'min' | 'max'>): string {
   if (prop.min !== undefined && prop.max !== undefined) return `${prop.min}..${prop.max}`
@@ -366,12 +413,12 @@ function numberRange(prop: Pick<ComponentProp, 'min' | 'max'>): string {
 /** What a prop's type says about its value, shared by the server and the editor: undefined when the
  *  value is fine, else what to use instead (`use a number from 0 to 10`). Text, image, link and boolean
  *  take anything (a boolean reads "false" as off and everything else as on), so old markup round-trips. */
-export function propValueProblem(prop: ComponentProp, value: string): string | undefined {
+export function propValueProblem(prop: ComponentProp, value: string, lookup?: ComponentLookup): string | undefined {
   switch (prop.type) {
     case 'enum':
       return prop.options?.length && !prop.options.includes(value) ? `use ${prop.options.join(' | ')}` : undefined
     case 'number': {
-      const number = value.trim() === '' ? NaN : Number(value)
+      const number = DECIMAL.test(value.trim()) ? Number(value) : NaN
       const expected = `a number${
         prop.min !== undefined && prop.max !== undefined
           ? ` from ${prop.min} to ${prop.max}`
@@ -385,21 +432,36 @@ export function propValueProblem(prop: ComponentProp, value: string): string | u
       if ((prop.min !== undefined && number < prop.min) || (prop.max !== undefined && number > prop.max))
         return `use ${expected}`
       if (prop.step !== undefined && prop.step > 0) {
-        const steps = (number - (prop.min ?? 0)) / prop.step
-        if (Math.abs(steps - Math.round(steps)) > 1e-9) return `use ${expected}`
+        const base = prop.min ?? 0
+        const off = Math.abs(number - base - Math.round((number - base) / prop.step) * prop.step)
+        const slack = prop.step * 1e-9 + Number.EPSILON * 4 * Math.max(Math.abs(number), Math.abs(base))
+        if (off > slack) return `use ${expected}`
       }
       return undefined
     }
     case 'color':
       return isColorValue(value)
         ? undefined
-        : 'use a hex colour (#rgb, #rrggbb, #rrggbbaa), rgb(), hsl(), oklch() or var(--token)'
+        : 'use a hex colour (#rgb, #rrggbb, #rrggbbaa), a colour name, rgb(), hsl(), oklch() or var(--token)'
     case 'instance': {
-      const name = value.trim().toLowerCase()
-      if (!name) return prop.accepts?.length ? `use ${prop.accepts.join(' | ')}` : 'use the name or id of a component'
-      return !prop.accepts?.length || prop.accepts.some((entry) => entry.trim().toLowerCase() === name)
-        ? undefined
-        : `use ${prop.accepts.join(' | ')}`
+      const text = value.trim()
+      /* with a lookup, a name and an id are the same component, in the value and in `accepts` */
+      const listed = (prop.accepts ?? []).map((entry) => lookup?.(entry)?.name ?? entry)
+      const hint = listed.length ? `use ${listed.join(' | ')}` : 'use the name or id of a component on this canvas'
+      if (!text) return hint
+      if (!lookup) {
+        return !prop.accepts?.length || prop.accepts.some((entry) => entry.trim().toLowerCase() === text.toLowerCase())
+          ? undefined
+          : hint
+      }
+      const found = lookup(text)
+      if (!found) return hint
+      if (!prop.accepts?.length) return undefined
+      const accepted = prop.accepts.some((entry) => {
+        const hit = lookup(entry)
+        return hit ? hit.id === found.id : entry.trim().toLowerCase() === text.toLowerCase()
+      })
+      return accepted ? undefined : hint
     }
     default:
       return undefined

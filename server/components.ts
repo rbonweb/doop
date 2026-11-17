@@ -12,6 +12,7 @@ import {
   REV_ATTR,
   USE_TAG,
   isDeleted,
+  variantAttrs,
   type ComponentDef,
   type ComponentIssue,
   type ComponentProp,
@@ -259,9 +260,7 @@ function prepareMains(
       })
       continue
     }
-    const variants = def.props
-      .filter((prop) => prop.type === 'enum' || (prop.type === 'boolean' && prop.reflect))
-      .map((prop) => `data-${prop.name}`)
+    const variants = variantAttrs(def.props)
     const { css, rawCss } = extractComponentCss(sheet(), found.el, id, variants)
     const head = headTags()
     const { props, slots } = derivePropsAndSlots(template, def.props)

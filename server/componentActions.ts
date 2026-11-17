@@ -19,6 +19,8 @@ import {
   isDeleted,
   isPropName,
   propValueProblem,
+  variantAttrs,
+  type ComponentLookup,
   type ComponentCode,
   type ComponentDef,
   type ComponentProp,
@@ -640,7 +642,7 @@ function reportCssNotKept(def: ComponentDef, css: string) {
     ? findMarked(frame.html, COMPONENT_ATTR).find((found) => attrOf(found.el, COMPONENT_ATTR) === def.id)
     : undefined
   if (!frame || !main) return
-  const variants = def.props.filter((prop) => prop.type === 'enum').map((prop) => `data-${prop.name}`)
+  const variants = variantAttrs(def.props)
   const selectors = unmatchedSelectors(css, main.el, variants)
   if (!selectors.length) return
   const more = selectors.length - MAX_SELECTORS_NAMED
@@ -957,6 +959,7 @@ export const insertInstance = atomic(function insertInstance(
 ): { frame: Frame; instanceId: string } {
   const def = requireComponent(canvasId, input.component)
   const frame = requireFrame(canvasId, input.frameId)
+  checkPropValues(def, input.props, contextFor(canvasId).find)
   const markup = useFor(def, input.props)
   const position = input.position ?? 'append'
   const html = insertAt(frame.html, markup, input.target, position)
@@ -1065,7 +1068,7 @@ export const changeInstances = atomic(function changeInstances(
         )
       const state = readInstance(located.el, ctx.atRev(def.id, Number(attrOf(located.el, REV_ATTR))) ?? def, ctx)
       if (!state) continue
-      validateProps(def, change.props)
+      validateProps(def, change.props, ctx.find)
       const rendered = renderInstance(def, def, applyChange(state.overrides, change), id, { ctx, stack: [] })
       if (!rendered) continue
       /* below another instance, this root is that instance's part */
@@ -1096,14 +1099,21 @@ function detachAll(html: string, def: ComponentDef): { html: string; count: numb
   }
 }
 
-function validateProps(def: ComponentDef, props: Record<string, string> | undefined) {
+/** The values of props the definition knows, each checked against its type: what a `<doop-use>` would say. */
+function checkPropValues(def: ComponentDef, props: Record<string, string> | undefined, lookup: ComponentLookup) {
   for (const [name, value] of Object.entries(props ?? {})) {
     const prop = def.props.find((candidate) => candidate.name === name)
-    if (!prop)
-      fail(`${def.name} has no prop “${name}” — it has ${def.props.map((p) => p.name).join(', ') || 'no props'}`)
-    if (value !== '' && prop.type === 'enum' && prop.options?.length && !prop.options.includes(value))
-      fail(`${def.name}: "${value}" is not a value of ${name} — use ${prop.options.join(' | ')}`)
+    const problem = prop && value !== '' ? propValueProblem(prop, value, lookup) : undefined
+    if (problem) fail(`${def.name}: "${value}" is not a value of ${name} — ${problem}`)
   }
+}
+
+function validateProps(def: ComponentDef, props: Record<string, string> | undefined, lookup: ComponentLookup) {
+  for (const name of Object.keys(props ?? {})) {
+    if (!def.props.some((candidate) => candidate.name === name))
+      fail(`${def.name} has no prop “${name}” — it has ${def.props.map((p) => p.name).join(', ') || 'no props'}`)
+  }
+  checkPropValues(def, props, lookup)
 }
 
 export interface DetachQueued {
