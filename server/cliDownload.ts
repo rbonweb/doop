@@ -1,4 +1,4 @@
-import { createReadStream, readdirSync, statSync } from 'node:fs'
+import { createReadStream, lstatSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type express from 'express'
@@ -40,7 +40,8 @@ export function currentCli(directory: string = env.DOOP_CLI_DIR ?? CLI_DIRECTORY
     .reverse()) {
     const file = path.join(directory, name)
     try {
-      const info = statSync(file)
+      /* lstat: a symlink under the CLI's name is never served, whatever it points at */
+      const info = lstatSync(file)
       if (info.isFile()) return { version: TARBALL.exec(name)![1]!, name, path: file, bytes: info.size }
     } catch {
       /* gone since the listing */
@@ -58,6 +59,41 @@ export function cliUrl(origin: string, directory?: string): string {
 /** The one command everywhere (the ticket answer, the import picker, the agent guide). `--allow-remote=root` because npm 12 refuses to fetch a package from a URL unless told to (EALLOWREMOTE; `root` is the narrowest value that admits it, and it still refuses URLs inside the package's own dependencies); npm 10 and 11 ignore the unknown flag. `--package=<url> doop-import` rather than the URL as the command, so every npm reads the arguments after it as the CLI's. */
 export function importCommand(uploadUrl: string, origin: string = env.BETTER_AUTH_URL, directory?: string): string {
   return `npx --yes --allow-remote=root --package=${cliUrl(origin, directory)} doop-import --storybook ./storybook-static --ticket ${uploadUrl}`
+}
+
+/** localhost, *.localhost, 127.0.0.0/8 and ::1: an address that never leaves this machine. */
+function isLoopbackOrigin(origin: string): boolean {
+  let host: string
+  try {
+    host = new URL(origin).hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  } catch {
+    return false
+  }
+  return host === 'localhost' || host.endsWith('.localhost') || /^127(?:\.\d{1,3}){3}$/.test(host) || host === '::1'
+}
+
+/** Why there is no command to hand out, or undefined when there is one: the command downloads a program and runs it, so it must come over https (plain http only to this machine). */
+export function commandUnavailable(origin: string = env.BETTER_AUTH_URL): string | undefined {
+  let protocol: string
+  try {
+    protocol = new URL(origin).protocol
+  } catch {
+    return 'this Doop server has no usable address for the command-line import'
+  }
+  if (protocol === 'https:' || isLoopbackOrigin(origin)) return undefined
+  return 'this Doop server must use https for the command-line import'
+}
+
+/** The `command` fields of a ticket answer: the command, or `command: null` and the reason (the upload URL and curl still work). */
+export function commandFields(
+  uploadUrl: string,
+  origin: string = env.BETTER_AUTH_URL,
+  directory?: string,
+): { command: string; command_unavailable?: undefined } | { command: null; command_unavailable: string } {
+  const reason = commandUnavailable(origin)
+  return reason
+    ? { command: null, command_unavailable: reason }
+    : { command: importCommand(uploadUrl, origin, directory) }
 }
 
 const NOT_FOUND = (res: express.Response) => res.status(404).type('text/plain').send('not found')

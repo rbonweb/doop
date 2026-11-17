@@ -132,7 +132,12 @@ export function CliImportSection({
               </Button>
             </Callout>
           )}
-          {minted.kind === 'ready' && (
+          {minted.kind === 'ready' && minted.ticket.command === null && (
+            <Callout tone="error" role="alert" data-slot="cli-command-unavailable">
+              {minted.ticket.command_unavailable ?? t('componentImport.ticketFailed')}
+            </Callout>
+          )}
+          {minted.kind === 'ready' && minted.ticket.command !== null && (
             <>
               {spent ? (
                 <div

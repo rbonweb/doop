@@ -1,12 +1,12 @@
 import { execFile } from 'node:child_process'
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, symlink, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { gunzipSync } from 'node:zlib'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { currentCli, importCommand } from '../server/cliDownload.ts'
+import { commandFields, commandUnavailable, currentCli, importCommand } from '../server/cliDownload.ts'
 import { findBrowserPath } from '../server/screenshot.ts'
 import { Client, startServer, type Server } from './harness.ts'
 
@@ -75,6 +75,53 @@ describe('the helper', () => {
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
+  })
+})
+
+describe('the helper: symlinks and plain http', () => {
+  it('never serves a symlink under the CLI name, whatever it points at', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'doop-cli-link-'))
+    try {
+      const real = path.join(directory, 'real.bin')
+      await writeFile(real, 'x')
+      await symlink(real, path.join(directory, 'doop-import-1.2.3-0123456789ab.tgz'))
+      expect(currentCli(directory)).toBeNull()
+      /* a real file beside the link is still found */
+      await writeFile(path.join(directory, 'doop-import-1.2.2-0123456789ab.tgz'), 'x')
+      expect(currentCli(directory)?.version).toBe('1.2.2')
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('hands out the command over https and to this machine, and the reason (no command) on public http', () => {
+    const upload = 'https://doop.test/import/tok'
+    expect(commandUnavailable('https://doop.example.com')).toBeUndefined()
+    const secure = commandFields(upload, 'https://doop.example.com')
+    expect(secure.command).toContain('--package=https://doop.example.com/cli/')
+    expect(secure.command_unavailable).toBeUndefined()
+    for (const origin of [
+      'http://localhost:4400',
+      'http://127.0.0.1:4400',
+      'http://127.4.5.6',
+      'http://[::1]:4400',
+      'http://doop.localhost',
+    ]) {
+      expect(commandFields(upload, origin).command, origin).toContain(`--package=${origin}/cli/`)
+    }
+    for (const origin of [
+      'http://doop.example.com',
+      'http://192.168.1.5:4400',
+      'http://10.0.0.2',
+      'http://127.evil.com',
+      'http://[2606:4700::1111]',
+    ]) {
+      expect(commandFields(upload, origin), origin).toEqual({
+        command: null,
+        command_unavailable: 'this Doop server must use https for the command-line import',
+      })
+    }
+    expect(commandFields(upload, 'not a url').command).toBeNull()
   })
 })
 

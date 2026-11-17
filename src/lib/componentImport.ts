@@ -162,7 +162,9 @@ export async function streamStorybookImport(
 export interface ImportTicket {
   upload_url: string
   expires_at: string
-  command: string
+  /** the CLI command; null when this Doop server cannot hand one out, with the reason in `command_unavailable` (curl still works) */
+  command: string | null
+  command_unavailable?: string
   curl: string
 }
 

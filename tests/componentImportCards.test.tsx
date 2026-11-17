@@ -312,6 +312,23 @@ it('cli: the command lapses at its expiry and "New command" mints another', asyn
   expect(dialog.querySelector('[data-slot="cli-expiry"]')?.textContent).toContain('Works once')
 })
 
+it('cli: a server on plain http hands out no command, and the card shows the reason instead', async () => {
+  answerWith(() =>
+    Response.json({
+      ...TICKET,
+      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      command: null,
+      command_unavailable: 'this Doop server must use https for the command-line import',
+    }),
+  )
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  expect(dialog.querySelector('[data-slot="cli-command-unavailable"]')?.textContent).toBe(
+    'this Doop server must use https for the command-line import',
+  )
+  expect(dialog.querySelector('[data-slot="code-block"]')).toBeNull()
+  expect(dialog.textContent).not.toContain('null')
+})
+
 it('cli: says so when a command cannot be made, and offers another try', async () => {
   answerWith(() => Response.json({ error: 'too many import commands this hour' }, { status: 429 }))
   const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
