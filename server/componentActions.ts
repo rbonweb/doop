@@ -876,10 +876,14 @@ export const updateComponent = atomic(function updateComponent(
   } else actions.broadcastComponent(canvasId, requireComponent(canvasId, def.id), actor)
   /* after the main's write the definition has the props and slots the template derives,
      so that is what a new mapping is checked against */
-  if (input.code !== undefined && input.code !== null) {
+  if (input.code !== undefined) {
     const current = requireComponent(canvasId, def.id)
-    const code = validCode(input.code, current)
-    if (code) saveMapping(canvasId, { ...current, code }, actor)
+    const code = input.code === null ? undefined : validCode(input.code, current)
+    /* the room hears of a mapping once it is settled: saved, or cleared, and never when it did not move */
+    if (input.code === null ? def.code !== undefined : code && JSON.stringify(code) !== JSON.stringify(def.code)) {
+      if (code) saveMapping(canvasId, { ...current, code }, actor)
+      else actions.broadcastComponent(canvasId, current, actor)
+    } else if (code) store.saveComponent(canvasId, { ...current, code })
   }
   /* new defaults change what instances render even when the main's markup did not move */
   if (propsChanged) actions.queuePropagation(canvasId, [requireComponent(canvasId, def.id)], actor)

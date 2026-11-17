@@ -345,6 +345,44 @@ describe('what the room is told when a mapping is saved', () => {
     expect(heard.at(-1)?.component?.code).toEqual(CODE)
   })
 
+  it('says so when a mapping is cleared, also when nothing else of the definition moved', async () => {
+    const canvas = newCanvas()
+    await card(canvas.id, CODE)
+    const alone = await heardDuring(async () => {
+      expect((await call('update_component', { canvas_id: canvas.id, component: 'Card', code: null })).isError).toBe(
+        false,
+      )
+    })
+    expect(alone.length).toBeGreaterThan(0)
+    expect(alone.at(-1)?.component?.code).toBeUndefined()
+
+    /* with the props sent again unchanged the main is rewritten, and that path must say it too */
+    await call('update_component', { canvas_id: canvas.id, component: 'Card', code: CODE })
+    const withMain = await heardDuring(async () => {
+      const done = await call('update_component', {
+        canvas_id: canvas.id,
+        component: 'Card',
+        props: CARD_PROPS,
+        code: null,
+      })
+      expect(done.isError).toBe(false)
+    })
+    expect(withMain.at(-1)?.component?.code).toBeUndefined()
+    expect((await read(canvas.id)).code).toBeUndefined()
+  })
+
+  it('adds no message when the mapping saved is the one already there', async () => {
+    const canvas = newCanvas()
+    await card(canvas.id, CODE)
+    const baseline = await heardDuring(async () => {
+      await call('update_component', { canvas_id: canvas.id, component: 'Card', description: 'same' })
+    })
+    const same = await heardDuring(async () => {
+      await call('update_component', { canvas_id: canvas.id, component: 'Card', description: 'same', code: CODE })
+    })
+    expect(same.length).toBe(baseline.length)
+  })
+
   it('carries the mapping when a component is duplicated', async () => {
     const canvas = newCanvas()
     await card(canvas.id, CODE)
