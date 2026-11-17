@@ -270,6 +270,12 @@ const schema = {
      self-hosted instance whose models run on its own network */
   DOOP_CUSTOM_PROVIDERS: bool({ default: true }),
   DOOP_CUSTOM_PROVIDER_PRIVATE_HOSTS: bool({ default: false }),
+  /* A Storybook import reads only public addresses unless this is on, for a self-hosted
+     instance whose Storybook is on its own network. Even then the story pages may reach
+     only the Storybook's own origin, never another private address. Never turn it on for an
+     instance strangers can sign up to: any editor could then aim imports at private addresses
+     and read the answers (index errors tell hosts and ports apart) */
+  DOOP_STORYBOOK_PRIVATE_HOSTS: bool({ default: false }),
 
   /* ------------------------------------------------ image generation */
   OPENAI_API_KEY: str({ default: undefined }),
@@ -381,6 +387,8 @@ const schema = {
   DOOP_UPDATE_API: origin({ default: 'https://api.github.com' }),
   /* Update now through Dokploy: the compose service's deploy webhook (Deployments tab), set with DOOP_UPDATE_REPO and never beside DOOP_UPDATE_DIR. A secret: anyone holding it can redeploy that one service; never logged or returned */
   DOOP_DOKPLOY_WEBHOOK_URL: dokployWebhook({ default: undefined }),
+  /* the directory holding the packed doop-import CLI (scripts/pack-doop-import.mjs, server/cliDownload.ts); default dist/cli next to server/ */
+  DOOP_CLI_DIR: str({ default: undefined }),
   /* where database backups are written, and how long they are kept */
   DOOP_BACKUP_DIR: str({ default: '/app/data/backups' }),
   DOOP_BACKUP_KEEP_DAYS: int(1)({ default: 14 }),

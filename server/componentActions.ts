@@ -30,6 +30,8 @@ import {
   type InstanceOverrides,
   type LibraryComponent,
   type PartOverride,
+  styleText,
+  COMPONENT_REF,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR } from '../shared/elementId.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
@@ -592,7 +594,7 @@ function mainFrameDoc(def: ComponentDef, root: string, rawCss: string): string {
 <head>
 ${def.head.join('\n')}
 <style ${SOURCE_CSS_ATTR}="${def.id}">
-${rawCss}
+${styleText(rawCss)}
 </style>
 </head>
 <body style="margin:0;padding:24px;background:transparent">
@@ -630,6 +632,8 @@ export interface CreateFromHtml {
   width?: number
   height?: number
   autoProps?: boolean
+  /** where the main goes when it is not the Components page's next free spot (the component importer's own page) */
+  place?: { pageId: string; x: number; y: number }
 }
 
 /** A new design with nowhere to live yet: its main goes on the Components page, as a frame of its own. */
@@ -652,7 +656,7 @@ export const createComponentFromHtml = atomic(function createComponentFromHtml(
   const root = singleRoot(input.html)
   const inferred = input.autoProps !== false && !hasBindings(root) ? inferBindings(root) : []
   setAttr(root, COMPONENT_ATTR, def.id)
-  writeNewMain(canvasId, def, serializeOuter(root), input.css ?? '', actor, input.width, input.height)
+  writeNewMain(canvasId, def, serializeOuter(root), input.css ?? '', actor, input.width, input.height, input.place)
   /* the main's write derived the props and slots: the mapping is checked against those */
   const made = requireComponent(canvasId, def.id)
   const code = validCode(input.code, made)
@@ -958,7 +962,7 @@ function withHeadTags(html: string, previous: string[], next: string[]): string 
 }
 
 function withSourceCss(html: string, id: string, css: string): string {
-  const block = `<style ${SOURCE_CSS_ATTR}="${id}">\n${css}\n</style>`
+  const block = `<style ${SOURCE_CSS_ATTR}="${id}">\n${styleText(css)}\n</style>`
   const existing = new RegExp(`<style[^>]*\\b${SOURCE_CSS_ATTR}="${id}"[^>]*>[\\s\\S]*?</style>`, 'i')
   if (existing.test(html)) return html.replace(existing, () => block)
   const head = /<\/head\s*>/i.exec(html)
@@ -1795,7 +1799,7 @@ function refuseSiblings(targetCanvasId: string, sourceCanvasId: string, origin: 
       fail(
         `this canvas already has its own component “${existing.name}” (${existing.id}), shared with canvas ${sourceCanvasId} because one was copied from the other; importing would replace it, so edit it here instead`,
       )
-    for (const match of def.template.matchAll(/component="([^"]+)"/g)) {
+    for (const match of def.template.matchAll(COMPONENT_REF)) {
       const dependency = contextFor(sourceCanvasId).find(match[1]!)
       if (dependency) stack.push(dependency)
     }
@@ -1812,7 +1816,7 @@ function importDependencies(
   if (progress.seen.has(origin.id)) return false
   progress.seen.add(origin.id)
   let changed = false
-  for (const match of origin.template.matchAll(/component="([^"]+)"/g)) {
+  for (const match of origin.template.matchAll(COMPONENT_REF)) {
     /* deleted ones too: a component built from a deleted one still renders it, frozen */
     const dependency = contextFor(sourceCanvasId).find(match[1]!)
     if (dependency && importDependencies(targetCanvasId, sourceCanvasId, dependency, actor, progress)) changed = true

@@ -5,9 +5,11 @@
   "type": "module",
   "packageManager": "bun@1.3.10",
   "scripts": {
-    "dev": "bun run build:claude-extension && concurrently -n server,web -c yellow,cyan \"tsx watch --env-file-if-exists=.env server/index.ts\" \"vite\"",
-    "build": "bun run build:claude-extension && vite build",
+    "dev": "bun run build:claude-extension && bun run pack:doop-import && concurrently -n server,web -c yellow,cyan \"tsx watch --env-file-if-exists=.env server/index.ts\" \"vite\"",
+    "build": "bun run build:claude-extension && vite build && bun run pack:doop-import",
     "build:claude-extension": "node scripts/build-claude-extension.mjs",
+    "build:doop-import": "node scripts/build-doop-import.mjs",
+    "pack:doop-import": "node scripts/pack-doop-import.mjs",
     "start": "NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsgo --noEmit",
     "test": "vitest run",

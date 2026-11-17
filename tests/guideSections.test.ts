@@ -185,6 +185,23 @@ describe('get_guide sections over MCP', () => {
     }
   })
 
+  it('lists the sections of a topic, here react-import', async () => {
+    const client = await guideClient()
+    try {
+      const whole = textOf(await client.callTool({ name: 'get_guide', arguments: { topic: 'react-import' } }))
+      expect(whole.startsWith(guideFor('react-import'))).toBe(true)
+      expect(whole).toContain('## Path 1 — a published Storybook')
+      const index = textOf(
+        await client.callTool({ name: 'get_guide', arguments: { topic: 'react-import', section: 'index' } }),
+      )
+      expect(index).toBe(guideIndex(whole))
+      expect(index).toContain('path-1-a-published-storybook')
+      expect(index).toContain('a-minimal-bundle')
+    } finally {
+      await client.close()
+    }
+  })
+
   it('refuses a blank section instead of returning the first one', async () => {
     const client = await guideClient()
     try {

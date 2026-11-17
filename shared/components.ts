@@ -11,6 +11,9 @@
 import type { ComponentCode } from './componentCode.ts'
 
 export const COMPONENT_ATTR = 'data-doop-component'
+
+/** The `component="…"` attribute of a nested `<doop-use>` in a template: after whitespace, so a page's own `data-component="Button"` (Primer marks every element that way) is not read as the component using itself. */
+export const COMPONENT_REF = /(?<=\s)component="([^"]+)"/g
 export const INSTANCE_ATTR = 'data-doop-instance'
 export const REV_ATTR = 'data-doop-rev'
 export const PROPS_ATTR = 'data-doop-props'
@@ -23,6 +26,72 @@ export const SLOT_SUGGEST_ATTR = 'data-doop-slot-suggest'
 export const BIND_ATTR = 'data-doop-prop'
 /** `showIcon`, `!showIcon`, `tone=ghost` or `tone!=ghost`: the element exists only when this holds. */
 export const IF_ATTR = 'data-doop-if'
+
+/** Attributes that carry a URL (or, for srcset, a list of them, or for SVG animation the value one will set): the importer's
+ *  sanitizer checks them in markup and the engine checks a value bound to one, so a prop can never become a script address. */
+export const URL_TARGETS: ReadonlySet<string> = new Set([
+  'href',
+  'src',
+  'action',
+  'formaction',
+  'poster',
+  'xlink:href',
+  'srcset',
+  'background',
+  'longdesc',
+  'cite',
+  'data',
+  'manifest',
+  'codebase',
+  'lowsrc',
+  'dynsrc',
+  'from',
+  'to',
+  'values',
+])
+
+/** SVG elements that set another attribute by name: which attribute must be written in the markup, never bound. */
+const ANIMATION_TAGS = new Set(['set', 'animate', 'animatemotion', 'animatetransform'])
+
+/** A binding target that is never written: an event handler, an attribute that loads a document or pings an address, or the
+ *  `attributeName` of an SVG animation (it could aim `to` or `values` at an event handler or a link). */
+export function unsafeBindingTarget(target: string, tagName = ''): boolean {
+  const name = target.trim().toLowerCase()
+  if (name === 'attributename' && ANIMATION_TAGS.has(tagName.toLowerCase())) return true
+  return name.startsWith('on') || name === 'srcdoc' || name === 'ping'
+}
+
+/** Whether a value is an address that would run code or open a document when followed: javascript:, vbscript: or data:text/html,
+ *  read the way a browser reads the start of a URL (control characters and spaces ignored, any case), at the start of the value
+ *  or of any comma-separated candidate in it. */
+export function unsafeUrl(value: string): boolean {
+  let text = ''
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0
+    if (
+      code > 0x20 &&
+      !(code >= 0x7f && code <= 0xa0) &&
+      code !== 0xad &&
+      !(code >= 0x200b && code <= 0x200f) &&
+      code !== 0x2028 &&
+      code !== 0x2029 &&
+      code !== 0x3000 &&
+      code !== 0xfeff
+    )
+      text += char
+  }
+  /* each candidate of a srcset (comma separated) is read as a start of its own */
+  return /(?:^|[,;(])(?:(?:javascript|vbscript|livescript|mocha):|data:(?:text\/html|application\/xhtml|text\/xml))/i.test(
+    text,
+  )
+}
+
+/** Stylesheet text made safe to sit inside a `<style>` element: a `</style` (or `<!--`) in it would end the element and let
+ *  what follows run as markup, so its `<` becomes the CSS escape for the same character. Every writer of a component's css
+ *  into a frame goes through this. */
+export function styleText(css: string): string {
+  return css.replace(/<(?=\/?style|!--)/gi, '\\3c ')
+}
 /** The component's scoped CSS in the head of a frame that uses it. */
 export const CSS_ATTR = 'data-doop-component-css'
 /** A stylesheet link or framework script a component brought into a frame's head: never the frame's own. */
@@ -437,6 +506,11 @@ export function propValueProblem(prop: ComponentProp, value: string, lookup?: Co
       }
       return undefined
     }
+    case 'link':
+    case 'image':
+      return unsafeUrl(value)
+        ? 'use a web address, mailto:, tel: or a relative path, not a javascript:, vbscript: or data:text/html address'
+        : undefined
     case 'color':
       return isColorValue(value)
         ? undefined

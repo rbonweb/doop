@@ -66,15 +66,17 @@ export function ImportStepFooter({
   onBack,
   backDisabled,
   children,
+  className,
 }: {
   note?: ReactNode
   onBack: () => void
   backDisabled?: boolean
   children?: ReactNode
+  className?: string
 }) {
   const t = useT()
   return (
-    <div className="mt-6 flex items-center gap-2.5 border-t border-line-soft pt-[18px]">
+    <div className={cn('mt-6 flex items-center gap-2.5 border-t border-line-soft pt-[18px]', className)}>
       <span className="mr-auto min-w-0 text-label leading-[1.4] text-ink-faint">{note}</span>
       <Button variant="ghost" className="flex-none gap-2" disabled={backDisabled} onClick={onBack}>
         <ArrowLeftIcon className="size-3.5" />

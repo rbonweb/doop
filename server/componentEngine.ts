@@ -43,6 +43,11 @@ import {
   type ComponentSlot,
   type InstanceOverrides,
   type PartOverride,
+  styleText,
+  unsafeBindingTarget,
+  unsafeUrl,
+  URL_TARGETS,
+  COMPONENT_REF,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR, isElementId, newElementId } from '../shared/elementId.ts'
 
@@ -327,7 +332,7 @@ function propValue(def: Revision, overrides: InstanceOverrides, name: string): s
   return overrides.props?.[name] ?? def.props.find((prop) => prop.name === name)?.default
 }
 
-function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides) {
+function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides, ctx: EngineContext) {
   const raw = attrOf(el, BIND_ATTR)
   if (raw === undefined) return
   setAttr(el, BIND_ATTR, null)
@@ -340,6 +345,21 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides)
     }
     const value = overrides.props?.[prop]
     if (value === undefined) continue
+    /* a bound value is instance data: it never becomes an event handler, and an address it sets cannot run code */
+    if (target !== null && el.tagName !== USE_TAG && unsafeBindingTarget(target, el.tagName)) {
+      ctx.issues.push({
+        code: 'ignored_attribute',
+        message: `${prop} is bound to ${target}, which a component never sets (event handlers, srcdoc and an animation's attributeName stay out of instances)`,
+      })
+      continue
+    }
+    if (target !== null && URL_TARGETS.has(target.toLowerCase()) && unsafeUrl(value)) {
+      ctx.issues.push({
+        code: 'invalid_prop_value',
+        message: `"${value.slice(0, 60)}" was not set as ${target}: a javascript:, vbscript: or data:text/html address is refused`,
+      })
+      continue
+    }
     if (target === null) setOwnText(el, value)
     else if (target.startsWith('style.') || target.startsWith('--')) {
       const styles = parseStyle(attrOf(el, 'style'))
@@ -409,7 +429,7 @@ function renderPart(
   part: PartOverride | undefined,
   options: RenderOptions,
 ) {
-  applyBindings(el, def, overrides)
+  applyBindings(el, def, overrides, options.ctx)
   setAttr(el, SLOT_SUGGEST_ATTR, null)
   if (part) applyPartOverride(el, part)
   const isSlot = attrOf(el, SLOT_ATTR) !== undefined
@@ -585,7 +605,7 @@ export function nestsComponent(ctx: EngineContext, ref: string, targetId: string
     if (!def || seen.has(def.id)) continue
     if (def.id === targetId) return true
     seen.add(def.id)
-    for (const match of def.template.matchAll(/component="([^"]+)"/g)) stack.push(match[1]!)
+    for (const match of def.template.matchAll(COMPONENT_REF)) stack.push(match[1]!)
   }
   return false
 }
@@ -1670,7 +1690,7 @@ export function withDetachedCss(html: string, def: Pick<ComponentDef, 'id' | 're
   const css = def.css
     .replaceAll(`[${INSTANCE_ATTR}="${def.id}"]`, `[${DETACHED_ATTR}="${key}"]`)
     .replaceAll(`__${def.id}`, `__${def.id}-${def.rev}`)
-  return insertIntoHead(html, `<style ${DETACHED_CSS_ATTR}="${key}">\n${css}\n</style>`)
+  return insertIntoHead(html, `<style ${DETACHED_CSS_ATTR}="${key}">\n${styleText(css)}\n</style>`)
 }
 
 export function splice(html: string, edits: { start: number; end: number; text: string }[]): string {
@@ -1767,7 +1787,7 @@ export function syncComponentHead(html: string, defs: ComponentDef[]): string {
       const marked = markedHeadTag(tag)
       if (!stripped.includes(tag) && !blocks.includes(marked)) blocks.push(marked)
     }
-    if (def.css.trim()) blocks.push(`<style ${CSS_ATTR}="${def.id}">\n${def.css}\n</style>`)
+    if (def.css.trim()) blocks.push(`<style ${CSS_ATTR}="${def.id}">\n${styleText(def.css)}\n</style>`)
   }
   if (!blocks.length) return stripped === html ? html : stripped
   const next = insertIntoHead(stripped, blocks.join('\n'))
@@ -2040,8 +2060,10 @@ const UTILITY_CLASS =
   /[:[\]/.]|^-|^(flex|grid|block|inline|hidden|relative|absolute|truncate|uppercase|italic|underline|antialiased)$|^(text|font|bg|border|rounded|shadow|leading|tracking|p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|w|h|min|max|gap|flex|grid|inline|items|justify|opacity|whitespace)-/
 
 /** The name an element gives itself: its `data-name`, else its last class that is not a utility. */
-function ownPropName(el: Element): string | undefined {
-  const classes = (attrOf(el, 'class') ?? '').split(/\s+/).filter((name) => name && !UTILITY_CLASS.test(name))
+function ownPropName(el: Element, fromClasses = true): string | undefined {
+  const classes = (fromClasses ? (attrOf(el, 'class') ?? '') : '')
+    .split(/\s+/)
+    .filter((name) => name && !UTILITY_CLASS.test(name))
   const raw = attrOf(el, 'data-name') ?? classes.at(-1) ?? ''
   const name = raw && raw.length < 30 ? toPropName(raw) : 'value'
   return name === 'value' ? undefined : name
@@ -2062,7 +2084,7 @@ function roleName(el: Element, root: Element): string {
 /** Name what a component would most likely vary: leaf text, image sources, link targets.
  *  Written onto the main as ordinary bindings, so a person or agent can see and change them.
  *  Returns the prop names it made up, in template order. */
-export function inferBindings(root: Element, limit = 12): string[] {
+export function inferBindings(root: Element, limit = 12, { fromClasses = true } = {}): string[] {
   const used = new Set<string>()
   let count = 0
   const take = (base: string) => {
@@ -2083,7 +2105,7 @@ export function inferBindings(root: Element, limit = 12): string[] {
   for (const el of order) {
     if (count >= limit || attrOf(el, BIND_ATTR) !== undefined || attrOf(el, SLOT_ATTR) !== undefined) continue
     const bindings: string[] = []
-    const own = ownPropName(el)
+    const own = ownPropName(el, fromClasses)
     if (el.tagName === 'img' && attrOf(el, 'src')) bindings.push(`src:${take(own ?? 'image')}`)
     /* a link's target is named beside its text: `cta-link` next to `cta` */
     if (el.tagName === 'a' && attrOf(el, 'href')) bindings.push(`href:${take(own ? `${own}-link` : 'link')}`)

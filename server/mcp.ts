@@ -3526,8 +3526,9 @@ export async function handleMcpRequest(req: Request, res: Response) {
   const sessionKey = bearer ? credentialKey(bearer) : session?.userId ? `user:${session.userId}` : undefined
   const server = buildMcpServer(owner, session?.userId ?? undefined, profile, clientName, sessionKey)
   /* Stateless, and plain JSON rather than an SSE stream per response: no
-     tool here sends notifications mid-call, so a stream carries nothing a
-     JSON body does not, and JSON is what every client — including ChatGPT's
+     tool here sends notifications mid-call (import_storybook answers at once
+     with a job to poll), so a stream carries nothing a JSON body does not, and
+     JSON is what every client — including ChatGPT's
      narrower template-fetch path, whose Accept the SDK would otherwise
      refuse with 406 — can read. The header is normalised to match. */
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })

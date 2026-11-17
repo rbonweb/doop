@@ -119,6 +119,11 @@ export function runOperation<T>(name: string, canvasId: string | undefined, work
   return result
 }
 
+/** Run `work` outside the operation it was started from: a job that outlives its request is charged to none of that request's budget. */
+export function outsideBudget<T>(work: () => T): T {
+  return context.exit(work)
+}
+
 export function currentOperation(): Operation | undefined {
   return context.getStore()
 }

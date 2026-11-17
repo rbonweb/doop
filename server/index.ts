@@ -93,6 +93,10 @@ import {
 } from './access.ts'
 import { deckRouter } from './deckRoutes.ts'
 import { reactExportRouter } from './reactExportRoutes.ts'
+import { serveCli } from './cliDownload.ts'
+import { uploadComponentBundle } from './componentImportRoutes.ts'
+import { createImportTicket, ImportTicketLimitError, ticketAnswer } from './componentImportTickets.ts'
+import { importStorybookRoute } from './storybookRoutes.ts'
 import { MAX_SPEAKER_NOTES_CHARS } from '../shared/slides.ts'
 import {
   accessUserOf,
@@ -578,6 +582,9 @@ if (NOINDEX) {
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }))
 
+/* the doop-import CLI this instance serves (server/cliDownload.ts): public, one fixed file, before the static bundle and the app shell */
+app.get('/cli/:file', (req, res) => serveCli(req, res))
+
 /* how many canvases have their frame HTML in memory (store.load / evictIdle) */
 app.get('/healthz/store', (_req, res) => {
   res.json(store.stats())
@@ -962,6 +969,10 @@ app.put(['/u/:token', '/u/:token/:name'], async (req, res) => {
     endTicketUpload(token, success)
   }
 })
+
+/* One-time component-bundle uploads (server/componentImportTickets.ts): a ticket from create_import_ticket or the import   */
+/* picker, and the bundle goes straight here (curl -T bundle.json /import/<token>). Mounted before express.json, like /u/.  */
+app.put('/import/:token', (req, res) => void uploadComponentBundle(req, res))
 
 /* better-auth handles /api/auth/* — mounted before express.json (it reads
    the raw body itself) and before the session gate below. Being mounted
@@ -2215,6 +2226,31 @@ app.put('/api/canvases/:id/token-themes', (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e instanceof Error ? e.message : 'invalid themes' })
   }
+})
+
+/* the import picker's upload ticket: the same answer as the create_import_ticket tool */
+app.post('/api/canvases/:id/component-import/ticket', (req, res) => {
+  if (!requireCanvas(req, res, req.params.id, 'edit')) return
+  try {
+    res.json(ticketAnswer(createImportTicket({ canvasId: req.params.id, userId: req.user!.id, actor: userActor(req) })))
+  } catch (e) {
+    if (!(e instanceof ImportTicketLimitError)) throw e
+    res.setHeader('Retry-After', String(e.retryAfterSeconds))
+    res.status(429).json({ error: e.message })
+  }
+})
+
+/* a published Storybook to components, streamed as NDJSON (server/storybookRoutes.ts) */
+app.post('/api/canvases/:id/import/storybook', async (req, res) => {
+  if (!requireCanvas(req, res, req.params.id, 'edit')) return
+  const userId = req.user!.id
+  const canvasId = req.params.id
+  /* asked again right before the importer writes: the render takes minutes */
+  const canEdit = () => {
+    const canvas = store.getCanvas(canvasId)
+    return !!canvas && roleAtLeast(canvasRole(userId, canvas), 'edit')
+  }
+  await importStorybookRoute(req, res, canvasId, userActor(req), userId, canEdit)
 })
 
 app.post('/api/canvases/:id/tokens', (req, res) => {

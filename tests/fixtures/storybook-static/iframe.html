@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Fixture Storybook</title>
+    <style>
+      :root { --brand: #00aa55; }
+      body { margin: 0; }
+      .btn { padding: 8px 16px; border: 0; border-radius: 6px; font: 14px Arial; }
+      .btn--primary { background: var(--brand); color: #fff; }
+      .btn--secondary { background: #eeeeee; color: #111111; }
+      .btn:disabled { opacity: 0.5; }
+      .badge { display: inline-block; padding: 2px 8px; background: #ffffcc; }
+    </style>
+  </head>
+  <body class="sb-show-preparing-story">
+    <div id="storybook-root"></div>
+    <script>
+      ;(function () {
+        var params = new URLSearchParams(location.search)
+        var id = params.get('id')
+        var args = { tone: 'primary', label: 'Save', disabled: false }
+        var given = params.get('args')
+        if (given)
+          given.split(';').forEach(function (pair) {
+            var at = pair.indexOf(':')
+            var value = pair.slice(at + 1)
+            args[pair.slice(0, at)] = value === '!true' ? true : value === '!false' ? false : value
+          })
+        var root = document.getElementById('storybook-root')
+        var meta = { argTypes: {}, initialArgs: {} }
+        if (id === 'inputs-button--primary') {
+          meta = {
+            argTypes: {
+              tone: { control: { type: 'select' }, options: ['primary', 'secondary'] },
+              disabled: { control: { type: 'boolean' } },
+              label: { control: { type: 'text' } },
+            },
+            initialArgs: { tone: 'primary', label: 'Save', disabled: false },
+          }
+          root.innerHTML =
+            '<button class="btn btn--' + args.tone + '"' + (args.disabled ? ' disabled' : '') + '>' + args.label + '</button>'
+        } else if (id === 'data-badge--default') {
+          root.innerHTML = '<span class="badge">NEW</span>'
+        } else {
+          return
+        }
+        window.__STORYBOOK_PREVIEW__ = {
+          currentRender: {
+            phase: 'completed',
+            story: { id: id, argTypes: meta.argTypes, initialArgs: meta.initialArgs, component: { displayName: id === 'inputs-button--primary' ? 'Button' : 'Badge' } },
+          },
+        }
+        document.body.className = 'sb-show-main'
+      })()
+    </script>
+  </body>
+</html>

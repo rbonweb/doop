@@ -1,0 +1,7 @@
+{
+  "v": 5,
+  "entries": {
+    "inputs-button--primary": { "type": "story", "id": "inputs-button--primary", "name": "Primary", "title": "Inputs/Button" },
+    "data-badge--default": { "type": "story", "id": "data-badge--default", "name": "Default", "title": "Data/Badge" }
+  }
+}
