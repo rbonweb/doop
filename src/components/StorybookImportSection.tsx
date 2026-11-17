@@ -37,11 +37,17 @@ const MAX_IMPORT = 60
 /** A list this long gets a filter field above it. */
 const FILTER_FROM = 12
 
+/** Seconds without a progress line before the card says it is still rendering. */
+const STILL_RENDERING_S = 8
+
+/** Skipped components named in the result before "+N more". */
+const SKIPPED_SHOWN = 8
+
 export type StorybookPhase =
   | { kind: 'idle'; cancelled?: boolean }
   | { kind: 'reading' }
   | { kind: 'preview'; plan: PlannedComponent[]; result: ImportResult; found?: number }
-  | { kind: 'running'; rendered: number; total: number; component: string | null }
+  | { kind: 'running'; rendered: number; total: number; component: string | null; at?: number }
   | { kind: 'done'; result: ImportResult }
   | {
       kind: 'refused'
@@ -69,9 +75,16 @@ function planTitles(plan: PlannedComponent[]): string[] | null {
   return [...new Set(plan.map((c) => c.group as string))]
 }
 
+/** A server note as one plain line: no backticks, no run of spaces or line breaks. */
+function plain(message: string): string {
+  return message.replace(/`/g, '').replace(/\s+/g, ' ').trim()
+}
+
 /** One import note group, in plain words with its count. */
 function issueSummary(t: Translate, key: IssueGroupKey, count: number): string {
   switch (key) {
+    case 'worker':
+      return t('componentImport.issueWorker', { count })
     case 'props':
       return t('componentImport.issueProps', { count })
     case 'noProps':
@@ -162,6 +175,15 @@ export function StorybookImportSection({
   /* closing the modal mid-import closes the request, which stops the import on the server */
   useEffect(() => () => controller.current?.abort(), [])
 
+  /* one clock while an import runs, so a render that takes tens of seconds still reads as alive */
+  const [now, setNow] = useState(() => Date.now())
+  const running = phase.kind === 'running'
+  useEffect(() => {
+    if (!running) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [running])
+
   const busy = phase.kind === 'reading' || phase.kind === 'running'
   const ready = url.trim().length > 0
 
@@ -177,16 +199,22 @@ export function StorybookImportSection({
     if (busy || !ready) return
     const abort = new AbortController()
     controller.current = abort
-    setPhase(dryRun ? { kind: 'reading' } : { kind: 'running', rendered: 0, total: 0, component: null })
+    setPhase(dryRun ? { kind: 'reading' } : { kind: 'running', rendered: 0, total: 0, component: null, at: Date.now() })
     let plan: PlannedComponent[] = []
     let found: number | undefined
     const onEvent = (event: StorybookEvent) => {
       if (event.type === 'plan') {
         plan = event.components
         found = event.total
-        if (!dryRun) setPhase({ kind: 'running', rendered: 0, total: event.renders, component: null })
+        if (!dryRun) setPhase({ kind: 'running', rendered: 0, total: event.renders, component: null, at: Date.now() })
       } else if (event.type === 'progress') {
-        setPhase({ kind: 'running', rendered: event.rendered, total: event.total, component: event.component ?? null })
+        setPhase({
+          kind: 'running',
+          rendered: event.rendered,
+          total: event.total,
+          component: event.component ?? null,
+          at: Date.now(),
+        })
       }
     }
     try {
@@ -256,6 +284,8 @@ export function StorybookImportSection({
 
   if (phase.kind === 'running') {
     const known = phase.total > 0
+    /* seconds since the last line from the server (progress or plan) */
+    const silent = phase.at ? Math.max(0, Math.floor((now - phase.at) / 1000)) : 0
     return (
       <Screen
         header={header}
@@ -286,7 +316,11 @@ export function StorybookImportSection({
             value={known ? phase.rendered : 0}
             max={known ? phase.total : 1}
           />
-          <Note>{t('componentImport.runningNote')}</Note>
+          <Note>
+            {silent >= STILL_RENDERING_S
+              ? t('componentImport.stillRendering', { seconds: silent })
+              : t('componentImport.runningNote')}
+          </Note>
         </div>
       </Screen>
     )
@@ -302,18 +336,18 @@ export function StorybookImportSection({
       result.tokens.created.length && t('componentImport.tokensAdded', { count: result.tokens.created.length }),
     ].filter(Boolean)
     const groups = groupImportIssues(result.issues)
-    const summary = [
-      ...(result.skipped.length ? [t('componentImport.issueSkipped', { count: result.skipped.length })] : []),
-      ...groups.map((group) => issueSummary(t, group.key, group.items.length)),
-    ]
-    const details = [
-      ...result.skipped.map((s) => t('componentImport.skippedLine', { name: s.name, reason: s.reason })),
-      ...groups.flatMap((group) =>
-        group.items.map((i) =>
-          i.component ? t('componentImport.issueLine', { component: i.component, message: i.message }) : i.message,
-        ),
+    const summary = groups.map((group) => issueSummary(t, group.key, group.items.length))
+    const needsWorker = groups.some((group) => group.key === 'worker')
+    const skippedLines = result.skipped.map((c) =>
+      t('componentImport.skippedLine', { name: c.name, reason: plain(c.reason) }),
+    )
+    const details = groups.flatMap((group) =>
+      group.items.map((i) =>
+        i.component
+          ? t('componentImport.issueLine', { component: i.component, message: plain(i.message) })
+          : plain(i.message),
       ),
-    ]
+    )
     return (
       <Screen
         header={header}
@@ -340,6 +374,33 @@ export function StorybookImportSection({
               </Badge>
             ))}
           </div>
+          {skippedLines.length > 0 && (
+            <div className="flex flex-col gap-1.5" data-slot="storybook-skipped">
+              <span className="text-label font-medium text-ink-soft">
+                {t('componentImport.skippedHeading', { count: skippedLines.length })}
+              </span>
+              <ul className="flex flex-col gap-1 text-label text-ink-soft">
+                {skippedLines.slice(0, SKIPPED_SHOWN).map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+              {skippedLines.length > SKIPPED_SHOWN && (
+                <Disclosure
+                  label={
+                    <span className="text-label text-ink-faint">
+                      {t('componentImport.moreNames', { count: skippedLines.length - SKIPPED_SHOWN })}
+                    </span>
+                  }
+                >
+                  <ul className="flex flex-col gap-1 text-label text-ink-soft">
+                    {skippedLines.slice(SKIPPED_SHOWN).map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                </Disclosure>
+              )}
+            </div>
+          )}
           {summary.length > 0 && (
             <div className="flex flex-col gap-1.5" data-slot="storybook-issues">
               <span className="text-label font-medium text-ink-soft">{t('componentImport.issuesHeading')}</span>
@@ -348,11 +409,16 @@ export function StorybookImportSection({
                   <li key={line}>{line}</li>
                 ))}
               </ul>
+              {needsWorker && (
+                <Button size="sm" className="self-start" onClick={onUseCli}>
+                  {t('componentImport.useCli')}
+                </Button>
+              )}
               <Disclosure
-                label={<span className="text-caption font-medium text-ink-faint">{t('componentImport.details')}</span>}
+                label={<span className="text-label font-medium text-ink-faint">{t('componentImport.details')}</span>}
                 contentClassName="mt-1.5"
               >
-                <ul className="flex max-h-[132px] flex-col gap-1 overflow-y-auto text-caption text-ink-faint">
+                <ul className="flex max-h-[168px] flex-col gap-1 overflow-y-auto text-label text-ink-soft">
                   {details.slice(0, 100).map((line, i) => (
                     <li key={i}>{line}</li>
                   ))}

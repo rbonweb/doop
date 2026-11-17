@@ -29,6 +29,8 @@ chatgpt-plugin/dist/
 storybook-static/
 # the tiny build the doop-import CLI test renders
 !/tests/fixtures/storybook-static/
+# a copy of the doop-import package a test packs after changing a byte of it
+/packages/.tmp-*
 *storybook.log
 
 # agent and sync worktrees

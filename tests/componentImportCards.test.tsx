@@ -258,7 +258,8 @@ it('storybook refused before streaming: a 4xx JSON error is shown as it is', asy
 const TICKET = {
   upload_url: 'https://doop.test/import/tok',
   expires_at: '',
-  command: 'npx doop-import --storybook ./storybook-static --ticket https://doop.test/import/tok',
+  command:
+    'npx --yes --allow-remote=root --package=https://doop.test/cli/doop-import-0.1.0-0123456789ab.tgz doop-import --storybook ./storybook-static --ticket https://doop.test/import/tok',
   curl: 'curl -T bundle.json https://doop.test/import/tok',
 }
 
@@ -309,6 +310,23 @@ it('cli: the command lapses at its expiry and "New command" mints another', asyn
   await click(button(dialog, /New command/))
   expect(fetchMock).toHaveBeenCalledTimes(2)
   expect(dialog.querySelector('[data-slot="cli-expiry"]')?.textContent).toContain('Works once')
+})
+
+it('cli: a server on plain http hands out no command, and the card shows the reason instead', async () => {
+  answerWith(() =>
+    Response.json({
+      ...TICKET,
+      expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      command: null,
+      command_unavailable: 'this Doop server must use https for the command-line import',
+    }),
+  )
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  expect(dialog.querySelector('[data-slot="cli-command-unavailable"]')?.textContent).toBe(
+    'this Doop server must use https for the command-line import',
+  )
+  expect(dialog.querySelector('[data-slot="code-block"]')).toBeNull()
+  expect(dialog.textContent).not.toContain('null')
 })
 
 it('cli: says so when a command cannot be made, and offers another try', async () => {
@@ -655,9 +673,75 @@ it('storybook done: notes are grouped by kind in plain words, with the raw lines
   expect(summary).toContain('3 props skipped because Storybook has no control for them')
   expect(summary).toContain('1 style rule or import was left out')
   expect(summary).toContain('1 other note')
-  expect(summary).toContain('1 component was skipped')
+  expect(summary).not.toContain('component was skipped')
   expect(summary).not.toContain('it has no control Doop can read')
   expect(issues.querySelector('[data-slot="disclosure"]')?.textContent).toContain(
     'Button: as: it has no control Doop can read',
   )
+})
+
+async function importToResult(result: object) {
+  const dry = stream()
+  answerWith(() => dry.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  await dry.send({ type: 'result', result: RESULT })
+  await dry.end()
+  const real = stream()
+  answerWith(() => real.response)
+  await click(button(dialog, /^Import$/))
+  await real.send({ type: 'result', result })
+  await real.end()
+  return dialog
+}
+
+it('storybook done: every skipped component is named with its reason in the result itself', async () => {
+  const dialog = await importToResult({
+    ...RESULT,
+    skipped: [
+      { name: 'Button', reason: 'a component named “Button” is already on this canvas: rename one of them' },
+      { name: 'Tooltip', reason: 'it only renders inside a portal' },
+    ],
+  })
+  const skipped = dialog.querySelector('[data-slot="storybook-skipped"]')!
+  expect(skipped.textContent).toContain('2 components were skipped')
+  expect(skipped.textContent).toContain('Button: a component named “Button” is already on this canvas')
+  expect(skipped.textContent).toContain('Tooltip: it only renders inside a portal')
+  expect(skipped.closest('[data-slot="disclosure"]')).toBeNull()
+})
+
+it('storybook done: a story that needs the project build offers the command line', async () => {
+  const dialog = await importToResult({
+    ...RESULT,
+    issues: [{ component: 'Menu', code: 'story_needs_worker', message: 'the story needs a service worker' }],
+  })
+  expect(dialog.querySelector('[data-slot="storybook-issues"]')?.textContent).toContain(
+    '1 component needs the command line',
+  )
+  await click(button(dialog, /Use the command line instead/))
+  expect(onUseCli).toHaveBeenCalledTimes(1)
+})
+
+it('storybook done: without that issue there is no command line button', async () => {
+  const dialog = await importToResult(RESULT)
+  expect(button(dialog, /Use the command line instead/)).toBeUndefined()
+})
+
+it('storybook running: a render that takes a while shows the seconds since the last update, and resets on progress', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+  const dialog = await previewOf(PLAN)
+  const run = stream()
+  answerWith(() => run.response)
+  await click(button(dialog, /^Import$/))
+  await run.send({ type: 'progress', rendered: 5, total: 17, component: 'Button' })
+  expect(dialog.querySelector('[data-slot="storybook-progress"]')?.textContent).not.toContain('Still rendering')
+  await act(async () => {
+    vi.advanceTimersByTime(24_000)
+  })
+  expect(dialog.querySelector('[data-slot="storybook-progress"]')?.textContent).toContain(
+    'Still rendering, 24 s since the last update',
+  )
+  await run.send({ type: 'progress', rendered: 6, total: 17, component: 'Select' })
+  expect(dialog.querySelector('[data-slot="storybook-progress"]')?.textContent).not.toContain('Still rendering')
 })

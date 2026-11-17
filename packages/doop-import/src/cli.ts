@@ -10,7 +10,11 @@ import { ticketUrl, UploadError, uploadBundle, type ImportResult } from './uploa
 export const USAGE = `doop-import: import a React team's Storybook into a Doop canvas as components.
 
 Usage
-  npx doop-import --storybook <dir|url> --ticket <upload url> [options]
+  npx --yes --allow-remote=root --package=<your Doop>/cli/doop-import-<version>-<hash>.tgz doop-import \\
+    --storybook <dir|url> --ticket <upload url> [options]
+
+  Run the command Doop gives you, which fills in your Doop, the version and the upload URL: the import picker's
+  command-line card, or an agent's create_import_ticket. The options below can be added to that command.
 
   --storybook <dir|url>   a \`storybook build\` directory (served on 127.0.0.1 while it runs) or the URL of a Storybook dev server on this machine (localhost)
   --ticket <url>          the upload URL from Doop's import picker (or an agent's create_import_ticket)

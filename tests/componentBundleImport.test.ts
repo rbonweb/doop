@@ -27,7 +27,7 @@ import * as propagation from '../server/propagation.ts'
 import { store } from '../server/store.ts'
 import { runOperation } from '../server/workBudget.ts'
 import { activeComponents, MAX_COMPONENTS } from '../shared/components.ts'
-import { cleanLabel } from '../server/componentBundleImport.ts'
+import { cleanLabel, qualifierOf } from '../server/componentBundleImport.ts'
 
 const OWNER = 'owner-1'
 const actor = actions.resolveActor({ name: 'Importer', kind: 'agent', userId: OWNER })
@@ -174,16 +174,133 @@ describe('importing a component bundle', () => {
     expect(findComponent(canvasId, 'A1')).toBeUndefined()
   })
 
-  it('refuses a name another component holds, and a malformed bundle by path', () => {
-    run({
-      version: 1,
-      source: { kind: 'agent' },
-      components: [{ name: 'Tag', html: '<b>t</b>', code: { origin: { kind: 'manual' } } }],
-    })
-    const result = run({ version: 1, source: { kind: 'agent' }, components: [{ name: 'tag', html: '<b>t</b>' }] })
-    expect(result.skipped[0]?.reason).toMatch(/already on this canvas/)
+  it('refuses a malformed bundle by path', () => {
     expect(() => run({ version: 1, source: { kind: 'agent' }, components: [] })).toThrow(ComponentError)
     expect(() => run({ version: 1, source: { kind: 'agent' }, components: [] })).toThrow(/components/)
+  })
+
+  describe('a name another component holds', () => {
+    const manual = (name: string) =>
+      run({
+        version: 1,
+        source: { kind: 'agent' },
+        components: [{ name, html: '<b>m</b>', code: { origin: { kind: 'manual' } } }],
+      })
+    const primer = (extra: Record<string, unknown> = {}, name = 'Tag') => ({
+      version: 1,
+      source: { kind: 'storybook' },
+      package: '@primer/react',
+      components: [{ name, html: '<i class="tag">t</i>', code: { exportName: 'Tag' }, ...extra }],
+    })
+
+    it('is imported under "Name (Package)", keeping the real export, with a renamed issue', () => {
+      const own = manual('Tag').created[0]!
+      const result = run(primer())
+      expect(result.skipped).toEqual([])
+      expect(result.created.map((entry) => entry.name)).toEqual(['Tag (Primer)'])
+      expect(result.issues).toContainEqual(
+        expect.objectContaining({
+          component: 'Tag',
+          code: 'renamed',
+          message: expect.stringContaining('“Tag (Primer)”'),
+        }),
+      )
+      const def = findComponent(canvasId, result.created[0]!.id)!
+      expect(def.code).toMatchObject({ importFrom: '@primer/react', exportName: 'Tag' })
+      expect(store.getFrame(def.mainFrameId!)!.name).toBe('Tag (Primer)')
+      expect(findComponent(canvasId, own.id)!.name).toBe('Tag')
+    })
+
+    it('goes on to " 2", " 3" when the qualified name is taken too', () => {
+      manual('Tag')
+      manual('Tag (Primer)')
+      expect(run(primer()).created.map((entry) => entry.name)).toEqual(['Tag (Primer) 2'])
+      manual('Tag (Primer) 3')
+      expect(run(primer()).unchanged.map((entry) => entry.name)).toEqual(['Tag (Primer) 2'])
+    })
+
+    it('a second import updates the renamed component in place, with or without an export name', () => {
+      manual('Tag')
+      const id = run(primer()).created[0]!.id
+      const again = run(primer())
+      expect(again.created).toEqual([])
+      expect(again.unchanged).toEqual([{ name: 'Tag (Primer)', id }])
+      /* no export name: matched by the qualified name and the kind of import */
+      const bare = (css: string) => ({
+        version: 1,
+        source: { kind: 'storybook' },
+        package: '@primer/react',
+        components: [{ name: 'Bare', html: '<i class="bare">t</i>', css }],
+      })
+      manual('Bare')
+      const first = run(bare('.bare{color:red}')).created[0]!
+      expect(first.name).toBe('Bare (Primer)')
+      expect(run(bare('.bare{color:blue}')).updated.map((entry) => entry.id)).toEqual([first.id])
+    })
+
+    it('a clash with the same package and export still updates in place under its own name', () => {
+      const id = run(primer()).created[0]!.id
+      const again = run(primer({ css: '.tag{color:red}' }))
+      expect(again.updated).toEqual([{ name: 'Tag', id }])
+      expect(again.issues.some((issue) => issue.code === 'renamed')).toBe(false)
+    })
+
+    it('a dry run reports the planned name and writes nothing', () => {
+      manual('Tag')
+      const before = store.getComponents(canvasId).length
+      const dry = run(primer(), true)
+      expect(dry.created).toEqual([{ name: 'Tag (Primer)', id: '' }])
+      expect(dry.issues.map((issue) => issue.code)).toContain('renamed')
+      expect(store.getComponents(canvasId)).toHaveLength(before)
+    })
+
+    it('keeps the name within the limit', () => {
+      const long = 'N'.repeat(80)
+      manual(long)
+      const created = run(primer({}, long)).created[0]!
+      expect(created.name.length).toBeLessThanOrEqual(80)
+      expect(created.name.endsWith(' (Primer)')).toBe(true)
+    })
+
+    it('takes the qualifier from the package, else the source name, else "Imported"', () => {
+      const q = (bundle: Record<string, unknown>) => qualifierOf(bundle as never)
+      expect(q({ package: '@primer/react', source: { kind: 'cli' } })).toBe('Primer')
+      expect(q({ package: 'acme-ui', source: { kind: 'cli' } })).toBe('Acme-ui')
+      expect(q({ package: 'acme-ui/button', source: { kind: 'cli' } })).toBe('Acme-ui')
+      expect(q({ source: { kind: 'cli', name: 'my lib <b>' } })).toBe('My lib b')
+      expect(q({ source: { kind: 'cli' } })).toBe('Imported')
+    })
+  })
+
+  it('makes tokens only of the :root variables a captured component reaches, through var() chains', () => {
+    const result = run({
+      version: 1,
+      source: { kind: 'storybook', url: 'https://sb.example/' },
+      css: ':root { --fg: var(--ink); --ink: #111; --bg: #fff; --unused: 1px; --also-unused: var(--unused); --page: #eee } body { background: var(--page) }',
+      components: [
+        { name: 'Chip', html: '<p class="chip">c</p>', css: '.chip { color: var(--fg) }' },
+        {
+          name: 'Tag',
+          html: '<p class="tag" style="background: var(--bg)">t</p>',
+          props: [{ name: 'tone', type: 'enum', options: ['light', 'dark'] }],
+          variants: { tone: { dark: { css: '.tag { border-color: var(--ink) }' } } },
+        },
+      ],
+    })
+    expect(result.tokens.created.sort()).toEqual(['--bg', '--fg', '--ink', '--page'])
+  })
+
+  it('reads a 15,000-variable var() chain without overflowing the stack', () => {
+    const count = 15_000
+    const root = Array.from({ length: count }, (_, n) => `--v${n}:var(--v${n + 1});`).join('')
+    const result = run({
+      version: 1,
+      source: { kind: 'storybook', url: 'https://sb.example/' },
+      css: `:root { ${root} --v${count}: #111 }`,
+      components: [{ name: 'Chip', html: '<p class="chip">c</p>', css: '.chip { color: var(--v0) }' }],
+    })
+    /* every link of the chain was reached: made a token, or skipped for having no type of its own */
+    expect(result.tokens.created.length + result.tokens.skipped.length).toBe(count + 1)
   })
 
   it('drops the code mapping of props the component does not have, keeps the rest, and still imports it', () => {

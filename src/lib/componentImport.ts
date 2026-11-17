@@ -162,7 +162,9 @@ export async function streamStorybookImport(
 export interface ImportTicket {
   upload_url: string
   expires_at: string
-  command: string
+  /** the CLI command; null when this Doop server cannot hand one out, with the reason in `command_unavailable` (curl still works) */
+  command: string | null
+  command_unavailable?: string
   curl: string
 }
 
@@ -229,9 +231,10 @@ export function relativeInSeconds(seconds: number, locale: string = getLocale())
 
 /** What a kind of import note is about, in the words the card uses for it. */
 export type IssueGroupKey =
-  'props' | 'noProps' | 'styles' | 'variants' | 'markup' | 'files' | 'unsafe' | 'limits' | 'other'
+  'worker' | 'props' | 'noProps' | 'styles' | 'variants' | 'markup' | 'files' | 'unsafe' | 'limits' | 'other'
 
 const ISSUE_GROUP: Record<string, IssueGroupKey> = {
+  story_needs_worker: 'worker',
   argtypes_dropped: 'props',
   text_arg_ambiguous: 'props',
   unsafe_prop_value: 'unsafe',
