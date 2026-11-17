@@ -182,6 +182,26 @@ describe('swapping a nested component on one instance', () => {
     expect(moon.id).toBeTruthy()
   })
 
+  it('compares a swap with the component the outer instance forwards, not the template literal', () => {
+    const { star } = icons()
+    makeComponent('Heart2', (id) => `<i ${COMPONENT_ATTR}="${id}">heart2</i>`)
+    const c = card(`<doop-use component="${star.id}" data-doop-prop="component:icon"></doop-use>`)
+    updateComponent(canvasId, c.id, { props: [{ name: 'icon', type: 'instance', accepts: ['Star', 'Heart'] }] }, actor)
+    const page = write(`<doop-use component="${c.id}" icon="Heart"></doop-use>`)
+    const part = useKey(c.def().template)
+    const instanceId = instanceIdOf(page, 'article')
+    /* Star is the template's component but Heart is what shows: swapping to Star is a real swap */
+    changeInstances(canvasId, page, [{ instanceId, swap: { part, component: 'Star' } }], actor)
+    expect(bodyOf(page)).toContain('star')
+    expect(html(page)).toContain(`&quot;swap&quot;:&quot;${star.id}&quot;`)
+    actions.updateFrame(page, { html: html(page) }, actor)
+    expect(bodyOf(page)).toContain('star')
+    /* swapping to the forwarded component itself stores nothing */
+    changeInstances(canvasId, page, [{ instanceId, swap: { part, component: 'Heart' } }], actor)
+    expect(bodyOf(page)).toContain('heart')
+    expect(html(page)).not.toContain('swap')
+  })
+
   it('leaves stored nested instances without a swap byte-identical on a re-save', () => {
     const { page } = starCard()
     const before = html(page)

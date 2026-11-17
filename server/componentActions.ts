@@ -44,6 +44,7 @@ import {
   attrOf,
   compactDocument,
   detachedMarkup,
+  effectiveComponent,
   elementCount,
   findAllMarked,
   findMarked,
@@ -1080,8 +1081,9 @@ function applySwap(
       fail(
         `nesting_cycle: “${def.name}” cannot contain itself, and “${target.name}” would put it inside itself, so the swap was refused`,
       )
-    const template = contextFor(canvasId).find(attrOf(info.el, 'component') ?? '')
-    if (template?.id === target.id) {
+    /* what the part shows without a swap: the component the outer instance forwards, else the template's */
+    const shown = effectiveComponent(info.el, def, state.props, contextFor(canvasId))
+    if (shown?.id === target.id) {
       if (next.swap !== undefined) delete next.use
       delete next.swap
     } else {

@@ -565,6 +565,17 @@ function forwardingOf(
   return forward
 }
 
+/** The component a nested `<doop-use>` shows before any swap: the one the outer instance forwards, else the one the template names. */
+export function effectiveComponent(
+  use: Element,
+  outer: Revision,
+  outerProps: Record<string, string> | undefined,
+  ctx: EngineContext,
+): ComponentDef | undefined {
+  const forward = forwardingOf(use, outer, outerProps, silent(ctx), false)
+  return ctx.find(forward.component ?? attrOf(use, 'component') ?? '')
+}
+
 /** Does this component, or one it is built from, hold the component `targetId`? */
 export function nestsComponent(ctx: EngineContext, ref: string, targetId: string): boolean {
   const seen = new Set<string>()
@@ -1166,7 +1177,7 @@ function pruneOverrides(
       if (next.tag !== undefined && next.tag === info.el.tagName) delete next.tag
       if (next.hidden === false) delete next.hidden
       /* a swap to the component the template already names is no swap */
-      if (next.swap !== undefined && ctx.find(next.swap)?.id === ctx.find(attrOf(info.el, 'component') ?? '')?.id)
+      if (next.swap !== undefined && ctx.find(next.swap)?.id === effectiveComponent(info.el, def, props, ctx)?.id)
         delete next.swap
     }
     if (Object.keys(next).length) kept[key] = next
