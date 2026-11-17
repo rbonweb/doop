@@ -441,7 +441,7 @@ describe('custom elements, URLs and determinism', () => {
     expect(home).toContain('https://doop.example/icons/iconify/a/b.svg')
     expect(home).toContain('href="/other"')
     expect(fileOf(out, 'src/pages/Home.css')).toContain('url("https://doop.example/a/h.png")')
-    expect(fileOf(out, 'src/components/Widget.module.css')).toContain('url(https://doop.example/a/bg.png)')
+    expect(fileOf(out, 'src/components/Widget.module.css')).toContain('url("https://doop.example/a/bg.png")')
   })
 
   it('is byte-identical across runs and independent of the order components arrive in', () => {
@@ -451,8 +451,8 @@ describe('custom elements, URLs and determinism', () => {
     expect(JSON.stringify(a)).toBe(JSON.stringify(b))
   })
 
-  it('refuses a Tailwind export until styling lands and a bad asset origin', () => {
-    expect(() => exportOf([STAR], [], { styling: 'tailwind' })).toThrow('tailwind styling lands with S9')
+  it('refuses an unknown styling and a bad asset origin', () => {
+    expect(() => exportOf([STAR], [], { styling: 'sass' as never })).toThrow('styling')
     expect(() => exportOf([STAR], [], { assetOrigin: 'javascript:alert(1)' })).toThrow('assetOrigin')
   })
 })
@@ -492,6 +492,43 @@ describe('hostile names and text stay data', () => {
       expect(rendered.page).not.toContain('<script>')
       expect(rendered.page).toContain('globalThis.pwned = 1')
       expect(rendered.page).toContain('&lt;script&gt;')
+    } finally {
+      project.cleanup()
+    }
+  })
+})
+
+describe('attributes the intrinsic type does not accept', () => {
+  const ODD = def(
+    'Odd',
+    '<div data-doop-part="r" align="center" foo="1"><i data-doop-part="i" data-doop-prop="size:size,data-foo:foo" size="3" bar="x">t</i><a data-doop-part="a" href="/a/z.png" target="_blank" wibble="y">k</a></div>',
+    {
+      props: [
+        { name: 'size', type: 'text' },
+        { name: 'foo', type: 'text' },
+      ],
+    },
+  )
+
+  it('passes them as a spread so strict type-checking still holds, and keeps the values', async () => {
+    const out = exportOf([ODD], frame(instance(ODD, [ODD], { props: { size: '7' } })), { componentIds: [ODD.id] })
+    const tsx = componentOf(out, 'Odd')
+    expect(tsx).toContain('{...{')
+    expect(tsx).toContain('"size": size')
+    expect(tsx).toContain('"bar": "x"')
+    expect(tsx).toContain('data-foo={foo}')
+    expect(tsx).toContain('wibble')
+    expect(tsx).not.toMatch(/ size=/)
+    const project = writeProject(out.files)
+    try {
+      expect(typecheck(project)).toEqual([])
+      const rendered = await renderAll(project, {
+        odd: { from: './src/components/Odd', name: 'Odd', props: { size: '9' } },
+      })
+      expect(rendered.odd).toContain('size="9"')
+      expect(rendered.odd).toContain('bar="x"')
+      expect(rendered.odd).toContain('wibble="y"')
+      expect(rendered.odd).toContain('align="center"')
     } finally {
       project.cleanup()
     }

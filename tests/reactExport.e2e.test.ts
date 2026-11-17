@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../server/db/persist.ts', () => ({
@@ -164,7 +165,7 @@ describe('React export end to end, CSS Modules', () => {
     const all = result.files.map((file) => file.content).join('\n')
     expect(all).not.toContain('dangerouslySetInnerHTML')
     expect(result.files.find((f) => f.path === 'src/components/Card.module.css')!.content).toContain(
-      'url(https://doop.example/a/badge.png)',
+      'url("https://doop.example/a/badge.png")',
     )
   })
 
@@ -218,6 +219,72 @@ describe('React export end to end, a component mapped to the team package', () =
       })
       expect(out.card).toContain('<button class="acme-btn">Buy</button>')
       expect(card.id).toBeTruthy()
+    } finally {
+      project.cleanup()
+    }
+  })
+})
+
+describe('React export end to end, Tailwind', () => {
+  const classCandidates = (files: { path: string; content: string }[]): string[] => {
+    const out = new Set<string>()
+    for (const file of files.filter((entry) => entry.path.endsWith('.tsx'))) {
+      for (const match of file.content.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
+        for (const token of (match[1] ?? '').split(/\s+/)) if (token) out.add(token)
+      }
+    }
+    return [...out]
+  }
+
+  it('type-checks strictly, renders the same DOM and compiles with Tailwind v4', async () => {
+    const { button, card, pageId } = workedExample()
+    const result = buildReactExport(input(pageId, { styling: 'tailwind' }))
+    const paths = result.files.map((file) => file.path)
+    expect(result.report.styling).toBe('tailwind')
+    // only what has no utility stays in a module sheet; the page converted entirely
+    expect(result.files.find((file) => file.path === 'src/components/Button.module.css')!.content).toContain(
+      'var(--color-primary',
+    )
+    expect(paths).not.toContain('src/pages/Pricing.css')
+    expect(paths).toContain('src/components/Card.module.css')
+    const tokens = result.files.find((file) => file.path === 'src/tokens.css')!.content
+    expect(tokens.startsWith('@import "tailwindcss";')).toBe(true)
+    expect(result.files.find((file) => file.path === 'README.md')!.content).toContain('Tailwind v4')
+
+    const project = writeProject(result.files)
+    try {
+      expect(typecheck(project)).toEqual([])
+      const out = await renderAll(project, {
+        buttonBuy: { from: './src/components/Button', name: 'Button', props: { label: 'Buy' } },
+        cardFull: {
+          from: './src/components/Card',
+          name: 'Card',
+          props: { title: 'Pro', tone: 'ghost', badge: true, cta: 'Buy', cover: '/a/x.png' },
+        },
+        page: { from: './src/pages/Pricing', name: 'Pricing' },
+      })
+      expect(normalize(out.buttonBuy!)).toBe(expected(button.id, { label: 'Buy' }))
+      expect(normalize(out.cardFull!)).toBe(
+        expected(card.id, { title: 'Pro', tone: 'ghost', badge: 'true', cta: 'Buy', cover: '/a/x.png' }),
+      )
+      const body = /<body>([\s\S]*)<\/body>/.exec(store.getFrame(pageId)!.html)![1]!
+      const wrapper = /^<div[^>]*>([\s\S]*)<\/div>$/.exec(out.page!)![1]!
+      expect(normalize(wrapper)).toBe(
+        normalize(body).replace(/src="\/a\/cover.png"/g, 'src="https://doop.example/a/cover.png"'),
+      )
+
+      const { compile } = await import('@tailwindcss/node')
+      const compiler = await compile('@import "tailwindcss";', {
+        base: resolve(import.meta.dirname, '..'),
+        onDependency: () => {},
+      })
+      const css = compiler.build(classCandidates(result.files))
+      // Card's ghost variant: `.card[data-tone="ghost"] { background: transparent }`
+      expect(css).toMatch(/data-tone[^{]*ghost[^{]*\{[^}]*background-color: transparent/)
+      // Button's padding and the badge's font size converted to utilities
+      expect(css).toContain('padding')
+      expect(css).toContain('--tw-font-weight: var(--font-weight-semibold)')
+      expect(css).toContain('border-style: var(--tw-border-style)')
     } finally {
       project.cleanup()
     }
