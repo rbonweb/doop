@@ -5,6 +5,7 @@ import {
   buildComponentBundle,
   diffStyles,
   isEmittedPath,
+  KnownRenderError,
   renderStory,
   safeDeclarationValue,
   type StoryPage,
@@ -380,6 +381,40 @@ describe('a renderer that cannot open pages', () => {
     })
     expect(result.bundle.components.map((component) => component.name)).toEqual(['One'])
     expect(result.issues.map((issue) => issue.code)).toContain('renderer_unavailable')
+  })
+
+  it('never puts a renderer error message into an issue, only the messages Doop wrote', async () => {
+    const cdp =
+      'Protocol error (Page.navigate): net::ERR_CONNECTION_REFUSED at http://10.0.0.5:9222/devtools/browser/abc'
+    const page = (message: Error): StoryPage => {
+      const base = fakePage([])
+      return {
+        ...base,
+        goto: async (url, timeoutMs) => {
+          if (url.includes('a-bad')) throw message
+          await base.goto(url, timeoutMs)
+        },
+      }
+    }
+    const run = (error: Error) =>
+      buildComponentBundle({
+        entries: [entry('A/Good'), entry('A/Bad')],
+        source: { kind: 'storybook' },
+        baseUrl: 'https://sb.test/',
+        withPage: async (use) => use(page(error)),
+      })
+    const leaked = await run(new Error(cdp))
+    expect(JSON.stringify(leaked.issues)).not.toContain('10.0.0.5')
+    expect(JSON.stringify(leaked.issues)).not.toContain('Protocol error')
+    expect(leaked.issues).toContainEqual(
+      expect.objectContaining({
+        component: 'Bad',
+        code: 'story_failed',
+        message: expect.stringContaining('The renderer could not open this story'),
+      }),
+    )
+    const known = await run(new KnownRenderError('The story did not finish rendering in time'))
+    expect(JSON.stringify(known.issues)).toContain('The story did not finish rendering in time')
   })
 
   it('throws the renderer error when nothing could be imported', async () => {

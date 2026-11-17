@@ -60,6 +60,19 @@ function refusalMessage(reason: string, bytes?: number): string {
   return reason
 }
 
+/** A reason a render failed that its raiser wrote for the person: shown as is. Any other error (a browser, protocol or network failure) can name internal addresses and paths, so it is replaced by `RENDER_FAILED`. */
+export class KnownRenderError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'KnownRenderError'
+  }
+}
+
+export const RENDER_FAILED = 'The renderer could not open this story'
+
+const reasonOf = (error: unknown): string =>
+  error instanceof KnownRenderError ? error.message.slice(0, 200) : RENDER_FAILED
+
 /** The import itself could not produce a bundle (nothing could be captured, or what was captured is not a valid bundle). The message is written for the person, never taken raw from an exception. */
 export class BundleImportError extends Error {
   constructor(message: string) {
@@ -152,7 +165,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     return { capture, props, displayName, issues }
   } catch (error) {
     if (signal?.aborted) throw error
-    return fail(error instanceof Error ? error.message.slice(0, 200) : 'The story could not be rendered')
+    return fail(reasonOf(error))
   }
 }
 
@@ -290,8 +303,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     } catch (error) {
       if (input.signal?.aborted) throw error
       openFailures++
-      const reason = error instanceof Error ? error.message.slice(0, 200) : 'a page could not be opened'
-      return { capture: { ok: false, reason }, props: [], issues: [] }
+      return { capture: { ok: false, reason: reasonOf(error) }, props: [], issues: [] }
     }
   }
 

@@ -105,7 +105,7 @@ export async function planStorybookImport(
   const plan = await detached(() => storybookPlan(run.url, { include: run.include, signal: run.signal }, run.deps))
   const components = plan.components.map(({ story: _story, ...entry }) => entry)
   if (!components.length) {
-    throw new StorybookIndexError(plan.issues[0]?.message ?? 'No story matched, so there is nothing to import')
+    throw new StorybookIndexError(plan.issues[0]?.message ?? 'No story matched, so there is nothing to import', true)
   }
   const placeholder = {
     version: 1,
@@ -152,12 +152,10 @@ export function storybookFailure(error: unknown): { code: StorybookFailureCode; 
   return { code: 'unreachable', message: 'The Storybook import failed', status: 502 }
 }
 
-/** Failures that happen before any story is rendered: the Storybook was not there, was private, or the server had no room. The import slot is given back for these (never for an abort, or for a failure after rendering began). */
+/** Whether the import slot is given back: only for a failure that cost the server next to nothing and that no one can farm. The server being busy; and an index that could not be reached or was refused without a body being read (connect or DNS failure, 401, 403, 404, a refused redirect). Never an abort, an index body that was downloaded (too large, not JSON, no stories), a story page that answered 401 or 403 (browser work was spent), or anything after rendering began. */
 export function failedBeforeRendering(error: unknown): boolean {
-  return (
-    error instanceof StorybookAccessError ||
-    error instanceof StorybookIndexError ||
-    error instanceof StorybookBusyError ||
-    error instanceof RendererBusyError
-  )
+  if (error instanceof StorybookBusyError || error instanceof RendererBusyError) return true
+  if (error instanceof StorybookAccessError) return !error.duringRender
+  if (error instanceof StorybookIndexError) return !error.readBody
+  return false
 }

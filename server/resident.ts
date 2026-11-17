@@ -2708,7 +2708,11 @@ async function runResidentTool(
           canRead: (id) => id === canvasId || (!!reader && canReadCanvas(reader, id)),
           /* other canvases are changed only where the person who asked may edit: a run nobody
              asked for (an automation, billed to its payer) changes none of them */
-          canEdit: (id) => id === canvasId || (!!runState.requesterId && canEditCanvas(runState.requesterId, id)),
+          canEdit: (id) =>
+            id === canvasId
+              ? /* a Storybook import writes minutes after it began: the person who asked must still hold the role then */
+                block.name !== 'import_storybook' || !runState.requesterId || canEditCanvas(runState.requesterId, id)
+              : !!runState.requesterId && canEditCanvas(runState.requesterId, id),
           readableCanvases: () =>
             reader ? canvasesFor(reader).flatMap((meta) => store.getCanvas(meta.id) ?? []) : [canvas],
           /* publishing is the requester's to do; a run nobody asked for publishes only where everyone may */

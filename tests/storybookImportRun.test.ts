@@ -116,6 +116,8 @@ describe('failedBeforeRendering', () => {
       expect(failedBeforeRendering(error)).toBe(true)
     }
     for (const error of [
+      new StorybookAccessError(undefined, true),
+      new StorybookIndexError('The Storybook index is too large', true),
       new DOMException('aborted', 'AbortError'),
       new BundleImportError('x'),
       new ComponentError('x'),
