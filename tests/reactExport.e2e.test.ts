@@ -245,10 +245,14 @@ describe('React export end to end, Tailwind', () => {
     expect(result.files.find((file) => file.path === 'src/components/Button.module.css')!.content).toContain(
       'var(--color-primary',
     )
-    expect(paths).not.toContain('src/pages/Pricing.css')
     expect(paths).toContain('src/components/Card.module.css')
     const tokens = result.files.find((file) => file.path === 'src/tokens.css')!.content
-    expect(tokens.startsWith('@import "tailwindcss";')).toBe(true)
+    expect(tokens).toContain('@import "tailwindcss/theme.css" layer(theme);')
+    expect(tokens).toContain('@import "tailwindcss/utilities.css" layer(utilities);')
+    expect(tokens).not.toContain('@import "tailwindcss";')
+    expect(tokens).not.toContain('preflight')
+    // the page's body rule stays CSS, scoped to the page root
+    expect(result.files.find((file) => file.path === 'src/pages/Pricing.css')!.content).toContain('.page-Pricing')
     expect(result.files.find((file) => file.path === 'README.md')!.content).toContain('Tailwind v4')
 
     const project = writeProject(result.files)
@@ -274,7 +278,7 @@ describe('React export end to end, Tailwind', () => {
       )
 
       const { compile } = await import('@tailwindcss/node')
-      const compiler = await compile('@import "tailwindcss";', {
+      const compiler = await compile(tokens, {
         base: resolve(import.meta.dirname, '..'),
         onDependency: () => {},
       })

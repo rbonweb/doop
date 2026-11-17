@@ -534,3 +534,186 @@ describe('attributes the intrinsic type does not accept', () => {
     }
   })
 })
+
+describe('review fixes', () => {
+  const plain = (name: string, extra: Partial<ComponentDef> = {}) => def(name, '<i data-doop-part="r"></i>', extra)
+  const mappedTo = (name: string, code: NonNullable<ComponentDef['code']>, extra: Partial<ComponentDef> = {}) =>
+    plain(name, { code, ...extra })
+  const callIt = (target: ComponentDef) => exportOf([target], frame(`<doop-use component="${target.id}"></doop-use>`))
+
+  it('reads value maps and tables by own keys only', () => {
+    const target = mappedTo(
+      'Btn',
+      { importFrom: '@acme/ui', exportName: 'Button', props: { tone: { values: { a: 'x', b: 3 } } } },
+      { props: [{ name: 'tone', type: 'enum', options: ['toString', 'constructor', 'valueOf', 'a'], default: 'a' }] },
+    )
+    const wrap = def(
+      'Wrap',
+      `<div data-doop-part="r"><doop-use component="${target.id}" data-doop-part="u" data-doop-prop="tone:t"></doop-use></div>`,
+      {
+        props: [{ name: 't', type: 'enum', options: ['toString', 'constructor', 'valueOf', 'a'], default: 'a' }],
+      },
+    )
+    const tsx = componentOf(exportOf([target, wrap], [], { componentIds: [wrap.id] }), 'Wrap')
+    expect(tsx).not.toContain('native code')
+    expect(tsx).toContain('"toString": "toString"')
+    expect(tsx).toContain('"constructor": "constructor"')
+    expect(tsx).toContain('"a": "x"')
+  })
+
+  it('keeps a class named __proto__ out of the module lookup', () => {
+    const odd = def('Odd', '<div class="__proto__ ok" data-doop-part="r"></div>', {
+      rawCss: '.__proto__ { color: red } .ok { color: blue }',
+    })
+    const tsx = componentOf(exportOf([odd], [], { componentIds: [odd.id] }), 'Odd')
+    expect(tsx).not.toContain('styles["__proto__"]')
+    expect(tsx).toContain('styles["ok"]')
+  })
+
+  it('cuts instance-prop default cycles, reports them and renders', async () => {
+    const ph = def('Ph', '<b data-doop-part="r">ph</b>')
+    const j1 = def(
+      'J1',
+      `<div data-doop-part="r"><doop-use component="${ph.id}" data-doop-part="u" data-doop-prop="component:y"></doop-use></div>`,
+      {
+        props: [{ name: 'y', type: 'instance', default: 'J2' }],
+      },
+    )
+    const j2 = def(
+      'J2',
+      `<div data-doop-part="r"><doop-use component="${ph.id}" data-doop-part="u" data-doop-prop="component:z"></doop-use></div>`,
+      {
+        props: [{ name: 'z', type: 'instance', default: 'J1' }],
+      },
+    )
+    const out = exportOf([ph, j1, j2], [], { componentIds: [j1.id] })
+    expect(
+      out.report.issues.some(
+        (issue) => issue.kind === 'dropped-attribute' && issue.detail.includes('renders this component again'),
+      ),
+    ).toBe(true)
+    const project = writeProject(out.files)
+    try {
+      expect(typecheck(project)).toEqual([])
+      const rendered = await renderAll(project, {
+        j1: { from: './src/components/J1', name: 'J1' },
+        j2: { from: './src/components/J2', name: 'J2' },
+      })
+      expect(rendered.j1).toContain('ph')
+      expect(rendered.j2).toContain('ph')
+    } finally {
+      project.cleanup()
+    }
+  })
+
+  it('puts every page selector under the page root class', () => {
+    const css = [
+      'html, body { margin: 0 }',
+      'body:not(.a) { color: red }',
+      'body::before { content: "" }',
+      'body * { box-sizing: border-box }',
+      'BODY { padding: 0 }',
+      'body > .a { gap: 1px }',
+      'body.dark .x { color: white }',
+      'html.dark { color: white }',
+      '.card { padding: 4px }',
+      'nav a.active { color: red }',
+      '::selection { color: red }',
+      ':root { --x: 1 }',
+      '@media (min-width: 600px) { .card { padding: 8px } body { margin: 1px } }',
+      '@keyframes spin { from { opacity: 0 } to { opacity: 1 } }',
+    ].join('\n')
+    const out = exportOf([], frame('<p class="card">x</p>', `<style>${css}</style>`))
+    const sheet = fileOf(out, 'src/pages/Home.css')
+    const selectors = [...sheet.matchAll(/^([^\s@}{][^{]*)\{/gm)].flatMap((m) => m[1]!.split(',').map((s) => s.trim()))
+    for (const selector of selectors) {
+      expect(selector === ':root' || selector.startsWith('.page-Home') || /^(from|to)$/.test(selector)).toBe(true)
+    }
+    expect(sheet).toContain('.page-Home:not(.a)')
+    expect(sheet).toContain('.page-Home > .a')
+    expect(sheet).toContain('.page-Home.dark .x')
+    expect(sheet).toContain('.page-Home .card')
+    expect(sheet).toContain('.page-Home nav a.active')
+    expect(sheet).toContain(':root')
+    expect(sheet).toContain('@keyframes spin')
+    expect(sheet).not.toMatch(/^body|^BODY|^html/im)
+  })
+
+  it('suffixes component names that are Windows device names', () => {
+    const names = ['Con', 'Aux', 'Nul', 'Com1', 'Lpt9', 'Prn']
+    const defs = names.map((name) => plain(name))
+    const out = exportOf(defs, [], { componentIds: defs.map((d) => d.id) })
+    const paths = out.files.map((file) => file.path)
+    for (const name of names) expect(paths).toContain(`src/components/${name}View.tsx`)
+    expect(paths.some((path) => /components\/(Con|Aux|Nul|Com1|Lpt9|Prn)\./.test(path))).toBe(false)
+  })
+
+  it('refuses bad prop renames, duplicates and reserved names, and says so', () => {
+    const target = mappedTo(
+      'Btn',
+      {
+        importFrom: '@acme/ui',
+        exportName: 'Button',
+        props: {
+          a: { name: 'x' },
+          b: { name: 'x' },
+          c: { name: 'dangerouslySetInnerHTML' },
+          d: { name: 'not valid' },
+          e: { values: { nope: 'z', a: 'y' } },
+        },
+        slots: { body: 'x', foot: 'children' },
+      },
+      {
+        props: [
+          { name: 'a', type: 'text' },
+          { name: 'b', type: 'text' },
+          { name: 'c', type: 'text' },
+          { name: 'd', type: 'text' },
+          { name: 'e', type: 'enum', options: ['a', 'b'] },
+          { name: 'key', type: 'text' },
+        ],
+        slots: [
+          { name: 'body', suggested: [] },
+          { name: 'foot', suggested: [] },
+        ],
+      },
+    )
+    const html = instance(target, [target], { props: { a: '1', b: '2', c: '3', d: '4', e: 'a', key: 'k' } })
+    const out = exportOf([target], frame(html))
+    const home = fileOf(out, 'src/pages/Home.tsx')
+    expect(home).toContain('x={"1"}')
+    expect(home).not.toContain('x={"2"}')
+    expect(home).not.toContain('dangerouslySetInnerHTML')
+    expect(home).not.toContain('not valid')
+    expect(home).not.toContain('key=')
+    const details = out.report.issues.map((issue) => issue.detail).join('\n')
+    expect(details).toContain('already uses')
+    expect(details).toContain('React reserves')
+    expect(details).toContain('not a prop name')
+    expect(details).toContain('"nope", which is not one of its values')
+  })
+
+  it('imports only from a bare package specifier and generates the component otherwise', () => {
+    for (const importFrom of [
+      '../../secret',
+      './x',
+      '/abs/x',
+      'file:///x',
+      'https://x.example/a',
+      'node:fs',
+      '@a/b/../../c',
+      'a b',
+    ]) {
+      const target = mappedTo('Btn', { importFrom, exportName: 'Button' })
+      const out = callIt(target)
+      expect(out.files.some((file) => file.path === 'src/components/Btn.tsx')).toBe(true)
+      expect(fileOf(out, 'src/pages/Home.tsx')).not.toContain(importFrom)
+      expect(out.report.issues.some((issue) => issue.detail.includes('package name'))).toBe(true)
+    }
+    const good = mappedTo('Btn', { importFrom: '@acme/ui/button', exportName: 'Button' })
+    expect(fileOf(callIt(good), 'src/pages/Home.tsx')).toContain('from "@acme/ui/button"')
+    expect(
+      fileOf(callIt(mappedTo('Btn', { importFrom: 'acme-ui', exportName: 'Button' })), 'src/pages/Home.tsx'),
+    ).toContain('from "acme-ui"')
+  })
+})

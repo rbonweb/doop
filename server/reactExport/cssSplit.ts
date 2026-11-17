@@ -11,7 +11,7 @@ export interface CssModuleSplit {
   issues: ExportIssue[]
 }
 
-interface Item {
+export interface Item {
   prelude: string
   /** the text between the braces, or null for a statement ended by `;` */
   body: string | null
@@ -235,7 +235,7 @@ function blockEnd(text: string, from: number): number {
 }
 
 /** Cuts a comment-free stylesheet or block body into its statements (`a: b;`, `@import x;`) and blocks (`sel { … }`). */
-function parseItems(text: string): Item[] {
+export function parseItems(text: string): Item[] {
   const items: Item[] = []
   let start = 0
   let paren = 0
@@ -277,7 +277,7 @@ function parseItems(text: string): Item[] {
   return items
 }
 
-function splitTopLevel(text: string, separator: string): string[] {
+export function splitTopLevel(text: string, separator: string): string[] {
   const parts: string[] = []
   let depth = 0
   let start = 0

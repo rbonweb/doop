@@ -171,7 +171,7 @@ export class NameAllocator {
 /** A PascalCase component name that is a valid identifier, is not one of the names the component file owns, and is unique. */
 export function componentName(raw: string, names: NameAllocator): string {
   const name = pascalCase(raw)
-  const safe = COMPONENT_RESERVED.has(name.toLowerCase()) ? `${name}View` : name
+  const safe = COMPONENT_RESERVED.has(name.toLowerCase()) || WINDOWS_DEVICE.test(name) ? `${name}View` : name
   return names.take(safe)
 }
 

@@ -22,7 +22,7 @@ import {
   type ComponentPlan,
   type ExportSession,
 } from './componentToReact.ts'
-import { splitComponentCss } from './cssSplit.ts'
+import { parseItems, splitComponentCss, splitTopLevel, type Item } from './cssSplit.ts'
 import { cssToTailwind, type TailwindSplit } from './tailwind.ts'
 import { htmlToJsx, nodeToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
 import { jsString, type ExportIssue } from './issues.ts'
@@ -103,13 +103,13 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
   walk(doc)
 
   const body = findBody(doc)
-  const scoped = scopeDocumentSelectors(styles.join('\n'), rootClass)
+  const scoped = styles.join('\n')
   const rewriteUrl = session.urls.url
   const tw = session.styling === 'tailwind' ? cssToTailwind(scoped, { rootClass, rewriteUrl }) : undefined
   const split = tw ? tw.leftover : splitComponentCss(scoped, { rootClass, rewriteUrl })
   fc.issues.push(...(tw ? [...tw.issues, ...tw.leftover.issues] : split.issues))
   fc.pageTw = tw
-  const joined = [split.globalCss, split.moduleCss].filter(Boolean).join('\n')
+  const joined = scopePageCss([split.globalCss, split.moduleCss].filter(Boolean).join('\n'), rootClass)
   const css = joined || (tw ? '' : '/* no styles */\n')
 
   const options = pageOptions(fc, session)
@@ -118,7 +118,7 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
   fc.issues.push(...result.issues)
 
   const bodyClasses = (attrOf(body, 'class') ?? '').split(/[ \t\n\f\r]+/).filter(Boolean)
-  const wrapperAttrs = [`className=${globalClassName(fc.pageTw, [rootClass, ...bodyClasses])}`]
+  const wrapperAttrs = [`className=${globalClassName(fc.pageTw, bodyClasses, rootClass)}`]
   const bodyStyle = attrOf(body, 'style')
   if (bodyStyle) {
     const issues: ExportIssue[] = []
@@ -316,15 +316,54 @@ function signature(nodes: Tree.ChildNode[]): string {
   return out.join('\u0002')
 }
 
-/** `html` and `body` rules would restyle the app the page is dropped into: they apply to the page's root element instead. */
-function scopeDocumentSelectors(css: string, rootClass: string): string {
-  return css.replace(/(^|[}\s,;{])(?:html|body)(?=\s*[{,])/g, (_all, lead: string) => `${lead}.${rootClass}`)
+const GROUPING_AT_RULES = new Set(['media', 'supports', 'container', 'layer', 'starting-style'])
+const ROOT_SELECTOR = /^:root(?![\w-])/i
+const DOCUMENT_ELEMENTS = /^(?:html(?![\w-])\s*(?:[>+~]|\s)\s*)?(?:html|body)(?![\w-])/i
+
+/** One selector placed under the page's root class: `html` and `body` stand for the root element itself (`body.dark .x` is `.page-x.dark .x`), `:root` stays, anything else becomes a descendant of the root. */
+function scopeSelector(selector: string, rootClass: string): string {
+  const root = `.${rootClass}`
+  const sel = selector.trim()
+  if (!sel || ROOT_SELECTOR.test(sel)) return sel
+  if (sel.startsWith(root) && !/[\w-]/.test(sel.charAt(root.length))) return sel
+  const document = DOCUMENT_ELEMENTS.exec(sel)
+  if (document) return `${root}${sel.slice(document[0].length)}`
+  return `${root} ${sel}`
+}
+
+function scopeItems(items: Item[], rootClass: string): string[] {
+  const out: string[] = []
+  for (const item of items) {
+    const prelude = item.prelude.trim()
+    if (item.body === null) out.push(`${prelude};`)
+    else if (prelude.startsWith('@')) {
+      const name = /^@([\w-]+)/.exec(prelude)?.[1]?.toLowerCase() ?? ''
+      out.push(
+        GROUPING_AT_RULES.has(name)
+          ? `${prelude} {\n${scopeItems(parseItems(item.body), rootClass)
+              .join('\n\n')
+              .replace(/^(?=.)/gm, '  ')}\n}`
+          : `${prelude} {${item.body}}`,
+      )
+    } else {
+      const selectors = splitTopLevel(prelude, ',').map((selector) => scopeSelector(selector, rootClass))
+      out.push(`${selectors.join(',\n')} {${item.body}}`)
+    }
+  }
+  return out
+}
+
+/** A page's stylesheet with every selector under the page root class, so no page CSS is global: two pages defining `.card` differently do not collide and `body` rules never restyle the app the page sits in. At-rules that name no selectors (`@keyframes`, `@font-face`) are kept as they are. */
+function scopePageCss(css: string, rootClass: string): string {
+  if (!css.trim()) return ''
+  const text = scopeItems(parseItems(css), rootClass).join('\n\n')
+  return text ? `${text}\n` : ''
 }
 
 /** The className for a page's own (global) classes: in Tailwind mode the utilities they became, plus the class itself while rules for it remain or nothing replaced it. */
-function globalClassName(tw: TailwindSplit | undefined, classes: string[]): string {
-  if (!tw) return `{${jsString(classes.join(' '))}}`
-  const out: string[] = []
+function globalClassName(tw: TailwindSplit | undefined, classes: string[], always?: string): string {
+  if (!tw) return `{${jsString((always ? [always, ...classes] : classes).join(' '))}}`
+  const out: string[] = always ? [always] : []
   for (const name of new Set(classes)) {
     const utilities = tw.utilities.get(name)
     if (utilities) out.push(...utilities)
