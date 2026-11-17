@@ -2,7 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import type { ComponentDef } from '../../shared/components'
 import type { Frame } from '../../shared/types'
 import { useT } from '../lib/i18n'
-import { downloadReactZip, ReactExportError, type ReactExportBody, type ReactZipResult } from '../lib/reactExport'
+import {
+  downloadReactZip,
+  fetchReactFiles,
+  ReactExportError,
+  type ReactExportBody,
+  type ReactExportReport,
+  type ReactZipResult,
+} from '../lib/reactExport'
 import { setReactExportSettings, useReactExportSettings, type ReactStyling } from '../lib/reactExportSettings'
 import { Button } from './ui/button'
 import { Callout } from './ui/callout'
@@ -19,7 +26,14 @@ export type ReactExportScope = 'frame' | 'page' | 'components'
 type Phase =
   | { phase: 'choose' }
   | { phase: 'running' }
-  | { phase: 'done'; result: ReactZipResult }
+  | { phase: 'done'; result: ReactZipResult; body: ReactExportBody }
+  | { phase: 'failed'; message: string }
+
+/** The list of what did not carry over, asked for on demand after a zip: loading, shown or failed. */
+type Dropped =
+  | { phase: 'closed' }
+  | { phase: 'loading' }
+  | { phase: 'shown'; issues: ReactExportReport['issues'] }
   | { phase: 'failed'; message: string }
 
 /** The scope the dialog opens on: what is selected, else the page, else the components. */
@@ -44,6 +58,7 @@ export function ExportReactDialog({
   page,
   components,
   initialComponentIds,
+  initialScope,
   onClose,
 }: {
   canvasId: string
@@ -52,15 +67,20 @@ export function ExportReactDialog({
   components: ComponentDef[]
   /** the components ticked on opening; every one when not given */
   initialComponentIds?: string[]
+  /** the scope it opens on; the selection, else the page, else the components when not given */
+  initialScope?: ReactExportScope
   onClose: () => void
 }) {
   const t = useT()
   const settings = useReactExportSettings()
-  const [scope, setScope] = useState<ReactExportScope>(() => firstScope(frames.length, page?.frameCount ?? 0))
+  const [scope, setScope] = useState<ReactExportScope>(
+    () => initialScope ?? firstScope(frames.length, page?.frameCount ?? 0),
+  )
   const [checked, setChecked] = useState<Set<string>>(
     () => new Set(initialComponentIds ?? components.map((component) => component.id)),
   )
   const [state, setState] = useState<Phase>({ phase: 'choose' })
+  const [dropped, setDropped] = useState<Dropped>({ phase: 'closed' })
   /* the download carries on if the dialog is closed; only the dialog stops listening */
   const mounted = useRef(true)
   useEffect(() => {
@@ -90,12 +110,27 @@ export function ExportReactDialog({
   async function download() {
     if (!ready || running) return
     setState({ phase: 'running' })
+    setDropped({ phase: 'closed' })
+    const sent = body()
     try {
-      const result = await downloadReactZip(canvasId, body())
-      if (mounted.current) setState({ phase: 'done', result })
+      const result = await downloadReactZip(canvasId, sent)
+      if (mounted.current) setState({ phase: 'done', result, body: sent })
     } catch (err) {
       const message = err instanceof ReactExportError ? err.message : t('reactExport.failed')
       if (mounted.current) setState({ phase: 'failed', message })
+    }
+  }
+
+  /* the same scope again as data, for the report's list (the zip answer carries only the count) */
+  async function showDropped(sent: ReactExportBody) {
+    if (dropped.phase === 'shown') return setDropped({ phase: 'closed' })
+    setDropped({ phase: 'loading' })
+    try {
+      const { report } = await fetchReactFiles(canvasId, sent)
+      if (mounted.current) setDropped({ phase: 'shown', issues: report.issues })
+    } catch (err) {
+      const message = err instanceof ReactExportError ? err.message : t('reactExport.failed')
+      if (mounted.current) setDropped({ phase: 'failed', message })
     }
   }
 
@@ -131,6 +166,43 @@ export function ExportReactDialog({
               </span>
             </span>
           </Callout>
+          {(state.result.issueCount ?? 0) > 0 && (
+            <div className="mt-3">
+              <Button
+                variant="link"
+                size="inline"
+                disabled={dropped.phase === 'loading'}
+                onClick={() => void showDropped(state.body)}
+              >
+                {dropped.phase === 'loading'
+                  ? t('reactExport.issuesLoading')
+                  : dropped.phase === 'shown'
+                    ? t('reactExport.issuesHide')
+                    : t('reactExport.issuesSee')}
+              </Button>
+              {dropped.phase === 'shown' &&
+                (dropped.issues.length === 0 ? (
+                  <p className="mt-2 text-body text-ink-soft">{t('reactExport.issuesNone')}</p>
+                ) : (
+                  <ul
+                    aria-label={t('reactExport.issuesAria')}
+                    className="mt-2 max-h-48 list-none space-y-1.5 overflow-y-auto rounded-control bg-sub px-3 py-2 text-body text-ink-soft shadow-ring"
+                  >
+                    {dropped.issues.map((issue, index) => (
+                      <li key={index} className="break-words">
+                        <span className="text-ink">{issue.detail}</span>
+                        <span className="block font-mono text-caption text-ink-faint">{issue.file}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ))}
+              {dropped.phase === 'failed' && (
+                <p role="alert" className="mt-2 text-body text-accent-ink">
+                  {dropped.message}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <>
@@ -260,7 +332,13 @@ export function ExportReactDialog({
       <ModalActions>
         {state.phase === 'done' ? (
           <>
-            <Button variant="ghost" onClick={() => setState({ phase: 'choose' })}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setState({ phase: 'choose' })
+                setDropped({ phase: 'closed' })
+              }}
+            >
               {t('reactExport.again')}
             </Button>
             <Button variant="primary" onClick={onClose}>

@@ -243,3 +243,66 @@ it('explains a 413', async () => {
   await click(downloadButton(dialog))
   expect(dialog.querySelector('[role="alert"]')!.textContent).toMatch(/too large/i)
 })
+
+it('opens on the components scope with only the asked-for component ticked', async () => {
+  const dialog = await open({ initialScope: 'components', initialComponentIds: ['c2'] })
+  expect(pick(radios(dialog, 'What to export'), 'Components').getAttribute('aria-checked')).toBe('true')
+  const boxes = Array.from(dialog.querySelectorAll<HTMLInputElement>('[role="group"] input[type="checkbox"]'))
+  expect(boxes.map((box) => box.checked)).toEqual([false, true])
+})
+
+const seeLink = (dialog: Element) =>
+  Array.from(dialog.querySelectorAll('button')).find((b) =>
+    /See what did not carry over|Hide the list/.test(b.textContent ?? ''),
+  )
+
+it('lists what did not carry over from the same scope as json, and hides it again', async () => {
+  fetchMock.mockResolvedValueOnce(zipResponse({ 'X-Doop-Export-Issues': '2' }))
+  const dialog = await open()
+  await click(pick(radios(dialog, 'What to export'), 'This page'))
+  await click(pick(radios(dialog, 'Styling'), 'Tailwind'))
+  await click(downloadButton(dialog))
+
+  fetchMock.mockResolvedValueOnce(
+    Response.json({
+      files: [],
+      report: {
+        styling: 'tailwind',
+        components: [],
+        pages: [],
+        inlined: [],
+        issues: [
+          { kind: 'script', detail: 'A script was removed', file: 'src/pages/Home.tsx' },
+          { kind: 'css', detail: 'Keyframes stayed in the stylesheet', file: 'src/components/Card.tsx' },
+        ],
+      },
+    }),
+  )
+  await click(seeLink(dialog)!)
+
+  expect(requestBody()).toEqual({ pageId: 'page1', styling: 'tailwind', tokens: true, format: 'json' })
+  const list = dialog.querySelector('ul[aria-label="What did not carry over"]')!
+  expect(Array.from(list.querySelectorAll('li')).map((li) => li.textContent)).toEqual([
+    'A script was removedsrc/pages/Home.tsx',
+    'Keyframes stayed in the stylesheetsrc/components/Card.tsx',
+  ])
+
+  await click(seeLink(dialog)!)
+  expect(dialog.querySelector('ul[aria-label="What did not carry over"]')).toBeNull()
+})
+
+it('offers no list when the zip carried no issues or no count', async () => {
+  fetchMock.mockResolvedValueOnce(zipResponse({ 'X-Doop-Export-Issues': '0' }))
+  const dialog = await open()
+  await click(downloadButton(dialog))
+  expect(seeLink(dialog)).toBeUndefined()
+})
+
+it('says why the list could not be loaded', async () => {
+  fetchMock.mockResolvedValueOnce(zipResponse({ 'X-Doop-Export-Issues': '5' }))
+  const dialog = await open()
+  await click(downloadButton(dialog))
+  fetchMock.mockResolvedValueOnce(new Response('too big', { status: 413 }))
+  await click(seeLink(dialog)!)
+  expect(dialog.querySelector('[role="alert"]')!.textContent).toMatch(/too large/i)
+})

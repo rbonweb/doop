@@ -1,5 +1,6 @@
 import type { ComponentDef } from '../../shared/components'
 import { t } from './i18n'
+import { getLocale } from './i18n/locale'
 import { saveBlob } from './frameExport'
 import { getReactExportSettings, type ReactStyling } from './reactExportSettings'
 import { useStore } from './store'
@@ -120,11 +121,41 @@ export async function fetchReactFiles(canvasId: string, body: ReactExportBody): 
 }
 
 /** The component's own .tsx among an export's files: the report names it, else the one under src/components. */
-export function componentSource(result: ReactFilesResult, def: Pick<ComponentDef, 'id' | 'name'>): string | undefined {
+export function componentFile(
+  result: ReactFilesResult,
+  def: Pick<ComponentDef, 'id' | 'name'>,
+): ReactExportFile | undefined {
   const file = result.report.components.find((entry) => entry.id === def.id)?.file
   const own = file ? result.files.find((candidate) => candidate.path === file) : undefined
-  if (own) return own.content
-  return result.files.find((candidate) => /^src\/components\/[^/]+\.tsx$/.test(candidate.path))?.content
+  return own ?? result.files.find((candidate) => /^src\/components\/[^/]+\.tsx$/.test(candidate.path))
+}
+
+/** The relative files a copied .tsx imports (`./Card.module.css`, `./Button`, `../cx`), by the name they carry, in order and once each. Those are not on the clipboard. */
+export function localImports(source: string): string[] {
+  const found: string[] = []
+  for (const match of source.matchAll(/^\s*import\s+(?:[^'"\n]*?\s+from\s+)?['"](\.{1,2}\/[^'"\n]+)['"]/gm)) {
+    const name = match[1]?.split('/').pop()
+    if (name && !found.includes(name)) found.push(name)
+  }
+  return found
+}
+
+type ExportRequest = { componentIds: string[] }
+const exportRequests = new Set<(request: ExportRequest) => void>()
+
+/** Ask the canvas page for the Export to React dialog, scoped to these components. The page listens while it is open. */
+export function requestReactExport(componentIds: string[]): void {
+  exportRequests.forEach((listener) => listener({ componentIds }))
+}
+
+export function onReactExportRequest(listener: (request: ExportRequest) => void): () => void {
+  exportRequests.add(listener)
+  return () => exportRequests.delete(listener)
+}
+
+/** "Card.module.css, Button and cx" */
+function listNames(names: string[]): string {
+  return new Intl.ListFormat(getLocale(), { style: 'long', type: 'conjunction' }).format(names)
 }
 
 /** "Copy as React": one component's .tsx on the clipboard, in the styling last picked, reporting through the canvas toast. */
@@ -138,8 +169,8 @@ export async function copyComponentAsReact(canvasId: string, def: Pick<Component
   try {
     const { styling } = getReactExportSettings()
     const result = await fetchReactFiles(canvasId, { componentIds: [def.id], styling, tokens: false })
-    const source = componentSource(result, def)
-    if (source === undefined) {
+    const copied = componentFile(result, def)
+    if (!copied) {
       const mapped = result.report.components.find((entry) => entry.id === def.id)
       pushNotice(
         mapped?.importedFrom
@@ -148,8 +179,19 @@ export async function copyComponentAsReact(canvasId: string, def: Pick<Component
       )
       return
     }
-    await navigator.clipboard.writeText(source)
-    pushNotice(t('reactExport.copied', { name: def.name }))
+    await navigator.clipboard.writeText(copied.content)
+    /* the clipboard holds the component alone: say what it leans on that stayed behind */
+    const imports = localImports(copied.content)
+    if (imports.length === 0) {
+      pushNotice(t('reactExport.copied', { name: def.name }))
+      return
+    }
+    pushNotice(
+      t('reactExport.copiedImports', { file: copied.path.split('/').pop() ?? def.name, files: listNames(imports) }),
+      {
+        action: { label: t('reactExport.copiedExport'), run: () => requestReactExport([def.id]) },
+      },
+    )
   } catch (err) {
     pushNotice(err instanceof ReactExportError ? err.message : t('reactExport.copyFailed', { name: def.name }))
   }

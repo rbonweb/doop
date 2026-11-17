@@ -57,6 +57,7 @@ import { Onboarding } from '../components/Onboarding'
 import { AccessBanner } from '../components/AccessBanner'
 import { ShareModal } from '../components/ShareModal'
 import { ExportReactDialog } from '../components/ExportReactDialog'
+import { onReactExportRequest } from '../lib/reactExport'
 import { FrameExportModal } from '../components/FrameExportModal'
 import { AppIcon } from '../components/ui/brand-mark'
 import { activeComponents } from '../../shared/components'
@@ -355,7 +356,9 @@ export function CanvasPage({
     url.searchParams.delete('import')
     history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`)
   }, [])
-  const [reactExportOpen, setReactExportOpen] = useState(false)
+  /* `componentIds`: opened from a Copy as React toast, on the components scope with that one ticked */
+  const [reactExportOpen, setReactExportOpen] = useState<false | { componentIds?: string[] }>(false)
+  useEffect(() => onReactExportRequest(({ componentIds }) => setReactExportOpen({ componentIds })), [])
   const [showImport, setShowImport] = useState(!!ghInstallPass || !!ghInstallError || !!importRequested)
   const [showMobileActions, setShowMobileActions] = useState(false)
   const [showMobileLayers, setShowMobileLayers] = useState(false)
@@ -678,7 +681,7 @@ export function CanvasPage({
         setFindStep({ dir, at: Date.now() })
       },
       openExport,
-      openExportReact: () => setReactExportOpen(true),
+      openExportReact: () => setReactExportOpen({}),
       openImport: () => setShowImport(true),
       openVersionHistory: () => {
         const s = useStore.getState()
@@ -1498,7 +1501,15 @@ export function CanvasPage({
         />
       )}
       {reactExportOpen && reactExportProps && (
-        <ExportReactDialog canvasId={canvasId} {...reactExportProps} onClose={() => setReactExportOpen(false)} />
+        <ExportReactDialog
+          key={reactExportOpen.componentIds?.join(',') ?? ''}
+          canvasId={canvasId}
+          {...reactExportProps}
+          {...(reactExportOpen.componentIds
+            ? { initialScope: 'components' as const, initialComponentIds: reactExportOpen.componentIds }
+            : {})}
+          onClose={() => setReactExportOpen(false)}
+        />
       )}
       {showImport && editorReady && (
         <ImportModal
