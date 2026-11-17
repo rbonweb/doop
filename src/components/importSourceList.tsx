@@ -4,8 +4,12 @@ import type { ImportSource } from './ImportSources'
 import { t as translate, type Translate } from '@/lib/i18n'
 
 /** The sources the import picker offers, in order — the canvas page's modal
- *  and Home's Import button show the same list, so it lives once. */
-export function importSources(t: Translate = translate): ImportSource[] {
+ *  and Home's Import button show the same list, so it lives once. `components`
+ *  is false for a viewer: the Storybook and CLI cards write components. */
+export function importSources(
+  t: Translate = translate,
+  { components = true }: { components?: boolean } = {},
+): ImportSource[] {
   return [
     {
       id: 'website',
@@ -28,5 +32,22 @@ export function importSources(t: Translate = translate): ImportSource[] {
       blurb: t('panels.importGithubBlurb'),
       icon: <AppIcon brand="github" />,
     },
+    /* writing components needs the edit role: a viewer is never offered them */
+    ...(components
+      ? [
+          {
+            id: 'storybook',
+            title: t('componentImport.storybookTitle'),
+            blurb: t('componentImport.storybookBlurb'),
+            icon: <AppIcon brand="storybook" />,
+          },
+          {
+            id: 'cli',
+            title: t('componentImport.cliTitle'),
+            blurb: t('componentImport.cliBlurb'),
+            icon: <AppIcon brand="cli" />,
+          },
+        ]
+      : []),
   ]
 }

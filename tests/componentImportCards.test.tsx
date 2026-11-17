@@ -1,0 +1,312 @@
+// @vitest-environment happy-dom
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import type { Canvas } from '../shared/types'
+import type { ComponentDef } from '../shared/components'
+import { CliImportSection } from '../src/components/CliImportSection'
+import { importSources } from '../src/components/importSourceList'
+import { StorybookImportSection } from '../src/components/StorybookImportSection'
+import { Modal } from '../src/components/ui/modal'
+import { useStore } from '../src/lib/store'
+
+vi.mock('../src/lib/posthog', () => ({ posthog: { capture: vi.fn() } }))
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+const fetchMock = vi.fn<typeof fetch>()
+const onBack = vi.fn()
+const onUseCli = vi.fn()
+const onOpenPage = vi.fn()
+let container: HTMLDivElement
+let root: Root
+
+beforeEach(() => {
+  vi.stubGlobal('fetch', fetchMock)
+  fetchMock.mockReset()
+  onBack.mockReset()
+  onUseCli.mockReset()
+  onOpenPage.mockReset()
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  root = createRoot(container)
+})
+
+afterEach(() => {
+  act(() => root.unmount())
+  container.remove()
+  useStore.setState({ canvas: null })
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+async function show(node: React.ReactNode): Promise<Element> {
+  await act(async () => {
+    root.render(<Modal onClose={() => {}}>{node}</Modal>)
+  })
+  return document.querySelector('[role="dialog"]')!
+}
+
+const button = (dialog: Element, label: RegExp) =>
+  Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find((b) => label.test(b.textContent ?? ''))!
+
+async function click(element: HTMLElement) {
+  await act(async () => {
+    element.click()
+  })
+}
+
+async function type(input: HTMLInputElement, value: string) {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+/** An NDJSON answer the test feeds line by line, and that errors like fetch does when its request is aborted. */
+function stream(signal?: AbortSignal | null) {
+  const encoder = new TextEncoder()
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c
+    },
+  })
+  signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')))
+  return {
+    response: new Response(body, { headers: { 'Content-Type': 'application/x-ndjson' } }),
+    send: async (event: object) => {
+      await act(async () => {
+        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))
+      })
+    },
+    end: async () => {
+      await act(async () => {
+        controller.close()
+      })
+    },
+  }
+}
+
+function answerWith(make: (signal: AbortSignal | null | undefined) => Response | Promise<Response>) {
+  fetchMock.mockImplementation(async (_url, init) => make(init?.signal))
+}
+
+const sentBody = (call = -1): Record<string, unknown> =>
+  JSON.parse(String(fetchMock.mock.calls.at(call)![1]!.body)) as Record<string, unknown>
+
+const RESULT = {
+  created: [{ name: 'Button', id: 'c1' }],
+  updated: [{ name: 'Card', id: 'c2' }],
+  unchanged: [],
+  skipped: [{ name: 'Tooltip', reason: 'needs a portal' }],
+  tokens: { created: ['--brand'], skipped: [] },
+  pageId: 'page-imported',
+  issues: [{ component: 'Card', code: 'css', message: 'a hover rule was dropped' }],
+}
+
+async function startStorybook() {
+  const dialog = await show(
+    <StorybookImportSection canvasId="canvas" onBack={onBack} onUseCli={onUseCli} onOpenPage={onOpenPage} />,
+  )
+  return dialog
+}
+
+it('storybook idle: asks for an address and package, and Preview waits for the address', async () => {
+  const dialog = await startStorybook()
+  expect(dialog.textContent).toContain('Import from Storybook')
+  expect(dialog.textContent).toContain('Package name')
+  const preview = button(dialog, /^Preview$/)
+  expect(preview.disabled).toBe(true)
+  await type(dialog.querySelector('#storybook-url')!, 'storybook.acme.com')
+  expect(button(dialog, /^Preview$/).disabled).toBe(false)
+  expect(fetchMock).not.toHaveBeenCalled()
+})
+
+it('storybook preview: a dry run lists what would be created, updated and skipped, then Import runs it', async () => {
+  const dryRun = stream()
+  answerWith(() => dryRun.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'storybook.acme.com')
+  await type(dialog.querySelector('#storybook-package')!, '@acme/ui')
+  await click(button(dialog, /^Preview$/))
+  expect(fetchMock.mock.calls[0]![0]).toBe('/api/canvases/canvas/import/storybook')
+  expect(sentBody()).toEqual({ url: 'https://storybook.acme.com', package: '@acme/ui', dryRun: true })
+  expect(dialog.textContent).toContain('Reading Storybook')
+
+  await dryRun.send({ type: 'plan', components: [{ name: 'Button', stories: 3, renders: 6 }], renders: 6 })
+  await dryRun.send({ type: 'result', result: RESULT })
+  await dryRun.end()
+  expect(dialog.textContent).toContain('What would change')
+  expect(dialog.textContent).toContain('1 component would be created')
+  expect(dialog.textContent).toContain('1 component would be updated')
+  expect(dialog.textContent).toContain('1 component would be skipped')
+  expect(dialog.textContent).toContain('Tooltip: needs a portal')
+  expect(dialog.textContent).toContain('6 renders to read')
+
+  const real = stream()
+  answerWith(() => real.response)
+  await click(button(dialog, /^Import$/))
+  expect(sentBody()).toEqual({ url: 'https://storybook.acme.com', package: '@acme/ui' })
+})
+
+it('storybook running then done: shows rendered of total and the component, then the result and the page button', async () => {
+  const run = stream()
+  answerWith(() => {
+    return run.response
+  })
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  // a preview with something to import, so Import is enabled
+  const dry = stream()
+  answerWith(() => dry.response)
+  await click(button(dialog, /^Preview$/))
+  await dry.send({ type: 'result', result: RESULT })
+  await dry.end()
+  answerWith(() => run.response)
+  await click(button(dialog, /^Import$/))
+
+  expect(dialog.textContent).toContain('Starting')
+  await run.send({ type: 'plan', components: [{ name: 'Button', stories: 2, renders: 5 }], renders: 5 })
+  await run.send({ type: 'progress', rendered: 2, total: 5, component: 'Button' })
+  expect(dialog.textContent).toContain('Rendered 2 of 5')
+  expect(dialog.textContent).toContain('Now reading Button')
+  expect(dialog.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('2')
+
+  await run.send({ type: 'result', result: RESULT, issues: RESULT.issues })
+  await run.end()
+  expect(dialog.textContent).toContain('Import finished')
+  expect(dialog.textContent).toContain('1 created')
+  expect(dialog.textContent).toContain('1 updated')
+  expect(dialog.textContent).toContain('1 token added')
+  expect(dialog.textContent).toContain('Card: a hover rule was dropped')
+  await click(button(dialog, /Open Imported components/))
+  expect(onOpenPage).toHaveBeenCalledWith('page-imported')
+})
+
+it('storybook running: Cancel aborts the request and goes back to the form', async () => {
+  const dry = stream()
+  answerWith(() => dry.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  await dry.send({ type: 'result', result: RESULT })
+  await dry.end()
+
+  let signal: AbortSignal | null | undefined
+  answerWith((s) => {
+    signal = s
+    return stream(s).response
+  })
+  await click(button(dialog, /^Import$/))
+  expect(button(dialog, /^Cancel$/)).toBeTruthy()
+  await click(button(dialog, /^Cancel$/))
+  expect(signal?.aborted).toBe(true)
+  expect(dialog.textContent).toContain('Import cancelled.')
+  expect(dialog.querySelector<HTMLInputElement>('#storybook-url')!.value).toBe('https://storybook.acme.com')
+})
+
+it('storybook refused: a private Storybook says why and offers the CLI card', async () => {
+  const run = stream()
+  answerWith(() => run.response)
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://internal.acme.com')
+  await click(button(dialog, /^Preview$/))
+  await run.send({ type: 'error', code: 'private', message: 'redirected to a sign-in page' })
+  await run.end()
+  expect(dialog.textContent).toContain('Doop could not open that Storybook')
+  expect(dialog.textContent).toContain('behind a login')
+  await click(button(dialog, /Use the command line instead/))
+  expect(onUseCli).toHaveBeenCalledTimes(1)
+  expect(button(dialog, /^Try again$/)).toBeTruthy()
+})
+
+it('storybook refused before streaming: a 4xx JSON error is shown as it is', async () => {
+  answerWith(() => Response.json({ error: 'at most 3 imports an hour' }, { status: 403 }))
+  const dialog = await startStorybook()
+  await type(dialog.querySelector('#storybook-url')!, 'https://storybook.acme.com')
+  await click(button(dialog, /^Preview$/))
+  expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('at most 3 imports an hour')
+})
+
+const TICKET = {
+  upload_url: 'https://doop.test/import/tok',
+  expires_at: '',
+  command: 'npx doop-import --storybook ./storybook-static --ticket https://doop.test/import/tok',
+  curl: 'curl -T bundle.json https://doop.test/import/tok',
+}
+
+const component = (id: string, rev = 1): ComponentDef =>
+  ({ id, name: id, rev, props: [], slots: [], history: [] }) as unknown as ComponentDef
+
+function openCanvas(components: ComponentDef[]) {
+  useStore.setState({ canvas: { id: 'canvas', components } as unknown as Canvas })
+}
+
+it('cli: mints a ticket when opened and shows the command, its expiry and the agent line', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  answerWith(() => Response.json({ ...TICKET, expires_at: new Date(Date.now() + 15 * 60_000).toISOString() }))
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  expect(fetchMock.mock.calls[0]![0]).toBe('/api/canvases/canvas/component-import/ticket')
+  expect(fetchMock.mock.calls[0]![1]!.method).toBe('POST')
+  expect(dialog.querySelector('[data-slot="code-block"]')?.textContent).toContain(TICKET.command)
+  expect(dialog.querySelector('[data-slot="cli-expiry"]')?.textContent).toBe('Works once. Expires in 15 minutes.')
+  expect(dialog.textContent).toContain('--storybook http://localhost:6006')
+  expect(dialog.textContent).toContain('--package @acme/ui')
+  expect(dialog.textContent).toContain('Ask your agent to import your components')
+  expect(button(dialog, /New command/)).toBeUndefined()
+})
+
+it('cli: the command lapses at its expiry and "New command" mints another', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  answerWith(() => Response.json({ ...TICKET, expires_at: new Date(Date.now() + 90_000).toISOString() }))
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  expect(dialog.querySelector('[data-slot="cli-expiry"]')?.textContent).toContain('in 2 minutes')
+  /* the label re-renders on the minute, then once more as the ticket lapses */
+  await act(async () => {
+    vi.advanceTimersByTime(31_000)
+  })
+  expect(dialog.querySelector('[data-slot="cli-expiry"]')?.textContent).toContain('in 1 minute')
+  await act(async () => {
+    vi.advanceTimersByTime(60_000)
+  })
+  expect(dialog.querySelector('[data-slot="cli-expiry"]')?.textContent).toBe('This command has expired.')
+  await click(button(dialog, /New command/))
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(dialog.querySelector('[data-slot="cli-expiry"]')?.textContent).toContain('Works once')
+})
+
+it('cli: says so when a command cannot be made, and offers another try', async () => {
+  answerWith(() => Response.json({ error: 'too many import commands this hour' }, { status: 429 }))
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('too many import commands this hour')
+  answerWith(() => Response.json({ ...TICKET, expires_at: new Date(Date.now() + 60_000 * 15).toISOString() }))
+  await click(button(dialog, /New command/))
+  expect(dialog.querySelector('[data-slot="code-block"]')?.textContent).toContain(TICKET.command)
+})
+
+it('cli: components arriving over the room show as landed, with a button to open the page', async () => {
+  openCanvas([component('old')])
+  answerWith(() => Response.json({ ...TICKET, expires_at: new Date(Date.now() + 15 * 60_000).toISOString() }))
+  const dialog = await show(<CliImportSection canvasId="canvas" onBack={onBack} onOpenPage={onOpenPage} />)
+  expect(dialog.textContent).not.toContain('arrived')
+  await act(async () => {
+    openCanvas([component('old'), component('new-1'), component('new-2')])
+  })
+  expect(dialog.textContent).toContain('2 components arrived')
+  await click(button(dialog, /Open Imported components/))
+  expect(onOpenPage).toHaveBeenCalledWith(null)
+  // an update to a component that was already there counts too
+  await act(async () => {
+    openCanvas([component('old', 2), component('new-1'), component('new-2')])
+  })
+  expect(dialog.textContent).toContain('3 components arrived')
+})
+
+it('the picker lists both cards for an editor and neither for a viewer', () => {
+  const ids = (components: boolean) => importSources(undefined, { components }).map((s) => s.id)
+  expect(ids(true)).toEqual(expect.arrayContaining(['storybook', 'cli']))
+  expect(ids(false)).not.toContain('storybook')
+  expect(ids(false)).not.toContain('cli')
+  expect(importSources().map((s) => s.id)).toEqual(expect.arrayContaining(['website', 'github', 'storybook', 'cli']))
+})

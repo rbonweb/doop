@@ -65,6 +65,9 @@ import { canvasPages, pageFrames } from '../../shared/pages'
 import type { Frame } from '../../shared/types'
 import { ImportStepFooter, ImportStepHeader, SourcePicker } from '../components/ImportSources'
 import { importSources } from '../components/importSourceList'
+import { StorybookImportSection } from '../components/StorybookImportSection'
+import { CliImportSection } from '../components/CliImportSection'
+import { openImportedComponents } from '../lib/componentImport'
 import { PresentMode } from '../components/PresentMode'
 import { CommandPalette } from '../components/CommandPalette'
 import { MainMenu } from '../components/MainMenu'
@@ -1588,6 +1591,8 @@ function ImportModal({
   /* which source's screen is open — null is the picker; landing back from
      GitHub's install flow jumps straight to that screen */
   const t = useT()
+  /* the component cards write; the modal only opens for editors, and this keeps a role change honest */
+  const canEdit = useCanEdit()
   const [source, setSource] = useState<string | null>(installPass || installError ? 'github' : initialSource)
   const [url, setUrl] = useState('')
   const [wholeSite, setWholeSite] = useState(false)
@@ -1602,6 +1607,12 @@ function ImportModal({
   const [repoSelected, setRepoSelected] = useState<Set<string>>(new Set())
   const [extractSystem, setExtractSystem] = useState(true)
   const [showPages, setShowPages] = useState(false)
+
+  /** Closes the picker on the Imported components page, with the Components tab open. */
+  function openComponents(pageId: string | null) {
+    openImportedComponents(canvasId, pageId)
+    onClose()
+  }
 
   function errorMessage(caught: unknown, fallback: string) {
     if (caught instanceof ApiError) return String(caught.body.error ?? fallback)
@@ -1899,7 +1910,7 @@ function ImportModal({
         ) : !discovery ? (
           <>
             {source === null ? (
-              <SourcePicker onPick={setSource} sources={importSources()} />
+              <SourcePicker onPick={setSource} sources={importSources(t, { components: canEdit })} />
             ) : source === 'website' ? (
               <>
                 <ImportStepHeader
@@ -1965,6 +1976,15 @@ function ImportModal({
               </>
             ) : source === 'liveapp' ? (
               <SyncKeysSection canvasId={canvasId} onBack={() => setSource(null)} />
+            ) : source === 'storybook' && canEdit ? (
+              <StorybookImportSection
+                canvasId={canvasId}
+                onBack={() => setSource(null)}
+                onUseCli={() => setSource('cli')}
+                onOpenPage={openComponents}
+              />
+            ) : source === 'cli' && canEdit ? (
+              <CliImportSection canvasId={canvasId} onBack={() => setSource(null)} onOpenPage={openComponents} />
             ) : source === 'github' ? (
               <GithubSection
                 canvasId={canvasId}

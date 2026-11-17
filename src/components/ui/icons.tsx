@@ -103,6 +103,7 @@ import {
   Presentation,
   Puzzle,
   RadioTower,
+  SquareTerminal,
   RefreshCw,
   RotateCcw,
   Route,
@@ -370,6 +371,7 @@ export const CircleIcon = icon(Circle)
 export const WebIcon = icon(Globe)
 /** a live app broadcasting its screens — the design-sync import */
 export const RadioTowerIcon = icon(RadioTower)
+export const TerminalIcon = icon(SquareTerminal)
 export const MinusIcon = icon(Minus)
 /** zoom to fit: the four corners of the viewport */
 /** sharing a canvas: the box with the arrow leaving it upward */

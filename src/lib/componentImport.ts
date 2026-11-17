@@ -1,0 +1,177 @@
+import { ApiError, req } from './api'
+import { getLocale } from './i18n/locale'
+import { useStore } from './store'
+import { canvasPages } from '../../shared/pages'
+
+/** The page the importer puts every main on (`IMPORT_PAGE` in server/componentBundleImport.ts). */
+export const IMPORT_PAGE_NAME = 'Imported components'
+
+/** What the importer answers, for the dry run and the real run alike (contract: "Result"). */
+export interface ImportResult {
+  created: { name: string; id: string }[]
+  updated: { name: string; id: string }[]
+  unchanged: { name: string; id: string }[]
+  skipped: { name: string; reason: string }[]
+  tokens: { created: string[]; skipped: string[] }
+  pageId: string | null
+  issues: { component?: string; code: string; message: string }[]
+}
+
+export interface PlannedComponent {
+  name: string
+  group?: string
+  stories: number
+  renders: number
+}
+
+/** Why the server stopped a Storybook import (contract: "Storybook REST progress"). */
+export type StorybookErrorCode = 'private' | 'unreachable' | 'too_many' | 'busy' | 'invalid'
+
+export type StorybookEvent =
+  | { type: 'plan'; components: PlannedComponent[]; renders: number }
+  | { type: 'progress'; rendered: number; total: number; component?: string }
+  | { type: 'result'; result: ImportResult; issues?: ImportResult['issues'] }
+  | { type: 'error'; code: StorybookErrorCode; message: string }
+
+export interface StorybookImportInput {
+  url: string
+  package?: string
+  dryRun?: boolean
+}
+
+const ERROR_CODES: readonly string[] = ['private', 'unreachable', 'too_many', 'busy', 'invalid']
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
+
+/** One parsed line, or null for a shape this client does not know (a newer server may add events). */
+export function parseStorybookEvent(line: string): StorybookEvent | null {
+  let value: unknown
+  try {
+    value = JSON.parse(line)
+  } catch {
+    return null
+  }
+  if (!isRecord(value)) return null
+  if (value.type === 'plan' && Array.isArray(value.components)) {
+    return {
+      type: 'plan',
+      components: value.components.filter(isRecord).map((c) => ({
+        name: String(c.name ?? ''),
+        group: typeof c.group === 'string' ? c.group : undefined,
+        stories: Number(c.stories) || 0,
+        renders: Number(c.renders) || 0,
+      })),
+      renders: Number(value.renders) || 0,
+    }
+  }
+  if (value.type === 'progress') {
+    return {
+      type: 'progress',
+      rendered: Number(value.rendered) || 0,
+      total: Number(value.total) || 0,
+      component: typeof value.component === 'string' ? value.component : undefined,
+    }
+  }
+  if (value.type === 'result' && isRecord(value.result)) {
+    const result = value.result as Partial<ImportResult>
+    return {
+      type: 'result',
+      result: {
+        created: result.created ?? [],
+        updated: result.updated ?? [],
+        unchanged: result.unchanged ?? [],
+        skipped: result.skipped ?? [],
+        tokens: result.tokens ?? { created: [], skipped: [] },
+        pageId: result.pageId ?? null,
+        issues: result.issues ?? [],
+      },
+      issues: Array.isArray(value.issues) ? (value.issues as ImportResult['issues']) : undefined,
+    }
+  }
+  if (value.type === 'error') {
+    const code = String(value.code)
+    return {
+      type: 'error',
+      code: (ERROR_CODES.includes(code) ? code : 'invalid') as StorybookErrorCode,
+      message: String(value.message ?? ''),
+    }
+  }
+  return null
+}
+
+/**
+ * Runs a Storybook import and hands every NDJSON line to `onEvent` as it arrives.
+ * Resolves with the last event (a result or an error); aborting `signal` closes the
+ * request, which is what stops the import on the server. A refusal before streaming
+ * starts is an `ApiError`, as everywhere else.
+ */
+export async function streamStorybookImport(
+  canvasId: string,
+  input: StorybookImportInput,
+  signal: AbortSignal,
+  onEvent: (event: StorybookEvent) => void,
+): Promise<StorybookEvent | null> {
+  const res = await fetch(`/api/canvases/${canvasId}/import/storybook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: input.url, package: input.package || undefined, dryRun: input.dryRun || undefined }),
+    signal,
+  })
+  if (!res.ok) throw new ApiError(res.status, await res.text())
+  if (!res.body) return null
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffered = ''
+  let last: StorybookEvent | null = null
+  const take = (line: string) => {
+    if (!line.trim()) return
+    const event = parseStorybookEvent(line)
+    if (!event) return
+    last = event
+    onEvent(event)
+  }
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffered += decoder.decode(value, { stream: true })
+    const lines = buffered.split('\n')
+    buffered = lines.pop() ?? ''
+    lines.forEach(take)
+  }
+  take(buffered + decoder.decode())
+  return last
+}
+
+/** The answer of `POST /api/canvases/:id/component-import/ticket`. */
+export interface ImportTicket {
+  upload_url: string
+  expires_at: string
+  command: string
+  curl: string
+}
+
+export const createImportTicket = (canvasId: string) =>
+  req<ImportTicket>(`/api/canvases/${canvasId}/component-import/ticket`, { method: 'POST' })
+
+/** The page the importer made, on the open canvas: the result's id, else the page by its name. */
+export function importedPageId(canvasId: string, pageId?: string | null): string | null {
+  const canvas = useStore.getState().canvas
+  if (!canvas || canvas.id !== canvasId) return null
+  const pages = canvasPages(canvas)
+  return pages.find((p) => p.id === pageId)?.id ?? pages.find((p) => p.name === IMPORT_PAGE_NAME)?.id ?? null
+}
+
+/** Shows the imported mains: switches to their page and opens the Components tab. */
+export function openImportedComponents(canvasId: string, pageId?: string | null): void {
+  const id = importedPageId(canvasId, pageId)
+  const store = useStore.getState()
+  if (id) store.setActivePage(id)
+  store.setLayersTab('components')
+}
+
+/** "in 12 minutes", "in 40 seconds", from now to `at` (ms). */
+export function relativeIn(at: number, now: number, locale: string = getLocale()): string {
+  const seconds = Math.max(0, Math.round((at - now) / 1000))
+  const format = new Intl.RelativeTimeFormat(locale, { numeric: 'always', style: 'long' })
+  return seconds >= 60 ? format.format(Math.round(seconds / 60), 'minute') : format.format(seconds, 'second')
+}
