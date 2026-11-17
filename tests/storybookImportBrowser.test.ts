@@ -110,6 +110,8 @@ const PHASES: Record<string, { sequence: string[]; errorDisplay?: boolean }> = {
     sequence: ['preparing', 'loading', 'rendering', 'completing', 'completed', 'afterEach', 'finished'],
   },
   'phases-broken--default': { sequence: ['preparing', 'loading', 'rendering', 'errored'] },
+  /* Grafana's stories register a mock service worker, which the hardened page may not start: Storybook shows that as an error display */
+  'phases-msw--default': { sequence: ['preparing', 'loading', 'rendering', 'errored'], errorDisplay: true },
   'phases-broken10--default': {
     sequence: ['preparing', 'loading', 'rendering', 'errored', 'finished'],
     errorDisplay: true,
@@ -125,7 +127,9 @@ function phasesPage(id: string): string {
   var id = ${JSON.stringify(id)}
   var render = { phase: sequence[0], story: { id: id, argTypes: {}, initialArgs: {}, component: { displayName: 'Phased' } } }
   window.__STORYBOOK_PREVIEW__ = { currentRender: render }
-  document.getElementById('storybook-root').innerHTML = '<button class="btn">Go</button>'
+  document.getElementById('storybook-root').innerHTML = id === 'phases-msw--default'
+    ? '<pre>[MSW] Failed to register the Service Worker:\\n\\nThe component failed to render properly</pre>'
+    : '<button class="btn">Go</button>'
   var step = 0
   var timer = setInterval(function () {
     step++
@@ -626,8 +630,11 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     expect(bundle.components.map((component) => component.name).sort()).toEqual(['V10', 'V7', 'V8', 'V9'])
     expect(Date.now() - started).toBeLessThan(STORYBOOK_LIMITS.renderMs)
     const failed = issues.filter((issue) => issue.code === 'story_failed').map((issue) => issue.component)
-    expect(failed.sort()).toEqual(['Broken', 'Broken10'])
-    expect(issues.map((issue) => issue.message).join('\n')).toContain('Storybook shows an error for this story')
+    expect(failed.sort()).toEqual(['Broken', 'Broken10', 'Msw'])
+    expect(issues.find((issue) => issue.component === 'Msw')?.message).toContain('needs a service worker')
+    expect(issues.find((issue) => issue.component === 'Broken')?.message).toContain(
+      'Storybook shows an error for this story',
+    )
   })
 
   it('stops the whole import when a story page answers 403', async () => {

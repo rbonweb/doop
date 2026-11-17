@@ -3,12 +3,14 @@ import {
   buildComponentBundle,
   KnownRenderError,
   type BundleResult,
+  type PlanInfo,
   type PlannedComponent,
+  plannedList,
   type StoryPage,
 } from '../shared/storybook/bundle.ts'
 import { parseStorybookIndex, type StoryEntry } from '../shared/storybook/index.ts'
 import { probeAttribute } from '../shared/storybook/probe.ts'
-import { groupStories, STORYBOOK_LIMITS, storybookBasePath } from '../shared/storybook/plan.ts'
+import { groupStories, MAX_PLANNED_COMPONENTS, STORYBOOK_LIMITS, storybookBasePath } from '../shared/storybook/plan.ts'
 import { env } from './env.ts'
 import { fetchPinnedPublicUrl, guardPublicPageRequests, parsePublicHttpUrl } from './publicUrl.ts'
 import { openIsolatedPage } from './screenshot.ts'
@@ -73,7 +75,7 @@ export interface StorybookImportDeps {
 
 export interface StorybookImportOptions {
   /** the components the import will render, as soon as the index is read */
-  onPlan?: (groups: PlannedComponent[]) => void
+  onPlan?: (components: PlannedComponent[], info: PlanInfo) => void
   /** after each render, with what is planned so far */
   onRender?: (event: { rendered: number; total: number; component: string }) => void
   /** the npm package the components are imported from in code, "@acme/ui" */
@@ -303,7 +305,8 @@ async function openStoryPage(
           .catch(() => {
             throw new KnownRenderError('The story did not finish rendering in time')
           })
-        return (await handle.jsonValue()) === 'error' ? 'error' : 'ready'
+        const verdict = await handle.jsonValue()
+        return verdict === 'error' || verdict === 'needs_worker' ? verdict : 'ready'
       },
       async readMeta(probe, storyId) {
         /* a plain Runtime.evaluate of an expression: it needs nothing from the page's builtins */
@@ -455,7 +458,11 @@ export async function storybookPlan(
   options: Pick<StorybookImportOptions, 'include' | 'signal'> = {},
   rawDeps: StorybookImportDeps = {},
 ): Promise<{
-  components: (PlannedComponent & { story: string })[]
+  /** every component the include selects, up to MAX_PLANNED_COMPONENTS */
+  components: PlannedComponent[]
+  info: PlanInfo
+  /** what an import takes of them, with each one's default story */
+  importable: (PlannedComponent & { story: string })[]
   issues: { code: string; message: string }[]
   baseUrl: string
 }> {
@@ -478,7 +485,13 @@ export async function storybookPlan(
   )
   const grouped = groupStories(index.entries, { include: options.include })
   return {
-    components: grouped.groups.map((group) => ({
+    components: plannedList(grouped.candidates),
+    info: {
+      total: grouped.candidates.length,
+      capped: grouped.candidates.length > MAX_PLANNED_COMPONENTS,
+      importing: grouped.groups.length,
+    },
+    importable: grouped.groups.map((group) => ({
       name: group.name,
       group: group.title,
       stories: group.stories.length,

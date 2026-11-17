@@ -157,6 +157,9 @@ function optionSource(argType: Dict): unknown {
   return type ? own(type, 'value') : undefined
 }
 
+/** How many skipped controls an issue names. */
+const MAX_DROPPED_NAMES = 12
+
 /** `argTypes` and `initialArgs` of one story to props. `argTypes` may hold anything a page put there; at most MAX_ARG_TYPES entries are looked at and MAX_PROPS kept. */
 export function readArgTypes(argTypes: unknown, initialArgs: unknown): ReadArgTypes {
   const issues: StorybookIssue[] = []
@@ -166,8 +169,10 @@ export function readArgTypes(argTypes: unknown, initialArgs: unknown): ReadArgTy
   const props: ArgProp[] = []
   const names = new Set<string>()
   const dropped: string[] = []
-  const drop = (arg: string, reason: string) => {
-    if (dropped.length < 20) dropped.push(`${arg.slice(0, 40)}: ${reason}`)
+  let droppedCount = 0
+  const drop = (arg: string, _reason: string) => {
+    droppedCount++
+    if (dropped.length < MAX_DROPPED_NAMES) dropped.push(arg.slice(0, 40))
   }
   let looked = 0
   let truncated = false
@@ -239,11 +244,11 @@ export function readArgTypes(argTypes: unknown, initialArgs: unknown): ReadArgTy
     names.add(name)
     props.push(prop)
   }
-  if (truncated) dropped.unshift(`only the first ${MAX_ARG_TYPES} argTypes are read`)
-  if (dropped.length) {
+  if (droppedCount) {
+    const more = droppedCount - dropped.length
     issues.push({
       code: 'argtypes_dropped',
-      message: `Some Storybook controls were not turned into props (${dropped.join('; ')})`,
+      message: `${droppedCount} ${droppedCount === 1 ? 'prop' : 'props'} skipped: ${dropped.join(', ')}${more > 0 ? `, and ${more} more` : ''}${truncated ? `; only the first ${MAX_ARG_TYPES} argTypes are read` : ''}`,
     })
   }
   return { props, issues }

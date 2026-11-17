@@ -42,8 +42,37 @@ describe('parseStorybookIndex', () => {
       name: 'Primary',
       type: 'story',
       tags: ['dev', 'autodocs'],
+      importPath: './b.tsx',
     })
     expect(issues).toEqual([])
+  })
+
+  it('keeps the story file and the component file as plain bounded text, nothing else', () => {
+    const { entries } = parseStorybookIndex({
+      v: 5,
+      entries: {
+        'a--x': {
+          id: 'a--x',
+          title: 'A',
+          name: 'X',
+          type: 'story',
+          importPath: './a.stories.tsx',
+          componentPath: './a.tsx',
+        },
+        'b--x': {
+          id: 'b--x',
+          title: 'B',
+          name: 'X',
+          type: 'story',
+          importPath: { evil: 1 },
+          componentPath: 'x'.repeat(301),
+        },
+      },
+    })
+    expect(entries.map((entry) => [entry.importPath, entry.componentPath])).toEqual([
+      ['./a.stories.tsx', './a.tsx'],
+      [undefined, undefined],
+    ])
   })
 
   it('reads index.json v4', () => {
@@ -59,7 +88,9 @@ describe('parseStorybookIndex', () => {
         'card--docs': { id: 'card--docs', kind: 'Card', story: 'Docs', parameters: { docsOnly: true } },
       },
     })
-    expect(entries).toEqual([{ id: 'card--basic', title: 'Card', name: 'Basic', type: 'story', tags: [] }])
+    expect(entries).toEqual([
+      { id: 'card--basic', title: 'Card', name: 'Basic', type: 'story', tags: [], importPath: './c.tsx' },
+    ])
     expect(issues).toEqual([])
   })
 

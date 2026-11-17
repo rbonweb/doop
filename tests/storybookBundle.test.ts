@@ -43,7 +43,10 @@ function shot(overrides: Partial<CapturedStory> = {}): CapturedStory {
 }
 
 /** A page that renders every story as one button with a tone enum, and counts renders. */
-function fakePage(log: string[], options: { fail?: (url: string) => boolean } = {}): StoryPage {
+function fakePage(
+  log: string[],
+  options: { fail?: (url: string) => boolean; withoutControls?: (storyId: string) => boolean } = {},
+): StoryPage {
   let url = ''
   return {
     installProbe: async () => {},
@@ -52,15 +55,17 @@ function fakePage(log: string[], options: { fail?: (url: string) => boolean } = 
       log.push(next)
     },
     waitForState: async () => (options.fail?.(url) ? 'error' : 'ready'),
-    readMeta: async () =>
-      JSON.stringify({
-        argTypes: {
-          tone: { control: 'select', options: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'] },
-          on: { control: 'boolean' },
-        },
-        initialArgs: { tone: 'a' },
-        displayName: 'MyButton',
-      }),
+    readMeta: async (_probe, storyId) =>
+      options.withoutControls?.(String(storyId))
+        ? JSON.stringify({ argTypes: {}, initialArgs: {} })
+        : JSON.stringify({
+            argTypes: {
+              tone: { control: 'select', options: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'] },
+              on: { control: 'boolean' },
+            },
+            initialArgs: { tone: 'a' },
+            displayName: 'MyButton',
+          }),
     evaluateSource: async () => undefined,
     evaluate: (async (fn: unknown) => {
       if (fn === settleStory) return undefined
@@ -179,6 +184,25 @@ describe('buildComponentBundle', () => {
     expect(result.issues.map((issue) => issue.code)).toContain('import_timeout')
   })
 
+  it('takes the controls from a Playground when the default story has none, and varies that story', async () => {
+    const log: string[] = []
+    const entries = [entry('Kit/Btn', 'Default'), entry('Kit/Btn/Features', 'Playground')]
+    const result = await buildComponentBundle({
+      entries: entries.map((story) => ({ ...story, title: story.title.replace('/Features', '') })),
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withPage(log, { withoutControls: (id) => id === 'kit-btn--default' }),
+    })
+    const [component] = result.bundle.components
+    expect(component?.props?.map((prop) => prop.name)).toEqual(['tone', 'on'])
+    expect(Object.keys(component?.variants ?? {})).toContain('tone')
+    /* the resting look is the default story's; the variants were rendered from the Playground */
+    expect(component?.code?.origin?.storyId).toBe('kit-btn--default')
+    const variantUrls = log.filter((url) => url.includes('args='))
+    expect(variantUrls.length).toBeGreaterThan(0)
+    for (const url of variantUrls) expect(url).toContain(`id=${entries[1]!.id}`)
+  })
+
   it('leaves a failing story out and throws when nothing imports', async () => {
     const log: string[] = []
     const some = await buildComponentBundle({
@@ -188,7 +212,13 @@ describe('buildComponentBundle', () => {
       withPage: withPage(log, { fail: (url) => url.includes('a-bad') }),
     })
     expect(some.bundle.components.map((component) => component.name)).toEqual(['Good'])
-    expect(some.issues).toContainEqual(expect.objectContaining({ component: 'Bad', code: 'story_failed' }))
+    expect(some.issues).toContainEqual(
+      expect.objectContaining({
+        component: 'Bad',
+        code: 'story_failed',
+        message: expect.stringMatching(/^Bad: the default story/),
+      }),
+    )
     await expect(
       buildComponentBundle({
         entries: [entry('A/Bad')],

@@ -234,6 +234,24 @@ export function withoutTokenVariables(css: string, tokens: ReadonlySet<string>):
   return serializeNodes(prune(parseCss(css)))
 }
 
+const VAR_REF = /var\(\s*(--[\w-]+)/g
+
+function varRefs(text: string): string[] {
+  return [...text.matchAll(VAR_REF)].map((match) => match[1]!)
+}
+
+/** Every custom property the components (html and css, variants too) and the page's own rules outside :root use. */
+function referencedVariables(bundle: ComponentBundle, sharedCss: string): Set<string> {
+  const names = new Set<string>(varRefs(sharedCss.replace(/:root\s*\{[^}]*\}/g, '')))
+  for (const component of bundle.components) {
+    for (const text of [component.html, component.css ?? '']) for (const name of varRefs(text)) names.add(name)
+    for (const values of Object.values(component.variants ?? {}))
+      for (const variant of Object.values(values))
+        for (const text of [variant.html ?? '', variant.css ?? '']) for (const name of varRefs(text)) names.add(name)
+  }
+  return names
+}
+
 function tokenCandidates(bundle: ComponentBundle, sharedCss: string, issues: ImportIssue[]): TokenCandidate[] {
   const found = new Map<string, TokenCandidate>()
   const add = (name: string, value: string, type: TokenType | undefined, explicit: boolean) => {
@@ -247,8 +265,22 @@ function tokenCandidates(bundle: ComponentBundle, sharedCss: string, issues: Imp
     if (known && !explicit) return
     found.set(token, { name: token, value, type: type ?? guessTokenType(token, value) })
   }
-  if (sharedCss)
-    for (const variable of rootVariables(parseCss(sharedCss))) add(variable.name, variable.value, undefined, false)
+  if (sharedCss) {
+    /* a captured page's :root holds every variable of its design system, used or not: only the ones the components reach (through var() chains) become tokens; a bundle an agent wrote says what it wants */
+    const captured = bundle.source.kind === 'storybook' || bundle.source.kind === 'cli'
+    const reached = captured ? referencedVariables(bundle, sharedCss) : null
+    const variables = rootVariables(parseCss(sharedCss))
+    const wanted = new Set<string>()
+    const byName = new Map(variables.map((variable) => [variable.name, variable.value]))
+    const visit = (name: string) => {
+      if (wanted.has(name) || !byName.has(name)) return
+      wanted.add(name)
+      for (const next of varRefs(byName.get(name) ?? '')) visit(next)
+    }
+    for (const name of reached ?? []) visit(name)
+    for (const variable of variables)
+      if (!reached || wanted.has(variable.name)) add(variable.name, variable.value, undefined, false)
+  }
   for (const token of bundle.tokens ?? []) add(token.name, token.value, token.type, true)
   return [...found.values()]
 }

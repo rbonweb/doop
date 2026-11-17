@@ -87,12 +87,14 @@ beforeEach(() => {
   run.planStorybookImport.mockReset()
 })
 
+const INFO = { total: 1, capped: false, importing: 1 }
+
 describe('before streaming', () => {
   it.each<unknown[]>([
     [{}],
     [{ url: 'https://sb.test/', package: 'Bad Name' }],
     [{ url: 'https://sb.test/', include: 'x' }],
-    [{ url: 'https://sb.test/', include: Array.from({ length: 51 }, () => 'x') }],
+    [{ url: 'https://sb.test/', include: Array.from({ length: 61 }, () => 'x') }],
     [{ url: 'https://sb.test/', dryRun: 'yes' }],
     [{ url: 'x'.repeat(2001) }],
   ])('answers %j with a 400 JSON error', async (body) => {
@@ -105,7 +107,7 @@ describe('before streaming', () => {
 
   it('answers a 429 with Retry-After once the hour is used, and a dry run does not use it', async () => {
     run.runStorybookImport.mockResolvedValue({ result: EMPTY_RESULT, issues: [], renders: 1 })
-    run.planStorybookImport.mockResolvedValue({ components: [], result: EMPTY_RESULT, issues: [] })
+    run.planStorybookImport.mockResolvedValue({ components: [], info: INFO, result: EMPTY_RESULT, issues: [] })
     const user = 'rate-limited'
     for (let i = 0; i < STORYBOOK_IMPORTS_PER_HOUR; i++) {
       const { res, done } = call({ url: 'https://sb.test/' }, user)
@@ -126,7 +128,7 @@ describe('before streaming', () => {
 describe('streaming', () => {
   it('writes the plan, each progress, then the result, one JSON object a line', async () => {
     run.runStorybookImport.mockImplementation(async (options) => {
-      options.onPlan([{ name: 'Button', group: 'Inputs/Button', stories: 2, renders: 1 }])
+      options.onPlan([{ name: 'Button', group: 'Inputs/Button', stories: 2, renders: 1 }], INFO)
       options.onRender({ rendered: 1, total: 1, component: 'Button' })
       options.onRender({ rendered: 2, total: 3, component: 'Button' })
       return { result: EMPTY_RESULT, issues: [{ code: 'x', message: 'y' }], renders: 2 }
@@ -135,7 +137,12 @@ describe('streaming', () => {
     await done
     expect(res.headers['content-type']).toContain('application/x-ndjson')
     expect(res.lines).toEqual([
-      { type: 'plan', components: [{ name: 'Button', group: 'Inputs/Button', stories: 2, renders: 1 }], renders: 1 },
+      {
+        type: 'plan',
+        components: [{ name: 'Button', group: 'Inputs/Button', stories: 2, renders: 1 }],
+        renders: 1,
+        total: 1,
+      },
       { type: 'progress', rendered: 1, total: 1, component: 'Button' },
       { type: 'progress', rendered: 2, total: 3, component: 'Button' },
       { type: 'result', result: EMPTY_RESULT, issues: [{ code: 'x', message: 'y' }] },
@@ -148,9 +155,33 @@ describe('streaming', () => {
     })
   })
 
+  it('takes up to 60 titles in include, one per component of a bundle', async () => {
+    run.runStorybookImport.mockResolvedValue({ result: EMPTY_RESULT, issues: [], renders: 1 })
+    const include = Array.from({ length: 60 }, (_, n) => `Components/C${n}`)
+    const { res, done } = call({ url: 'https://sb.test/sb/', include })
+    await done
+    expect(res.statusCode).toBe(200)
+    expect(run.runStorybookImport.mock.calls[0]![0]).toMatchObject({ include })
+  })
+
+  it('says how many components the Storybook offers and when the list is cut short', async () => {
+    run.runStorybookImport.mockImplementation(async (options) => {
+      options.onPlan([{ name: 'Button', group: 'Inputs/Button', stories: 2, renders: 1 }], {
+        total: 733,
+        capped: true,
+        importing: 60,
+      })
+      return { result: EMPTY_RESULT, issues: [], renders: 1 }
+    })
+    const { res, done } = call({ url: 'https://sb.test/sb/' })
+    await done
+    expect(res.lines[0]).toMatchObject({ type: 'plan', renders: 60, total: 733, capped: true })
+  })
+
   it('a dry run plans only: the plan, then the result, and no import runs', async () => {
     run.planStorybookImport.mockResolvedValue({
       components: [{ name: 'Button', group: 'Inputs/Button', stories: 1, renders: 1 }],
+      info: INFO,
       result: { ...EMPTY_RESULT, created: [{ name: 'Button', id: '' }] },
       issues: [],
     })
@@ -249,7 +280,7 @@ describe('the hour and the stream', () => {
 
   it('gives a plan-only dry run an hour of its own, larger than the import one', async () => {
     const user = 'planner'
-    run.planStorybookImport.mockResolvedValue({ components: [], result: EMPTY_RESULT, issues: [] })
+    run.planStorybookImport.mockResolvedValue({ components: [], info: INFO, result: EMPTY_RESULT, issues: [] })
     for (let i = 0; i < STORYBOOK_PLANS_PER_HOUR; i++) {
       const { res, done } = call({ url: 'https://sb.test/', dryRun: true }, user)
       await done
@@ -279,7 +310,7 @@ describe('the hour and the stream', () => {
   it('names components as the importer will: cleaned, in the plan and in each progress line', async () => {
     const dirty = 'Bad\u0000 <b>Name</b>\n'
     run.runStorybookImport.mockImplementation(async (options) => {
-      options.onPlan([{ name: dirty, group: 'A/' + dirty, stories: 1, renders: 1 }])
+      options.onPlan([{ name: dirty, group: 'A/' + dirty, stories: 1, renders: 1 }], INFO)
       options.onRender({ rendered: 1, total: 1, component: dirty })
       return { result: EMPTY_RESULT, issues: [], renders: 1 }
     })

@@ -76,7 +76,7 @@ describe('groupStories', () => {
     expect(groups.map((group) => [group.name, group.stories.length, group.defaultStory.name])).toEqual([
       ['ActionMenu', 3, 'Default'],
       ['Button', 2, 'Primary'],
-      ['Features', 1, 'A'],
+      ['Layout Features', 1, 'A'],
     ])
     expect(issues).toEqual([])
   })
@@ -103,6 +103,53 @@ describe('groupStories', () => {
     /* naming a collection alone selects nothing: include names components */
     expect(groupStories(entries, { include: ['Components/ActionMenu/Features'] }).issues[0]?.code).toBe('no_components')
     expect(groupStories([story('Layout/Features', 'A')], { include: ['Layout/Features'] }).groups).toHaveLength(1)
+  })
+
+  it('groups Primer-shaped titles: collections, test pages and files decide, not the title alone', () => {
+    const at = (title: string, name: string, importPath: string, componentPath?: string) => ({
+      ...story(title, name),
+      importPath,
+      ...(componentPath ? { componentPath } : {}),
+    })
+    const { groups } = groupStories([
+      at(
+        'Components/Skeleton/SkeletonBox',
+        'Default',
+        './src/Skeleton/SkeletonBox.stories.tsx',
+        './src/Skeleton/SkeletonBox.tsx',
+      ),
+      at('Components/Skeleton/Examples', 'Comments Loading', './src/Skeleton/Skeleton.examples.stories.tsx'),
+      at('Components/PageLayout', 'Default', './src/PageLayout/PageLayout.stories.tsx'),
+      at('Components/PageLayout/Performance Tests', 'Baseline', './src/PageLayout/PageLayout.performance.stories.tsx'),
+      at(
+        'Components/SegmentedControl',
+        'Default',
+        './src/SegmentedControl/SegmentedControl.stories.tsx',
+        './src/SegmentedControl/index.ts',
+      ),
+      at(
+        'Components/SegmentedControl/Responsive Tests',
+        'Complex',
+        './src/SegmentedControl/SegmentedControl.responsive.stories.tsx',
+      ),
+      at('Components/PageHeader', 'Default', './src/PageHeader/PageHeader.stories.tsx'),
+      at(
+        'Components/PageHeader/Responsive Variants',
+        'Title Area',
+        './src/PageHeader/PageHeader.responsive.stories.tsx',
+      ),
+      /* an odd collection name is caught by the file it lives in */
+      at('Components/Button', 'Default', './src/Button/Button.stories.tsx'),
+      at('Components/Button/Recipes And Patterns', 'Split', './src/Button/Button.patterns.stories.tsx'),
+    ])
+    expect(groups.map((group) => [group.name, group.stories.length])).toEqual([
+      ['SkeletonBox', 1],
+      ['Skeleton', 1],
+      ['PageLayout', 2],
+      ['SegmentedControl', 2],
+      ['PageHeader', 2],
+      ['Button', 2],
+    ])
   })
 
   it('matches include on a whole title or up to a slash, in any case, never part of a name', () => {

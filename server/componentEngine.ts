@@ -44,6 +44,7 @@ import {
   type InstanceOverrides,
   type PartOverride,
   styleText,
+  COMPONENT_REF,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR, isElementId, newElementId } from '../shared/elementId.ts'
 
@@ -586,7 +587,7 @@ export function nestsComponent(ctx: EngineContext, ref: string, targetId: string
     if (!def || seen.has(def.id)) continue
     if (def.id === targetId) return true
     seen.add(def.id)
-    for (const match of def.template.matchAll(/component="([^"]+)"/g)) stack.push(match[1]!)
+    for (const match of def.template.matchAll(COMPONENT_REF)) stack.push(match[1]!)
   }
   return false
 }

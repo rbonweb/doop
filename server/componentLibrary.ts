@@ -6,6 +6,7 @@ import {
   type ComponentDef,
   type LibraryChange,
   type LibraryComponent,
+  COMPONENT_REF,
 } from '../shared/components.ts'
 import type { Canvas } from '../shared/types.ts'
 import { libraryLandingPageId } from '../shared/pages.ts'
@@ -132,7 +133,7 @@ export function originOf(canvas: Pick<Canvas, 'id' | 'workspaceId'>, def: Compon
 /* ------------------------------------------------------------------ */
 
 function nestedRefs(template: string): string[] {
-  return [...template.matchAll(/component="([^"]+)"/g)].map((match) => match[1]!)
+  return [...template.matchAll(COMPONENT_REF)].map((match) => match[1]!)
 }
 
 /** Which other library each nested component of a definition is linked to, on its canvas today. */

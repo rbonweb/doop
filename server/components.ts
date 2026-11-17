@@ -17,6 +17,7 @@ import {
   type ComponentIssue,
   type ComponentProp,
   styleText,
+  COMPONENT_REF,
 } from '../shared/components.ts'
 import { extractComponentCss, frameHeadTags, frameStylesheets } from './componentCss.ts'
 import {
@@ -144,7 +145,7 @@ function closureOf(ids: Iterable<string>, canvasId: string): ComponentDef[] {
     const def = defs.find((candidate) => candidate.id === id)
     if (!def) continue
     seen.set(id, def)
-    for (const match of def.template.matchAll(/component="([^"]+)"/g)) {
+    for (const match of def.template.matchAll(COMPONENT_REF)) {
       const nested = defs.find((candidate) => candidate.id === match[1] || candidate.name === match[1])
       if (nested) stack.push(nested.id)
     }
@@ -156,14 +157,14 @@ function closureOf(ids: Iterable<string>, canvasId: string): ComponentDef[] {
 /** Would a template using these components put `id` inside itself? */
 function wouldCycle(canvasId: string, id: string, template: string): boolean {
   const defs = store.getComponents(canvasId)
-  const stack = [...template.matchAll(/component="([^"]+)"/g)].map((match) => match[1]!)
+  const stack = [...template.matchAll(COMPONENT_REF)].map((match) => match[1]!)
   const seen = new Set<string>()
   for (let ref = stack.pop(); ref; ref = stack.pop()) {
     const def = defs.find((candidate) => candidate.id === ref || candidate.name === ref)
     if (!def || seen.has(def.id)) continue
     if (def.id === id) return true
     seen.add(def.id)
-    for (const match of def.template.matchAll(/component="([^"]+)"/g)) stack.push(match[1]!)
+    for (const match of def.template.matchAll(COMPONENT_REF)) stack.push(match[1]!)
   }
   return false
 }

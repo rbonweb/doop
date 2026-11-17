@@ -31,6 +31,7 @@ import {
   type LibraryComponent,
   type PartOverride,
   styleText,
+  COMPONENT_REF,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR } from '../shared/elementId.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
@@ -1798,7 +1799,7 @@ function refuseSiblings(targetCanvasId: string, sourceCanvasId: string, origin: 
       fail(
         `this canvas already has its own component “${existing.name}” (${existing.id}), shared with canvas ${sourceCanvasId} because one was copied from the other; importing would replace it, so edit it here instead`,
       )
-    for (const match of def.template.matchAll(/component="([^"]+)"/g)) {
+    for (const match of def.template.matchAll(COMPONENT_REF)) {
       const dependency = contextFor(sourceCanvasId).find(match[1]!)
       if (dependency) stack.push(dependency)
     }
@@ -1815,7 +1816,7 @@ function importDependencies(
   if (progress.seen.has(origin.id)) return false
   progress.seen.add(origin.id)
   let changed = false
-  for (const match of origin.template.matchAll(/component="([^"]+)"/g)) {
+  for (const match of origin.template.matchAll(COMPONENT_REF)) {
     /* deleted ones too: a component built from a deleted one still renders it, frozen */
     const dependency = contextFor(sourceCanvasId).find(match[1]!)
     if (dependency && importDependencies(targetCanvasId, sourceCanvasId, dependency, actor, progress)) changed = true

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { Actor } from '../shared/types.ts'
-import { BundleImportError, type PlannedComponent } from '../shared/storybook/bundle.ts'
+import { MAX_BUNDLE_COMPONENTS } from '../shared/componentBundle.ts'
+import { BundleImportError, type PlanInfo, type PlannedComponent } from '../shared/storybook/bundle.ts'
 import { importComponentBundle, type ImportIssue, type ImportResult } from './componentBundleImport.ts'
 import { ComponentError } from './componentActions.ts'
 import { detached } from './journal.ts'
@@ -31,7 +32,7 @@ export const storybookInput = {
     .describe('The npm package the components are imported from in code, e.g. "@acme/ui"'),
   include: z
     .array(z.string().min(1).max(200))
-    .max(50)
+    .max(MAX_BUNDLE_COMPONENTS)
     .optional()
     .describe(
       'Only components whose Storybook title is one of these or sits under one of these folders (matched up to a /, so "Inputs" is not "InputsLegacy"), e.g. ["Inputs", "Layout/Card"]',
@@ -48,7 +49,7 @@ export interface StorybookRun {
   signal?: AbortSignal
   /** asked again right before the importer writes, since the render took minutes: whether the account may still edit this canvas */
   canEdit: () => boolean
-  onPlan?: (groups: PlannedComponent[]) => void
+  onPlan?: (components: PlannedComponent[], info: PlanInfo) => void
   onRender?: (event: { rendered: number; total: number; component: string }) => void
   /** a test swaps what reaches a fake Storybook on this machine */
   deps?: StorybookImportDeps
@@ -103,10 +104,11 @@ export async function runStorybookImport(run: StorybookRun): Promise<StorybookRu
 /** A dry run that reads only the index: what would be created or updated, by name, with nothing rendered. The importer answers it from placeholder components so "updated" means what a real run would match. */
 export async function planStorybookImport(
   run: Pick<StorybookRun, 'canvasId' | 'actor' | 'url' | 'package' | 'include' | 'signal' | 'deps'>,
-): Promise<{ components: PlannedComponent[]; result: ImportResult; issues: ImportIssue[] }> {
+): Promise<{ components: PlannedComponent[]; info: PlanInfo; result: ImportResult; issues: ImportIssue[] }> {
   const plan = await detached(() => storybookPlan(run.url, { include: run.include, signal: run.signal }, run.deps))
-  const components = plan.components.map(({ story: _story, ...entry }) => entry)
-  if (!components.length) {
+  /* what a real run would write is what it takes (at most one bundle's worth), not everything the plan lists */
+  const components = plan.importable.map(({ story: _story, ...entry }) => entry)
+  if (!plan.components.length) {
     throw new StorybookIndexError(plan.issues[0]?.message ?? 'No story matched, so there is nothing to import', true)
   }
   const placeholder = {
@@ -129,7 +131,8 @@ export async function planStorybookImport(
     ),
   )
   return {
-    components,
+    components: plan.components,
+    info: plan.info,
     result: { ...result, issues: [] },
     issues: plan.issues,
   }

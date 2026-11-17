@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 
-/** A tiny published Storybook with no React and no build, for tests that run the real import against it: an index.json and an iframe.html whose script renders the story named by ?id=…&args=… and sets the body class and `__STORYBOOK_PREVIEW__` the way Storybook does. Components: Inputs/Button (tone enum, disabled boolean, label text) and Data/Badge. `/private/` answers 401 and `/gone/` 404. */
+/** A tiny published Storybook with no React and no build, for tests that run the real import against it: an index.json and an iframe.html whose script renders the story named by ?id=…&args=… and sets the body class and `__STORYBOOK_PREVIEW__` the way Storybook does. Components: Inputs/Button (tone enum, disabled boolean, label text) and Data/Badge, each root marked data-component="<its name>" as Primer marks its elements. `/private/` answers 401 and `/gone/` 404. */
 
 const ENTRIES = {
   'inputs-button--primary': { type: 'story', id: 'inputs-button--primary', name: 'Primary', title: 'Inputs/Button' },
@@ -34,9 +34,9 @@ body { margin: 0; }
       argTypes: { tone: { control: { type: 'select' }, options: ['primary', 'secondary'] }, disabled: { control: 'boolean' }, label: { control: 'text' } },
       initialArgs: { tone: 'primary', label: 'Save', disabled: false },
     }
-    root.innerHTML = '<button class="btn btn--' + args.tone + '"' + (args.disabled ? ' disabled' : '') + '><span>' + args.label + '</span></button>'
+    root.innerHTML = '<button data-component="Button" class="btn btn--' + args.tone + '"' + (args.disabled ? ' disabled' : '') + '><span>' + args.label + '</span></button>'
   } else {
-    root.innerHTML = '<span class="badge">NEW</span>'
+    root.innerHTML = '<span data-component="Badge" class="badge">NEW</span>'
   }
   window.__STORYBOOK_PREVIEW__ = { currentRender: { phase: 'completed', story: { id: id, argTypes: meta.argTypes, initialArgs: meta.initialArgs } } }
   document.body.className = 'sb-show-main'

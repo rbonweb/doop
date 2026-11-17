@@ -18,7 +18,14 @@ import type { StoryEntry, StorybookIssue } from './index.ts'
 import { guardCss } from './cssGuard.ts'
 import { MAX_PROBE_CHARS, probeInstallSource, probeName } from './probe.ts'
 import { captureRefusalSchema, storyCaptureSchema, storyMetaSchema } from './schemas.ts'
-import { groupStories, planVariants, STORYBOOK_LIMITS, storyIframeUrl, variantAllowance } from './plan.ts'
+import {
+  groupStories,
+  MAX_PLANNED_COMPONENTS,
+  planVariants,
+  STORYBOOK_LIMITS,
+  storyIframeUrl,
+  variantAllowance,
+} from './plan.ts'
 
 /** Pure: no node or server imports, since the CLI bundles it. Turns a Storybook's stories into a ComponentBundle through a page it is handed, so the server (the hardened renderer) and the CLI (the team's own browser) run the same capture and build the same bundle. */
 
@@ -28,7 +35,7 @@ export interface StoryPage {
   installProbe(source: string): Promise<void>
   goto(url: string, timeoutMs: number): Promise<void>
   /** asks the probe called `probe` until its state is ready or error; rejects at the timeout */
-  waitForState(probe: string, timeoutMs: number): Promise<'ready' | 'error'>
+  waitForState(probe: string, timeoutMs: number): Promise<'ready' | 'error' | 'needs_worker'>
   /** asks the probe for the story's argTypes, initial args and display name: a JSON string of at most MAX_PROBE_CHARS, or null */
   readMeta(probe: string, storyId: string): Promise<unknown>
   /** runs `fn` in the isolated world */
@@ -68,6 +75,10 @@ export class KnownRenderError extends Error {
   }
 }
 
+/** A story that registers a service worker (MSW, for mocked data) cannot run where the page may not start one. */
+export const NEEDS_WORKER =
+  'this story needs a service worker, which a published-Storybook import cannot run; use the Doop CLI on your machine'
+
 export const RENDER_FAILED = 'The renderer could not open this story'
 
 const reasonOf = (error: unknown): string =>
@@ -81,6 +92,17 @@ export class BundleImportError extends Error {
   }
 }
 
+/** The stories of a component that might carry controls when its default story has none, best first: a Playground (Storybook's own name for the story you tweak), then the rest in index order. */
+function controlStories(group: { defaultStory: { id: string }; stories: { id: string; name: string }[] }) {
+  const others = group.stories.filter((story) => story.id !== group.defaultStory.id)
+  const playground = (story: { id: string; name: string }) =>
+    /playground|interactive|controls/i.test(story.name) || /--(playground|interactive)/i.test(story.id)
+  return [...others.filter(playground), ...others.filter((story) => !playground(story))]
+}
+
+/** How many other stories are rendered to find controls the default story lacks. */
+const MAX_CONTROL_PROBES = 2
+
 /** One story, rendered and captured. A failure to load, a story that errors or one that never renders is a `capture` with `ok: false`, never a throw (an abort is the only throw). */
 export async function renderStory(page: StoryPage, request: RenderRequest, signal?: AbortSignal): Promise<StoryRender> {
   const issues: StorybookIssue[] = []
@@ -91,6 +113,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     await page.installProbe(probeInstallSource(probe))
     await page.goto(storyIframeUrl(request.baseUrl, request.storyId, request.args), STORYBOOK_LIMITS.renderMs)
     const state = await page.waitForState(probe, STORYBOOK_LIMITS.renderMs)
+    if (state === 'needs_worker') return fail(NEEDS_WORKER)
     if (state === 'error') return fail('Storybook shows an error for this story')
     await page.evaluateSource(CAPTURE_PRELUDE)
     await page.evaluate(settleStory, 2000)
@@ -235,9 +258,16 @@ export interface BundleInput {
   now?: () => number
   onProgress?: (done: number, total: number) => void
   /** the components the import will render, once the stories are grouped and before the first render */
-  onPlan?: (groups: PlannedComponent[]) => void
+  onPlan?: (components: PlannedComponent[], info: PlanInfo) => void
   /** after each render: `total` is what is planned so far (a component's variants join it once its default has been read), so it only grows */
   onRender?: (event: { rendered: number; total: number; component: string }) => void
+}
+
+/** What a plan says beside its list: how many components the Storybook offers, whether the list is cut short (the plan line holds MAX_PLANNED_COMPONENTS), and how many an import takes. */
+export interface PlanInfo {
+  total: number
+  capped: boolean
+  importing: number
 }
 
 export interface PlannedComponent {
@@ -269,6 +299,16 @@ async function inPool<T, R>(items: T[], size: number, work: (item: T) => Promise
   return results
 }
 
+/** Every component a plan offers, for a person to choose from: up to MAX_PLANNED_COMPONENTS. */
+export function plannedList(groups: { name: string; title: string; stories: unknown[] }[]): PlannedComponent[] {
+  return groups.slice(0, MAX_PLANNED_COMPONENTS).map((group) => ({
+    name: group.name,
+    group: group.title,
+    stories: group.stories.length,
+    renders: 1,
+  }))
+}
+
 /** Stories to a bundle, inside STORYBOOK_LIMITS: components, renders and the whole import's time. A component whose default story fails is left out and said so; a variant that fails is left out and said so. Throws only when nothing at all could be imported or the signal aborts. */
 export async function buildComponentBundle(input: BundleInput): Promise<BundleResult> {
   const now = input.now ?? Date.now
@@ -276,14 +316,11 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   const issues: StorybookIssue[] = []
   const grouped = groupStories(input.entries, { include: input.include })
   issues.push(...grouped.issues)
-  input.onPlan?.(
-    grouped.groups.map((group) => ({
-      name: group.name,
-      group: group.title,
-      stories: group.stories.length,
-      renders: 1,
-    })),
-  )
+  input.onPlan?.(plannedList(grouped.candidates), {
+    total: grouped.candidates.length,
+    capped: grouped.candidates.length > MAX_PLANNED_COMPONENTS,
+    importing: grouped.groups.length,
+  })
   let plannedTotal = grouped.groups.length
   let renderedCount = 0
   const concurrency = input.concurrency ?? 1
@@ -338,7 +375,10 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
     const capture = base.capture
     if (!capture.ok) {
-      note('story_failed', `The default story "${group.defaultStory.name}" could not be captured: ${capture.reason}`)
+      note(
+        'story_failed',
+        `${group.name}: the default story "${group.defaultStory.name}" could not be captured: ${capture.reason}`,
+      )
       input.onProgress?.(index + 1, grouped.groups.length)
       continue
     }
@@ -350,14 +390,31 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     }
     for (const rule of capture.sharedRules) shared.add(rule)
 
-    const props = base.props.map((prop) => ({ ...prop }))
+    let props = base.props.map((prop) => ({ ...prop }))
+    /* the story whose controls are varied, and what it looks like at its own resting args: the default story, unless it has no controls and a sibling (a Playground) does */
+    let controls = { storyId: group.defaultStory.id, base: capture }
+    let displayNameOf = base.displayName
+    if (!props.length) {
+      for (const candidate of controlStories(group).slice(0, MAX_CONTROL_PROBES)) {
+        if (renders >= STORYBOOK_LIMITS.renders) break
+        renders++
+        const probe = await render({ storyId: candidate.id, args: {}, readMeta: true })
+        renderedCount++
+        input.onRender?.({ rendered: renderedCount, total: plannedTotal, component: group.name })
+        if (!probe.capture.ok || !probe.props.length) continue
+        props = probe.props.map((prop) => ({ ...prop }))
+        controls = { storyId: candidate.id, base: probe.capture }
+        displayNameOf ??= probe.displayName
+        break
+      }
+    }
     const plan = planVariants(props, variantAllowance(renders, grouped.groups.length - index - 1))
     for (const reason of plan.skipped) note('variants_skipped', reason)
     renders += plan.renders.length
     plannedTotal += plan.renders.length
     const rendered = await inPool(plan.renders, concurrency, async (variant) => {
       const result = await render({
-        storyId: group.defaultStory.id,
+        storyId: controls.storyId,
         args: { [variant.arg]: variant.argValue },
         readMeta: false,
       })
@@ -374,7 +431,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         continue
       }
       for (const rule of shot.sharedRules) shared.add(rule)
-      const diff = diffStyles(capture, shot)
+      const diff = diffStyles(controls.base, shot)
       let entry: { html?: string; css?: string } | undefined
       if (diff !== undefined) {
         if (diff) entry = { css: diff }
@@ -391,7 +448,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       ...(prop.type === 'boolean' && reflected.has(prop.name) ? { reflect: true } : {}),
     }))
     const exportName =
-      identifier(base.displayName) ??
+      identifier(displayNameOf) ??
       identifier(
         group.title
           .split('/')

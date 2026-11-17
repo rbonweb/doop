@@ -11,6 +11,9 @@
 import type { ComponentCode } from './componentCode.ts'
 
 export const COMPONENT_ATTR = 'data-doop-component'
+
+/** The `component="…"` attribute of a nested `<doop-use>` in a template: after whitespace, so a page's own `data-component="Button"` (Primer marks every element that way) is not read as the component using itself. */
+export const COMPONENT_REF = /(?<=\s)component="([^"]+)"/g
 export const INSTANCE_ATTR = 'data-doop-instance'
 export const REV_ATTR = 'data-doop-rev'
 export const PROPS_ATTR = 'data-doop-props'

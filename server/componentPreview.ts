@@ -1,5 +1,5 @@
 import { serializeOuter } from 'parse5'
-import { CSS_ATTR, styleText, type ComponentDef, type InstanceOverrides } from '../shared/components.ts'
+import { CSS_ATTR, styleText, type ComponentDef, type InstanceOverrides, COMPONENT_REF } from '../shared/components.ts'
 import type { Frame } from '../shared/types.ts'
 import { withCanvasFaces } from './canvasFaces.ts'
 import { contextFor } from './components.ts'
@@ -28,7 +28,7 @@ function combinations(def: ComponentDef): Record<string, string>[] {
 function stylesFor(canvasId: string, def: ComponentDef, seen = new Set<string>()): string {
   if (seen.has(def.id)) return ''
   seen.add(def.id)
-  const nested = [...def.template.matchAll(/component="([^"]+)"/g)].map((match) => {
+  const nested = [...def.template.matchAll(COMPONENT_REF)].map((match) => {
     const dependency = contextFor(canvasId).find(match[1]!)
     return dependency ? stylesFor(canvasId, dependency, seen) : ''
   })

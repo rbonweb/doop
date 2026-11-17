@@ -32,7 +32,10 @@ export interface StoryGroup {
 }
 
 export interface GroupedStories {
+  /** what an import takes: the first STORYBOOK_LIMITS.components of `candidates` */
   groups: StoryGroup[]
+  /** every component `include` selects, for a plan to list and a person to pick from */
+  candidates: StoryGroup[]
   issues: StorybookIssue[]
 }
 
@@ -43,15 +46,18 @@ export function pickDefaultStory(stories: StoryEntry[]): StoryEntry | undefined 
   return named('default') ?? named('primary') ?? stories[0]
 }
 
+/** The component's own name: the title's last segment, with its parent in front when it is only a collection word ("Table Features", not "Features"). */
 function lastSegment(title: string): string {
   const segments = title
     .split('/')
     .map((part) => part.trim())
     .filter(Boolean)
-  return segments[segments.length - 1] ?? title.trim()
+  const last = segments[segments.length - 1] ?? title.trim()
+  const parent = segments[segments.length - 2]
+  return parent && isCollectionSegment(last) ? `${parent} ${last}` : last
 }
 
-/** The last segment of a title that names a set of stories rather than a component. */
+/** Words that name a set of stories rather than a component: a title segment made only of these ("Features", "Responsive Tests", "Performance Tests") is a collection. */
 const COLLECTION_WORDS = new Set([
   'features',
   'examples',
@@ -61,7 +67,21 @@ const COLLECTION_WORDS = new Set([
   'docs',
   'default',
   'variants',
+  'tests',
+  'test',
+  'responsive',
+  'performance',
+  'sandbox',
+  'recipes',
 ])
+
+const isCollectionSegment = (segment: string): boolean => {
+  const words = segment
+    .toLowerCase()
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+  return words.length > 0 && words.every((word) => COLLECTION_WORDS.has(word))
+}
 
 function normalizedTitle(title: string): string {
   return title
@@ -71,16 +91,70 @@ function normalizedTitle(title: string): string {
     .join('/')
 }
 
-/** The title of the component a collection's stories belong to (collection words come off the end, never the first segment), or undefined when the title is not a collection. */
-function collectionOwner(title: string): string | undefined {
-  const segments = title
-    .split('/')
-    .map((part) => part.trim())
-    .filter(Boolean)
-  const before = segments.length
-  while (segments.length > 1 && COLLECTION_WORDS.has((segments[segments.length - 1] ?? '').toLowerCase()))
-    segments.pop()
-  return segments.length < before ? segments.join('/') : undefined
+/** `./src/Button/Button.features.stories.tsx` and `./src/Button/Button.stories.tsx` are the same stem, `./src/Button/Button`: the file a component's stories live in, however the story files are split. */
+function pathStem(path: string | undefined): string | undefined {
+  if (!path) return undefined
+  const slash = path.lastIndexOf('/')
+  const base = path.slice(slash + 1)
+  const dot = base.indexOf('.')
+  const stem = dot > 0 ? base.slice(0, dot) : base
+  return stem ? `${path.slice(0, slash + 1)}${stem}` : undefined
+}
+
+/** What lets a story's title be read as a collection of the component above it. */
+interface TitleIndex {
+  /** every story title, normalised */
+  titles: Set<string>
+  /** every folder above a title ("Components" above "Components/Button") */
+  folders: Set<string>
+  /** per title, the file stems and component files of its stories */
+  stems: Map<string, Set<string>>
+}
+
+function indexTitles(entries: StoryEntry[]): TitleIndex {
+  const titles = new Set<string>()
+  const folders = new Set<string>()
+  const stems = new Map<string, Set<string>>()
+  for (const entry of entries) {
+    const title = normalizedTitle(entry.title)
+    titles.add(title)
+    const parts = title.split('/')
+    /* a collection does not make its parent a folder of components: "Layout/Features" alone leaves no "Layout" */
+    if (!isCollectionSegment(parts[parts.length - 1] ?? ''))
+      for (let end = 1; end < parts.length; end++) folders.add(parts.slice(0, end).join('/'))
+    const set = stems.get(title) ?? new Set<string>()
+    const stem = pathStem(entry.importPath)
+    if (stem) set.add(stem)
+    if (entry.componentPath) set.add(`component:${entry.componentPath}`)
+    stems.set(title, set)
+  }
+  return { titles, folders, stems }
+}
+
+/**
+ * The title of the component a story belongs to. Evidence in order: the story files (a title directly under another title whose stories sit in the same file or name the same component file is more of that component, whatever the segment is called: Storybook 8+ `componentPath`, else the `importPath` stem), then the words (a trailing segment that is only collection words, "Features", "Responsive Tests", comes off), taken only when what is left is a component with stories or a folder of them, so "Layout/Features" with no Layout stays a component of its own.
+ */
+function componentTitle(entry: StoryEntry, index: TitleIndex): string {
+  const title = normalizedTitle(entry.title)
+  const segments = title.split('/')
+  const mine = new Set<string>()
+  const stem = pathStem(entry.importPath)
+  if (stem) mine.add(stem)
+  if (entry.componentPath) mine.add(`component:${entry.componentPath}`)
+  /* the files first: one step up while the parent is a component whose stories sit in the same file */
+  let current = segments
+  while (current.length > 1) {
+    const parent = current.slice(0, -1).join('/')
+    const sharedFile = index.titles.has(parent) && [...(index.stems.get(parent) ?? [])].some((key) => mine.has(key))
+    if (!sharedFile) break
+    current = current.slice(0, -1)
+  }
+  /* then the words: every trailing collection segment comes off together, when what is left is a component or a folder of them */
+  const stripped = [...current]
+  while (stripped.length > 1 && isCollectionSegment(stripped[stripped.length - 1] ?? '')) stripped.pop()
+  const left = stripped.join('/')
+  if (stripped.length < current.length && (index.titles.has(left) || index.folders.has(left))) current = stripped
+  return current.join('/')
 }
 
 function matchesInclude(title: string, include: string[] | undefined): boolean {
@@ -93,15 +167,17 @@ function matchesInclude(title: string, include: string[] | undefined): boolean {
   })
 }
 
-/** Stories to components by title, in index order, limited to `include` (a title, or the folders above it, up to a `/`) and to STORYBOOK_LIMITS.components. */
+/** The most components a plan line lists; what an import takes is STORYBOOK_LIMITS.components of them. */
+export const MAX_PLANNED_COMPONENTS = 500
+
+/** Stories to components (see `componentTitle`), in index order. `candidates` is every component `include` selects; `groups` is what an import takes of them, the first STORYBOOK_LIMITS.components. */
 export function groupStories(entries: StoryEntry[], options: { include?: string[] } = {}): GroupedStories {
   const issues: StorybookIssue[] = []
-  /* a title ending in a collection word ("Components/ActionMenu/Features") is more stories of the component above it when that component has stories of its own; with none above it ("Layout/Features") it is a component itself. `include` names components, so it is matched against the title a story ends up under. */
-  const titles = new Set(entries.map((entry) => normalizedTitle(entry.title)))
+  const index = indexTitles(entries)
   const owned = new Map<string, StoryEntry[]>()
   for (const entry of entries) {
-    const owner = collectionOwner(entry.title)
-    const title = owner !== undefined && titles.has(owner) ? owner : entry.title
+    const title = componentTitle(entry, index)
+    /* `include` names components, so it is matched against the title a story ends up under */
     if (!matchesInclude(title, options.include)) continue
     const list = owned.get(title)
     if (list) list.push(entry)
@@ -109,13 +185,13 @@ export function groupStories(entries: StoryEntry[], options: { include?: string[
   }
   const candidates: StoryGroup[] = []
   const names = new Set<string>()
-  for (const [title, stories] of owned) {
+  for (const [title, members] of owned) {
+    /* the component's own stories come first, so its default is one of them rather than an example's */
+    const own = (entry: StoryEntry) => normalizedTitle(entry.title) === title
+    const stories = [...members.filter(own), ...members.filter((entry) => !own(entry))]
     const defaultStory = pickDefaultStory(stories)
     if (!defaultStory) continue
-    const segments = title
-      .split('/')
-      .map((part) => part.trim())
-      .filter(Boolean)
+    const segments = title.split('/')
     let name = lastSegment(title).slice(0, MAX_COMPONENT_NAME)
     for (let take = 2; names.has(name.toLowerCase()) && take <= segments.length; take++) {
       name = segments.slice(-take).join(' ').slice(0, MAX_COMPONENT_NAME)
@@ -130,13 +206,13 @@ export function groupStories(entries: StoryEntry[], options: { include?: string[
     const left = candidates.length - groups.length
     issues.push({
       code: 'components_capped',
-      message: `The Storybook has ${candidates.length} components and one import holds ${STORYBOOK_LIMITS.components}: the first ${groups.length} were planned and ${left} were left out. Use include to pick others.`,
+      message: `The Storybook has ${candidates.length} components and one import holds ${STORYBOOK_LIMITS.components}: the first ${groups.length} were taken and ${left} were left out. Use include to pick others.`,
     })
   }
   if (!groups.length && entries.length) {
     issues.push({ code: 'no_components', message: 'No story matched the include filter' })
   }
-  return { groups, issues }
+  return { groups, candidates, issues }
 }
 
 export interface VariantRender {

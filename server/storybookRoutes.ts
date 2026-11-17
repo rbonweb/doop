@@ -99,16 +99,26 @@ export async function importStorybookRoute(
     }
     if (dryRun) {
       const planned = await planStorybookImport(run)
-      line({ type: 'plan', components: planned.components.map(cleaned), renders: planned.components.length })
+      line({
+        type: 'plan',
+        components: planned.components.map(cleaned),
+        renders: planned.info.importing,
+        total: planned.info.total,
+        ...(planned.info.capped ? { capped: true } : {}),
+      })
       line({ type: 'result', result: planned.result, issues: planned.issues })
     } else {
-      let planned = 0
       const { result, issues } = await runStorybookImport({
         ...run,
         dryRun: false,
-        onPlan: (components) => {
-          planned = components.length
-          line({ type: 'plan', components: components.map(cleaned), renders: planned })
+        onPlan: (components, info) => {
+          line({
+            type: 'plan',
+            components: components.map(cleaned),
+            renders: info.importing,
+            total: info.total,
+            ...(info.capped ? { capped: true } : {}),
+          })
         },
         onRender: ({ rendered, total, component }) =>
           line({ type: 'progress', rendered, total, component: cleanLabel(component) || 'Component' }),

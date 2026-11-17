@@ -22,6 +22,10 @@ export interface StoryEntry {
   name: string
   type: 'story'
   tags: string[]
+  /** the story file (`./src/Button/Button.stories.tsx`), when the index says: what groups stories of one component */
+  importPath?: string
+  /** the component's source file (Storybook 8+), when the index says */
+  componentPath?: string
 }
 
 export interface ParsedIndex {
@@ -40,6 +44,8 @@ const rawEntry = z.object({
   story: z.string().optional(),
   type: z.string().optional(),
   tags: z.unknown().optional(),
+  importPath: z.unknown().optional(),
+  componentPath: z.unknown().optional(),
   parameters: z.unknown().optional(),
 })
 
@@ -48,6 +54,13 @@ const rawIndex = z.object({
   entries: z.record(z.string(), z.unknown()).optional(),
   stories: z.record(z.string(), z.unknown()).optional(),
 })
+
+const MAX_PATH = 300
+
+/** A file path from the index, used only to compare two stories, never opened: plain text of a bounded length. */
+function cleanPath(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.length > 0 && raw.length <= MAX_PATH ? raw : undefined
+}
 
 function cleanTags(raw: unknown): string[] {
   if (!Array.isArray(raw)) return []
@@ -121,7 +134,17 @@ export function parseStorybookIndex(json: unknown): ParsedIndex {
       continue
     }
     seen.add(id)
-    entries.push({ id, title, name, type: 'story', tags: cleanTags(raw.tags) })
+    const importPath = cleanPath(raw.importPath)
+    const componentPath = cleanPath(raw.componentPath)
+    entries.push({
+      id,
+      title,
+      name,
+      type: 'story',
+      tags: cleanTags(raw.tags),
+      ...(importPath ? { importPath } : {}),
+      ...(componentPath ? { componentPath } : {}),
+    })
   }
   if (dropped)
     issues.push({ code: 'index_entries_dropped', message: `${dropped} index entries were malformed and skipped` })

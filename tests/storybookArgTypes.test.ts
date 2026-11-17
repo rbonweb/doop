@@ -17,6 +17,17 @@ describe('propName', () => {
     expect(propName(arg)).toBe(expected)
   })
 
+  it('says what it skipped in one issue: a count and the names, not a line each', () => {
+    const argTypes: Record<string, unknown> = { as: {}, ref: { control: false }, onClick: { action: 'clicked' } }
+    for (let n = 0; n < 20; n++) argTypes[`handler${n}`] = { action: 'x' }
+    const { issues } = readArgTypes(argTypes, {})
+    expect(issues).toHaveLength(1)
+    expect(issues[0]?.code).toBe('argtypes_dropped')
+    expect(issues[0]?.message).toMatch(/^23 props skipped: as, ref, onClick, handler0/)
+    expect(issues[0]?.message).toContain('and 11 more')
+    expect(issues[0]?.message).not.toContain('event handler')
+  })
+
   it('caps the length', () => {
     expect(propName('a'.repeat(200))?.length).toBeLessThanOrEqual(40)
   })
@@ -151,7 +162,7 @@ describe('readArgTypes against hostile input', () => {
     })
     expect(props[0]?.options).toHaveLength(MAX_OPTIONS)
     expect(props[1]?.options).toEqual(['ok', '5', 'fine'])
-    expect(issues[0]?.message).toContain('options were unusable')
+    expect(issues[0]?.message).toContain('big')
   })
 
   it('caps the number of props and argTypes read', () => {
@@ -186,7 +197,7 @@ describe('readArgTypes against hostile input', () => {
       ünï: { control: 'text' },
     })
     expect(props.map((prop) => prop.name)).toEqual(['show-icon'])
-    expect(issues[0]?.message).toContain('collides')
+    expect(issues[0]?.message).toContain('props skipped')
   })
 
   it('treats functions serialized as strings, non-string names and deep nesting as plain data', () => {

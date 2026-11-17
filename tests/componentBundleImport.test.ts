@@ -186,6 +186,24 @@ describe('importing a component bundle', () => {
     expect(() => run({ version: 1, source: { kind: 'agent' }, components: [] })).toThrow(/components/)
   })
 
+  it('makes tokens only of the :root variables a captured component reaches, through var() chains', () => {
+    const result = run({
+      version: 1,
+      source: { kind: 'storybook', url: 'https://sb.example/' },
+      css: ':root { --fg: var(--ink); --ink: #111; --bg: #fff; --unused: 1px; --also-unused: var(--unused); --page: #eee } body { background: var(--page) }',
+      components: [
+        { name: 'Chip', html: '<p class="chip">c</p>', css: '.chip { color: var(--fg) }' },
+        {
+          name: 'Tag',
+          html: '<p class="tag" style="background: var(--bg)">t</p>',
+          props: [{ name: 'tone', type: 'enum', options: ['light', 'dark'] }],
+          variants: { tone: { dark: { css: '.tag { border-color: var(--ink) }' } } },
+        },
+      ],
+    })
+    expect(result.tokens.created.sort()).toEqual(['--bg', '--fg', '--ink', '--page'])
+  })
+
   it('makes tokens from :root variables and the tokens list, leaving existing ones alone', () => {
     runOperation('seed', canvasId, () =>
       actions.createTokens(canvasId, [{ name: '--brand', type: 'color', value: '#000' }], actor),

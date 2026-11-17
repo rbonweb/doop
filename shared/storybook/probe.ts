@@ -111,13 +111,29 @@ export function installStoryProbe(name: string): void {
 
   const preview = (): unknown => field(win, '__STORYBOOK_PREVIEW__')
 
+  const textOf = (getDescriptor(HTMLElement.prototype, 'innerText') || {}).get as (() => string) | undefined
+  const indexOf = call.bind(String.prototype.indexOf) as (text: string, search: string) => number
+  /* an error display that is about a service worker (MSW and the like) is a story the hardened renderer cannot run: it has no service workers, by design. The verdict stays one of two fixed words whatever the page says. */
+  const errorKind = (): string => {
+    try {
+      const text = textOf ? apply(textOf, document.body, []) : ''
+      if (typeof text === 'string' && /* only the head of the display names the cause */ text.length > 0) {
+        const head = slice(text, 0, 600)
+        if (indexOf(head, 'Service Worker') !== -1 || indexOf(head, 'ServiceWorker') !== -1) return 'needs_worker'
+      }
+    } catch {
+      /* a plain error */
+    }
+    return 'error'
+  }
+
   const state = (): string => {
     try {
       const phase = field(field(preview(), 'currentRender'), 'phase')
       const body = document.body
       if (!body) return 'pending'
       const classes = ' ' + body.className + ' '
-      if (classes.indexOf(' sb-show-errordisplay ') !== -1 || phase === 'errored') return 'error'
+      if (classes.indexOf(' sb-show-errordisplay ') !== -1 || phase === 'errored') return errorKind()
       const root = document.querySelector('#storybook-root') || document.querySelector('#root')
       const hasContent = !!(root && root.firstElementChild)
       /* every phase but the ones that come before the story is on screen is a finished render: Storybook 7 ends on completed, 8 and 9 on completed or afterEach, 10 on finished, and a phase a later version adds counts as done too, rather than timing out */

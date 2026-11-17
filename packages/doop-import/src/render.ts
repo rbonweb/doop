@@ -198,7 +198,8 @@ async function openStoryPage(
           `document.documentElement.getAttribute(${JSON.stringify(probeAttribute(probe))}) || false`,
           { timeout: Math.min(timeoutMs, left()), polling: 100 },
         )
-        return (await handle.jsonValue()) === 'error' ? 'error' : 'ready'
+        const verdict = await handle.jsonValue()
+        return verdict === 'error' || verdict === 'needs_worker' ? verdict : 'ready'
       },
       readMeta: (probe, storyId) =>
         bounded(raw.evaluate(`window[${JSON.stringify(probe)}].meta(${JSON.stringify(storyId)})`)),
