@@ -1183,6 +1183,11 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
   fc.issues.push(...plan.mappingIssues, ...plan.cssIssues)
   for (const tag of def.head) {
     const link = parseFragment(tag).childNodes.find(isElement)
+    if (link?.tagName === 'style') {
+      if (attrOf(link, 'data-doop-tokens') === undefined && attrOf(link, 'data-doop-fonts') === undefined)
+        fc.note('dropped-element', 'a <style> in the component head was ignored: its rules are not in the export')
+      continue
+    }
     if (!link || link.tagName !== 'link') continue
     const fonts = googleFontsUrl(attrOf(link, 'href') ?? '')
     if (fonts) {
