@@ -185,6 +185,9 @@ function PropField({
         )
       case 'text':
       case 'link':
+      case 'number':
+      case 'color':
+      case 'instance':
         return (
           <TextField
             label={prop.name}

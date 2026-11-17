@@ -47,12 +47,30 @@ import { transaction } from './journal.ts'
 
 export const propSchema = z.object({
   name: z.string().describe('Lowercase, it becomes an attribute: "label", "tone", "show-icon"'),
-  type: z.enum(PROP_TYPES).optional().describe('text (default), image, link, boolean, or enum with options'),
-  default: z.string().optional().describe('enum and boolean only; text-like defaults are the template content'),
+  type: z
+    .enum(PROP_TYPES)
+    .optional()
+    .describe('text (default), image, link, boolean, number, color, instance, or enum with options'),
+  default: z
+    .string()
+    .optional()
+    .describe('enum, boolean, number, color and instance only; text-like defaults are the template content'),
   options: z
     .array(z.string())
     .optional()
     .describe('enum values. An enum sets data-<name> on the root, for CSS to key on'),
+  min: z.number().optional().describe('number only: smallest value'),
+  max: z.number().optional().describe('number only: largest value'),
+  step: z.number().positive().optional().describe('number only: values sit on this step, counted from min (else 0)'),
+  accepts: z
+    .array(z.string())
+    .max(20)
+    .optional()
+    .describe('instance only: component names or ids that may be chosen; leave out for any'),
+  reflect: z
+    .boolean()
+    .optional()
+    .describe('boolean only: put data-<name>="true"|"false" on the root, for CSS to key on like an enum'),
   description: z.string().optional().describe('When to use it, in a line'),
 })
 

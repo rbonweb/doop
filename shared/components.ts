@@ -42,17 +42,26 @@ export const MAX_NESTING_DEPTH = 8
 /** instances inside instances however they got there, slot content included: the render stops here */
 export const MAX_INSTANCE_DEPTH = 32
 
-export const PROP_TYPES = ['text', 'image', 'link', 'enum', 'boolean'] as const
+export const PROP_TYPES = ['text', 'image', 'link', 'enum', 'boolean', 'number', 'color', 'instance'] as const
 export type ComponentPropType = (typeof PROP_TYPES)[number]
 
 export interface ComponentProp {
   /** lowercase, since it doubles as an HTML attribute on `<doop-use>` */
   name: string
   type: ComponentPropType
-  /** enum and boolean only: text-like defaults are the template's own content */
+  /** enum, boolean, number, color and instance: what conditions see when an instance gives no value.
+   *  Text-like defaults are the template's own content */
   default?: string
   /** enum only */
   options?: string[]
+  /** number only: the smallest and largest value, and the step values sit on, counted from `min` (else 0) */
+  min?: number
+  max?: number
+  step?: number
+  /** instance only: the component names or ids that may be picked; empty or absent accepts any */
+  accepts?: string[]
+  /** boolean only: puts `data-<name>="true"|"false"` on the instance root, as an enum does, for CSS to key on */
+  reflect?: boolean
   description?: string
 }
 
@@ -337,10 +346,78 @@ export function stableJson(value: unknown): string {
   })
 }
 
-/** The one-line signature agents scan: `Button(label: text, tone: primary|ghost = primary) slots: icon`. */
+const HEX_COLOR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
+/* a shape check, not a CSS parser: a function name and the characters a colour's arguments use */
+const COLOR_FUNCTION = /^(?:rgba?|hsla?|oklch)\(\s*[0-9a-z.,%+\-/\s]*\)$/i
+const TOKEN_COLOR = /^var\(\s*--[a-z0-9_-]+\s*\)$/i
+
+export function isColorValue(value: string): boolean {
+  const text = value.trim()
+  return HEX_COLOR.test(text) || COLOR_FUNCTION.test(text) || TOKEN_COLOR.test(text)
+}
+
+function numberRange(prop: Pick<ComponentProp, 'min' | 'max'>): string {
+  if (prop.min !== undefined && prop.max !== undefined) return `${prop.min}..${prop.max}`
+  if (prop.min !== undefined) return `${prop.min}..`
+  if (prop.max !== undefined) return `..${prop.max}`
+  return ''
+}
+
+/** What a prop's type says about its value, shared by the server and the editor: undefined when the
+ *  value is fine, else what to use instead (`use a number from 0 to 10`). Text, image, link and boolean
+ *  take anything (a boolean reads "false" as off and everything else as on), so old markup round-trips. */
+export function propValueProblem(prop: ComponentProp, value: string): string | undefined {
+  switch (prop.type) {
+    case 'enum':
+      return prop.options?.length && !prop.options.includes(value) ? `use ${prop.options.join(' | ')}` : undefined
+    case 'number': {
+      const number = value.trim() === '' ? NaN : Number(value)
+      const expected = `a number${
+        prop.min !== undefined && prop.max !== undefined
+          ? ` from ${prop.min} to ${prop.max}`
+          : prop.min !== undefined
+            ? ` of at least ${prop.min}`
+            : prop.max !== undefined
+              ? ` of at most ${prop.max}`
+              : ''
+      }${prop.step !== undefined ? ` in steps of ${prop.step}` : ''}`
+      if (!Number.isFinite(number)) return `use ${expected}`
+      if ((prop.min !== undefined && number < prop.min) || (prop.max !== undefined && number > prop.max))
+        return `use ${expected}`
+      if (prop.step !== undefined && prop.step > 0) {
+        const steps = (number - (prop.min ?? 0)) / prop.step
+        if (Math.abs(steps - Math.round(steps)) > 1e-9) return `use ${expected}`
+      }
+      return undefined
+    }
+    case 'color':
+      return isColorValue(value)
+        ? undefined
+        : 'use a hex colour (#rgb, #rrggbb, #rrggbbaa), rgb(), hsl(), oklch() or var(--token)'
+    case 'instance': {
+      const name = value.trim().toLowerCase()
+      if (!name) return prop.accepts?.length ? `use ${prop.accepts.join(' | ')}` : 'use the name or id of a component'
+      return !prop.accepts?.length || prop.accepts.some((entry) => entry.trim().toLowerCase() === name)
+        ? undefined
+        : `use ${prop.accepts.join(' | ')}`
+    }
+    default:
+      return undefined
+  }
+}
+
+/** The one-line signature agents scan: `Button(label: text, tone: primary|ghost = primary) slots: icon`.
+ *  Typed values show their limits: `count: number(0..10) = 1`, `icon: instance(Icon|Avatar)`. */
 export function componentSignature(def: Pick<ComponentDef, 'name' | 'props' | 'slots'>): string {
   const props = def.props.map((prop) => {
-    const type = prop.type === 'enum' ? (prop.options ?? []).join('|') : prop.type
+    const type =
+      prop.type === 'enum'
+        ? (prop.options ?? []).join('|')
+        : prop.type === 'number' && (numberRange(prop) || prop.step !== undefined)
+          ? `number(${numberRange(prop)}${prop.step !== undefined ? `${numberRange(prop) ? ' ' : ''}step ${prop.step}` : ''})`
+          : prop.type === 'instance' && prop.accepts?.length
+            ? `instance(${prop.accepts.join('|')})`
+            : prop.type
     return `${prop.name}: ${type}${prop.default !== undefined ? ` = ${prop.default}` : ''}`
   })
   const slots = def.slots.length ? ` slots: ${def.slots.map((slot) => slot.name).join(', ')}` : ''

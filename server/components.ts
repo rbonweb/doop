@@ -259,7 +259,9 @@ function prepareMains(
       })
       continue
     }
-    const variants = def.props.filter((prop) => prop.type === 'enum').map((prop) => `data-${prop.name}`)
+    const variants = def.props
+      .filter((prop) => prop.type === 'enum' || (prop.type === 'boolean' && prop.reflect))
+      .map((prop) => `data-${prop.name}`)
     const { css, rawCss } = extractComponentCss(sheet(), found.el, id, variants)
     const head = headTags()
     const { props, slots } = derivePropsAndSlots(template, def.props)

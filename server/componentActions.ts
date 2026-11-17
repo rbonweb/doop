@@ -18,6 +18,7 @@ import {
   componentSignature,
   isDeleted,
   isPropName,
+  propValueProblem,
   type ComponentCode,
   type ComponentDef,
   type ComponentProp,
@@ -215,6 +216,47 @@ export function withCarriedFaces(rawCss: string, faces: string): string {
   return `${lead}${lead && !lead.endsWith('\n') ? '\n' : ''}${faces}\n${rest}`
 }
 
+const MAX_ACCEPTS = 20
+
+function finiteNumber(prop: string, field: string, value: unknown): number {
+  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value
+  if (typeof number !== 'number' || !Number.isFinite(number)) fail(`prop “${prop}”: ${field} must be a number`)
+  return number
+}
+
+/** The typed fields of one prop, each allowed on its own type only. */
+function typedFields(name: string, type: ComponentProp['type'], raw: Partial<ComponentProp>) {
+  const only = (field: keyof ComponentProp, allowed: ComponentProp['type']) => {
+    if (raw[field] !== undefined && type !== allowed)
+      fail(`prop “${name}”: ${field} belongs to ${allowed} props, not ${type}`)
+  }
+  only('min', 'number')
+  only('max', 'number')
+  only('step', 'number')
+  only('accepts', 'instance')
+  only('reflect', 'boolean')
+  const fields: Partial<ComponentProp> = {}
+  if (raw.min !== undefined) fields.min = finiteNumber(name, 'min', raw.min)
+  if (raw.max !== undefined) fields.max = finiteNumber(name, 'max', raw.max)
+  if (fields.min !== undefined && fields.max !== undefined && fields.min > fields.max)
+    fail(`prop “${name}”: min ${fields.min} is above max ${fields.max}`)
+  if (raw.step !== undefined) {
+    fields.step = finiteNumber(name, 'step', raw.step)
+    if (fields.step <= 0) fail(`prop “${name}”: step must be above 0`)
+  }
+  if (raw.accepts !== undefined) {
+    if (!Array.isArray(raw.accepts)) fail(`prop “${name}”: accepts must be a list of component names or ids`)
+    const accepts = [...new Set(raw.accepts.map((entry) => String(entry).trim()).filter(Boolean))]
+    if (accepts.length > MAX_ACCEPTS) fail(`prop “${name}”: accepts lists at most ${MAX_ACCEPTS} components`)
+    if (accepts.length) fields.accepts = accepts
+  }
+  if (raw.reflect !== undefined) {
+    if (typeof raw.reflect !== 'boolean') fail(`prop “${name}”: reflect must be true or false`)
+    if (raw.reflect) fields.reflect = true
+  }
+  return fields
+}
+
 export function validProps(props: unknown): ComponentProp[] {
   if (props === undefined) return []
   if (!Array.isArray(props)) fail('props must be a list')
@@ -226,7 +268,7 @@ export function validProps(props: unknown): ComponentProp[] {
     const type = raw.type ?? (raw.options?.length ? 'enum' : 'text')
     if (!PROP_TYPES.includes(type)) fail(`prop “${raw.name}” has unknown type “${String(type)}”`)
     if (type === 'enum' && !raw.options?.length) fail(`enum prop “${raw.name}” needs options`)
-    return {
+    const prop: ComponentProp = {
       name: raw.name,
       type,
       ...(raw.default !== undefined
@@ -235,8 +277,14 @@ export function validProps(props: unknown): ComponentProp[] {
           ? { default: raw.options![0]! }
           : {}),
       ...(raw.options?.length ? { options: raw.options.map(String) } : {}),
+      ...typedFields(raw.name, type, raw),
       ...(raw.description ? { description: String(raw.description).slice(0, 300) } : {}),
     }
+    if (prop.default !== undefined && (type === 'number' || type === 'color' || type === 'instance')) {
+      const problem = propValueProblem(prop, prop.default)
+      if (problem) fail(`prop “${prop.name}”: default “${prop.default}” does not fit — ${problem}`)
+    }
+    return prop
   })
 }
 
