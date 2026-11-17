@@ -9,6 +9,13 @@ import { Client, startServer, type Server } from './harness.ts'
 
 const doc = (body: string, head = '') => `<!doctype html><html><head>${head}</head><body>${body}</body></html>`
 
+/** Tailwind mode imports the theme and utilities layers, never the bare import that would bring Preflight's reset along. */
+function expectTailwindImports(css: string): void {
+  expect(css).toContain('@import "tailwindcss/theme.css" layer(theme);')
+  expect(css).toContain('@import "tailwindcss/utilities.css" layer(utilities);')
+  expect(css).not.toContain('@import "tailwindcss";')
+}
+
 let server: Server
 let owner: Client
 let editor: Client
@@ -320,7 +327,7 @@ describe('tailwind', () => {
     expect(res.status).toBe(200)
     const zip = await JSZip.loadAsync(Buffer.from(await res.arrayBuffer()))
     const tokens = await zip.file('Shop-front-end-react/src/tokens.css')!.async('string')
-    expect(tokens.startsWith('@import "tailwindcss";')).toBe(true)
+    expectTailwindImports(tokens)
     expect(tokens).toContain('--brand')
     const report = JSON.parse(await zip.file('Shop-front-end-react/export-report.json')!.async('string')) as {
       styling: string
@@ -337,9 +344,7 @@ describe('tailwind', () => {
       await exportReact(owner, canvasId, { format: 'json', styling: 'tailwind' }),
     )
     expect((report as unknown as { styling: string }).styling).toBe('tailwind')
-    expect(files.find((file) => file.path === 'src/tokens.css')?.content.startsWith('@import "tailwindcss";')).toBe(
-      true,
-    )
+    expectTailwindImports(files.find((file) => file.path === 'src/tokens.css')?.content ?? '')
   })
 })
 

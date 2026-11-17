@@ -22,6 +22,13 @@ import * as propagation from '../server/propagation.ts'
 
 /** export_react over MCP and its resident twin: the small inline answer, the zip for a large one, access, arguments and the budget. */
 
+/** Tailwind mode imports the theme and utilities layers, never the bare import that would bring Preflight's reset along. */
+function expectTailwindImports(css: string): void {
+  expect(css).toContain('@import "tailwindcss/theme.css" layer(theme);')
+  expect(css).toContain('@import "tailwindcss/utilities.css" layer(utilities);')
+  expect(css).not.toContain('@import "tailwindcss";')
+}
+
 const OWNER = 'owner-1'
 const AGENT = { agent_name: 'Tester' }
 const BUTTON = `<button class="btn"><span class="label">Start</span></button>`
@@ -147,7 +154,7 @@ describe('export_react over MCP', () => {
     const tokens = (out.data.files as { path: string; content: string }[]).find(
       (file) => file.path === 'src/tokens.css',
     )!
-    expect(tokens.content.startsWith('@import "tailwindcss";')).toBe(true)
+    expectTailwindImports(tokens.content)
   })
 
   it('hands a large export over as a zip resource, with the report and a file listing', async () => {
