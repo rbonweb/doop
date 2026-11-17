@@ -202,6 +202,7 @@ describe('importing a component bundle', () => {
         expect.objectContaining({
           component: 'Tag',
           code: 'renamed',
+          detail: { from: 'Tag', to: 'Tag (Primer)' },
           message: expect.stringContaining('“Tag (Primer)”'),
         }),
       )
@@ -214,7 +215,12 @@ describe('importing a component bundle', () => {
     it('goes on to " 2", " 3" when the qualified name is taken too', () => {
       manual('Tag')
       manual('Tag (Primer)')
-      expect(run(primer()).created.map((entry) => entry.name)).toEqual(['Tag (Primer) 2'])
+      const second = run(primer())
+      expect(second.created.map((entry) => entry.name)).toEqual(['Tag (Primer) 2'])
+      expect(second.issues.find((issue) => issue.code === 'renamed')?.detail).toEqual({
+        from: 'Tag',
+        to: 'Tag (Primer) 2',
+      })
       manual('Tag (Primer) 3')
       expect(run(primer()).unchanged.map((entry) => entry.name)).toEqual(['Tag (Primer) 2'])
     })
@@ -251,6 +257,7 @@ describe('importing a component bundle', () => {
       const dry = run(primer(), true)
       expect(dry.created).toEqual([{ name: 'Tag (Primer)', id: '' }])
       expect(dry.issues.map((issue) => issue.code)).toContain('renamed')
+      expect(dry.issues.find((issue) => issue.code === 'renamed')?.detail).toEqual({ from: 'Tag', to: 'Tag (Primer)' })
       expect(store.getComponents(canvasId)).toHaveLength(before)
     })
 

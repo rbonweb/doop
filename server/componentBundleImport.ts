@@ -51,6 +51,8 @@ export interface ImportIssue {
   component?: string
   code: string
   message: string
+  /** structured fields of an issue a caller reads without parsing `message`: for `renamed`, the name in the bundle and the name it was imported under */
+  detail?: { from: string; to: string }
 }
 
 export interface ImportResult {
@@ -554,6 +556,7 @@ function writeOne(
     issues.push({
       component: component.name,
       code: 'renamed',
+      detail: { from: component.name, to: name },
       message: `a component named “${component.name}” is already on this canvas, so this one was imported as “${name}” (its code export is still ${code.exportName ?? component.name})`,
     })
   if (dryRun) {
