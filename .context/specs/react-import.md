@@ -54,6 +54,8 @@ CSS variants are scoped under `[data-<prop>="<value>"]` on the component root, t
 
 The published-Storybook way in, MCP `import_storybook({ canvas_id, url, package?, include?, dry_run?, agent_name })` (edit role) and REST `POST /api/canvases/:id/import/storybook`.
 
+Over MCP an import is a job (`server/storybookJobs.ts`), since one of a dozen components runs for minutes and MCP clients time out a call at 60 s: `import_storybook` answers at once with `{ job_id, status, planned }` (a dry run only plans and answers in full), `get_import_status({ canvas_id, job_id })` reports `running`, `cancelling`, `done`, `failed`, `cancelled` or `unknown` (lost on restart) with progress and the result, and `cancel_import` (edit role) stops it before the writes begin; once writing has begun a cancel is refused as too late. Only the starter or an editor of that canvas reads a job; ids are 128-bit; one running job per user; the job loads and holds its canvas until it ends; finished jobs are kept 30 minutes, at most 5 per user and 500 in all. REST keeps the NDJSON stream.
+
 - The index is `index.json` (v4 and v5) and, failing that, the older `stories.json` (v3), parsed by `shared/storybook/index.ts` into `{ id, title, name, type, tags }[]`; docs entries are skipped, hostile JSON is dropped field by field, and nothing throws on bad input. Arg types and initial args read from `__STORYBOOK_PREVIEW__` become Doop props through `shared/storybook/argTypes.ts`.
 - `shared/storybook/plan.ts` groups stories into components by title, picks the default story (`--default`, then `--primary`, else the first), and plans one render per default plus one per enum option (up to 8 on up to 4 axes) and per boolean, inside the budget. `shared/storybook/bundle.ts` turns captures into a `ComponentBundle` with `source.kind` `storybook`, `code.origin = { kind, storyId, url }` and `code.exportName` from the display name, else the title's last segment when it is a JS identifier.
 - Each story renders in its own isolated page in `openIsolatedPage` behind `guardPublicPageRequests`, at 1280 wide, with a 20-second deadline per render and 10 minutes for the import. The capture (`shared/storybook/capture.ts`) runs in an isolated world: it sees the DOM and CSSOM but none of the page's JavaScript, so page script cannot change what is measured or returned. A small probe installed before the document loads leaves its verdict on the document element and the wait runs in that same world.
@@ -74,7 +76,7 @@ The published-Storybook way in, MCP `import_storybook({ canvas_id, url, package?
 ## The picker and the agent path
 
 - The import picker (`src/components/ImportSources.tsx`, `importSourceList.tsx`) has two cards for a canvas's owner: Storybook (`StorybookImportSection.tsx`: URL and optional package, dry-run preview of created/updated/skipped, Import, progress with rendered of total and the current component, Cancel that aborts the fetch, the result with counts, skipped and issues, "Open Imported components", and refusal text per code) and CLI (`CliImportSection.tsx`: mints a ticket on open, shows the command, a relative expiry that flips to expired, "New command", the dev-server and `--package` note, and a landed callout when components arrive over the room). Both are edit-only: a viewer sees neither.
-- Agents get the `react-import` guide topic (`server/guide.ts`): the three ways in and how to choose, calling `import_storybook` with `dry_run` first, `create_import_ticket` and the CLI command, writing a bundle by hand with a minimal example, and re-importing. The main guide carries one pointer line, not the topic.
+- Agents get the `react-import` guide topic (`server/guide.ts`): the three ways in and how to choose, calling `import_storybook` with `dry_run` first and following its job with `get_import_status`, `create_import_ticket` and the CLI command, writing a bundle by hand with a minimal example, and re-importing. The main guide carries one pointer line, not the topic.
 
 ## Tests
 
@@ -91,6 +93,9 @@ The published-Storybook way in, MCP `import_storybook({ canvas_id, url, package?
 - `tests/componentImportCards.test.tsx`: the two picker cards (idle, preview, progress, cancel, refusal, ticket expiry, renewal, landed over the room, viewer gating).
 
 ## Known limits
+
+- A story that registers a service worker (MSW mocks, as Grafana UI's do) cannot render in the hardened renderer, whose policy blocks workers: it is reported as needing a service worker, with the CLI as the way in.
+- A story whose controls live only in a sibling story (Primer's Playground) is imported from that sibling, named in a `controls_from_story` issue.
 
 - The CLI duplicates the server adapter's page logic (`packages/doop-import/src/render.ts`) rather than sharing it with `server/storybookImport.ts`; a follow-up could move the adapter into `shared/`.
 - Chrome is not auto-detected: its install paths are left out of `browser.ts` so the repo's no-owner-Chrome rule holds. Chrome users pass `--browser` or set `CHROME_PATH`.
