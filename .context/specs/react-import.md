@@ -1,0 +1,99 @@
+# React import
+
+Status: built (S10 importer and tickets, S11 Storybook, S12 CLI, S13 agent path and picker). Plan: Phase C of the component-upgrades plan; contract in `/tmp/react-components/c/contract.md` at the time of writing, code is the source of truth.
+
+## Goal
+
+A team's React component system arrives in a canvas as ordinary Doop components, on one page, with props, variants and tokens, and with the `code` mapping the React export consumes, so an imported Button is a real Doop component a person can instance and an agent can compose with, and `export_react` imports the team's own package instead of regenerating it. Three ways in produce one `ComponentBundle` and go through one importer: a published Storybook URL, the CLI on a machine that has the repo, and an agent writing a bundle over MCP.
+
+## Safety
+
+A Storybook, a bundle and an upload are all untrusted, and the importer may run on code a stranger wrote, so nothing in a bundle becomes executable in the Doop process or in a canvas:
+
+- `server/bundleSanitize.ts` runs on the server before the ordinary component write path: markup through parse5 and CSS through `componentCss`'s tokenizer. It drops `script`, `noscript`, `iframe`, `frame`, `frameset`, `object`, `embed`, `applet`, `portal`, `fencedframe`, `base`, `meta`, `link` (stylesheets travel as `css`), SVG `set`/`animate` that set `href`, every `on*` attribute, `srcdoc`, `ping`, `formaction`, comments, and `javascript:`, `vbscript:` or `data:text/html` in `href`, `src`, `action`, `poster`, `xlink:href`, `srcset` and the other URL attributes, checked the way a browser strips control characters and spaces; every `data-doop-*` other than `data-doop-prop`, `data-doop-slot`, `data-doop-slot-suggest` and `data-doop-if` is removed.
+- A base64 `data:` URI becomes an empty `src` with an `inline_data` issue, as `server/inlineData.ts` does for agent writes; `<style>` elements move out as CSS.
+- CSS drops `@import`, `expression(`, `behavior:`, `-moz-binding`, and `javascript:`/`vbscript:`/`data:text/html` URLs after CSS escapes are decoded and comments removed; a `url()` is kept only for `http(s):`, `#fragment` and non-base64 `data:image` (anything else becomes `url("")` with an issue). Sanitized style text is re-serialized with `styleText`, which escapes `<` before `/style` or `!--` so a stylesheet can never close a `<style>` element.
+- A prop option or default holding `< > " \ { } ;` or a control character would end an attribute, a selector or a style block, so `unsafePropValue` makes the importer skip that one component with a reason; the rest of the bundle still lands.
+- The Storybook path never runs page JavaScript: story pages load in the hardened renderer (`openIsolatedPage` plus `guardPublicPageRequests`), no cookies or credentials are sent, and a private or authenticated Storybook is refused before anything is captured. The CLI renders on the team's own machine, so no repository code touches the server at all.
+
+## The bundle (`shared/componentBundle.ts`)
+
+Pure (zod and `shared/*` only, since the CLI bundles it), `BUNDLE_VERSION = 1`, `BUNDLE_SOURCES = ['storybook', 'cli', 'agent']`. One schema validates every source and the importer validates the caller's raw value again.
+
+- Top level: `version`, `source` (`kind`, optional `url` and `name`), optional `package` (the default `code.importFrom` for every component), optional shared `css` (resets, `:root` variables), optional `tokens` (up to 500 `{ name: --…, value, type? }`), and `components` (1 to 60).
+- A component: `name`, optional `description` and `group` (the Storybook title path, for page layout), `html` (one root element, the default render, may carry `data-doop-prop`, `data-doop-slot` and `data-doop-if` and `<doop-use>`), optional `css`, `props` (up to 40), `variants` and `code`.
+- Limits: `MAX_BUNDLE_COMPONENTS` 60, `MAX_BUNDLE_BYTES` 20 MB of JSON after gzip is undone, `MAX_INLINE_BUNDLE_BYTES` 300 KB for `import_components`, `MAX_BUNDLE_HTML_BYTES` 200 KB per component and per variant, `MAX_BUNDLE_CSS_BYTES` 400 KB per component, per variant and for the shared sheet, `MAX_VARIANT_AXES` 4 and `MAX_VARIANT_VALUES` 8.
+- Refinements: at most 4 variant props and 8 values each, every variant key names an enum or boolean prop of that component (`"true"` / `"false"` for a boolean), and component names are unique inside a bundle, case-insensitively.
+- Variant meaning: `variants[prop][value].css` is CSS written against the default `html` that applies when the prop has that value; `variants[prop][value].html` is a whole alternative render, used only when the structure differs.
+
+## Variants (`server/bundleVariants.ts`)
+
+CSS variants are scoped under `[data-<prop>="<value>"]` on the component root, the way Doop enum variants are styled: a selector that already matches the root gets the attribute compounded onto it, anything else becomes a descendant of that root, and `@media`, `@supports`, `@container` and `@layer` groups are recursed. A boolean prop with CSS variants gets `reflect: true`, so its on state writes `data-<name>` like an enum. An HTML variant is diffed against the default (LCS over children) and expressed with `data-doop-if` (`prop=value`, `prop!=value`, `prop`, `!prop`); a node that already carries a condition is wrapped in `<div style="display:contents">`. When the difference cannot be expressed that way, the default is kept and the bundle records a `variant_html_unsupported` issue against the component.
+
+## The importer (`server/componentBundleImport.ts`)
+
+`importComponentBundle(ctx, raw, { dryRun })` validates with the schema, sanitizes each component, builds the main template, and creates through the existing component create path in batches of six, each batch inside `runOperation`/`atomic` so writes have a work budget. A bundle that cannot fit the canvas's `MAX_COMPONENTS` is refused up front with the numbers; a component that fails on its own is `skipped` with a reason and the rest go on.
+
+- The result is `{ created, updated, unchanged, skipped, tokens, pageId, issues }`, the same shape the dry run answers (its created ids are `""`). One activity line per import: "imported N components from <source>".
+- Mains go on a page named "Imported components" (`IMPORTED_COMPONENTS_PAGE`), created if missing and reused on re-import, laid out five to a row below what the page holds, grouped by `group` with `freeSpotBeside`/`arrangeRows`. Mains are 480x240.
+- `:root` custom properties in the shared `css` and `bundle.tokens` become canvas tokens: existing names are left alone and listed as skipped, the type is guessed from the value when absent, an unsafe value is dropped with an issue.
+- Each component's `code` gets `importFrom` defaulted from `bundle.package`, and `origin.kind` from `bundle.source.kind`.
+- Re-import in place: a component whose `code.importFrom` + `code.exportName` match a live component updates that component through `updateComponent` (same id, history kept, instances propagate); with no `exportName`, a component the importer created before with the same name and the same `code.origin.kind` is updated. The update runs in a savepoint and is undone when nothing a component is made of changed, so an unchanged component is reported `unchanged` and writes no revision. Props on update keep the component's own order and the text-like props an earlier import inferred.
+- A name another, non-imported component already holds is skipped with a reason, so an import never takes a person's component over.
+
+## Tickets and upload (`server/componentImportTickets.ts`, `server/componentImportRoutes.ts`)
+
+- MCP `import_components({ canvas_id, bundle, dry_run?, agent_name })`, edit role, in `COMPONENT_TOOLS` so the resident agent has it too; the inline bundle is capped at 300 KB and a bigger one is told to use `create_import_ticket`.
+- MCP `create_import_ticket({ canvas_id, agent_name })`, edit role, in `COMPONENT_TOOLS`, answers `{ upload_url, expires_at, command, curl }`: `npx doop-import --storybook ./storybook-static --ticket <upload_url>` and `curl -T bundle.json <upload_url>` (or `-H 'Content-Encoding: gzip'` for a `.json.gz`).
+- REST `POST /api/canvases/:id/component-import/ticket` (session, edit role) answers the same, for the picker; at the cap it is 429 with `Retry-After`.
+- Upload is `PUT /import/:token`, mounted before `express.json` like `/u/:token`, with no session: the token is the capability, 32 random bytes base64url, bound to one canvas and the person it was made for. It lives 15 minutes, is single use (a failed upload of a valid ticket may retry until expiry, a success consumes it), and the person's edit role on that canvas is checked again when the bytes arrive (403 when it was lost). The body is JSON; `Content-Encoding: gzip` is accepted with the 20 MB cap applied to the decompressed bytes; 413 over size, 400 on bad JSON, gzip, encoding or bundle, 410 on a bad, expired or used ticket. The answer is the import result JSON.
+- At most 5 tickets an hour per account and 20 live at once; tickets are in memory on purpose (a restart drops them).
+- `?dry_run=1` on the upload URL runs a dry run and does not consume the ticket.
+
+## Storybook (`server/storybookImport.ts`, `shared/storybook/*`)
+
+The published-Storybook way in, MCP `import_storybook({ canvas_id, url, package?, include?, dry_run?, agent_name })` (edit role) and REST `POST /api/canvases/:id/import/storybook`.
+
+- The index is `index.json` (v4 and v5) and, failing that, the older `stories.json` (v3), parsed by `shared/storybook/index.ts` into `{ id, title, name, type, tags }[]`; docs entries are skipped, hostile JSON is dropped field by field, and nothing throws on bad input. Arg types and initial args read from `__STORYBOOK_PREVIEW__` become Doop props through `shared/storybook/argTypes.ts`.
+- `shared/storybook/plan.ts` groups stories into components by title, picks the default story (`--default`, then `--primary`, else the first), and plans one render per default plus one per enum option (up to 8 on up to 4 axes) and per boolean, inside the budget. `shared/storybook/bundle.ts` turns captures into a `ComponentBundle` with `source.kind` `storybook`, `code.origin = { kind, storyId, url }` and `code.exportName` from the display name, else the title's last segment when it is a JS identifier.
+- Each story renders in its own isolated page in `openIsolatedPage` behind `guardPublicPageRequests`, at 1280 wide, with a 20-second deadline per render and 10 minutes for the import. The capture (`shared/storybook/capture.ts`) runs in an isolated world: it sees the DOM and CSSOM but none of the page's JavaScript, so page script cannot change what is measured or returned. A small probe installed before the document loads leaves its verdict on the document element and the wait runs in that same world.
+- Limits: 60 components, 400 renders (variants get a fair share), 20 s a render, 10 minutes an import, 2 MB per story capture, and 3 imports at once across the server; a fourth is refused with `StorybookBusyError` and a retry hint. At most 3 Storybook imports an hour per account (`STORYBOOK_IMPORTS_PER_HOUR`), refused with a 429 and `Retry-After`; a dry run does not spend one.
+- A Storybook answering 401 or 403, redirecting to a sign-in path, or on a private address is refused (`StorybookAccessError`, code `private`); no cookies or credentials are sent. `DOOP_STORYBOOK_PRIVATE_HOSTS` is the operator's opt-in for a self-hosted instance whose Storybook is on its own network; even then story pages may reach only the Storybook's own origin and nothing else private.
+- The REST answer is `application/x-ndjson`, one JSON object a line, flushed as it goes: `plan` (components, renders) once the index is read, `progress` (rendered, total, component) after each render, then a final `result` or `error` (`private`, `unreachable`, `too_many`, `busy`, `invalid`). A refusal before streaming starts is an ordinary JSON error with a 4xx status. Closing the request aborts the import and the browser with it. A dry run reads the index, plans, and ends after `plan` with a `result` whose arrays are what would be created or updated by name. The MCP tool returns the final result only.
+- Capture conventions: variant CSS is written against the default html, computed properties only and no `!important`; the root is its tag plus classes, descendants are `tag:nth-child(n)` paths, so scoping under the variant attribute matches. `bundle.css` holds deduped shared rules (resets, `:root`, `html`/`body`/`*`, used `@font-face`), a component's `css` the rules that reach its tree, its used keyframes and wrapping at-rules; `.sb-*`, `#storybook-*` and `.docs-story` rules are left out, `url()` is made absolute, and `src`/`poster` are made absolute.
+
+## CLI (`packages/doop-import`)
+
+`npx doop-import --storybook <dir|url> --ticket <url> [--package <name>] [--include <title prefix>…] [--browser <path>] [--dry-run] [--out bundle.json]`. It uses the same `shared/storybook/*` and `shared/componentBundle.ts` as the server path, so the two produce the same bundle.
+
+- A directory is served on `127.0.0.1` at a random port by a tiny static server with a Host-header check and a symlink-escape check; a URL (a dev server, `localhost` allowed because it runs on the team's machine) is used as is.
+- Renders with `puppeteer-core` and the first browser of: `--browser`, `DOOP_IMPORT_BROWSER`, `CHROME_PATH`, then a Chromium, Edge or Brave found at its usual install path. A named path must be executable; it never falls through to another browser. Any Chromium-based executable works, headless-shell builds included.
+- Each story renders in a fresh context; when `--storybook` is someone else's server, story pages are stopped from reaching this machine and its network. It uploads gzip to the ticket (https only; plain http only for this machine) and prints what was created, updated or skipped. `--out` without `--ticket` only writes the bundle. It uploads rendered HTML and CSS, props and variants: nothing of the source, the repository or `node_modules` leaves the machine.
+- Built by `bun run build:doop-import` (esbuild) into the gitignored `packages/doop-import/dist/cli.mjs`, run with Node 20 or newer; the package is `private: true` and not published to npm in this phase.
+
+## The picker and the agent path
+
+- The import picker (`src/components/ImportSources.tsx`, `importSourceList.tsx`) has two cards for a canvas's owner: Storybook (`StorybookImportSection.tsx`: URL and optional package, dry-run preview of created/updated/skipped, Import, progress with rendered of total and the current component, Cancel that aborts the fetch, the result with counts, skipped and issues, "Open Imported components", and refusal text per code) and CLI (`CliImportSection.tsx`: mints a ticket on open, shows the command, a relative expiry that flips to expired, "New command", the dev-server and `--package` note, and a landed callout when components arrive over the room). Both are edit-only: a viewer sees neither.
+- Agents get the `react-import` guide topic (`server/guide.ts`): the three ways in and how to choose, calling `import_storybook` with `dry_run` first, `create_import_ticket` and the CLI command, writing a bundle by hand with a minimal example, and re-importing. The main guide carries one pointer line, not the topic.
+
+## Tests
+
+- `tests/componentBundle.test.ts`: the bundle schema and its limits and refinements.
+- `tests/componentBundleImport.test.ts`: the importer end to end (acceptance, in-place re-import, unchanged, dry run, capacity, name clash, tokens, hostile bundle, sanitizer corpus, variants).
+- `tests/componentImportTicketsHttp.test.ts`: ticket REST and MCP routes, the upload route, single use, expiry, gzip and compressed cap, dry run, lost edit role and the hourly cap.
+- `tests/bundleSanitize` corpus lives in `componentBundleImport.test.ts`; the Storybook chain's hostile capture is `tests/storybookHostileImport.test.ts` (a compromised capture cannot put anything executable in a frame).
+- `tests/pageCapture.test.ts`: the website-import sanitizer moved out of `server/importer.ts`, unchanged.
+- `tests/storybookIndex.test.ts`, `tests/storybookArgTypes.test.ts`, `tests/storybookPlan.test.ts`: index formats, argument types to props, and grouping/default/variant planning.
+- `tests/storybookBundle.test.ts`: captures to a bundle against a fake page.
+- `tests/storybookImportBrowser.test.ts`: the fake Storybook in a browser (no React); no request leaves the origin, no cookies or authorization, 401 and 403, sign-in and off-origin redirects, HTML instead of JSON, private addresses, a hanging story, the 2 MB cap and 3 at once.
+- `tests/storybookImportHttp.test.ts` and `tests/storybookRoute.test.ts`: REST and MCP import through the real server, the NDJSON lines, refusals and the per-hour cap.
+- `tests/doopImportCli.test.ts`: static-server refusals, browser lookup, ticket parsing, the gzip PUT shape, a real fixture import through a real ticket, `--include`, `--out`, usage errors and the esbuild output under node.
+- `tests/componentImportCards.test.tsx`: the two picker cards (idle, preview, progress, cancel, refusal, ticket expiry, renewal, landed over the room, viewer gating).
+
+## Known limits
+
+- The CLI duplicates the server adapter's page logic (`packages/doop-import/src/render.ts`) rather than sharing it with `server/storybookImport.ts`; a follow-up could move the adapter into `shared/`.
+- Chrome is not auto-detected: its install paths are left out of `browser.ts` so the repo's no-owner-Chrome rule holds. Chrome users pass `--browser` or set `CHROME_PATH`.
+- CSS from a cross-origin stylesheet without CORS cannot be read through the CSSOM, so its rules are skipped with a `css_cross_origin` issue; Google Fonts links are the common case.
+- Imported mains are placed at a default 480x240 without measuring, so a screenshot pass or `arrange_frames` may be needed to tidy the page.
+- Tickets and the per-hour counters are in memory, so a restart forgets them; a dry run is the safe way to check a bundle before a real import.
