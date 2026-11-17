@@ -24,6 +24,7 @@ import { components } from './components'
 import { actions } from './actions'
 import { plans } from './plans'
 import { reactExport } from './reactExport'
+import { componentImport } from './componentImport'
 
 /** The source catalog, one namespace per area of the app. */
 export const en = {
@@ -53,4 +54,5 @@ export const en = {
   actions,
   plans,
   reactExport,
+  componentImport,
 }

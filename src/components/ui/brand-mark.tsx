@@ -1,6 +1,16 @@
 import { useId, type JSX } from 'react'
 import { cn } from '@/lib/utils'
-import { ImageIcon, PdfIcon, PuzzleIcon, RadioTowerIcon, ServerIcon, VectorIcon, WebIcon } from './icons'
+import {
+  BookOpenIcon,
+  ImageIcon,
+  PdfIcon,
+  PuzzleIcon,
+  RadioTowerIcon,
+  ServerIcon,
+  TerminalIcon,
+  VectorIcon,
+  WebIcon,
+} from './icons'
 import canvaLogo from './brand/canva.svg'
 import linearLogo from './brand/linear.svg'
 import slackLogo from './brand/slack.svg'
@@ -359,6 +369,8 @@ export type AppIconBrand =
   | 'canva'
   | 'website'
   | 'live-app'
+  | 'storybook'
+  | 'cli'
   | 'pdf'
   | 'png'
   | 'jpg'
@@ -448,6 +460,10 @@ const APP_TILES: Record<AppIconBrand, AppTile> = {
   },
   website: { tile: '#0177d3', art: chromeGlyph(WebIcon) },
   'live-app': { tile: '#1f9d55', art: chromeGlyph(RadioTowerIcon) },
+  /* Storybook's pink, with a book: its own mark is not in the brand set */
+  storybook: { tile: '#ff4785', art: chromeGlyph(BookOpenIcon) },
+  /* a command line: the CLI import, which has no brand */
+  cli: { tile: '#262624', art: chromeGlyph(TerminalIcon) },
   pdf: { tile: '#e5322d', art: chromeGlyph(PdfIcon) },
   png: { tile: '#6e56cf', art: chromeGlyph(ImageIcon) },
   jpg: { tile: '#0891b2', art: chromeGlyph(ImageIcon) },
