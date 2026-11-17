@@ -62,6 +62,6 @@ With no browser to point at, install a standalone one: `npx @puppeteer/browsers 
 
 - It renders each component's default story, then one render per enum option and boolean to capture variants, inside Doop's limits: 60 components, 400 renders, 20 seconds a render, 10 minutes in all.
 - A Storybook that asks for a sign-in is refused: no cookies or credentials are sent.
-- Each story renders in a fresh browser context with no cookies. The Storybook is your own code and runs on your machine with your network access, so doop-import is not a sandbox for untrusted code: only point it at a Storybook you trust. (The request guard in the source, which stops story pages reaching private and loopback addresses, is best-effort and off for local Storybooks.)
+- Each story renders in a fresh browser context with no cookies. For a `storybook-static` directory, story pages may load the build's own files and public hosts but are stopped from requesting any other loopback, private or link-local address; for a dev server that guard is off, since dev servers call other local ports. The guard is best-effort, not a sandbox: the Storybook is your own code running on your machine with your network access, so only point doop-import at one you trust.
 - It sends the bundle gzipped to the ticket and prints what was created, updated or skipped, and anything that could not be captured.
 - Run as root (in a container) it starts the browser without its sandbox, as Chromium requires there.

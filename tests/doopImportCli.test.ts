@@ -464,6 +464,44 @@ describe.skipIf(!browserPath)(
       expect(again.err).toMatch(/refused the upload/)
     })
 
+    it("serving a directory, blocks a story reaching another local port and still loads the build's own files", async () => {
+      const { cp, mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises')
+      const { tmpdir } = await import('node:os')
+      const hits: string[] = []
+      const leak = createServer((req, res) => {
+        hits.push(req.url ?? '')
+        res.writeHead(200, { 'access-control-allow-origin': '*' })
+        res.end('x')
+      })
+      await new Promise<void>((resolve) => leak.listen(0, '127.0.0.1', resolve))
+      const directory = await mkdtemp(path.join(tmpdir(), 'doop-import-static-'))
+      try {
+        await cp(fixture, directory, { recursive: true })
+        const leakUrl = `http://127.0.0.1:${(leak.address() as AddressInfo).port}/leak`
+        const html = (await readFile(path.join(directory, 'iframe.html'), 'utf8')).replace(
+          '</head>',
+          `<link rel="stylesheet" href="/extra.css"></head>`,
+        )
+        await writeFile(
+          path.join(directory, 'iframe.html'),
+          html.replace(
+            '<script>',
+            `<script>fetch(${JSON.stringify(leakUrl)}, { mode: 'no-cors' }).catch(function () {}); new Image().src = ${JSON.stringify(leakUrl + '.png')};`,
+          ),
+        )
+        await writeFile(path.join(directory, 'extra.css'), '.btn--primary { background: #123456; }')
+        const out = path.join(directory, 'bundle.json')
+        const result = await run(['--storybook', directory, '--out', out])
+        expect(result.code, result.err).toBe(0)
+        expect(hits).toEqual([])
+        /* the build's own stylesheet loaded: its colour is in the captured css */
+        expect(await readFile(out, 'utf8')).toContain('rgb(18, 52, 86)')
+      } finally {
+        await new Promise((resolve) => leak.close(resolve))
+        await rm(directory, { recursive: true, force: true })
+      }
+    })
+
     it('writes the bundle with --out, and only that when there is no ticket', async () => {
       const file = path.join(root, 'node_modules', '.cache', `doop-import-${process.pid}.json`)
       const { mkdir, readFile, rm } = await import('node:fs/promises')

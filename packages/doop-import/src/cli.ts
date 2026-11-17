@@ -186,6 +186,8 @@ export async function main(argv: string[], partial: Partial<Io> = {}): Promise<n
       include: options.include.length ? options.include : undefined,
       signal: io.signal,
       noSandbox: io.noSandbox,
+      /* a static build has no reason to call other local ports; a dev server does (HMR, APIs) */
+      guardRequests: source.server !== undefined,
       onProgress: (done, total) => io.stderr(`Captured ${done} of ${total} components`),
     })
     await server?.close()
