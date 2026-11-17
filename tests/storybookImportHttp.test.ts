@@ -12,6 +12,8 @@ type Line = {
   [key: string]: unknown
 }
 
+type Progress = { progress: number; total?: number; message?: string }
+
 let server: Server
 let storybook: FakeStorybook
 let owner: Client
@@ -122,11 +124,15 @@ describe.skipIf(!findBrowserPath())(
     })
 
     it('MCP import_storybook: a dry run, then again for real, which updates in place', async () => {
-      const call = async (args: Record<string, unknown>) => {
-        const result = await agent.callTool({
-          name: 'import_storybook',
-          arguments: { canvas_id: canvasId, agent_name: 'T', url: `${storybook.origin}/sb/`, ...args },
-        })
+      const call = async (args: Record<string, unknown>, onprogress?: (progress: Progress) => void) => {
+        const result = await agent.callTool(
+          {
+            name: 'import_storybook',
+            arguments: { canvas_id: canvasId, agent_name: 'T', url: `${storybook.origin}/sb/`, ...args },
+          },
+          undefined,
+          onprogress ? { onprogress } : undefined,
+        )
         return { isError: result.isError, text: (result.content as { text: string }[])[0]!.text }
       }
       const dry = await call({ dry_run: true })
@@ -141,8 +147,16 @@ describe.skipIf(!findBrowserPath())(
       expect(dryData.updated.map((entry) => entry.name).sort()).toEqual(['Badge', 'Button'])
       expect(dryData.renders).toBeGreaterThan(3)
 
-      const real = await call({ package: '@acme/ui', include: ['Inputs'] })
+      /* a client that sends a progress token hears one notification per render, which also starts the answer streaming at once (a long call would otherwise outlast a client's headers timeout) */
+      const progress: Progress[] = []
+      const real = await call({ package: '@acme/ui', include: ['Inputs'] }, (update) => progress.push(update))
       expect(real.isError).toBeFalsy()
+      expect(progress.length).toBeGreaterThanOrEqual(2)
+      expect(progress.map((update) => update.progress)).toEqual(
+        [...progress.map((update) => update.progress)].sort((a, b) => a - b),
+      )
+      expect(progress.at(-1)?.message).toContain('Rendered Button')
+      expect(progress.at(-1)?.total).toBeGreaterThanOrEqual(progress.at(-1)?.progress ?? 0)
       const data = JSON.parse(real.text) as {
         created: unknown[]
         updated: { name: string }[]
@@ -164,6 +178,50 @@ describe.skipIf(!findBrowserPath())(
       })
       expect(tool.isError).toBe(true)
       expect((tool.content as { text: string }[])[0]!.text).toContain('Storybook imports in the last hour')
+    })
+
+    it('stops rendering when the MCP client goes away mid-import', async () => {
+      let asked = 0
+      let firstAsked!: () => void
+      let cutOff!: () => void
+      const first = new Promise<void>((resolve) => (firstAsked = resolve))
+      const cut = new Promise<void>((resolve) => (cutOff = resolve))
+      const slow = await startFakeStorybook({
+        iframeDelayMs: 30_000,
+        onIframe: () => {
+          asked++
+          firstAsked()
+        },
+        onCut: () => cutOff(),
+      })
+      const leaver = await new Client(server).signUp('leaver@storybook.test', 'Leaver')
+      const id = ((await (await leaver.post('/api/canvases', { name: 'Leaver' })).json()) as { id: string }).id
+      const { secret } = (await (await leaver.post('/api/agent-keys', { name: 'Agent' })).json()) as { secret: string }
+      const client = new McpClient({ name: 'leaver', version: '1.0.0' })
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL('/mcp', server.base), {
+          requestInit: { headers: { Authorization: `Bearer ${secret}` } },
+        }),
+      )
+      try {
+        const pending = client
+          .callTool({
+            name: 'import_storybook',
+            arguments: { canvas_id: id, agent_name: 'T', url: `${slow.origin}/sb/` },
+          })
+          .catch(() => undefined)
+        await first
+        const left = Date.now()
+        await client.close()
+        /* the renderer closed its page, so the story request is cut off; no further page was opened after the first two (the import renders two at a time) */
+        await cut
+        await pending
+        /* well inside the 20 s a render in flight would otherwise be left to run out */
+        expect(Date.now() - left).toBeLessThan(10_000)
+        expect(asked).toBeLessThanOrEqual(2)
+      } finally {
+        await slow.close()
+      }
     })
 
     it('refuses a private Storybook, an address with no Storybook, a bad URL, a bad body and a stranger', async () => {

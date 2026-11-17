@@ -42,6 +42,30 @@ beforeEach(() => {
 })
 
 describe('import_storybook', () => {
+  it("hands the caller's abort signal to the import and puts only a cleaned label in progress messages", async () => {
+    const controller = new AbortController()
+    const messages: string[] = []
+    run.runStorybookImport.mockImplementation(
+      async (options: { signal?: AbortSignal; onRender?: (e: unknown) => void }) => {
+        expect(options.signal).toBe(controller.signal)
+        options.onRender?.({ rendered: 1, total: 2, component: 'Button\u0000\n<script>alert(1)</script> '.repeat(20) })
+        options.onRender?.({ rendered: 2, total: 2, component: '\u0000' })
+        return { result: EMPTY, issues: [], renders: 2 }
+      },
+    )
+    const ctx = context({
+      userId: 'u-signal',
+      signal: controller.signal,
+      progress: ({ message }) => messages.push(message),
+    })
+    expect((await call('https://sb.test/', ctx)).ok).toBe(true)
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).not.toMatch(/[\n<>]/)
+    expect(messages[0]).not.toContain(String.fromCharCode(0))
+    expect(messages[0]!.length).toBeLessThan(140)
+    expect(messages[1]).toBe('Rendered Component (2 of 2)')
+  })
+
   it('counts the hour against the requesting account, not the payer', async () => {
     for (let i = 0; i < STORYBOOK_IMPORTS_PER_HOUR; i++) {
       expect((await call('https://sb.test/', context({ budgetKey: `payer-${i}`, userId: 'u-requester' }))).ok).toBe(

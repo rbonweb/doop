@@ -852,7 +852,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
                 content: 'This task has been stopped.',
                 is_error: true,
               }
-            return execTool(block, canvasId, actor, runState)
+            return execTool(block, canvasId, actor, runState, abort.signal)
           },
         })
         if (canceled()) return 'ran'
@@ -947,7 +947,7 @@ async function runAgent(canvasId: string, agentName: string, stalled: Set<string
                   console.log(
                     `[resident] tool canvas=${canvasId} name=${block.name}${typeof target === 'string' ? ` frame=${target}` : ''}`,
                   )
-                  const result = await execTool(block, canvasId, actor, runState)
+                  const result = await execTool(block, canvasId, actor, runState, abort.signal)
                   if (block.name === 'import_webpage' && result.is_error && !runState.blockedWebsiteAccess) {
                     importFailureInBatch =
                       'The website import failed. Correct the tool error and retry the import before making design changes.'
@@ -1896,6 +1896,8 @@ export async function execTool(
   canvasId: string,
   actor: ReturnType<typeof actions.resolveActor>,
   runState: RunState,
+  /** aborted when the run is cancelled, for the tools that run for minutes */
+  signal?: AbortSignal,
 ): Promise<Anthropic.ToolResultBlockParam> {
   const input = block.input as { frame_id: string } & Record<string, string>
   const fail = (msg: string): Anthropic.ToolResultBlockParam => ({
@@ -1912,7 +1914,7 @@ export async function execTool(
 
   /* one tool call is one operation, as over MCP: a work budget of its own (server/workBudget.ts) */
   return runOperation(`resident ${block.name}`, canvasId, () =>
-    runResidentTool(canvasId, block, actor, runState, input, ok, fail),
+    runResidentTool(canvasId, block, actor, runState, input, ok, fail, signal),
   )
 }
 
@@ -1924,6 +1926,7 @@ async function runResidentTool(
   input: { frame_id: string } & Record<string, string>,
   ok: (content: Anthropic.ToolResultBlockParam['content']) => Anthropic.ToolResultBlockParam,
   fail: (msg: string) => Anthropic.ToolResultBlockParam,
+  signal: AbortSignal | undefined,
 ): Promise<Anthropic.ToolResultBlockParam> {
   /* a tool that throws answers with its error instead of failing the operation, so what it
      had changed by then is undone here (server/journal.ts) */
@@ -2719,6 +2722,7 @@ async function runResidentTool(
           userId: runState.requesterId,
           budgetKey: runState.payerId ?? runState.requesterId,
           surface: 'resident',
+          signal,
         })
         if (!outcome.ok) return fail(outcome.error)
         const { data, note, frames } = outcome.result

@@ -106,6 +106,9 @@ export function installStoryProbe(name: string): void {
     }
   }
 
+  /* the phases of a render still under way (a render that is aborted is followed by the one that replaces it) */
+  const PENDING = ' preparing loading beforeEach rendering playing completing aborted '
+
   const preview = (): unknown => field(win, '__STORYBOOK_PREVIEW__')
 
   const state = (): string => {
@@ -117,8 +120,9 @@ export function installStoryProbe(name: string): void {
       if (classes.indexOf(' sb-show-errordisplay ') !== -1 || phase === 'errored') return 'error'
       const root = document.querySelector('#storybook-root') || document.querySelector('#root')
       const hasContent = !!(root && root.firstElementChild)
+      /* every phase but the ones that come before the story is on screen is a finished render: Storybook 7 ends on completed, 8 and 9 on completed or afterEach, 10 on finished, and a phase a later version adds counts as done too, rather than timing out */
       if (typeof phase === 'string')
-        return (phase === 'completed' || phase === 'played') && hasContent ? 'ready' : 'pending'
+        return PENDING.indexOf(' ' + phase + ' ') === -1 && hasContent ? 'ready' : 'pending'
       return classes.indexOf(' sb-show-main ') !== -1 && hasContent ? 'ready' : 'pending'
     } catch {
       return 'pending'

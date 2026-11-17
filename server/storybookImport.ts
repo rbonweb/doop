@@ -78,7 +78,7 @@ export interface StorybookImportOptions {
   onRender?: (event: { rendered: number; total: number; component: string }) => void
   /** the npm package the components are imported from in code, "@acme/ui" */
   package?: string
-  /** only components whose Storybook title starts with one of these */
+  /** only components whose Storybook title is one of these or sits under one of them, matched up to a `/` */
   include?: string[]
   signal?: AbortSignal
 }
@@ -370,10 +370,17 @@ export async function storybookBundle(
       concurrency: 2,
       withPage: async (use) => {
         const opened = await openStoryPage(index.base.origin, deps, (error) => controller.abort(error))
+        /* an aborted import (the caller left, the time ran out) closes the page it is waiting on, so a render in flight ends now rather than at its own timeout */
+        let closing: Promise<void> | undefined
+        const close = () => (closing ??= opened.close())
+        const closeNow = () => void close().catch(() => {})
+        controller.signal.addEventListener('abort', closeNow, { once: true })
+        if (controller.signal.aborted) closeNow()
         try {
           return await use(opened.page)
         } finally {
-          await opened.close()
+          controller.signal.removeEventListener('abort', closeNow)
+          await close()
         }
       },
     })

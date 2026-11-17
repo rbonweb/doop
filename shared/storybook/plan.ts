@@ -51,34 +51,67 @@ function lastSegment(title: string): string {
   return segments[segments.length - 1] ?? title.trim()
 }
 
+/** The last segment of a title that names a set of stories rather than a component. */
+const COLLECTION_WORDS = new Set([
+  'features',
+  'examples',
+  'playground',
+  'stories',
+  'dev',
+  'docs',
+  'default',
+  'variants',
+])
+
+function normalizedTitle(title: string): string {
+  return title
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join('/')
+}
+
+/** The title of the component a collection's stories belong to (collection words come off the end, never the first segment), or undefined when the title is not a collection. */
+function collectionOwner(title: string): string | undefined {
+  const segments = title
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean)
+  const before = segments.length
+  while (segments.length > 1 && COLLECTION_WORDS.has((segments[segments.length - 1] ?? '').toLowerCase()))
+    segments.pop()
+  return segments.length < before ? segments.join('/') : undefined
+}
+
 function matchesInclude(title: string, include: string[] | undefined): boolean {
   if (!include?.length) return true
   const lower = title.toLowerCase()
-  return include.some((prefix) => prefix.trim() && lower.startsWith(prefix.trim().toLowerCase()))
+  return include.some((entry) => {
+    const wanted = entry.trim().replace(/\/+$/, '').toLowerCase()
+    /* a whole title, or the folders above it: "Components/Button" is not "Components/ButtonGroup" */
+    return wanted !== '' && (lower === wanted || lower.startsWith(`${wanted}/`))
+  })
 }
 
-/** Stories to components by title, in index order, limited to `include` (title prefixes) and to STORYBOOK_LIMITS.components. */
+/** Stories to components by title, in index order, limited to `include` (a title, or the folders above it, up to a `/`) and to STORYBOOK_LIMITS.components. */
 export function groupStories(entries: StoryEntry[], options: { include?: string[] } = {}): GroupedStories {
   const issues: StorybookIssue[] = []
-  const byTitle = new Map<string, StoryEntry[]>()
+  /* a title ending in a collection word ("Components/ActionMenu/Features") is more stories of the component above it when that component has stories of its own; with none above it ("Layout/Features") it is a component itself. `include` names components, so it is matched against the title a story ends up under. */
+  const titles = new Set(entries.map((entry) => normalizedTitle(entry.title)))
+  const owned = new Map<string, StoryEntry[]>()
   for (const entry of entries) {
-    if (!matchesInclude(entry.title, options.include)) continue
-    const list = byTitle.get(entry.title)
+    const owner = collectionOwner(entry.title)
+    const title = owner !== undefined && titles.has(owner) ? owner : entry.title
+    if (!matchesInclude(title, options.include)) continue
+    const list = owned.get(title)
     if (list) list.push(entry)
-    else byTitle.set(entry.title, [entry])
+    else owned.set(title, [entry])
   }
-  const groups: StoryGroup[] = []
+  const candidates: StoryGroup[] = []
   const names = new Set<string>()
-  for (const [title, stories] of byTitle) {
+  for (const [title, stories] of owned) {
     const defaultStory = pickDefaultStory(stories)
     if (!defaultStory) continue
-    if (groups.length >= STORYBOOK_LIMITS.components) {
-      issues.push({
-        code: 'components_capped',
-        message: `The Storybook has more than ${STORYBOOK_LIMITS.components} components; the first ${STORYBOOK_LIMITS.components} were imported. Use include to pick others.`,
-      })
-      break
-    }
     const segments = title
       .split('/')
       .map((part) => part.trim())
@@ -90,7 +123,15 @@ export function groupStories(entries: StoryEntry[], options: { include?: string[
     for (let n = 2; names.has(name.toLowerCase()); n++)
       name = `${lastSegment(title).slice(0, MAX_COMPONENT_NAME - 4)} ${n}`
     names.add(name.toLowerCase())
-    groups.push({ title, name, stories, defaultStory })
+    candidates.push({ title, name, stories, defaultStory })
+  }
+  const groups = candidates.slice(0, STORYBOOK_LIMITS.components)
+  if (candidates.length > groups.length) {
+    const left = candidates.length - groups.length
+    issues.push({
+      code: 'components_capped',
+      message: `The Storybook has ${candidates.length} components and one import holds ${STORYBOOK_LIMITS.components}: the first ${groups.length} were planned and ${left} were left out. Use include to pick others.`,
+    })
   }
   if (!groups.length && entries.length) {
     issues.push({ code: 'no_components', message: 'No story matched the include filter' })

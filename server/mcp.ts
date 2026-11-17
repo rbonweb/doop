@@ -2779,7 +2779,7 @@ export function buildMcpServer(
         },
         inputSchema: { canvas_id: z.string(), ...tool.shape, agent_name: agentName.optional() } as never,
       },
-      (async (raw: Record<string, unknown>) => {
+      (async (raw: Record<string, unknown>, extra: ToolExtra) => {
         const canvasId = String(raw.canvas_id)
         const agent = raw.agent_name as string | undefined
         const canvas = canvasFor(canvasId, tool.readOnly ? 'view' : 'edit')
@@ -2795,6 +2795,8 @@ export function buildMcpServer(
             workspaces.canvasesFor(ownerId ?? '').flatMap((meta) => store.getCanvas(meta.id) ?? []),
           userId: ownerId,
           budgetKey: ownerId,
+          progress: progressReporter(extra),
+          signal: extra?.signal,
         })
         if (!outcome.ok) return err(outcome.error)
         const { data, note, frames, attachment } = outcome.result
@@ -3427,6 +3429,41 @@ async function oauthClientName(clientId: string): Promise<string | undefined> {
   return app?.name
 }
 
+/** What a tool callback is handed beside its arguments: the request's progress token and the way to send a notification on it. */
+interface ToolExtra {
+  _meta?: { progressToken?: string | number }
+  /** aborted when the client disconnects or cancels the call */
+  signal?: AbortSignal
+  sendNotification?: (notification: {
+    method: 'notifications/progress'
+    params: { progressToken: string | number; progress: number; total?: number; message?: string }
+  }) => Promise<void>
+}
+
+/** A progress reporter for a call whose client sent a progress token, else nothing. A notification that cannot be sent (the client left) is dropped: progress is only a courtesy. */
+function progressReporter(extra: ToolExtra | undefined) {
+  const token = extra?._meta?.progressToken
+  const send = extra?.sendNotification
+  if (token === undefined || !send) return undefined
+  return ({ progress, total, message }: { progress: number; total: number; message: string }) => {
+    send({ method: 'notifications/progress', params: { progressToken: token, progress, total, message } }).catch(
+      () => {},
+    )
+  }
+}
+
+/** An import_storybook call takes minutes and a client's HTTP client gives up on a response that has not started in about 5 (undici's headers timeout). When it asks for progress (a progress token on the call) the answer streams as SSE, which starts at once and carries one notification per render; every other call keeps the plain JSON answer. */
+function streamsProgress(body: unknown): boolean {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false
+  const message = body as { method?: unknown; params?: { name?: unknown; _meta?: { progressToken?: unknown } } }
+  const token = message.params?._meta?.progressToken
+  return (
+    message.method === 'tools/call' &&
+    message.params?.name === 'import_storybook' &&
+    (typeof token === 'string' || typeof token === 'number')
+  )
+}
+
 export async function handleMcpRequest(req: Request, res: Response) {
   if (req.method !== 'POST') {
     res.status(405).json({
@@ -3525,12 +3562,16 @@ export async function handleMcpRequest(req: Request, res: Response) {
     (oauthClientId ? await oauthClientName(oauthClientId) : undefined)
   const sessionKey = bearer ? credentialKey(bearer) : session?.userId ? `user:${session.userId}` : undefined
   const server = buildMcpServer(owner, session?.userId ?? undefined, profile, clientName, sessionKey)
-  /* Stateless, and plain JSON rather than an SSE stream per response: no
-     tool here sends notifications mid-call, so a stream carries nothing a
-     JSON body does not, and JSON is what every client — including ChatGPT's
+  /* Stateless, and plain JSON rather than an SSE stream per response: a
+     stream carries nothing a JSON body does not, except for the one call
+     that runs for minutes and reports progress (streamsProgress), and JSON
+     is what every client — including ChatGPT's
      narrower template-fetch path, whose Accept the SDK would otherwise
      refuse with 406 — can read. The header is normalised to match. */
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: !streamsProgress(req.body),
+  })
   req.headers.accept = 'application/json, text/event-stream'
   res.on('close', () => {
     /* the client is gone; there is nobody left to report a close failure to */
