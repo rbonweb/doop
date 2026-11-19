@@ -12,7 +12,9 @@ export const propSchema = z.object({
   type: z
     .enum(PROP_TYPES)
     .optional()
-    .describe('text (default), image, link, boolean, number, color, instance, or enum with options'),
+    .describe(
+      'text (default), richtext (inline <b> <i> <a href> <span class>, sanitized), image, link, boolean, number, color, instance, or enum with options',
+    ),
   default: z
     .string()
     .optional()

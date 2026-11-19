@@ -44,6 +44,7 @@ import { unmatchedSelectors } from './componentCss.ts'
 import {
   alignParts,
   attrOf,
+  cleanRichProps,
   compactDocument,
   detachedMarkup,
   effectiveComponent,
@@ -282,7 +283,7 @@ export function validProps(props: unknown): ComponentProp[] {
     const prop: ComponentProp = {
       name: raw.name,
       type,
-      ...(raw.default !== undefined
+      ...(raw.default !== undefined && type !== 'richtext'
         ? { default: String(raw.default) }
         : type === 'enum'
           ? { default: raw.options![0]! }
@@ -1175,7 +1176,9 @@ export const changeInstances = atomic(function changeInstances(
       const state = readInstance(located.el, ctx.atRev(def.id, Number(attrOf(located.el, REV_ATTR))) ?? def, ctx)
       if (!state) continue
       validateProps(def, change.props, ctx.find)
-      const changed = applyChange(state.overrides, change)
+      /* a rich-text value is stored in its safe form, and the agent hears what was taken out of it */
+      const props = cleanRichProps(def, change.props, ctx)
+      const changed = applyChange(state.overrides, props === change.props ? change : { ...change, props })
       const next = change.swap ? applySwap(changed, def, change.swap, canvasId) : changed
       const rendered = renderInstance(def, def, next, id, { ctx, stack: [] })
       if (!rendered) continue
@@ -1188,6 +1191,8 @@ export const changeInstances = atomic(function changeInstances(
   }
   const next = html !== frame.html ? actions.updateFrame(frame.id, { html }, actor) : frame
   if (!next) fail('frame not found')
+  /* the write just replaced what the frame had to say about its components: add what the sanitiser said */
+  for (const issue of ctx.issues) if (issue.code === 'richtext_sanitized') actions.addComponentIssue(frame.id, issue)
   return { frame: next, missing: changes.map((change) => change.instanceId).filter((id) => !seen.has(id)) }
 })
 

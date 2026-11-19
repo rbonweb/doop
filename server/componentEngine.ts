@@ -53,6 +53,7 @@ import {
   COMPONENT_REF,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR, isElementId, newElementId } from '../shared/elementId.ts'
+import { describeRemoved, safeName, sanitizeRichText, shown } from './richText.ts'
 
 /**
  * The component engine: pure string-and-tree work with no store behind it.
@@ -335,6 +336,36 @@ function propValue(def: Revision, overrides: InstanceOverrides, name: string): s
   return overrides.props?.[name] ?? def.props.find((prop) => prop.name === name)?.default
 }
 
+const isRichProp = (def: Pick<Revision, 'props'>, name: string) =>
+  def.props.find((prop) => prop.name === name)?.type === 'richtext'
+
+/** A rich-text prop's value in its one safe form. The issue says what was removed, never the value itself. */
+export function cleanRichValue(def: Pick<Revision, 'name'>, prop: string, value: string, ctx: EngineContext): string {
+  const { html, removed } = sanitizeRichText(value)
+  if (removed.length)
+    ctx.issues.push({
+      code: 'richtext_sanitized',
+      message: `${def.name}: ${prop} is rich text, a safe subset of inline markup (b, i, strong, em, br, a with an https address, span with a class); removed from it: ${describeRemoved(removed)}`,
+    })
+  return html
+}
+
+/** The props with every rich-text value sanitised: the same object when nothing changed. */
+export function cleanRichProps(
+  def: Pick<Revision, 'name' | 'props'>,
+  props: Record<string, string> | undefined,
+  ctx: EngineContext,
+): Record<string, string> | undefined {
+  if (!props || !def.props.some((prop) => prop.type === 'richtext')) return props
+  let next: Record<string, string> | undefined
+  for (const [name, value] of Object.entries(props)) {
+    if (!isRichProp(def, name)) continue
+    const clean = cleanRichValue(def, name, value, ctx)
+    if (clean !== value) (next ??= { ...props })[name] = clean
+  }
+  return next ?? props
+}
+
 function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides, ctx: EngineContext) {
   const raw = attrOf(el, BIND_ATTR)
   if (raw === undefined) return
@@ -363,7 +394,10 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides,
       })
       continue
     }
-    if (target === null) setOwnText(el, value)
+    if (target === null && el.tagName !== USE_TAG && isRichProp(def, prop)) {
+      /* rich text replaces the element's children, and only ever with the sanitised subset */
+      setChildrenFromHtml(el, sanitizeRichText(value).html)
+    } else if (target === null) setOwnText(el, value)
     else if (target.startsWith('style.') || target.startsWith('--')) {
       const styles = parseStyle(attrOf(el, 'style'))
       styles.set(target.startsWith('--') ? target : target.slice('style.'.length), value)
@@ -572,7 +606,7 @@ function forwardingOf(
     }
     const outerProp = outer.props.find((candidate) => candidate.name === prop)
     if (!outerProp) {
-      skip(`“${outer.name}” has no prop “${prop}”, so there is nothing to forward`)
+      skip(`“${outer.name}” has no prop “${safeName(prop)}”, so there is nothing to forward`)
       continue
     }
     if (target === 'component' && outerProp.type !== 'instance') {
@@ -588,7 +622,7 @@ function forwardingOf(
         if (report)
           ctx.issues.push({
             code: 'invalid_prop_value',
-            message: `${outer.name}: "${value}" is not a value of ${prop} — ${problem}`,
+            message: `${outer.name}: "${shown(value)}" is not a value of ${prop} — ${problem}`,
           })
         continue
       }
@@ -596,7 +630,7 @@ function forwardingOf(
         if (report)
           ctx.issues.push({
             code: 'invalid_prop_value',
-            message: `${outer.name}: "${value}" would put “${outer.name}” inside itself, so ${prop} was ignored and the component written in the template renders`,
+            message: `${outer.name}: "${shown(value)}" would put “${outer.name}” inside itself, so ${prop} was ignored and the component written in the template renders`,
           })
         continue
       }
@@ -656,7 +690,7 @@ function forwardedState(
       if (!swapped)
         ctx.issues.push({
           code: 'ignored_attribute',
-          message: `${BIND_ATTR} on <${USE_TAG} component="${nested.name}"> forwards to “${target}”, which “${nested.name}” does not have (it has ${nested.props.map((p) => p.name).join(', ') || 'no props'})`,
+          message: `${BIND_ATTR} on <${USE_TAG} component="${nested.name}"> forwards to “${safeName(target)}”, which “${nested.name}” does not have (it has ${nested.props.map((p) => p.name).join(', ') || 'no props'})`,
         })
       continue
     }
@@ -664,7 +698,7 @@ function forwardedState(
     if (problem) {
       ctx.issues.push({
         code: 'invalid_prop_value',
-        message: `${nested.name}: "${value}" is not a value of ${target} — ${problem}`,
+        message: `${nested.name}: "${shown(value)}" is not a value of ${target} — ${problem}`,
       })
       continue
     }
@@ -744,6 +778,8 @@ export function renderInstance(
     })
     return undefined
   }
+  const cleanProps = cleanRichProps(revision, overrides.props, options.ctx)
+  if (cleanProps !== overrides.props) overrides = { ...overrides, props: cleanProps }
   const id = instanceId || newElementId()
   const inner: RenderOptions = { ...options, stack: [...options.stack, revision.id], depth: depth + 1, ownerId: id }
   const key = attrOf(root, PART_ATTR)
@@ -1026,6 +1062,22 @@ function diffPart(
     return
   }
 
+  const richProp = info?.textProp && isRichProp(def, info.textProp) ? info.textProp : undefined
+  if (richProp) {
+    /* a rich-text element's content is its prop's value: an edit becomes the sanitised markup, never a part override */
+    if (canonicalInner(base) !== canonicalInner(incoming)) {
+      const edited = serialize(incoming)
+      const problem = propValueProblem({ name: richProp, type: 'richtext' }, edited)
+      if (problem)
+        ctx.issues.push({
+          code: 'invalid_prop_value',
+          message: `${def.name}: ${richProp} was not changed — ${problem}`,
+        })
+      else (state.props ??= {})[richProp] = cleanRichValue(def, richProp, edited, ctx)
+    }
+    mergeInto(state, key, into)
+    return
+  }
   const baseKids = elementKids(base)
   const incomingKids = elementKids(incoming)
   if (baseKids.length === 0 && incomingKids.length === 0) {
@@ -1192,9 +1244,10 @@ function pruneOverrides(
         prop.type === 'image' ||
         prop.type === 'link' ||
         prop.type === 'number' ||
-        prop.type === 'color')
+        prop.type === 'color' ||
+        prop.type === 'richtext')
     ) {
-      if (templateValueOf(name, parts) === value) continue
+      if (templateValueOf(name, parts, prop) === value) continue
     }
     props[name] = value
   }
@@ -1228,9 +1281,10 @@ function pruneOverrides(
   return out
 }
 
-function templateValueOf(prop: string, parts: Map<string, PartInfo>): string | undefined {
+function templateValueOf(prop: string, parts: Map<string, PartInfo>, declared?: ComponentProp): string | undefined {
   for (const info of parts.values()) {
-    if (info.textProp === prop) return directText(info.el)
+    if (info.textProp === prop)
+      return declared?.type === 'richtext' ? sanitizeRichText(serialize(info.el)).html : directText(info.el)
     for (const [target, name] of info.attrProps) if (name === prop) return attrOf(info.el, target)
     for (const [target, name] of info.styleProps)
       if (name === prop) return parseStyle(attrOf(info.el, 'style')).get(target)
@@ -1412,11 +1466,11 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
       if (problem) {
         ctx.issues.push({
           code: 'invalid_prop_value',
-          message: `${def.name}: "${attr.value}" is not a value of ${name} — ${problem}`,
+          message: `${def.name}: "${shown(attr.value)}" is not a value of ${name} — ${problem}`,
         })
         continue
       }
-      props[name] = attr.value
+      props[name] = prop.type === 'richtext' ? cleanRichValue(def, name, attr.value, ctx) : attr.value
       continue
     }
     if (name.startsWith('data-') || name.startsWith('aria-')) {
@@ -1425,11 +1479,11 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
     }
     ctx.issues.push({
       code: 'unknown_prop',
-      message: `${def.name} has no prop “${name}” — it has ${def.props.map((p) => p.name).join(', ') || 'no props'}`,
+      message: `${def.name} has no prop “${safeName(name)}” — it has ${def.props.map((p) => p.name).join(', ') || 'no props'}`,
     })
   }
   /* `<template slot="x">` and plain children go to their slots */
-  assignSlots(use, def, parts)
+  assignSlots(use, def, parts, ctx)
   const rawId = attrOf(use, 'id') ?? attrOf(use, ELEMENT_ID_ATTR)
   return {
     instanceId: isElementId(rawId) ? rawId : newElementId(),
@@ -1439,16 +1493,24 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
   }
 }
 
-function assignSlots(use: Element, def: Revision, parts: Record<string, PartOverride>) {
+function assignSlots(use: Element, def: Revision, parts: Record<string, PartOverride>, ctx: EngineContext) {
   const slotParts = [...partsOf(def.template)].filter(([, info]) => info.isSlot)
   if (!slotParts.length) return
   const byName = new Map(slotParts.map(([key, info]) => [attrOf(info.el, SLOT_ATTR) ?? '', key]))
   const fallback = slotParts[0]![0]
+  /* a component with one slot takes everything without comment; with several, content that names no slot is a guess worth reporting */
+  const several = slotParts.length > 1
+  const names = [...byName.keys()].map((name) => safeName(name) || 'default')
+  /* where unnamed content has always gone: the first slot the template walk finds */
+  const fallbackName = safeName(attrOf(slotParts[0]![1].el, SLOT_ATTR) ?? '') || 'default'
+  const unknown = new Set<string>()
   const unnamed: string[] = []
   for (const child of use.childNodes) {
     if (isElement(child)) {
       const slotName = attrOf(child, 'slot')
       if (slotName !== undefined) {
+        const known = byName.has(slotName)
+        if (!known && several) unknown.add(safeName(slotName))
         const key = byName.get(slotName) ?? fallback
         const content = child.tagName === 'template' ? templateInner(child) : serializeOuterWithoutSlot(child)
         const existing = parts[key]?.slot
@@ -1463,7 +1525,17 @@ function assignSlots(use: Element, def: Revision, parts: Record<string, PartOver
   if (unnamed.length) {
     const existing = parts[fallback]?.slot
     parts[fallback] = { ...parts[fallback], slot: `${existing ?? ''}${unnamed.join('')}` }
+    if (several)
+      ctx.issues.push({
+        code: 'unnamed_slot_content',
+        message: `${def.name} has several slots (${names.join(', ')}) and some content in <${USE_TAG}> names none, so it went into “${fallbackName}”. Wrap each part in <template slot="name">…</template> to say where it goes.`,
+      })
   }
+  for (const name of unknown)
+    ctx.issues.push({
+      code: 'unknown_slot',
+      message: `${def.name} has no slot “${name}” (it has ${names.join(', ')}), so that content went into “${fallbackName}”.`,
+    })
 }
 
 function templateInner(el: Element): string {
@@ -2048,7 +2120,15 @@ function fedFieldsOf(prop: ComponentProp): Partial<ComponentProp> {
 
 /** What a declared prop says beyond its name and type: kept for a prop the template still uses. */
 function typedFieldsOf(prop: ComponentProp | undefined, withDefault = true): Partial<ComponentProp> {
-  if (!prop || prop.type === 'text' || prop.type === 'image' || prop.type === 'link' || prop.type === 'enum') return {}
+  if (
+    !prop ||
+    prop.type === 'text' ||
+    prop.type === 'richtext' ||
+    prop.type === 'image' ||
+    prop.type === 'link' ||
+    prop.type === 'enum'
+  )
+    return {}
   return {
     ...(withDefault && prop.default !== undefined ? { default: prop.default } : {}),
     ...(prop.min !== undefined ? { min: prop.min } : {}),
