@@ -1,7 +1,8 @@
-import { parseFragment, type DefaultTreeAdapterTypes as Tree } from 'parse5'
+import { parseFragment, serialize, type DefaultTreeAdapterTypes as Tree } from 'parse5'
 import {
   BIND_ATTR,
   ATTR_IF_ATTR,
+  EACH_ATTR,
   IF_ATTR,
   SLOT_ATTR,
   USE_TAG,
@@ -16,6 +17,10 @@ import {
   type ComponentProp,
   type Condition,
   type InstanceOverrides,
+  type ListField,
+  type ListFieldType,
+  type ListItem,
+  readList,
 } from '../../shared/components.ts'
 import { isBareSpecifier, type ComponentCode } from '../../shared/componentCode.ts'
 import {
@@ -37,8 +42,9 @@ import {
   type HtmlToJsxOptions,
   type JsxContext,
 } from './htmlToJsx.ts'
+import { describeRemoved, sanitizeRichText } from '../richText.ts'
 import { isUnsafeUrl, jsString, type ExportIssue } from './issues.ts'
-import { NameAllocator, componentName, isIdentifier, propName } from './names.ts'
+import { NameAllocator, componentName, isIdentifier, pascalCase, propName } from './names.ts'
 import { cssToTailwind, tailwindClassName, type TailwindSplit } from './tailwind.ts'
 import type { ReactStyling } from './report.ts'
 import type { UrlRewriter } from './urls.ts'
@@ -50,10 +56,22 @@ type Element = Tree.Element
 /* ------------------------------------------------------------------ */
 
 export type Kind =
-  { k: 'string' } | { k: 'enum'; options: string[] } | { k: 'boolean' } | { k: 'number' } | { k: 'node' }
+  | { k: 'string' }
+  | { k: 'enum'; options: string[] }
+  | { k: 'boolean' }
+  | { k: 'number' }
+  | { k: 'node' }
+  /** a `richtext` prop: sanitized inline markup, typed `ReactNode` */
+  | { k: 'rich' }
+  /** a `list` prop: `itemType` is the exported interface of one item, `sig` what two lists must share to be passed on */
+  | { k: 'list'; itemType: string; sig: string }
 
-export function kindOf(prop: Pick<ComponentProp, 'type' | 'options'>): Kind {
+export function kindOf(prop: Pick<ComponentProp, 'type' | 'options'>, list?: { itemType: string; sig: string }): Kind {
   switch (prop.type) {
+    case 'richtext':
+      return { k: 'rich' }
+    case 'list':
+      return { k: 'list', itemType: list?.itemType ?? 'unknown', sig: list?.sig ?? '' }
     case 'enum':
       return prop.options?.length ? { k: 'enum', options: [...prop.options] } : { k: 'string' }
     case 'boolean':
@@ -76,18 +94,24 @@ export function tsType(kind: Kind): string {
     case 'number':
       return 'number'
     case 'node':
+    case 'rich':
       return 'ReactNode'
+    case 'list':
+      return `${kind.itemType}[]`
     default:
       return 'string'
   }
 }
 
 const sameKind = (a: Kind, b: Kind): boolean =>
-  a.k === b.k && (a.k !== 'enum' || (b.k === 'enum' && a.options.join('\u0000') === b.options.join('\u0000')))
+  a.k === b.k &&
+  (a.k !== 'enum' || (b.k === 'enum' && a.options.join('\u0000') === b.options.join('\u0000'))) &&
+  (a.k !== 'list' || (b.k === 'list' && a.sig === b.sig))
 
 /** An expression of kind `from` as an expression of kind `to`; `defined` says the value can never be undefined. Returns null when the two cannot meet. */
 export function convertExpr(expr: string, from: Kind, to: Kind, defined: boolean): string | null {
   if (sameKind(from, to)) return expr
+  if (from.k === 'list' || to.k === 'list') return null
   const guard = (body: string) => (defined ? body : `${expr} === undefined ? undefined : ${body}`)
   if (to.k === 'string') {
     if (from.k === 'enum') return expr
@@ -106,7 +130,8 @@ export function convertExpr(expr: string, from: Kind, to: Kind, defined: boolean
     if (from.k === 'string' || from.k === 'enum') return `${expr} !== undefined && ${expr} !== "false"`
     return null
   }
-  return from.k === 'node' ? expr : `(${expr})`
+  if (to.k === 'rich') return from.k === 'boolean' ? guard(`String(${expr})`) : expr
+  return from.k === 'node' || from.k === 'rich' ? expr : `(${expr})`
 }
 
 /* ------------------------------------------------------------------ */
@@ -122,6 +147,31 @@ export interface PropPlan {
   hasDefault: boolean
   /** the template's own content for a text-like prop with no declared default */
   derived?: string
+  /** a `list` prop: its item interface and fields */
+  list?: ListPlan
+  /** a `richtext` prop: the sanitized content the main shows, which an instance without a value shows too */
+  richDefault?: string
+  /** a field of the list item being rendered (`ts` is `item.field`) rather than a prop */
+  item?: boolean
+}
+
+export interface ListFieldPlan {
+  name: string
+  /** the member name in the item interface and the object literals */
+  ts: string
+  type: ListFieldType
+  /** bound to a URL attribute somewhere in the each-element, so a value is held to the URL safety rules */
+  boundUrl: boolean
+  /** nested components this field is forwarded to (`inner:field`) */
+  forwards: { nestedRef: string; inner: string }[]
+}
+
+export interface ListPlan {
+  /** the exported interface of one item; empty for a mapped component, which has no file */
+  itemType: string
+  fields: ListFieldPlan[]
+  /** the one item the main's own content stands for: what an instance without a value shows */
+  sample: ListItem
 }
 
 export interface SlotPlan {
@@ -185,6 +235,10 @@ export interface ComponentPlan {
   /** props bound to URL attributes in the template, and the nested props forwarded to */
   directUrlProps: Set<string>
   forwards: { outer: string; nestedRef: string; inner: string }[]
+  /** the exported item interfaces of list props, beside the props interface in the barrel */
+  itemTypes: string[]
+  /** problems found planning the props (a list with no usable fields) */
+  propIssues: ExportIssue[]
 }
 
 const TEXT_LIKE = new Set(['text', 'image', 'link', 'color'])
@@ -362,20 +416,34 @@ export class ExportSession {
     if (root) collectBindings(root, derived, directUrlProps, forwards)
 
     const props: PropPlan[] = []
+    const itemTypes: string[] = []
+    const propIssues: ExportIssue[] = []
     const seenProps = new Set<string>()
     for (const prop of def.props) {
       if (!isPropName(prop.name) || seenProps.has(prop.name)) continue
       seenProps.add(prop.name)
-      const kind = kindOf(prop)
+      let list: ListPlan | undefined
+      if (prop.type === 'list') {
+        list = planList(prop, root, mapped ? undefined : this.names, name, propIssues)
+        if (!list) continue
+        if (list.itemType) itemTypes.push(list.itemType)
+      }
+      const kind = kindOf(prop, list ? { itemType: list.itemType || 'unknown', sig: listSignature(list) } : undefined)
       const declared = declaredDefault(prop, kind)
       const component = prop.type === 'instance' && prop.default ? this.find(prop.default) : undefined
       const text = TEXT_LIKE.has(prop.type) && prop.default === undefined ? derived.get(prop.name) : undefined
+      const richDefault = prop.type === 'richtext' && root ? richDefaultOf(root, prop.name) : undefined
       props.push({
         prop,
         ts: mapped ? prop.name : propName(prop.name, locals),
         kind,
-        hasDefault: prop.type === 'instance' ? component !== undefined : declared !== undefined || text !== undefined,
+        hasDefault:
+          prop.type === 'instance'
+            ? component !== undefined
+            : list !== undefined || declared !== undefined || text !== undefined || richDefault !== undefined,
         ...(text !== undefined ? { derived: text } : {}),
+        ...(list ? { list } : {}),
+        ...(richDefault !== undefined ? { richDefault } : {}),
       })
     }
     const slots: SlotPlan[] = []
@@ -410,6 +478,8 @@ export class ExportSession {
       stylesIdent: mapped ? '' : this.names.take(`${name}Styles`),
       directUrlProps,
       forwards,
+      itemTypes,
+      propIssues,
     }
     return plan
   }
@@ -527,7 +597,7 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
 /** A declared default as the TypeScript expression it becomes, or undefined when there is none or it does not fit the prop. */
 function declaredDefault(prop: ComponentProp, kind: Kind): string | undefined {
   const value = prop.default
-  if (value === undefined || prop.type === 'instance') return undefined
+  if (value === undefined || prop.type === 'instance' || kind.k === 'rich' || kind.k === 'list') return undefined
   switch (kind.k) {
     case 'enum':
       return kind.options.includes(value) ? jsString(value) : undefined
@@ -540,6 +610,146 @@ function declaredDefault(prop: ComponentProp, kind: Kind): string | undefined {
     default:
       return jsString(value)
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* List and rich-text props                                            */
+/* ------------------------------------------------------------------ */
+
+const FIELD_NAME = /^[a-z][a-z0-9-]{0,39}$/
+const LIST_FIELD_KINDS = new Set<string>(['text', 'link', 'image', 'boolean'])
+
+/** The elements of a template that repeat for a list prop (never the root and never a nested use). */
+function eachElements(root: Element, name: string): Element[] {
+  const found: Element[] = []
+  const stack: Element[] = [root]
+  for (let el = stack.pop(); el; el = stack.pop()) {
+    if (el !== root && el.tagName !== USE_TAG && (attrOf(el, EACH_ATTR) ?? '').trim() === name) found.push(el)
+    for (let i = el.childNodes.length - 1; i >= 0; i--) {
+      const child = el.childNodes[i]
+      if (child && isElement(child)) stack.push(child)
+    }
+  }
+  return found
+}
+
+/** All text an element holds directly, collapsed: how the engine reads a bound element's sample. */
+function directText(el: Element): string {
+  return el.childNodes
+    .map((child) => (child.nodeName === '#text' ? (child as Tree.TextNode).value : ''))
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** The one item a main's own content stands for (a fresh instance shows it): the engine's `sampleItem`. */
+function sampleItemOf(el: Element, fields: Record<string, ListField>): ListItem {
+  const item: ListItem = {}
+  const stack: Element[] = [el]
+  const order: Element[] = []
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    order.push(node)
+    if (node.tagName === USE_TAG) continue
+    for (let i = node.childNodes.length - 1; i >= 0; i--) {
+      const child = node.childNodes[i]
+      if (child && isElement(child)) stack.push(child)
+    }
+  }
+  for (const node of order) {
+    for (const { target, prop: name } of parseBindings(attrOf(node, BIND_ATTR) ?? '', node.tagName)) {
+      const field = Object.hasOwn(fields, name) ? fields[name] : undefined
+      if (!field || field.type === 'boolean' || Object.hasOwn(item, name)) continue
+      if (target !== null && (target.startsWith('style.') || target.startsWith('--'))) continue
+      const value = target === null ? directText(node) : attrOf(node, target)
+      if (!value || (field.type !== 'text' && isUnsafeUrl(value))) continue
+      item[name] = value
+    }
+    const condition = node === el ? undefined : parseCondition(attrOf(node, IF_ATTR) ?? '')
+    if (condition?.equals === undefined && condition && fields[condition.prop]?.type === 'boolean')
+      if (!Object.hasOwn(item, condition.prop)) item[condition.prop] = !condition.negate
+  }
+  return item
+}
+
+/** A list prop's fields, item interface and sample; undefined (and a report line) when it declares no usable field. */
+function planList(
+  prop: ComponentProp,
+  root: Element | undefined,
+  names: NameAllocator | undefined,
+  componentNameText: string,
+  issues: ExportIssue[],
+): ListPlan | undefined {
+  const used = new NameAllocator()
+  const fields: ListFieldPlan[] = []
+  const skipped: string[] = []
+  for (const [name, field] of Object.entries(prop.fields ?? {})) {
+    if (!FIELD_NAME.test(name) || name === 'constructor' || name === 'prototype' || !LIST_FIELD_KINDS.has(field.type)) {
+      skipped.push(name.slice(0, 40).replace(/[^\w .:-]/g, '?'))
+      continue
+    }
+    fields.push({ name, ts: propName(name, used), type: field.type, boundUrl: false, forwards: [] })
+  }
+  if (skipped.length)
+    issues.push({
+      kind: 'dropped-attribute',
+      detail: `list ${jsString(prop.name)}: the fields ${skipped.map((name) => jsString(name)).join(', ')} are not usable names or types and were left out`,
+    })
+  if (!fields.length) {
+    issues.push({
+      kind: 'dropped-attribute',
+      detail: `list ${jsString(prop.name)} declares no usable fields, so the prop was left out of the export`,
+    })
+    return undefined
+  }
+  const byName = new Map(fields.map((field) => [field.name, field]))
+  const elements = root ? eachElements(root, prop.name) : []
+  for (const each of elements) {
+    const stack: Element[] = [each]
+    for (let el = stack.pop(); el; el = stack.pop()) {
+      for (const { target, prop: bound } of parseBindings(attrOf(el, BIND_ATTR) ?? '', el.tagName)) {
+        const field = byName.get(bound)
+        if (!field || target === null) continue
+        if (el.tagName === USE_TAG) field.forwards.push({ nestedRef: attrOf(el, 'component') ?? '', inner: target })
+        else if (URL_BINDING_TARGETS.has(target)) field.boundUrl = true
+      }
+      for (let i = el.childNodes.length - 1; i >= 0; i--) {
+        const child = el.childNodes[i]
+        if (child && isElement(child)) stack.push(child)
+      }
+    }
+  }
+  const first = elements[0]
+  const itemType = names
+    ? names.take(
+        prop.name === 'items' ? `${componentNameText}Item` : `${componentNameText}${pascalCase(prop.name)}Item`,
+      )
+    : ''
+  return { itemType, fields, sample: first ? sampleItemOf(first, prop.fields ?? {}) : {} }
+}
+
+/** What two lists must share for one to be passed to the other: field names and types. */
+function listSignature(list: ListPlan | undefined): string {
+  return list ? list.fields.map((field) => `${field.name}:${field.type}`).join(',') : ''
+}
+
+/** The sanitized content a main shows in the element its rich-text prop is bound to. */
+function richDefaultOf(root: Element, name: string): string | undefined {
+  const stack: Element[] = [root]
+  for (let el = stack.pop(); el; el = stack.pop()) {
+    const raw = attrOf(el, BIND_ATTR)
+    if (raw !== undefined && el.tagName !== USE_TAG) {
+      for (const { target, prop } of parseBindings(raw, el.tagName)) {
+        if (target !== null || prop !== name) continue
+        const html = sanitizeRichText(serialize(el)).html
+        return html.trim() === '' ? undefined : html
+      }
+    }
+    for (let i = el.childNodes.length - 1; i >= 0; i--) {
+      const child = el.childNodes[i]
+      if (child && isElement(child)) stack.push(child)
+    }
+  }
+  return undefined
 }
 
 /** What the template says about each prop where it is bound: its first literal content (a text-like prop's default), the props that land in URL attributes, and what is forwarded to nested components. */
@@ -616,6 +826,8 @@ export class FileCtx {
   usesNode = false
   usesCssProps = false
   usesFonts = false
+  /** rendering the element of a list item: a nested list there is an ordinary element */
+  inItem = false
   /** a page file in Tailwind mode: the utilities its own global classes became */
   pageTw?: TailwindSplit
   readonly issues: ExportIssue[] = []
@@ -685,6 +897,55 @@ export interface UseCall {
   slots: Map<string, string>
 }
 
+const isNodeKind = (kind: Kind): boolean => kind.k === 'node' || kind.k === 'rich'
+
+/** Sanitized rich-text markup as JSX (`null` when it is empty): text escaped, links and spans only, classes through the component's own stylesheet. `own` is true inside the component's file. */
+function richJsx(fc: FileCtx, plan: ComponentPlan, html: string, own: boolean): string {
+  const result = htmlToJsx(html, {
+    rewriteUrl: fc.session.urls.url,
+    className: (classes) => fc.className(plan, classes, own, false),
+  })
+  fc.issues.push(...result.issues)
+  return result.jsx
+}
+
+/** Is a list field's value held to the URL safety rules: typed link or image, bound to a URL attribute, or forwarded to a nested component's URL prop. */
+function fieldIsUrl(fc: FileCtx, field: ListFieldPlan): boolean {
+  if (field.type === 'link' || field.type === 'image' || field.boundUrl) return true
+  return field.forwards.some((forward) => {
+    const nested = fc.session.find(forward.nestedRef)
+    return nested !== undefined && fc.session.isUrlProp(fc.session.plan(nested), forward.inner)
+  })
+}
+
+const memberKey = (ts: string): string => (/^[A-Za-z_$][\w$]*$/.test(ts) ? ts : jsString(ts))
+
+/** One item as an object literal in the item interface's shape: every field present, a missing text as "" and a missing boolean as false. */
+function itemLiteral(fc: FileCtx, list: ListPlan, item: ListItem): string {
+  const entries = list.fields.map((field) => {
+    const raw = Object.hasOwn(item, field.name) ? item[field.name] : undefined
+    if (field.type === 'boolean') return `${memberKey(field.ts)}: ${raw === true ? 'true' : 'false'}`
+    let text = typeof raw === 'string' ? raw : ''
+    if (text !== '' && fieldIsUrl(fc, field)) {
+      if (isUnsafeUrl(text)) {
+        fc.noteOnce(
+          'unsafe-url',
+          `an item value of ${jsString(field.name)} was dropped: it is a URL that would run code`,
+        )
+        text = ''
+      } else text = fc.session.urls.url(text)
+    }
+    return `${memberKey(field.ts)}: ${jsString(text)}`
+  })
+  return `{ ${entries.join(', ')} }`
+}
+
+/** The items as an array literal: one item to a line, every string a JS string literal. */
+function listLiteral(fc: FileCtx, list: ListPlan, items: readonly ListItem[]): string {
+  if (!items.length) return '[]'
+  return `[\n${items.map((item) => `  ${itemLiteral(fc, list, item)},`).join('\n')}\n]`
+}
+
 /** One literal Doop value as an expression of the target prop's kind; null when it does not fit (the engine ignores such a value too). */
 export function literalValue(fc: FileCtx, plan: ComponentPlan, name: string, raw: string): CallValue | null {
   const entry = plan.propByName.get(name)
@@ -708,6 +969,27 @@ export function literalValue(fc: FileCtx, plan: ComponentPlan, name: string, raw
       const target = fc.session.plan(def)
       fc.use(target)
       return { expr: renderUseCall(fc, { plan: target, values: new Map(), slots: new Map() }), literal: raw }
+    }
+    case 'rich': {
+      const clean = sanitizeRichText(raw)
+      if (clean.removed.length)
+        fc.noteOnce('dropped-element', `value of ${jsString(name)}: ${describeRemoved(clean.removed)} was left out`)
+      return { expr: richJsx(fc, plan, clean.html, false), literal: raw }
+    }
+    case 'list': {
+      const list = entry.list
+      if (!list) return null
+      const read = readList(entry.prop, raw)
+      if (!read.items) {
+        fc.note('dropped-attribute', `value of ${jsString(name)} dropped: ${read.problem ?? 'it is not a list'}`)
+        return null
+      }
+      if (read.dropped.length)
+        fc.noteOnce(
+          'dropped-attribute',
+          `value of ${jsString(name)}: ${read.dropped.length} unknown field value(s) were left out`,
+        )
+      return { expr: listLiteral(fc, list, read.items), literal: raw }
     }
     default: {
       let value = raw
@@ -911,6 +1193,8 @@ export function condExpr(plan: ComponentPlan, condition: Condition): string {
       case 'number':
         return wrap(`String(${ts}) === ${jsString(equals)}`)
       case 'node':
+      case 'rich':
+      case 'list':
         return wrap('false')
       default:
         return wrap(`${ts} === ${jsString(equals)}`)
@@ -922,10 +1206,15 @@ export function condExpr(plan: ComponentPlan, condition: Condition): string {
     case 'number':
       return wrap(`${ts} !== undefined`)
     case 'node':
+    case 'rich':
       return wrap(`${ts} !== undefined && ${ts} !== null`)
+    case 'list':
+      return wrap(`${ts}.length > 0`)
     case 'enum':
       return wrap(kind.options.includes('false') ? `${ts} !== undefined && ${ts} !== "false"` : `${ts} !== undefined`)
     default:
+      /* an item's text is "" when the item has none: nothing to show */
+      if (entry.item) return wrap(`${ts} !== "" && ${ts} !== "false"`)
       return wrap(`${ts} !== undefined && ${ts} !== "false"`)
   }
 }
@@ -1178,9 +1467,12 @@ const camelStyle = (name: string): string | null => {
 }
 
 /** `prop` as the JSX attribute expression for an attribute binding, falling back to the template's own literal when the prop has no default. */
-function attrValueExpr(entry: PropPlan, literal: string | undefined, boolAttr: boolean): string | null {
+function attrValueExpr(entry: PropPlan, literal: string | undefined, boolAttr: boolean, style = false): string | null {
   const { ts, kind } = entry
-  if (kind.k === 'node') return null
+  if (kind.k === 'node' || kind.k === 'rich' || kind.k === 'list') return null
+  /* an item's text is "" when the item has none: an attribute goes away, a style keeps the template's value */
+  if (entry.item && kind.k === 'string')
+    return style && literal !== undefined ? `${ts} || ${jsString(literal)}` : `${ts} || undefined`
   if (kind.k === 'boolean') {
     if (boolAttr) return literal !== undefined && !entry.hasDefault ? `${ts} ?? true` : ts
     return entry.hasDefault
@@ -1220,9 +1512,12 @@ export function bindElement(
     const entry = plan.propByName.get(prop)
     if (!entry) continue
     if (target === null) {
-      if (entry.kind.k === 'node') continue
+      if (entry.kind.k === 'node' || entry.kind.k === 'list') continue
       const marker = `${markerBase}${counter++}`
-      el.childNodes = textChildren(el, marker)
+      el.childNodes =
+        entry.kind.k === 'rich'
+          ? [{ nodeName: '#text', value: marker, parentNode: el } as Tree.TextNode]
+          : textChildren(el, marker)
       const jsx = entry.kind.k === 'boolean' ? `{String(${entry.ts})}` : `{${entry.ts}}`
       result.text = { marker, jsx }
       continue
@@ -1235,7 +1530,7 @@ export function bindElement(
         continue
       }
       const literal = parseStyle(attrOf(el, 'style')).get(name)
-      const expr = attrValueExpr(entry, literal, false)
+      const expr = attrValueExpr(entry, literal, false, true)
       if (expr) styleEntries.push({ key, expr, name })
       continue
     }
@@ -1318,6 +1613,18 @@ const isCustomTag = (el: Element): boolean =>
   /^[a-z][a-z0-9]*(-[a-z0-9]+)+$/.test(el.tagName)
 
 /** The default expression a destructured prop gets, or undefined. */
+/** A list's default: the declared items, else the one item the main's own content is. */
+function listDefault(fc: FileCtx, entry: PropPlan, list: ListPlan): string {
+  const { prop } = entry
+  if (prop.default === undefined) return listLiteral(fc, list, [list.sample])
+  const read = readList(prop, prop.default)
+  if (!read.items) {
+    fc.note('dropped-attribute', `default of ${jsString(prop.name)} dropped: ${read.problem ?? 'it is not a list'}`)
+    return '[]'
+  }
+  return listLiteral(fc, list, read.items)
+}
+
 function defaultExpr(fc: FileCtx, plan: ComponentPlan, entry: PropPlan): string | undefined {
   const { prop, kind } = entry
   if (prop.type === 'instance') {
@@ -1333,6 +1640,13 @@ function defaultExpr(fc: FileCtx, plan: ComponentPlan, entry: PropPlan): string 
     }
     return renderUseCall(fc, { plan: fc.session.plan(def), values: new Map(), slots: new Map() })
   }
+  if (kind.k === 'rich') {
+    if (entry.richDefault === undefined) return undefined
+    const jsx = richJsx(fc, plan, entry.richDefault, true)
+    if (jsx === 'null') return undefined
+    return jsx.includes('\n') ? `(\n${indentText(jsx)}\n)` : jsx
+  }
+  if (kind.k === 'list') return entry.list ? listDefault(fc, entry, entry.list) : undefined
   if (kind.k !== 'string') return declaredDefault(prop, kind)
   const raw = prop.default ?? entry.derived
   if (raw === undefined) return undefined
@@ -1349,7 +1663,7 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
   const file = plan.file ?? `src/components/${plan.name}.tsx`
   const fc = new FileCtx(session, file)
   const root = parseTemplateRoot(def.template)
-  fc.issues.push(...plan.mappingIssues, ...plan.cssIssues)
+  fc.issues.push(...plan.mappingIssues, ...plan.cssIssues, ...plan.propIssues)
   for (const tag of def.head) {
     const link = parseFragment(tag).childNodes.find(isElement)
     if (link?.tagName === 'style') {
@@ -1388,7 +1702,7 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
   const members: string[] = []
   for (const entry of plan.props) {
     const expr = defaultExpr(fc, plan, entry)
-    if (entry.kind.k === 'node') fc.usesNode = true
+    if (isNodeKind(entry.kind)) fc.usesNode = true
     members.push(`  ${entry.ts}?: ${tsType(entry.kind)}`)
     params.push(expr === undefined ? entry.ts : `${entry.ts} = ${expr}`)
   }
@@ -1400,11 +1714,23 @@ export function emitComponent(session: ExportSession, plan: ComponentPlan): Comp
 
   const lines: string[] = importLines(fc, plan, 'component')
   lines.push('')
+  for (const entry of plan.props) {
+    if (!entry.list?.itemType) continue
+    lines.push(`export interface ${entry.list.itemType} {`)
+    for (const field of entry.list.fields)
+      lines.push(`  ${memberKey(field.ts)}: ${field.type === 'boolean' ? 'boolean' : 'string'}`)
+    lines.push('}')
+    lines.push('')
+  }
   lines.push(`export interface ${plan.propsName} {`)
   lines.push(...members)
   lines.push('}')
   lines.push('')
-  const signature = params.length ? `{ ${params.join(', ')} }: ${plan.propsName}` : `_props: ${plan.propsName}`
+  const signature = !params.length
+    ? `_props: ${plan.propsName}`
+    : params.some((param) => param.includes('\n'))
+      ? `{\n${indentText(params.join(',\n'))},\n}: ${plan.propsName}`
+      : `{ ${params.join(', ')} }: ${plan.propsName}`
   lines.push(`export function ${plan.name}(${signature}) {`)
   lines.push(body === 'null' ? '  return null' : `  return (\n${indentText(body, '    ')}\n  )`)
   lines.push('}')
@@ -1468,6 +1794,8 @@ function componentOptions(fc: FileCtx, plan: ComponentPlan, root: Element, marke
       if (isCustomTag(el)) fc.session.customElements.add(el.tagName)
       if (el.tagName === USE_TAG) return visitUse(fc, plan, el, ctx, options)
       const isRoot = el === root
+      const listEntry = isRoot || fc.inItem ? undefined : eachListOf(plan, el)
+      if (listEntry) return renderEach(fc, plan, el, ctx, options, listEntry, marker)
       const condRaw = isRoot ? undefined : attrOf(el, IF_ATTR)
       const slotName = attrOf(el, SLOT_ATTR)
       const special = isRoot || attrOf(el, BIND_ATTR) !== undefined || slotName !== undefined
@@ -1485,6 +1813,73 @@ function componentOptions(fc: FileCtx, plan: ComponentPlan, root: Element, marke
     },
   }
   return options
+}
+
+/** The list prop an element repeats for, when it names one the export has (a nested list, or a name that is no list, is an ordinary element). */
+function eachListOf(plan: ComponentPlan, el: Element): PropPlan | undefined {
+  const raw = attrOf(el, EACH_ATTR)
+  if (raw === undefined) return undefined
+  const entry = plan.propByName.get(raw.trim())
+  return entry?.list ? entry : undefined
+}
+
+/** A name for a loop variable that no prop, slot or reserved local takes. */
+function freeName(plan: ComponentPlan, wanted: string): string {
+  const taken = new Set([...plan.props.map((entry) => entry.ts), ...plan.slots.map((slot) => slot.ts), ...LOCAL_NAMES])
+  let name = wanted
+  while (taken.has(name)) name += '_'
+  return name
+}
+
+/** The element of a list as `{items.map((item, index) => (<li key={index} …/>))}`: inside it a bound item field reads `item.field`, anything else reads the component's props as it does outside. */
+function renderEach(
+  fc: FileCtx,
+  plan: ComponentPlan,
+  el: Element,
+  ctx: JsxContext,
+  options: HtmlToJsxOptions,
+  entry: PropPlan,
+  marker: string,
+): string {
+  const list = entry.list
+  if (!list) return ''
+  /* the element's own condition gates the whole list and reads the component's props */
+  const condRaw = attrOf(el, IF_ATTR)
+  const condition = condRaw === undefined ? undefined : parseCondition(condRaw)
+  const itemName = freeName(plan, 'item')
+  const indexName = freeName(plan, 'index')
+  const names = new Set(Object.keys(entry.prop.fields ?? {}))
+  const outer = plan.propByName
+  const scope = new Map([...outer].filter(([name]) => !names.has(name)))
+  for (const field of list.fields) {
+    scope.set(field.name, {
+      prop: { name: field.name, type: field.type },
+      ts: `${itemName}.${field.ts}`,
+      kind: field.type === 'boolean' ? { k: 'boolean' } : { k: 'string' },
+      hasDefault: true,
+      item: true,
+    })
+  }
+  let element: string
+  plan.propByName = scope
+  fc.inItem = true
+  try {
+    const styled = customPropertyStyle(fc, el)
+    const loose = staticSpread(fc, el)
+    const guards = attrGuards(plan, el)
+    const plain = attrOf(el, BIND_ATTR) === undefined && !loose.entries.length
+    element = plain
+      ? ctx.element(styled, undefined, guards)
+      : renderCustomized(fc, plan, el, ctx, options, false, undefined, marker, guards)
+  } finally {
+    plan.propByName = outer
+    fc.inItem = false
+  }
+  if (element === '') return ''
+  const keyed = element.replace(/^<[^\s/>]+/, (tag) => `${tag} key={${indexName}}`)
+  const param = element.includes(`${itemName}.`) ? itemName : freeName(plan, `_${itemName}`)
+  const mapped = `{${entry.ts}.map((${param}, ${indexName}) => (\n${indentText(keyed)}\n))}`
+  return condition ? wrapCondition(mapped, condExpr(plan, condition)) : mapped
 }
 
 function renderCustomized(
