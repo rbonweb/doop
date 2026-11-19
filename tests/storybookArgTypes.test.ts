@@ -223,3 +223,102 @@ describe('readArgTypes against hostile input', () => {
     expect(read(table).props).toEqual([])
   })
 })
+
+describe('readArgTypes children', () => {
+  it('reads a text children arg as a label prop passed back as children', () => {
+    const { props, issues } = read({ children: { control: 'text' } }, { children: 'Click me' })
+    expect(props).toEqual([{ name: 'label', type: 'text', arg: 'children', initial: 'Click me' }])
+    expect(issues).toEqual([])
+  })
+
+  it('reads the text from the argType defaultValue when the story has no initial arg', () => {
+    const { props } = read({ children: { control: 'text', defaultValue: 'Save' } })
+    expect(props).toEqual([{ name: 'label', type: 'text', arg: 'children', initial: 'Save' }])
+  })
+
+  it('names it content, then text, when label is taken', () => {
+    const taken = read({ label: { control: 'text' }, children: { control: 'text' } }, { children: 'Hi' })
+    expect(taken.props.map((prop) => prop.name)).toEqual(['label', 'content'])
+    const both = read(
+      { label: { control: 'text' }, content: { control: 'text' }, children: { control: 'text' } },
+      { children: 'Hi' },
+    )
+    expect(both.props.map((prop) => prop.name)).toEqual(['label', 'content', 'text'])
+    expect(both.props[2]).toMatchObject({ arg: 'children', initial: 'Hi' })
+  })
+
+  it('drops a children arg that is not text, and counts it', () => {
+    const { props, issues } = read({ children: { control: 'object' } }, { children: { type: 'span' } })
+    expect(props).toEqual([])
+    expect(issues).toHaveLength(1)
+    expect(issues[0]?.code).toBe('argtypes_dropped')
+    expect(issues[0]?.message).toMatch(/^1 props? skipped: children/)
+  })
+
+  it('makes no prop of a children arg with no text and no definition', () => {
+    expect(read({}, { children: 42 }).props).toEqual([])
+  })
+})
+
+describe('readArgTypes component-valued enums', () => {
+  const icons = ['HeartIcon', 'StarIcon']
+
+  it('maps each option to the display name of the component its mapping holds', () => {
+    const { props } = read(
+      {
+        icon: {
+          control: 'select',
+          options: icons,
+          mapping: { HeartIcon: { displayName: 'HeartIcon' }, StarIcon: { displayName: 'StarFillIcon' } },
+        },
+      },
+      { icon: 'HeartIcon' },
+    )
+    expect(props[0]).toMatchObject({
+      type: 'enum',
+      options: icons,
+      componentExports: { HeartIcon: 'HeartIcon', StarIcon: 'StarFillIcon' },
+    })
+  })
+
+  it('falls back to the option when the display name is not an identifier', () => {
+    const { props } = read({
+      icon: {
+        control: 'select',
+        options: icons,
+        mapping: { HeartIcon: { displayName: 'not an identifier' }, StarIcon: { displayName: 'Star-Icon' } },
+      },
+    })
+    expect(props[0]?.componentExports).toEqual({ HeartIcon: 'HeartIcon', StarIcon: 'StarIcon' })
+  })
+
+  it('reads a mapping with a none: null entry as data, with no components', () => {
+    const { props } = read({
+      icon: {
+        control: 'select',
+        options: ['none', ...icons],
+        mapping: { none: null, HeartIcon: { displayName: 'HeartIcon' }, StarIcon: { displayName: 'StarIcon' } },
+      },
+    })
+    expect(props[0]?.type).toBe('enum')
+    expect(props[0]?.componentExports).toBeUndefined()
+  })
+
+  it('reads a plain number or string mapping as data', () => {
+    const { props } = read({ size: { control: 'select', options: ['s', 'l'], mapping: { s: 12, l: 'large' } } })
+    expect(props[0]?.componentExports).toBeUndefined()
+  })
+
+  it('takes the export names from the options where the probe left no key for a function', () => {
+    const { props } = read({
+      icon: { control: 'select', options: icons, mapping: { HeartIcon: { displayName: 'HeartIcon' } } },
+    })
+    expect(props[0]?.componentExports).toEqual({ HeartIcon: 'HeartIcon', StarIcon: 'StarIcon' })
+    const empty = read({ icon: { control: 'select', options: icons, mapping: {} } })
+    expect(empty.props[0]?.componentExports).toEqual({ HeartIcon: 'HeartIcon', StarIcon: 'StarIcon' })
+  })
+
+  it('has no components without a mapping', () => {
+    expect(read({ icon: { control: 'select', options: icons } }).props[0]?.componentExports).toBeUndefined()
+  })
+})

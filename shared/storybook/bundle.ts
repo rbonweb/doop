@@ -17,6 +17,7 @@ import {
 import type { StoryEntry, StorybookIssue } from './index.ts'
 import { bindHtml, findBindings, mapBindings } from './bindings.ts'
 import { guardCss, splitRules } from './cssGuard.ts'
+import { iconPackageOf } from './iconPackages.ts'
 import { MAX_PROBE_CHARS, probeInstallSource, probeName } from './probe.ts'
 import { captureRefusalSchema, storyCaptureSchema, storyMetaSchema } from './schemas.ts'
 import {
@@ -565,7 +566,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
           .join(', ')}`,
       )
     }
-    const outProps = useful.map(({ arg: _arg, initial: _initial, ...prop }) => ({
+    const outProps = useful.map(({ arg: _arg, initial: _initial, componentExports: _exports, ...prop }) => ({
       ...prop,
       ...(prop.type === 'boolean' && reflected.has(prop.name) ? { reflect: true } : {}),
     }))
@@ -578,8 +579,24 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
           ?.replace(/[^\w$]/g, ''),
       )
     /* the code mapping names only props the component has */
+    const iconPackage = useful.some((prop) => prop.componentExports)
+      ? iconPackageOf([
+          finalHtml,
+          ...Object.values(variants).flatMap((values) => Object.values(values).map((variant) => variant.html ?? '')),
+        ])
+      : undefined
     const propMapping = Object.fromEntries(
-      useful.filter((prop) => prop.arg !== prop.name).map((prop) => [prop.name, { name: prop.arg }]),
+      useful.flatMap((prop) => {
+        const mapping: NonNullable<NonNullable<BundleComponent['code']>['props']>[string] = {}
+        if (prop.arg !== prop.name) mapping.name = prop.arg
+        if (prop.componentExports) {
+          /* the options are component references: the package when the markup names it, and the export of each option that is not its own name */
+          mapping.component = iconPackage ? { importFrom: iconPackage } : {}
+          const renamed = Object.entries(prop.componentExports).filter(([option, exported]) => option !== exported)
+          if (renamed.length) mapping.values = Object.fromEntries(renamed)
+        }
+        return Object.keys(mapping).length ? [[prop.name, mapping] as const] : []
+      }),
     )
     components.push({
       name: group.name,

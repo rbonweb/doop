@@ -18,6 +18,7 @@ import { captureStory, settleStory, STYLE_PROPERTIES, type CapturedStory } from 
 import type { StoryEntry } from '../shared/storybook/index.ts'
 import { STORYBOOK_LIMITS } from '../shared/storybook/plan.ts'
 import { guardCss, splitRules } from '../shared/storybook/cssGuard.ts'
+import { iconPackageOf } from '../shared/storybook/iconPackages.ts'
 import { probeAttribute, probeInstallSource, probeName } from '../shared/storybook/probe.ts'
 import { isBoundedJson } from '../shared/storybook/schemas.ts'
 
@@ -851,5 +852,90 @@ describe('the probe', () => {
     expect(() => new Function(source)).not.toThrow()
     expect(source).toContain('"__doop_probe_abc"')
     expect(source).toContain('const __name')
+  })
+})
+
+describe('icon props and children text', () => {
+  const TEXT = 'Click me'
+
+  /** A button with an icon enum (its argType mapping names components) and a children text arg: the markup shows the icon as the given svg and the text where textArgs says. */
+  function iconPage(svg: string, seen: unknown[] = []): StoryPage {
+    return {
+      installProbe: async () => {},
+      goto: async () => {},
+      waitForState: async () => 'ready',
+      readMeta: async () =>
+        JSON.stringify({
+          argTypes: {
+            icon: {
+              control: 'select',
+              options: ['HeartIcon', 'StarIcon'],
+              mapping: { HeartIcon: { displayName: 'HeartIcon' }, StarIcon: { displayName: 'StarFillIcon' } },
+            },
+            children: { control: 'text' },
+          },
+          initialArgs: { icon: 'HeartIcon', children: TEXT },
+          displayName: 'Button',
+        }),
+      evaluateSource: async () => undefined,
+      evaluate: (async (fn: unknown, options: { marker?: string; textArgs?: { prop: string; value: string }[] }) => {
+        if (fn === settleStory) return undefined
+        if (fn !== captureStory) throw new Error('unexpected evaluate')
+        seen.push(options.textArgs)
+        const bound = options.textArgs?.some((arg) => arg.prop === 'label') ? ' data-doop-prop="label"' : ''
+        return JSON.stringify(
+          shot({ html: `<button class="b">${svg}<span${bound}>${TEXT}</span></button>`, shape: '0button,1svg,1span' }),
+        )
+      }) as StoryPage['evaluate'],
+    }
+  }
+
+  const build = (svg: string, seen: unknown[] = []) =>
+    buildComponentBundle({
+      entries: [entry('A/Button')],
+      source: { kind: 'storybook', url: 'https://sb.test/' },
+      baseUrl: 'https://sb.test/',
+      withPage: async (use) => use(iconPage(svg, seen)),
+    })
+
+  it('names the octicons package for an icon enum whose markup is an octicon, and renames only the exports that differ', async () => {
+    const { bundle } = await build('<svg class="octicon octicon-heart" width="16"></svg>')
+    expect(componentBundleSchema.safeParse(bundle).success).toBe(true)
+    const code = bundle.components[0]?.code
+    expect(code?.props?.icon).toEqual({
+      component: { importFrom: '@primer/octicons-react' },
+      values: { StarIcon: 'StarFillIcon' },
+    })
+    const prop = bundle.components[0]?.props?.find((entry) => entry.name === 'icon')
+    expect(prop).toBeDefined()
+    expect(prop).not.toHaveProperty('componentExports')
+    expect(prop).not.toHaveProperty('arg')
+  })
+
+  it('leaves component empty when the svg is not from a known family', async () => {
+    const { bundle } = await build('<svg class="icon" width="16"></svg>')
+    expect(bundle.components[0]?.code?.props?.icon).toEqual({ component: {}, values: { StarIcon: 'StarFillIcon' } })
+  })
+
+  it('asks the page to bind the children text as label and maps it back to children', async () => {
+    const seen: unknown[] = []
+    const { bundle } = await build('<svg class="octicon" width="16"></svg>', seen)
+    expect(seen[0]).toEqual([{ prop: 'label', value: TEXT }])
+    const component = bundle.components[0]!
+    expect(component.html).toContain('<span data-doop-prop="label">Click me</span>')
+    expect(component.props?.find((prop) => prop.name === 'label')).toMatchObject({ type: 'text' })
+    expect(component.code?.props?.label).toEqual({ name: 'children' })
+    expect(JSON.stringify(component.props)).not.toContain('"arg"')
+  })
+})
+
+describe('iconPackageOf', () => {
+  it('finds the octicons package in any of the markup, only for an svg with the octicon class', () => {
+    expect(iconPackageOf(['<b>x</b>', '<svg class="foo octicon octicon-x"></svg>'])).toBe('@primer/octicons-react')
+    expect(iconPackageOf(['<svg class="octicon"></svg>'])).toBe('@primer/octicons-react')
+    expect(
+      iconPackageOf(['<svg class="icon"></svg>', '<i class="octicon"></i>', '<svg class="my-octicon"></svg>']),
+    ).toBe(undefined)
+    expect(iconPackageOf([])).toBeUndefined()
   })
 })
