@@ -267,6 +267,10 @@ needs a reusable piece the system lacks, add it, then use it.
   instance of those. A NavItem written out by hand nine times inside a Sidebar is the same mistake
   as a Button written out by hand inside a frame. Check list_components before writing a main, as
   you would before writing a frame.
+- Frame CSS stops at component instances: a rule in a frame's \`<style>\` does not restyle a
+  component's own elements inside an instance (style the component with \`update_component\`, or
+  override on the instance), but it still styles the instance root and anything you put in a slot;
+  a custom property you set on the frame's \`:root\` overrides the one the component's main used.
 - Build from the smallest piece up: name the pieces a large component repeats (Button, NavItem)
   and create those first, then the one that holds them:
       <aside class="sb">
@@ -279,6 +283,18 @@ needs a reusable piece the system lacks, add it, then use it.
 - auto_props=false skips the automatic text, image and link props; explicit data-doop-prop bindings
   and per-instance edits still work. Use it when you do not want those automatic props. A list that
   will change (navigation, menus, rows) is nested components or a slot, not text in one main.
+- A repeated block (nav links, a feature list, table rows) is a list prop: mark the element that
+  repeats with \`data-doop-each="links"\` and bind the fields inside it, e.g.
+  \`<li data-doop-each="links"><a data-doop-prop="href:url,label">Home</a></li>\`. The fields
+  (\`url\` a link, \`label\` text) are inferred from the bindings; declare the prop with
+  \`type: "list"\` and \`fields\` when you need booleans, an item that also reads component props,
+  or a default.
+- Give each instance its items as JSON:
+  \`<doop-use component="Menu" links='[{"label":"Home","url":"/"},{"label":"Pricing","url":"/pricing"}]'>\`,
+  or \`props: { links: [{ "label": "Home", "url": "/" }] }\` in insert_instance and
+  update_instances. An update replaces the whole list, \`[]\` shows none, and an instance with no
+  value shows the one sample item the main holds. Items hold only the declared fields; anything
+  else is dropped and reported. Never put markup in a text field: it is shown as text.
 - create_component from html puts the main on the Components page and places nothing: use it
   with <doop-use> in a frame, or insert_instance. Its result lists the props it inferred; name
   your own with data-doop-prop. create_components does the same for up to 12 at once, in order,
@@ -293,6 +309,13 @@ needs a reusable piece the system lacks, add it, then use it.
 - Vary with props, not copies. An enum prop sets data-<name> on the root, so a variant is plain
   CSS: .btn[data-tone="ghost"] { … }. Hover and focus are ordinary CSS too. You do not need a
   component per state, or per size.
+- To add, rename, remove or style a variant (a size, a tone, a disabled state), call
+  edit_component_variants instead of rewriting the stylesheet: ops run in order as one revision.
+- rename_value and remove_value also move the CSS rules and the instances that held the value;
+  set_style writes \`[data-<prop>="<value>"]\` rules for one element (a data-doop-part key, or
+  "root") and never an inline style on the main.
+- Use dry_run first on a component with many instances; the answer lists the variant props and
+  every variant rule.
 - Prop types: text, image, link, enum, boolean, plus number (min, max, step), color (#hex, rgb(), hsl(),
   oklch() or var(--token)) and instance (accepts: the components that may be chosen). A value that does
   not fit comes back as a COMPONENT note naming what does. A boolean bound to an HTML boolean attribute
@@ -300,6 +323,20 @@ needs a reusable piece the system lacks, add it, then use it.
   bare attribute when on and removes it when off. Set reflect=true on a boolean to put
   data-<name>="true"|"false" on the root, so CSS can key on it like an enum. A text binding on an element
   with children (<a><svg/>Label</a>) changes only the element's own text and keeps the children.
+- A prop declared with type \`richtext\` carries inline formatting: bind it with a bare
+  \`data-doop-prop="title"\` on the element whose content it replaces, and pass it as
+  \`<doop-use component="Card" title="<b>Hi</b> there">\`, or through \`update_instances\` and
+  \`insert_instance\`.
+- Rich text keeps \`b\`, \`i\`, \`strong\`, \`em\`, \`br\`, \`a\` (absolute http or https \`href\`
+  only) and \`span\` (a plain \`class\` only). Everything else is stripped: other tags are unwrapped
+  to their text, \`script\`, \`style\`, \`iframe\`, \`svg\` and similar go with their content, and
+  attributes such as \`style\`, \`onclick\` and \`id\` are dropped. The result says what was removed
+  in a \`richtext_sanitized\` issue; read it and use a \`text\` prop or a slot when you need
+  structure.
+- A component with several slots needs every piece of content wrapped in
+  \`<template slot="name">\`. Content with no slot goes into one slot and the result reports
+  \`unnamed_slot_content\`; a slot name the component does not have reports \`unknown_slot\` with the
+  names it does have.
 - For one instance that must differ: use update_instances, or just edit it; edits inside an instance
   are captured as overrides on that element alone and survive every later change to the main. Do
   not detach to make a small change.
