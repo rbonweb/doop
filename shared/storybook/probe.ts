@@ -182,16 +182,19 @@ export function installStoryProbe(name: string): void {
       const argTypes = encode(field(story, 'argTypes'), 0)
       const initialArgs = encode(field(story, 'initialArgs'), 0)
       const component = field(story, 'component')
+      /* a production build minifies the function name, so the two are sent apart and the bundle decides which to trust */
       const display = field(component, 'displayName')
-      const fallback = field(component, 'name')
-      const shown = typeof display === 'string' ? display : fallback
-      const displayName = typeof shown === 'string' && shown.length < 100 ? stringify(slice(shown, 0, 100)) : undefined
+      const fn = field(component, 'name')
+      const displayName =
+        typeof display === 'string' && display.length < 100 ? stringify(slice(display, 0, 100)) : undefined
+      const functionName = typeof fn === 'string' && fn.length < 100 ? stringify(slice(fn, 0, 100)) : undefined
       const text =
         '{"argTypes":' +
         (argTypes ?? '{}') +
         ',"initialArgs":' +
         (initialArgs ?? '{}') +
         (displayName ? ',"displayName":' + displayName : '') +
+        (functionName ? ',"functionName":' + functionName : '') +
         '}'
       return text.length <= MAX_CHARS + 1024 ? text : null
     } catch {

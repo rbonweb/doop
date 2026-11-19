@@ -69,7 +69,9 @@ function mapComponent(raw: unknown, prop: ComponentProp, key: string): { importF
   const component: { importFrom?: string } = {}
   if (raw.importFrom !== undefined) {
     if (typeof raw.importFrom !== 'string' || !isBareSpecifier(raw.importFrom))
-      fail(`code.props.${key}.component.importFrom must be a package name such as @scope/name`)
+      fail(
+        `code.props.${key}.component.importFrom must be a package name such as @scope/name or a path alias such as @/components/ui`,
+      )
     component.importFrom = raw.importFrom
   }
   return component

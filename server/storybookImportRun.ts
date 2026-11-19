@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import type { Actor } from '../shared/types.ts'
+import { isAliasSpecifier } from '../shared/componentCode.ts'
 import { MAX_BUNDLE_COMPONENTS } from '../shared/componentBundle.ts'
+import { chooseExportName } from '../shared/storybook/exportName.ts'
 import { BundleImportError, type PlanInfo, type PlannedComponent } from '../shared/storybook/bundle.ts'
 import { importComponentBundle, type ImportIssue, type ImportResult } from './componentBundleImport.ts'
 import { ComponentError } from './componentActions.ts'
@@ -19,7 +21,7 @@ import { runOperation, WorkBudgetError } from './workBudget.ts'
 
 /** What the MCP tool, the resident tool and the REST route share: a Storybook URL to components on a canvas. The long part (a browser rendering the Storybook) runs outside any write boundary; only the importer's own writes are units of their own. */
 
-/** An npm package name, "react-ui" or "@acme/ui": what becomes every component's `importFrom`. */
+/** An npm package name, "react-ui" or "@acme/ui" (or a path alias, see `isAliasSpecifier`): what becomes every component's `importFrom`. */
 export const PACKAGE_NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/
 
 export const storybookInput = {
@@ -27,9 +29,13 @@ export const storybookInput = {
   package: z
     .string()
     .max(214)
-    .regex(PACKAGE_NAME, 'an npm package name such as "@acme/ui"')
+    .refine((value) => PACKAGE_NAME.test(value) || isAliasSpecifier(value), {
+      message: 'an npm package name such as "@acme/ui", or a path alias such as "@/components/ui"',
+    })
     .optional()
-    .describe('The npm package the components are imported from in code, e.g. "@acme/ui"'),
+    .describe(
+      'Where the components are imported from in code: an npm package, e.g. "@acme/ui", or a path alias that holds one file per component, e.g. "@/components/ui" (each component then imports from "@/components/ui/<kebab-case name>")',
+    ),
   include: z
     .array(z.string().min(1).max(200))
     .max(MAX_BUNDLE_COMPONENTS)
@@ -123,7 +129,7 @@ export async function planStorybookImport(
       group: entry.group,
       html: '<div></div>',
       code: {
-        exportName: /^[A-Za-z_$][\w$]*$/.test(entry.name) ? entry.name : undefined,
+        exportName: chooseExportName({ title: entry.group }),
         origin: { kind: 'storybook' },
       },
     })),

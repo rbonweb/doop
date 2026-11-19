@@ -433,7 +433,7 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
   }
   if (!isBareSpecifier(code.importFrom)) {
     refuse(
-      'code mapping ignored: it must import from a package name such as @scope/name, so the component is generated',
+      'code mapping ignored: it must import from a package name such as @scope/name or a path alias such as @/components/ui, so the component is generated',
     )
     return { issues }
   }
@@ -476,7 +476,7 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
       const usable = importFrom !== undefined && isBareSpecifier(importFrom)
       if (importFrom !== undefined && !usable)
         refuse(
-          `prop ${jsString(prop.name)} imports its components from ${jsString(importFrom)}, which is not a package name such as @scope/name: they are left for you to import`,
+          `prop ${jsString(prop.name)} imports its components from ${jsString(importFrom)}, which is not a package name such as @scope/name or a path alias such as @/components/ui: they are left for you to import`,
         )
       const exports = new Map<string, string | null>()
       for (const option of prop.options ?? []) {

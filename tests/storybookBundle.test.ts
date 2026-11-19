@@ -51,7 +51,13 @@ function shot(overrides: Partial<CapturedStory> = {}): CapturedStory {
 /** A page that renders every story as one button with a tone enum, and counts renders. */
 function fakePage(
   log: string[],
-  options: { fail?: (url: string) => boolean; withoutControls?: (storyId: string) => boolean; perStory?: boolean } = {},
+  options: {
+    fail?: (url: string) => boolean
+    withoutControls?: (storyId: string) => boolean
+    perStory?: boolean
+    /** what the page names the component, in place of displayName `MyButton` */
+    names?: { displayName?: string; functionName?: string }
+  } = {},
 ): StoryPage {
   let url = ''
   return {
@@ -70,7 +76,7 @@ function fakePage(
               on: { control: 'boolean' },
             },
             initialArgs: { tone: 'a' },
-            displayName: 'MyButton',
+            ...(options.names ?? { displayName: 'MyButton' }),
           }),
     evaluateSource: async () => undefined,
     evaluate: (async (fn: unknown) => {
@@ -140,6 +146,37 @@ describe('diffStyles', () => {
 
 describe('buildComponentBundle', () => {
   const source = { kind: 'storybook' as const, url: 'https://sb.test/' }
+
+  describe('export name', () => {
+    const exportOf = async (title: string, names: { displayName?: string; functionName?: string }) => {
+      const { bundle } = await buildComponentBundle({
+        entries: [entry(title)],
+        source,
+        baseUrl: 'https://sb.test/',
+        withPage: withPage([], { names }),
+      })
+      return bundle.components[0]?.code?.exportName
+    }
+
+    it('never takes a minified function name', async () => {
+      for (const functionName of ['l', 's', 'F', 'Kr', 'C', 'a']) {
+        expect(await exportOf('Components/Alert Dialog', { functionName })).toBe('AlertDialog')
+      }
+      expect(await exportOf('Components/Card', { functionName: 'Kr' })).toBe('Card')
+    })
+
+    it('prefers the display name, then a function name that looks like the title, then the title', async () => {
+      expect(await exportOf('Components/Button', { displayName: 'PrimaryButton', functionName: 'Button' })).toBe(
+        'PrimaryButton',
+      )
+      expect(await exportOf('Components/Button', { functionName: 'ButtonGroup' })).toBe('ButtonGroup')
+      expect(await exportOf('Components/Alert Dialog', {})).toBe('AlertDialog')
+    })
+
+    it('leaves the export out when nothing usable is left', async () => {
+      expect(await exportOf('Components/3D', { functionName: 'l' })).toBeUndefined()
+    })
+  })
 
   it('builds a valid bundle, naming the export after the display name', async () => {
     const log: string[] = []

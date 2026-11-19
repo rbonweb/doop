@@ -1022,6 +1022,12 @@ describe('review fixes', () => {
     }
   })
 
+  it('imports a component mapped to a path alias as a named import from that file', () => {
+    const out = callIt(mappedTo('Btn', { importFrom: '@/components/ui/button', exportName: 'Button' }))
+    expect(fileOf(out, 'src/pages/Home.tsx')).toContain('import { Button } from "@/components/ui/button"')
+    expect(out.files.some((file) => file.path === 'src/components/Btn.tsx')).toBe(false)
+  })
+
   it('keeps :root and html theme rules as ancestors of the page root', () => {
     const css = [
       ':root[data-doop-theme=dark] .x { color: white }',
