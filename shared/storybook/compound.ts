@@ -49,6 +49,11 @@ const NATIVE_CONTENT = ['placeholder', 'alt']
 
 const normal = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, '')
 
+/** A name that reads as an event handler (`on-click`, `onclick`, `on_change`) is not a slot or a prop: it would be mistaken for one by a framework or a person. */
+function isHandlerName(name: string): boolean {
+  return /^on[-_]?[a-z]/i.test(name)
+}
+
 interface TreeNode {
   tag: string
   depth: number
@@ -192,6 +197,7 @@ export function planCompound(input: CompoundInput): CompoundPlan {
     const stripped =
       rootIdentity && identity.startsWith(`${rootIdentity}-`) ? identity.slice(rootIdentity.length + 1) : identity
     const stem = stripped.replace(/_/g, '-')
+    if (isHandlerName(stem)) continue
     if (!SAFE_NAME.test(stem)) continue
     const node = tree[index]!
     const below = subtree(index)
