@@ -1,11 +1,13 @@
 import { parseFragment, type DefaultTreeAdapterTypes as Tree } from 'parse5'
 import {
   BIND_ATTR,
+  ATTR_IF_ATTR,
   IF_ATTR,
   SLOT_ATTR,
   USE_TAG,
   isPropName,
   parseBindings,
+  parseAttrConditions,
   parseCondition,
   parseStyle,
   serializeStyle,
@@ -27,7 +29,14 @@ import {
 } from '../componentEngine.ts'
 import { moduleClassName, safeClass, safeClassCss, splitComponentCss, type CssModuleSplit } from './cssSplit.ts'
 import { componentDocument, googleFontsUrl, hostedFontUrl } from './fonts.ts'
-import { nodeToJsx, htmlToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
+import {
+  nodeToJsx,
+  htmlToJsx,
+  styleToJsx,
+  type AttrGuards,
+  type HtmlToJsxOptions,
+  type JsxContext,
+} from './htmlToJsx.ts'
 import { isUnsafeUrl, jsString, type ExportIssue } from './issues.ts'
 import { NameAllocator, componentName, isIdentifier, propName } from './names.ts'
 import { cssToTailwind, tailwindClassName, type TailwindSplit } from './tailwind.ts'
@@ -798,6 +807,43 @@ export function condExpr(plan: ComponentPlan, condition: Condition): string {
   }
 }
 
+/** `data-doop-attr-if` as one JS condition per attribute (lowercased name): each entry's conditions joined with `&&`, a condition that always holds left out and one that never holds making it `'false'`. Undefined when the element has none. */
+function attrGuards(plan: ComponentPlan, el: Element): AttrGuards | undefined {
+  const raw = attrOf(el, ATTR_IF_ATTR)
+  if (raw === undefined) return undefined
+  const terms = new Map<string, string[] | 'false'>()
+  for (const { attr, conditions } of parseAttrConditions(raw)) {
+    const key = attr.toLowerCase()
+    const held = terms.get(key) ?? []
+    if (held === 'false') continue
+    const next: string[] = []
+    for (const condition of conditions) {
+      const expr = condExpr(plan, condition)
+      if (expr === 'false') {
+        next.length = 0
+        terms.set(key, 'false')
+        break
+      }
+      if (expr !== 'true') next.push(expr)
+    }
+    if (terms.get(key) !== 'false') terms.set(key, [...held, ...next])
+  }
+  const guards: Record<string, string> = {}
+  for (const [key, held] of terms) guards[key] = held === 'false' ? 'false' : held.length ? held.join(' && ') : 'true'
+  return Object.keys(guards).length ? guards : undefined
+}
+
+/** A `"name": value` spread entry under its guard: unchanged, dropped (an empty list) or `"name": cond ? value : undefined`. */
+function guardSpreadEntry(entry: string, guards: AttrGuards | undefined): string[] {
+  if (!guards) return [entry]
+  const at = entry.indexOf(':')
+  const name = (JSON.parse(entry.slice(0, at)) as string).toLowerCase()
+  const cond = guards[name]
+  if (cond === undefined || cond === 'true') return [entry]
+  if (cond === 'false') return []
+  return [`${entry.slice(0, at)}: ${cond} ? ${entry.slice(at + 1).trim()} : undefined`]
+}
+
 /** A style attribute holding custom properties as a JSX attribute override: React's `CSSProperties` has no `--x` keys, so the object is asserted to it. */
 export function customPropertyStyle(fc: FileCtx, el: Element): Record<string, string> | undefined {
   const style = attrOf(el, 'style')
@@ -1300,10 +1346,11 @@ function componentOptions(fc: FileCtx, plan: ComponentPlan, root: Element, marke
       const styled = customPropertyStyle(fc, el)
       const loose = staticSpread(fc, el)
       const plain = !special && !loose.entries.length
-      if (plain && condRaw === undefined && !styled) return undefined
+      const guards = attrGuards(plan, el)
+      if (plain && condRaw === undefined && !styled && !guards) return undefined
       let rendered = plain
-        ? ctx.element(styled)
-        : renderCustomized(fc, plan, el, ctx, options, isRoot, slotName, marker)
+        ? ctx.element(styled, undefined, guards)
+        : renderCustomized(fc, plan, el, ctx, options, isRoot, slotName, marker, guards)
       const condition = condRaw === undefined ? undefined : parseCondition(condRaw)
       if (condition) rendered = wrapCondition(rendered, condExpr(plan, condition))
       return rendered
@@ -1321,6 +1368,7 @@ function renderCustomized(
   isRoot: boolean,
   slotName: string | undefined,
   marker: string,
+  guards: AttrGuards | undefined,
 ): string {
   const bound: BoundElement =
     slotName === undefined
@@ -1358,8 +1406,8 @@ function renderCustomized(
   const spreadEntries = [
     ...loose.entries.filter((entry) => !boundKeys.has(entry.slice(0, entry.indexOf(':')))),
     ...bound.spread,
-  ]
-  let rendered = withSpread(ctx.element(attrs, children), spreadEntries)
+  ].flatMap((entry) => guardSpreadEntry(entry, guards))
+  let rendered = withSpread(ctx.element(attrs, children, guards), spreadEntries)
   if (bound.text) rendered = rendered.replace(`{${jsString(bound.text.marker)}}`, bound.text.jsx)
   return rendered
 }
