@@ -76,8 +76,11 @@ import {
   renderInstance,
   setAttr,
   shapeOf,
+  STYLE_VALUE_RULE,
+  styleBound,
   splice,
   stampParts,
+  unsafeStyleValue,
   useMarkup,
   withDetachedCss,
 } from './componentEngine.ts'
@@ -1278,6 +1281,8 @@ function detachAll(html: string, def: ComponentDef): { html: string; count: numb
 function checkPropValues(def: ComponentDef, props: Record<string, string> | undefined, lookup: ComponentLookup) {
   for (const [name, value] of Object.entries(props ?? {})) {
     const prop = def.props.find((candidate) => candidate.name === name)
+    if (prop && prop.type !== 'list' && unsafeStyleValue(value) && styleBound(def.template, name))
+      fail(`${def.name}: ${name} was not set — it is bound to a style, and ${STYLE_VALUE_RULE}`)
     const problem = prop && value !== '' ? propValueProblem(prop, value, lookup) : undefined
     if (problem)
       fail(

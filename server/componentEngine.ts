@@ -366,7 +366,7 @@ export function cleanRichValue(def: Pick<Revision, 'name'>, prop: string, value:
 /** The props with every rich-text and list value in its one safe form: the same object when nothing changed. A list value
  *  that cannot be read is dropped (the prop's default shows) and reported. */
 export function cleanPropValues(
-  def: Pick<Revision, 'name' | 'props'>,
+  def: Pick<Revision, 'name' | 'props' | 'template'>,
   props: Record<string, string> | undefined,
   ctx: EngineContext,
 ): Record<string, string> | undefined {
@@ -391,7 +391,7 @@ export function cleanPropValues(
 /** A list prop's value in its one stored form (key-sorted JSON of declared fields only), or `undefined` with an issue when
  *  it cannot be read. Fields the list does not declare are dropped and reported. The issue never quotes the value. */
 export function cleanListValue(
-  def: Pick<Revision, 'name'>,
+  def: Pick<Revision, 'name' | 'template'>,
   prop: ComponentProp,
   value: string,
   ctx: EngineContext,
@@ -404,12 +404,43 @@ export function cleanListValue(
     })
     return undefined
   }
+  const unsafe = read.items.some((item) =>
+    Object.entries(item).some(
+      ([field, value]) =>
+        typeof value === 'string' && unsafeStyleValue(value) && styleBound(def.template, field, prop.name),
+    ),
+  )
+  if (unsafe) {
+    ctx.issues.push({
+      code: 'invalid_prop_value',
+      message: `${def.name}: ${prop.name} was not set — a field is bound to a style, and ${STYLE_VALUE_RULE}`,
+    })
+    return undefined
+  }
   if (read.dropped.length)
     ctx.issues.push({
       code: 'list_field_dropped',
       message: `${def.name}: ${prop.name} gave ${read.dropped.length} value${read.dropped.length === 1 ? '' : 's'} the list has no field for, dropped (${read.dropped.slice(0, 5).join(', ')}${read.dropped.length > 5 ? `, and ${read.dropped.length - 5} more` : ''}); its fields are ${listFieldsText(prop.fields)}`,
     })
   return listJson(read.items)
+}
+
+/** A value bound to a style property or custom property is one value: a `;` or a brace would add declarations, and a
+ *  function that loads makes the viewer's browser fetch an address the value chose. */
+export const unsafeStyleValue = (value: string) =>
+  /[;{}\\]|\/\*|\b(?:url|image-set|-webkit-image-set|src|image)\s*\(/i.test(value)
+
+/** The wording shared by a refusal at write time and the render's own guard. */
+export const STYLE_VALUE_RULE =
+  'a style value takes one value, with no ; { } \\ /* or loading function (url, image-set, src, image)'
+
+/** Is this prop (or, with `list`, a field of that list) bound to a style property or custom property somewhere in the template? */
+export function styleBound(template: string, name: string, list?: string): boolean {
+  for (const info of partsOf(template).values()) {
+    if ((info.inEach ?? undefined) !== list) continue
+    if ([...info.styleProps.values()].includes(name)) return true
+  }
+  return false
 }
 
 function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides, ctx: EngineContext) {
@@ -440,10 +471,17 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides,
       if (!target.startsWith('style.') && !target.startsWith('--')) setAttr(el, target, null)
       continue
     }
+    if (target !== null && (target.startsWith('style.') || target.startsWith('--')) && unsafeStyleValue(value)) {
+      ctx.issues.push({
+        code: 'invalid_prop_value',
+        message: `${prop} was not set as ${target}: ${STYLE_VALUE_RULE}`,
+      })
+      continue
+    }
     if (target !== null && URL_TARGETS.has(target.toLowerCase()) && unsafeUrl(value)) {
       ctx.issues.push({
         code: 'invalid_prop_value',
-        message: `"${value.slice(0, 60)}" was not set as ${target}: a javascript:, vbscript: or data:text/html address is refused`,
+        message: `"${shown(value, 60)}" was not set as ${target}: a javascript:, vbscript: or data:text/html address is refused`,
       })
       continue
     }
@@ -1547,12 +1585,13 @@ export function reconcileInstance(el: Element, ctx: EngineContext, inMain = fals
 /* ------------------------------------------------------------------ */
 
 /** The elements below `root` (not through a nested instance) that are copies of one of these list templates, in document order. */
-function copiesOf(root: Element, keys: ReadonlySet<string>): Element[] {
+function copiesOf(root: Element, keys: ReadonlySet<string>, parts: ReadonlyMap<string, PartInfo>): Element[] {
   const found: Element[] = []
   const walk = (node: Element) => {
     for (const kid of elementKids(node)) {
       const key = attrOf(kid, PART_ATTR)
-      const template = key === undefined ? undefined : (COPY_KEY.exec(key)?.[1] ?? key)
+      /* `<template key>-<index>`; a key the template itself has (an authored `x-1` beside `x`) is that element, not a copy */
+      const template = key === undefined || parts.has(key) ? undefined : COPY_KEY.exec(key)?.[1]
       if (template !== undefined && keys.has(template)) found.push(kid)
       else if (!attrOf(kid, INSTANCE_ATTR)) walk(kid)
     }
@@ -1661,23 +1700,26 @@ function readLists(
   })
   if (!lists.length) return () => {}
   const keys = new Set(lists.map((list) => list.key))
-  const copies = copiesOf(incoming, keys)
+  const copies = copiesOf(incoming, keys, parts)
+  const baseCopies = copiesOf(base, keys, parts)
   const gone = new Set(copies)
   for (const { key, info, prop } of lists) {
-    const mine = copies.filter((copy) => {
-      const copyKey = attrOf(copy, PART_ATTR) ?? ''
-      return (COPY_KEY.exec(copyKey)?.[1] ?? copyKey) === key
-    })
+    const mine = copies.filter((copy) => COPY_KEY.exec(attrOf(copy, PART_ATTR) ?? '')?.[1] === key)
     const current = listItemsOf(prop, marker.overrides, info.el)
+    /* its items were never rendered (a false condition on it or around it, a hidden part): there is nothing to read back */
+    if (current.length && !baseCopies.some((copy) => COPY_KEY.exec(attrOf(copy, PART_ATTR) ?? '')?.[1] === key))
+      continue
     const next: ListItem[] = []
     for (const copy of mine) {
-      const at = Number(attrOf(copy, ITEM_ATTR))
-      const known = Number.isInteger(at) && at >= 0 && at < current.length && attrOf(copy, PART_ATTR) === `${key}-${at}`
+      /* the place in the list is the key's suffix: it follows the copy when it is moved, and a duplicate shares it */
+      const at = Number(COPY_KEY.exec(attrOf(copy, PART_ATTR) ?? '')?.[2])
+      const known = Number.isInteger(at) && at >= 0 && at < current.length
       /* a copy duplicated by hand carries the same index: it starts from that item and adds one */
       const item: ListItem = known ? { ...current[at] } : {}
       for (const [name, value] of readCopy(copy, prop, parts, ctx, def)) {
         const before = item[name]
-        if (before === value) continue
+        /* what the page shows is the text with its spaces collapsed: that is no edit of the stored text */
+        if (before === value || (typeof before === 'string' && before.replace(/\s+/g, ' ').trim() === value)) continue
         if (value === '' && before === undefined) continue
         if (value === '') delete item[name]
         else item[name] = value
@@ -1707,7 +1749,7 @@ function readLists(
         message: `${def.name}: ${dropped} item${dropped === 1 ? '' : 's'} of ${prop.name} had edits that are not one of its fields (${listFieldsText(prop.fields)}), which a list does not keep: change the component's template, or edit the field values`,
       })
   }
-  const undoBase = withoutNodes(base, new Set(copiesOf(base, keys)))
+  const undoBase = withoutNodes(base, new Set(baseCopies))
   const undoIncoming = withoutNodes(incoming, gone)
   return () => {
     undoIncoming()
@@ -1846,6 +1888,13 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
             prop.type === 'list'
               ? `${def.name}: ${name} was not set — ${problem}`
               : `${def.name}: "${shown(attr.value)}" is not a value of ${name} — ${problem}`,
+        })
+        continue
+      }
+      if (prop.type !== 'list' && unsafeStyleValue(attr.value) && styleBound(def.template, name)) {
+        ctx.issues.push({
+          code: 'invalid_prop_value',
+          message: `${def.name}: ${name} was not set — it is bound to a style, and ${STYLE_VALUE_RULE}`,
         })
         continue
       }
