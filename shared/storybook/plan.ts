@@ -157,13 +157,15 @@ function componentTitle(entry: StoryEntry, index: TitleIndex): string {
   return current.join('/')
 }
 
-function matchesInclude(title: string, include: string[] | undefined): boolean {
-  if (!include?.length) return true
-  const lower = title.toLowerCase()
+/** Whether one include entry selects a title: the whole title, its last part, or a prefix that ends at a slash, trimmed and compared without case. So "Components/Button", "Button" and "Components" all select "Components/Button", and "Comp" selects nothing. */
+export function matchesInclude(title: string, include: string[]): boolean {
+  if (!include.length) return true
+  const lower = title.trim().toLowerCase()
+  const last = (lower.split('/').pop() ?? '').trim()
   return include.some((entry) => {
     const wanted = entry.trim().replace(/\/+$/, '').toLowerCase()
-    /* a whole title, or the folders above it: "Components/Button" is not "Components/ButtonGroup" */
-    return wanted !== '' && (lower === wanted || lower.startsWith(`${wanted}/`))
+    /* a whole title, its last part, or the folders above it: "Components/Button" is not "Components/ButtonGroup" */
+    return wanted !== '' && (lower === wanted || last === wanted || lower.startsWith(`${wanted}/`))
   })
 }
 
@@ -217,7 +219,7 @@ export function groupStories(entries: StoryEntry[], options: { include?: string[
   for (const entry of entries) {
     const title = componentTitle(entry, index)
     /* `include` names components, so it is matched against the title a story ends up under */
-    if (!matchesInclude(title, options.include)) continue
+    if (!matchesInclude(title, options.include ?? [])) continue
     const list = owned.get(title)
     if (list) list.push(entry)
     else owned.set(title, [entry])
@@ -257,7 +259,11 @@ export function groupStories(entries: StoryEntry[], options: { include?: string[
     })
   }
   if (!groups.length && entries.length) {
-    issues.push({ code: 'no_components', message: 'No story matched the include filter' })
+    issues.push({
+      code: 'no_components',
+      message:
+        'No story matched the include filter (an entry matches a whole title such as "Components/Button", its last part "Button", or a title prefix such as "Components")',
+    })
   }
   return { groups, candidates, issues }
 }

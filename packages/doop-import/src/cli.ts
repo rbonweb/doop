@@ -19,7 +19,7 @@ Usage
   --storybook <dir|url>   a \`storybook build\` directory (served on 127.0.0.1 while it runs) or the URL of a Storybook dev server on this machine (localhost)
   --ticket <url>          the upload URL from Doop's import picker (or an agent's create_import_ticket)
   --package <name>        where the components are imported from in code: an npm package such as @acme/ui, or a path alias such as @/components/ui (one file per component)
-  --include <prefix>      only components whose Storybook title starts with this (repeat for several)
+  --include <title>       only components whose Storybook title is this, ends with it as its last part, or starts with it up to a slash (repeat for several)
   --browser <path>        the Chrome, Chromium or Edge executable to render with
   --dry-run               render and check the bundle, and say what would change; nothing is written and the ticket stays usable
   --out <file>            also write the bundle JSON to this file (with no --ticket, only write it)

@@ -6,6 +6,7 @@ import {
   argsParam,
   groupStories,
   isPageLike,
+  matchesInclude,
   PAGE_ELEMENTS,
   PAGE_ROOTS_ELEMENTS,
   pickDefaultStory,
@@ -218,6 +219,14 @@ describe('groupStories', () => {
     expect(titles(['Components'])).toEqual(['Components/Button', 'Components/ButtonGroup', 'Components/Forms/Input'])
     expect(titles(['Components/Forms'])).toEqual(['Components/Forms/Input'])
     expect(titles(['Components/But'])).toEqual([])
+  })
+
+  it('matches a whole title, its last part, or a prefix that ends at a slash', () => {
+    expect(matchesInclude('Components/Alert', ['Alert'])).toBe(true)
+    expect(matchesInclude('Components/Alert', ['alert'])).toBe(true)
+    expect(matchesInclude('Components/Alert', ['Components'])).toBe(true)
+    expect(matchesInclude('Components/Alert', ['Comp'])).toBe(false)
+    expect(matchesInclude('Components/Alert', ['Components/Alert'])).toBe(true)
   })
 
   it('keeps a first segment that is a collection word and matches the words in any case', () => {
