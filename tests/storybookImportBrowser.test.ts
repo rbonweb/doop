@@ -178,7 +178,7 @@ function wrappedPage(): string {
 /* Primer's Button: colours are custom properties on a theme wrapper (`[data-color-mode]`), the variant is an attribute on the button that rules keyed on the class style, and an icon adds a child and drops `data-no-visuals`, so that render is a different tree. */
 function themedPage(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><style>
-[data-color-mode="light"] { --btn-primary-bg: #1f883d; --btn-primary-fg: #ffffff; }
+[data-color-mode="light"] { --btn-primary-bg: #116329; --btn-primary-fg: #ffffff; }
 .btn { background-color: transparent; color: #222222; border: 0; padding: 4px 8px; }
 .btn:where([data-variant="primary"]) { background-color: var(--btn-primary-bg, #1f883d); color: var(--btn-primary-fg, #fff); }
 .btn:where([data-no-visuals]) { padding: 8px; }
@@ -797,7 +797,7 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
           icon,
           `${icon}:`,
         )
-        expect(background).toBe(`${icon}:rgb(31, 136, 61)`)
+        expect(background).toBe(`${icon}:rgb(17, 99, 41)`)
       }
     } finally {
       await page.close()
@@ -843,9 +843,52 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
         const [light, dark] = [luminance(resolved), luminance(background)].sort((a, b) => b - a)
         return { fill: resolved, background, contrast: (light! + 0.05) / (dark! + 0.05) }
       })
-      expect(look.background).toBe('rgb(31, 136, 61)')
+      expect(look.background).toBe('rgb(17, 99, 41)')
       expect(look.fill).toBe('rgb(255, 255, 255)')
       expect(look.contrast).toBeGreaterThan(3)
+    } finally {
+      await page.close()
+    }
+  })
+
+  it('keeps rules for another value of a state, written in any shape, and none that need only an identity attribute', async () => {
+    const page = await (await getBrowser()).newPage()
+    try {
+      /* a lone component (one data-component value) whose state is data-variant; the rules are the shapes a library writes */
+      await page.setContent(`<!doctype html><style>
+.btn { color: black; }
+.btn:where([data-variant="primary"]) .vis { color: white; }
+[data-variant="primary"] > .vis { fill: white; }
+.btn > [data-variant="primary"] { outline-width: 2px; }
+.btn[DATA-VARIANT="primary"] .vis { stroke: white; }
+.btn:where([data-variant="primary"], [data-variant="danger"]) .vis { opacity: 0.9; }
+[data-variant="primary"] { margin-left: 1px; }
+.btn:where([data-component="IconButton"]) .vis { margin-top: 2px; }
+[data-testid="other"] .vis { margin-right: 3px; }
+[data-color-mode="dark"] .vis { margin-bottom: 4px; }
+.other .vis { padding-top: 5px; }
+</style><div id="storybook-root"><span class="btn" data-component="Button" data-variant="default" data-testid="one"><i class="vis"></i></span></div>`)
+      await page.evaluate(CAPTURE_PRELUDE)
+      const options = {
+        textArgs: [],
+        styleProperties: STYLE_PROPERTIES,
+        maxBytes: STORYBOOK_LIMITS.captureBytes,
+        maxElements: 300,
+      }
+      const shot = JSON.parse((await page.evaluate(captureStory, options)) as string) as { ok: boolean; css: string }
+      expect(shot.ok).toBe(true)
+      /* the state is taken away to ask whether the rule could reach: a compound, a descendant, a list, a case-insensitive name and a leading or trailing combinator all stay valid */
+      expect(shot.css).toContain('.btn:where([data-variant="primary"]) .vis')
+      expect(shot.css).toContain('[data-variant="primary"] > .vis')
+      expect(shot.css).toContain('.btn > [data-variant="primary"]')
+      expect(shot.css).toMatch(/\.btn\[data-variant="primary"\] \.vis/i)
+      expect(shot.css).toContain('[data-variant="danger"]')
+      /* a rule made only of state would match every element, and one on an identity attribute or another class is not the component's */
+      expect(shot.css).not.toContain('margin-left')
+      expect(shot.css).not.toContain('IconButton')
+      expect(shot.css).not.toContain('data-testid="other"')
+      expect(shot.css).not.toContain('data-color-mode')
+      expect(shot.css).not.toContain('.other')
     } finally {
       await page.close()
     }

@@ -296,11 +296,13 @@ export function captureStory(options: CaptureOptions): CaptureResult {
     }
   }
   const unscoped = (selector: string) => selector.replace(dynamic, '').replace(/\s+/g, ' ').trim()
-  /* A data attribute with one value across the tree is a state of the component (data-variant="default"); one with several names its parts (data-component="text"). A rule for another value of a state (primary's icon colour: the variant attribute plus the icon's class) needs this render's markup (the icon) and a value this render does not have, while the render that has the value (variant=primary) has no icon, so no single render matches it and the rule would be lost. It counts as reaching when it would with the state taken away, and is kept as written, so an instance that has both still matches it. */
+  /* A data attribute with one value across the tree is a state of the component (data-variant="default"); one with several names its parts (data-component="text"). A rule for another value of a state (primary's icon colour: the variant attribute plus the icon's class) needs this render's markup (the icon) and a value this render does not have, while the render that has the value (variant=primary) has no icon, so no single render matches it and the rule would be lost. It counts as reaching when it would with the state taken away, and is kept as written, so an instance that has both still matches it. Attributes that say what an element is or wrap the component are never a state: they would let other components' rules in. */
+  const identity =
+    /^data-(?:doop-.*|component|testid|test-id|slot|name|id|part|key|portal-root|color-mode|color-scheme|light-theme|dark-theme|a11y-.*)$/i
   const attributeValues = new Map<string, Set<string>>()
   for (const el of liveEls) {
     for (const attr of Array.from(el.attributes)) {
-      if (!attr.name.startsWith('data-')) continue
+      if (!attr.name.startsWith('data-') || identity.test(attr.name)) continue
       const values = attributeValues.get(attr.name) ?? new Set<string>()
       values.add(attr.value)
       attributeValues.set(attr.name, values)
@@ -310,15 +312,15 @@ export function captureStory(options: CaptureOptions): CaptureResult {
     .filter(([, values]) => values.size === 1)
     .map(([name]) => name.replace(/[^\w-]/g, ''))
   const stateAttribute = stateNames.length
-    ? new RegExp(`\\[(?:${stateNames.join('|')})(?:[~|^$*]?=(?:"[^"]*"|'[^']*'|[^\\]]*))?\\]`, 'g')
+    ? `\\[(?:${stateNames.join('|')})(?:[~|^$*]?=(?:"[^"]*"|'[^']*'|[^\\]]*))?\\]`
     : undefined
-  const withoutState = (selector: string) =>
-    stateAttribute
-      ? selector
-          .replace(stateAttribute, '')
-          .replace(/:(?:where|is)\(\s*(?:,\s*)*\)/g, '')
-          .trim()
-      : selector
+  /* the selector with its state attributes taken away: a compound made only of them becomes `*`, so `[data-x="a"] > .y` stays valid, and a selector with nothing but state in it reaches nothing (it would match every element) */
+  const withoutState = (selector: string) => {
+    if (!stateAttribute) return selector
+    const whole = new RegExp(`(^|[\\s>+~,(])(?:${stateAttribute})+(?=[\\s>+~,)]|$)`, 'gi')
+    const out = selector.replace(whole, '$1*').replace(new RegExp(stateAttribute, 'gi'), '').trim()
+    return out.replace(/:(?:where|is)\(|[)\s*>+~,]/g, '') === '' ? '' : out
+  }
   const internal = /(?:^|[\s.#>+~,])(?:\.sb-|#storybook-|\.docs-story|\.sb_)/
   const used = {
     fonts: new Set(
