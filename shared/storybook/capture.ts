@@ -100,7 +100,7 @@ export type CaptureResult = string | { ok: false; reason: string; bytes?: number
 /** Elements in the story's tree over which it is not captured. */
 export const MAX_CAPTURE_ELEMENTS = 20_000
 
-/** Lets a story come to rest before it is captured: fonts, images and two frames, no longer than `maxMs`. */
+/** Lets a story come to rest before it is captured: fonts, images, two frames, then a short quiet spell with no change to the story's DOM (a framework commits an args update a beat after the render event that announced it), no longer than `maxMs` in all. */
 export async function settleStory(maxMs: number): Promise<void> {
   const end = performance.now() + maxMs
   const capped = (work: Promise<unknown>) =>
@@ -114,6 +114,27 @@ export async function settleStory(maxMs: number): Promise<void> {
         })
   await capped(Promise.all([document.fonts.ready, ...Array.from(document.images, loaded)]))
   await capped(new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+  const host = document.querySelector('#storybook-root') ?? document.querySelector('#root')
+  if (!host) return
+  /* a story that never stops changing (a timer, a spinner) is captured after the cap, as before */
+  await capped(
+    new Promise((done) => {
+      let quiet: ReturnType<typeof setTimeout>
+      const watcher = new MutationObserver(() => {
+        clearTimeout(quiet)
+        quiet = setTimeout(finish, 150)
+      })
+      const cap = setTimeout(finish, 800)
+      function finish() {
+        clearTimeout(quiet)
+        clearTimeout(cap)
+        watcher.disconnect()
+        done(undefined)
+      }
+      watcher.observe(host, { subtree: true, childList: true, attributes: true, characterData: true })
+      quiet = setTimeout(finish, 150)
+    }),
+  )
 }
 
 /** The first element rendered into the story root, as passive html, the CSS that applies to it and what a variant needs to be diffed against it. Never mutates the live story. */

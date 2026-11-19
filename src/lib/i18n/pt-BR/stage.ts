@@ -57,6 +57,8 @@ export const stage: Catalog['stage'] = {
   slideTip: 'Um slide: toca com os outros slides desta página no modo de apresentação',
   claimTip: '{name} está trabalhando neste frame até {time}: “{note}”',
   claimTipNoNote: '{name} está trabalhando neste frame até {time}',
+  catchingUp: 'Atualizando',
+  catchingUpTip: 'Este frame está sendo atualizado com uma mudança em um componente',
   exportFrameLabel: 'Exportar',
   exportFrame: 'Exportar {name}',
   exportFrameTip: 'Exportar este frame ({shortcut})',

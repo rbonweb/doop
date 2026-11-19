@@ -1,3 +1,4 @@
+import { restoreStyleText } from '../frameIsolation.ts'
 import { parse, parseFragment, type DefaultTreeAdapterTypes as Tree } from 'parse5'
 import { INSTANCE_ATTR, PART_ATTR, REV_ATTR, USE_TAG } from '../../shared/components.ts'
 import {
@@ -74,7 +75,7 @@ export function emitPage(session: ExportSession, frame: PageInput, base: string,
       if (isElement(child)) {
         const managed = MANAGED_ATTRS.some((name) => attrOf(child, name) !== undefined)
         if (child.tagName === 'style' && child.namespaceURI === 'http://www.w3.org/1999/xhtml') {
-          if (!managed) styles.push(textOf(child))
+          if (!managed) styles.push(restoreStyleText(textOf(child)))
           continue
         }
         if (child.tagName === 'link' && attrOf(child, 'rel')?.toLowerCase().split(/\s+/).includes('stylesheet')) {

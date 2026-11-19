@@ -1,3 +1,4 @@
+import { restoreFrameStyles } from './frameIsolation.ts'
 import { env } from './env.ts'
 import { resolveAgentBrand } from '../shared/agentBrand.ts'
 import { MAX_DECISION_CHARS } from '../shared/designDecisions.ts'
@@ -1953,7 +1954,9 @@ export function buildMcpServer(
           canvasId: f.canvasId,
           ...frameSummary({ ...current, pageId: canvas ? framePageId(canvas, current) : current.pageId }, images),
           ...(f.speakerNotes ? { speaker_notes: f.speakerNotes } : {}),
-          ...(include_html === false || outline ? {} : { html: expand_components ? f.html : compactFrameHtml(f) }),
+          ...(include_html === false || outline
+            ? {}
+            : { html: expand_components ? restoreFrameStyles(f.html) : compactFrameHtml(f) }),
           ...(outlineView ? { outline: outlineView } : {}),
           ...(instances.length ? { instances } : {}),
           ...(imageAssets.length

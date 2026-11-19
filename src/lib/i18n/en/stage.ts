@@ -57,6 +57,8 @@ export const stage = {
   slideTip: 'A slide: plays with the other slides on this page in present mode',
   claimTip: '{name} is working on this frame until {time}: “{note}”',
   claimTipNoNote: '{name} is working on this frame until {time}',
+  catchingUp: 'Catching up',
+  catchingUpTip: 'This frame is being brought up to date with a change to a component',
   exportFrameLabel: 'Export',
   exportFrame: 'Export {name}',
   exportFrameTip: 'Export this frame ({shortcut})',

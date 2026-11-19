@@ -1,4 +1,4 @@
-import { CODE_ORIGINS, MAX_CODE_BYTES, type ComponentCode } from '../shared/componentCode.ts'
+import { CODE_ORIGINS, MAX_CODE_BYTES, isBareSpecifier, type ComponentCode } from '../shared/componentCode.ts'
 import type { ComponentDef, ComponentProp } from '../shared/components.ts'
 import { ComponentError } from './componentActions.ts'
 
@@ -48,7 +48,8 @@ function mapProps(raw: unknown, def: Pick<ComponentDef, 'name' | 'props'>): Comp
     if (!isObject(entry)) fail(`code.props.${key} must be an object`)
     const mapped: NonNullable<ComponentCode['props']>[string] = {}
     if (entry.name !== undefined) mapped.name = identifier(entry.name, `code.props.${key}.name`)
-    if (entry.values !== undefined) mapped.values = mapValues(entry.values, prop, key)
+    if (entry.component !== undefined) mapped.component = mapComponent(entry.component, prop, key)
+    if (entry.values !== undefined) mapped.values = mapValues(entry.values, prop, key, entry.component !== undefined)
     if (entry.omit !== undefined) {
       if (entry.omit !== true) fail(`code.props.${key}.omit must be true`)
       mapped.omit = true
@@ -58,7 +59,28 @@ function mapProps(raw: unknown, def: Pick<ComponentDef, 'name' | 'props'>): Comp
   return props
 }
 
-function mapValues(raw: unknown, prop: ComponentProp, key: string): Record<string, string | number | boolean> {
+/** An enum whose values are components: the package they come from is optional, a bare package name when given. */
+function mapComponent(raw: unknown, prop: ComponentProp, key: string): { importFrom?: string } {
+  if (!isObject(raw)) fail(`code.props.${key}.component must be an object`)
+  if (prop.type !== 'enum')
+    fail(
+      `code.props.${key}.component belongs to an enum prop whose values are components; “${key}” is a ${prop.type} prop`,
+    )
+  const component: { importFrom?: string } = {}
+  if (raw.importFrom !== undefined) {
+    if (typeof raw.importFrom !== 'string' || !isBareSpecifier(raw.importFrom))
+      fail(`code.props.${key}.component.importFrom must be a package name such as @scope/name`)
+    component.importFrom = raw.importFrom
+  }
+  return component
+}
+
+function mapValues(
+  raw: unknown,
+  prop: ComponentProp,
+  key: string,
+  components = false,
+): Record<string, string | number | boolean> {
   if (!isObject(raw)) fail(`code.props.${key}.values must be an object`)
   const allowed = prop.type === 'enum' ? (prop.options ?? []) : prop.type === 'boolean' ? ['true', 'false'] : undefined
   if (!allowed)
@@ -77,6 +99,8 @@ function mapValues(raw: unknown, prop: ComponentProp, key: string): Record<strin
       !(typeof value === 'number' && Number.isFinite(value))
     )
       fail(`code.props.${key}.values.${name} must be a string, number or boolean`)
+    if (components && (typeof value !== 'string' || !IDENTIFIER.test(value)))
+      fail(`code.props.${key}.values.${name} must be the component's export name, a JavaScript identifier`)
     values[name] = value
   }
   return values

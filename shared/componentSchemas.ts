@@ -63,6 +63,18 @@ export const codeSchema = z
               .record(z.union([z.string(), z.number(), z.boolean()]))
               .optional()
               .describe('Enum or boolean value -> what the export receives, e.g. { "ghost": "secondary" }'),
+            component: z
+              .object({
+                importFrom: z
+                  .string()
+                  .max(300)
+                  .optional()
+                  .describe('Package the components are imported from, e.g. "@primer/octicons-react"'),
+              })
+              .optional()
+              .describe(
+                'Enum only: its values are components the export takes by reference, as an icon prop does. Each value is the component export\'s name ("HeartIcon"; `values` renames one) and is imported from importFrom, not passed as a string',
+              ),
             omit: z.literal(true).optional().describe('The export has no such prop: do not pass it'),
           })
           .partial(),

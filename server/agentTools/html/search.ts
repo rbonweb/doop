@@ -1,3 +1,4 @@
+import { restoreFrameStyles } from '../../frameIsolation.ts'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import type { Actor, Canvas, Frame } from '../../../shared/types.ts'
@@ -115,14 +116,14 @@ function frameMatches(frame: Frame, input: FindInput): FindMatch[] | undefined {
   if (input.text !== undefined) {
     const query = compileQuery(input.text, { caseSensitive: false })
     if (!query.ok) return undefined
-    const hits = findInText(frame.html, query.re, MAX_MATCHES)
+    const hits = findInText(restoreFrameStyles(frame.html), query.re, MAX_MATCHES)
     if (hits.length === 0) return undefined
     matches.push(...matchHits('text', hits))
   }
   if (input.html !== undefined) {
     const query = compileQuery(input.html, { caseSensitive: false })
     if (!query.ok) return undefined
-    const hits = findInHtml(frame.html, query.re, MAX_MATCHES)
+    const hits = findInHtml(restoreFrameStyles(frame.html), query.re, MAX_MATCHES)
     if (hits.length === 0) return undefined
     matches.push(...matchHits('html', hits))
   }
