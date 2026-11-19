@@ -201,10 +201,13 @@ export function guessTokenType(name: string, value: string): TokenType | undefin
     return 'fontFamily'
   if (/weight/.test(label) && /^\d{3}$|^(normal|bold|bolder|lighter)$/.test(text)) return 'fontWeight'
   if (/opacity|alpha/.test(label) && /^[\d.]+%?$/.test(text)) return 'opacity'
-  if (/line-height|leading/.test(label) && /^[\d.]+(px|rem|em|%)?$/.test(text)) return 'lineHeight'
+  if (/line-height|leading/.test(label) && /^([\d.]+(px|rem|em|%)?|calc\([\d.\s/*+-]+\))$/.test(text))
+    return 'lineHeight'
   if (/letter-spacing|tracking/.test(label) && /^-?[\d.]+(px|rem|em)?$/.test(text)) return 'letterSpacing'
   if (/^-?[\d.]+(px|rem|em|vw|vh|ch)$/.test(text) || text === '0') {
     if (/radius|rounded|corner/.test(label)) return 'radius'
+    /* a scale step named for text (`--text-sm`, `--font-size-lg`), never its `--text-sm--line-height` companion */
+    if (/^--(text|font-size|fs)-[a-z0-9]+(-[a-z0-9]+)*$/.test(label)) return 'fontSize'
     if (/font-size|text-size|\bsize\b|fs-/.test(label) && /font|text|size/.test(label) && !/space|gap/.test(label))
       return 'fontSize'
     if (/breakpoint|screen/.test(label)) return 'breakpoint'
@@ -230,11 +233,16 @@ function declarationsOf(body: string): { name: string; value: string }[] {
   })
 }
 
+/** Whether a rule sets the page's root: `:root`, `html` or `:host` (a Tailwind v4 theme sits on `:root,:host`), alone or in a list. */
+function onRootSelector(selector: string): boolean {
+  return splitTopLevel(selector, ',').some((part) => /^(:root|html|:host)$/i.test(part.trim()))
+}
+
 function rootVariables(nodes: CssNode[]): { name: string; value: string }[] {
   return nodes.flatMap((node) => {
     if (node.kind === 'group') return rootVariables(node.nodes)
     if (node.kind !== 'rule') return []
-    const onRoot = splitTopLevel(node.selector, ',').some((selector) => /^(:root|html)$/i.test(selector.trim()))
+    const onRoot = onRootSelector(node.selector)
     return onRoot ? declarationsOf(node.body).filter((declaration) => declaration.name.startsWith('--')) : []
   })
 }
@@ -250,8 +258,7 @@ export function withoutTokenVariables(css: string, tokens: ReadonlySet<string>):
         return inner.length ? [{ ...node, nodes: inner }] : []
       }
       if (node.kind !== 'rule') return [node]
-      const onRoot = splitTopLevel(node.selector, ',').some((selector) => /^(:root|html)$/i.test(selector.trim()))
-      if (!onRoot) return [node]
+      if (!onRootSelector(node.selector)) return [node]
       const kept = splitTopLevel(node.body, ';').filter((declaration) => {
         const name = declaration.slice(0, declaration.indexOf(':')).trim()
         return declaration.trim() !== '' && !(name.startsWith('--') && tokens.has(name))
@@ -267,9 +274,22 @@ function varRefs(text: string): string[] {
   return [...text.matchAll(VAR_REF)].map((match) => match[1]!)
 }
 
-/** Every custom property the components (html and css, variants too) and the page's own rules outside :root use. */
+/** Every var() the shared css reads outside the custom-property definitions of its root rules (those are what the closure walks): any declaration of a rule elsewhere, and a root rule's ordinary declarations (`html,:host{font-family:var(--default-font-family)}`). */
+function sharedReferences(nodes: CssNode[], names: Set<string>) {
+  for (const node of nodes) {
+    if (node.kind === 'group') sharedReferences(node.nodes, names)
+    else if (node.kind === 'atomic') for (const name of varRefs(node.text)) names.add(name)
+    else if (!onRootSelector(node.selector)) for (const name of varRefs(node.body)) names.add(name)
+    else
+      for (const declaration of declarationsOf(node.body))
+        if (!declaration.name.startsWith('--')) for (const name of varRefs(declaration.value)) names.add(name)
+  }
+}
+
+/** Every custom property the components (html and css, variants too) and the page's own rules outside root-rule definitions use. */
 function referencedVariables(bundle: ComponentBundle, sharedCss: string): Set<string> {
-  const names = new Set<string>(varRefs(sharedCss.replace(/:root\s*\{[^}]*\}/g, '')))
+  const names = new Set<string>()
+  sharedReferences(parseCss(sharedCss), names)
   for (const component of bundle.components) {
     for (const text of [component.html, component.css ?? '']) for (const name of varRefs(text)) names.add(name)
     for (const values of Object.values(component.variants ?? {}))

@@ -298,6 +298,72 @@ describe('importing a component bundle', () => {
     expect(result.tokens.created.sort()).toEqual(['--bg', '--fg', '--ink', '--page'])
   })
 
+  describe('a Tailwind v4 theme on :root,:host', () => {
+    const THEME =
+      ':root,:host{--spacing:.25rem;--text-sm:.875rem;--text-sm--line-height:calc(1.25/.875);--font-weight-medium:500;--tracking-tight:-.025em;--container-sm:24rem;--radius-lg:.5rem;--default-font-family:var(--font-sans);--font-sans:ui-sans-serif,system-ui,sans-serif;--font-root:"Inter",sans-serif;--unused:1px;--shadow-xs:0 1px 2px 0 rgb(0 0 0/.05)}' +
+      'html,:host{line-height:1.5;font-family:var(--default-font-family,ui-sans-serif)}'
+    const BUTTON_CSS =
+      '.btn{padding:calc(var(--spacing)*4);font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height));font-weight:var(--font-weight-medium);letter-spacing:var(--tracking-tight);max-width:var(--container-sm);border-radius:var(--radius-lg);font-family:var(--font-root);box-shadow:var(--shadow-xs)}'
+    const bundle = (kind: 'storybook' | 'cli' = 'storybook') => ({
+      version: 1,
+      source: { kind, url: 'https://sb.example/' },
+      css: THEME,
+      components: [{ name: 'Button', html: '<button class="btn">Go</button>', css: BUTTON_CSS }],
+    })
+
+    it.each(['storybook', 'cli'] as const)('makes tokens of every used variable and its chain, typed (%s)', (kind) => {
+      const result = run(bundle(kind))
+      expect(result.tokens.created.sort()).toEqual(
+        [
+          '--container-sm',
+          '--default-font-family',
+          '--font-root',
+          '--font-sans',
+          '--font-weight-medium',
+          '--radius-lg',
+          '--spacing',
+          '--text-sm',
+          '--text-sm--line-height',
+          '--tracking-tight',
+        ].sort(),
+      )
+      expect(result.tokens.created).not.toContain('--unused')
+      const types = Object.fromEntries(store.getTokens(canvasId).map((token) => [token.name, token.type]))
+      expect(types).toMatchObject({
+        '--spacing': 'spacing',
+        '--text-sm': 'fontSize',
+        '--text-sm--line-height': 'lineHeight',
+        '--font-weight-medium': 'fontWeight',
+        '--tracking-tight': 'letterSpacing',
+        '--container-sm': 'container',
+        '--radius-lg': 'radius',
+        '--font-sans': 'fontFamily',
+        '--font-root': 'fontFamily',
+        '--default-font-family': 'fontFamily',
+      })
+    })
+
+    it('leaves the shared css without the token declarations, keeping the html rule and what is not a token', () => {
+      const result = run(bundle())
+      const css = findComponent(canvasId, result.created[0]!.id)!.rawCss
+      expect(css).not.toMatch(/--spacing:|--text-sm:|--font-sans:|--default-font-family:|--tracking-tight:/)
+      expect(css).toMatch(/font-family:\s*var\(--default-font-family,\s*ui-sans-serif\)/)
+      expect(css).toContain('--unused')
+      /* a value that is no plain token (a shadow has no type) stays where components can still reach it */
+      expect(css).toContain('--shadow-xs')
+    })
+
+    it('counts a var() read only by a root rule declaration, not the root definitions', () => {
+      const result = run({
+        version: 1,
+        source: { kind: 'storybook', url: 'https://sb.example/' },
+        css: THEME,
+        components: [{ name: 'Plain', html: '<i class="plain">x</i>', css: '.plain{color:red}' }],
+      })
+      expect(result.tokens.created.sort()).toEqual(['--default-font-family', '--font-sans'])
+    })
+  })
+
   it('reads a 15,000-variable var() chain without overflowing the stack', () => {
     const count = 15_000
     const root = Array.from({ length: count }, (_, n) => `--v${n}:var(--v${n + 1});`).join('')
