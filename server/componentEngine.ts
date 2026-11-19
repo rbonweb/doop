@@ -2226,6 +2226,23 @@ export function inferBindings(root: Element, limit = 12, { fromClasses = true } 
   return [...used]
 }
 
+/** The one piece of text a component shows, bound as its `label`: for a main that already has bindings (a captured component's variant attributes), where `inferBindings` leaves everything alone. Only when the markup holds exactly one text, in a leaf that nothing binds, and `label` is free (`taken` holds the names in use). Returns the name, or undefined when nothing was bound. */
+export function inferLabel(root: Element, taken: ReadonlySet<string>): string | undefined {
+  if (taken.has('label')) return undefined
+  const leaves: Element[] = []
+  const stack: Element[] = [root]
+  for (let el = stack.pop(); el; el = stack.pop()) {
+    if (el.tagName === 'style' || el.tagName === 'script' || el.tagName === 'svg') continue
+    if (attrOf(el, INSTANCE_ATTR) || el.tagName === USE_TAG || attrOf(el, SLOT_ATTR) !== undefined) return undefined
+    if (elementKids(el).length === 0 && directText(el)) leaves.push(el)
+    stack.push(...elementKids(el).reverse())
+  }
+  const only = leaves[0]
+  if (leaves.length !== 1 || !only || attrOf(only, BIND_ATTR) !== undefined) return undefined
+  setAttr(only, BIND_ATTR, 'label')
+  return 'label'
+}
+
 /* ------------------------------------------------------------------ */
 /* Shape matching: lookalikes and repeated structures                  */
 /* ------------------------------------------------------------------ */

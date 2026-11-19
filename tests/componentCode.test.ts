@@ -268,6 +268,59 @@ describe('validCode checks that the tool schema cannot reach', () => {
     )
   })
 
+  it('keeps a component-valued enum with its package, and lets importFrom stay out', () => {
+    const def = { ...DEF, props: [{ name: 'icon', type: 'enum' as const, options: ['HeartIcon', 'StarIcon'] }] }
+    expect(
+      validCode(
+        {
+          props: {
+            icon: { component: { importFrom: '@primer/octicons-react' }, values: { StarIcon: 'StarFillIcon' } },
+          },
+        },
+        def,
+      )?.props,
+    ).toEqual({ icon: { component: { importFrom: '@primer/octicons-react' }, values: { StarIcon: 'StarFillIcon' } } })
+    expect(validCode({ props: { icon: { component: {} } } }, def)?.props).toEqual({ icon: { component: {} } })
+  })
+
+  it('refuses component on a prop that is not an enum', () => {
+    expect(() => validCode({ props: { title: { component: {} } } }, DEF)).toThrow(
+      /code\.props\.title\.component belongs to an enum prop/,
+    )
+    expect(() => validCode({ props: { badge: { component: { importFrom: 'pkg' } } } }, DEF)).toThrow(
+      /code\.props\.badge\.component belongs to an enum prop/,
+    )
+  })
+
+  it('refuses an importFrom that is not a bare package name', () => {
+    for (const importFrom of ['./x', '../x', '/abs/path', 'https://cdn.test/x', 'a//b', 'has space', 'a/../b', '']) {
+      expect(() => validCode({ props: { tone: { component: { importFrom } } } }, DEF), importFrom).toThrow(
+        /code\.props\.tone\.component\.importFrom must be a package name/,
+      )
+    }
+    expect(() => validCode({ props: { tone: { component: { importFrom: 5 } } } }, DEF)).toThrow(/importFrom/)
+    expect(() => validCode({ props: { tone: { component: 'pkg' } } }, DEF)).toThrow(/component must be an object/)
+  })
+
+  it('needs every value of a component-valued enum to be an identifier string', () => {
+    const component = { importFrom: 'pkg' }
+    expect(() => validCode({ props: { tone: { component, values: { primary: 'Not An Id' } } } }, DEF)).toThrow(
+      /code\.props\.tone\.values\.primary must be the component's export name/,
+    )
+    expect(() => validCode({ props: { tone: { component, values: { primary: 3 } } } }, DEF)).toThrow(
+      /code\.props\.tone\.values\.primary must be the component's export name/,
+    )
+    expect(
+      validCode({ props: { tone: { component, values: { primary: 'Fine' } } } }, DEF)?.props?.tone?.values,
+    ).toEqual({
+      primary: 'Fine',
+    })
+    /* without component, values stay free text */
+    expect(validCode({ props: { tone: { values: { primary: 'Not An Id' } } } }, DEF)?.props?.tone?.values).toEqual({
+      primary: 'Not An Id',
+    })
+  })
+
   it('refuses a mapping larger than its byte limit, and lets undefined through', () => {
     const options = Object.fromEntries(Array.from({ length: 2000 }, (_, index) => [`value-${index}`, 'x']))
     const def = {
