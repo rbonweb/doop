@@ -411,6 +411,25 @@ describe('planCompound', () => {
     expect(planCompound({ ...base, capture: shot }).slots.size).toBe(3)
   })
 
+  it('refuses a part whose derived name reads as an event handler', () => {
+    const tree: El = {
+      tag: 'div',
+      attrs: { 'data-slot': 'card' },
+      kids: [{ tag: 'div', attrs: { 'data-slot': 'card-on-click' }, kids: [{ tag: 'p', text: 'hi' }] }],
+    }
+    const plan = planCompound({
+      capture: capture(tree),
+      props: [],
+      bound: new Set(),
+      occupied: new Set(),
+      boundAttrs: new Set(),
+      taken: new Set(),
+      bundleNames: new Set(),
+    })
+    expect([...plan.slots.values()]).not.toContain('on-click')
+    expect(plan.added.map((prop) => prop.name)).not.toContain('on-click')
+  })
+
   it('refuses an identity that is not a plain name, so a page cannot put markup in a slot name', () => {
     const hostile: El = {
       tag: 'div',
