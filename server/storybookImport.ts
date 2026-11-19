@@ -8,8 +8,8 @@ import {
   plannedList,
   type StoryPage,
 } from '../shared/storybook/bundle.ts'
-import { parseStorybookIndex, type StoryEntry } from '../shared/storybook/index.ts'
-import { probeAppliedAttribute, probeAttribute } from '../shared/storybook/probe.ts'
+import type { StorybookIssue, StoryEntry } from '../shared/storybook/index.ts'
+import { readStorybookIndex, STORY_VIEWPORT, storyPageAdapter } from '../shared/storybook/page.ts'
 import { groupStories, MAX_PLANNED_COMPONENTS, STORYBOOK_LIMITS, storybookBasePath } from '../shared/storybook/plan.ts'
 import { env } from './env.ts'
 import { fetchPinnedPublicUrl, guardPublicPageRequests, parsePublicHttpUrl } from './publicUrl.ts'
@@ -21,13 +21,6 @@ import { openIsolatedPage } from './screenshot.ts'
 
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 DoopImporter/1.0'
-const MAX_INDEX_BYTES = 10_000_000
-const MAX_REDIRECTS = 3
-const VIEWPORT = { width: 1280, height: 800 }
-/** an evaluate in the last moments of a render still gets this long, so a render stays within its limit by at most a second */
-const MIN_STEP_MS = 1000
-const SIGN_IN_PATH =
-  /(?:^|[/_-])(?:log-?in|sign-?in|sign-?on|sso|oauth2?|authorize|auth|session|account|saml)(?:$|[/_.-])/i
 
 /** The Storybook is not public: it answered 401 or 403, or sent the visitor to a sign-in page. */
 export class StorybookAccessError extends Error {
@@ -85,24 +78,6 @@ export interface StorybookImportOptions {
   signal?: AbortSignal
 }
 
-interface IsolatedRealm {
-  evaluate(pageFunction: unknown, ...args: unknown[]): Promise<unknown>
-  waitForFunction(
-    pageFunction: string,
-    options: { timeout: number; polling: number },
-  ): Promise<{ jsonValue(): Promise<unknown> }>
-}
-
-/** What came back from the page, in characters: a string's length, else the JSON of what it was (a small refusal object, null). */
-function answerSize(result: unknown): number {
-  if (typeof result === 'string') return result.length
-  try {
-    return JSON.stringify(result)?.length ?? 0
-  } catch {
-    return 0
-  }
-}
-
 /** An operator's own Storybook on a private network: plain http(s) addresses, no credentials in the URL. */
 function anyHttpUrl(raw: string): URL {
   const url = new URL(raw)
@@ -143,106 +118,32 @@ export function storybookSlotFree(): boolean {
   return running < STORYBOOK_LIMITS.concurrentImports
 }
 
-async function readBounded(response: Response, max: number): Promise<string> {
-  const declared = Number(response.headers.get('content-length') || 0)
-  if (declared > max) throw new StorybookIndexError('The Storybook index is too large', true)
-  if (!response.body) return ''
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    total += value.byteLength
-    if (total > max) {
-      await reader.cancel().catch(() => {})
-      throw new StorybookIndexError('The Storybook index is too large', true)
-    }
-    chunks.push(value)
-  }
-  return Buffer.concat(chunks).toString('utf8')
-}
-
-/** A redirect to a sign-in path means a private Storybook. One to another address is refused too, but as a redirect, not a sign-in; http to https on the same host is followed. */
-function checkRedirect(from: URL, to: URL): void {
-  if (SIGN_IN_PATH.test(to.pathname) && !SIGN_IN_PATH.test(from.pathname)) throw new StorybookAccessError()
-  const upgrade = from.protocol === 'http:' && to.protocol === 'https:' && from.hostname === to.hostname
-  if (to.origin !== from.origin && !upgrade) {
-    throw new StorybookIndexError(`The Storybook redirects to another address (${to.origin}). Use that URL instead.`)
-  }
-}
-
-/** One JSON file of a Storybook, or undefined when it is not there. No cookies or credentials are sent. */
-async function fetchJson(
-  url: URL,
-  deps: Required<Pick<StorybookImportDeps, 'fetchUrl' | 'parseUrl'>>,
-  signal?: AbortSignal,
-): Promise<{ json: unknown; url: URL } | undefined> {
-  let current = url
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const response = await deps.fetchUrl(current, {
-      headers: { accept: 'application/json', 'user-agent': UA },
-      redirect: 'manual',
-      signal: AbortSignal.any([AbortSignal.timeout(20_000), ...(signal ? [signal] : [])]),
-    })
-    if (response.status === 401 || response.status === 403) {
-      await response.body?.cancel().catch(() => {})
-      throw new StorybookAccessError()
-    }
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get('location')
-      await response.body?.cancel().catch(() => {})
-      if (!location) throw new StorybookIndexError('The Storybook redirected without saying where')
-      const next = deps.parseUrl(new URL(location, current).href)
-      checkRedirect(current, next)
-      current = next
-      continue
-    }
-    if (response.status === 404 || response.status === 410) {
-      await response.body?.cancel().catch(() => {})
-      return undefined
-    }
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => {})
-      throw new StorybookIndexError(`The Storybook answered ${response.status}`)
-    }
-    const text = await readBounded(response, MAX_INDEX_BYTES)
-    try {
-      return { json: JSON.parse(text) as unknown, url: current }
-    } catch {
-      throw new StorybookIndexError('That address does not serve a Storybook story index (index.json)', true)
-    }
-  }
-  throw new StorybookIndexError('The Storybook redirected too many times')
-}
-
 /** The stories of a published Storybook: `index.json` (v4, v5), else the older `stories.json` (v3). */
 export async function fetchStorybookIndex(
   base: URL,
   deps: Required<Pick<StorybookImportDeps, 'fetchUrl' | 'parseUrl'>>,
   signal?: AbortSignal,
-): Promise<{ entries: StoryEntry[]; issues: { code: string; message: string }[]; base: URL }> {
-  for (const file of ['index.json', 'stories.json']) {
-    const found = await fetchJson(new URL(file, base), deps, signal)
-    if (found === undefined) continue
-    const parsed = parseStorybookIndex(found.json)
-    if (!parsed.entries.length) {
-      throw new StorybookIndexError(parsed.issues[0]?.message ?? 'The Storybook lists no stories', true)
-    }
-    /* an http address that sent us to https: the stories load from there */
-    const landed = new URL(base.href)
-    landed.protocol = found.url.protocol
-    landed.host = found.url.host
-    return { ...parsed, base: landed }
-  }
-  throw new StorybookIndexError('No Storybook index.json was found at that address')
+): Promise<{ entries: StoryEntry[]; issues: StorybookIssue[]; base: URL }> {
+  return readStorybookIndex(base, {
+    /* the shared reader sends an index request with no body, so the server's pinned fetch accepts the init as it is */
+    fetchUrl: deps.fetchUrl as (url: URL, init: RequestInit) => Promise<Response>,
+    parseUrl: deps.parseUrl,
+    headers: { 'user-agent': UA },
+    errors: {
+      access: () => new StorybookAccessError(),
+      index: (message, readBody) => new StorybookIndexError(message, readBody),
+    },
+    notFoundMessage: 'No Storybook index.json was found at that address',
+    tooLargeMessage: 'The Storybook index is too large',
+    signal,
+  })
 }
 
 /** One story render's page: a fresh isolated context, public-only network, every step inside the render's deadline. */
 async function openStoryPage(
   origin: string,
   deps: StorybookImportDeps,
-  denied: (error: StorybookAccessError) => void,
+  denied: (error: Error) => void,
 ): Promise<{ page: StoryPage; close: () => Promise<void> }> {
   /* background: an import never takes a slot an interactive render is waiting for */
   const isolated = await openIsolatedPage({ priority: 'background' })
@@ -254,95 +155,18 @@ async function openStoryPage(
         ? { ...deps.guard, allowUrl: (url) => url.origin === origin || (deps.guard?.allowUrl?.(url) ?? false) }
         : deps.guard,
     )
-    await raw.setViewport(VIEWPORT)
+    await raw.setViewport(STORY_VIEWPORT)
     await raw.setUserAgent(UA)
-    const deadline = Date.now() + STORYBOOK_LIMITS.renderMs
-    const left = () => Math.max(MIN_STEP_MS, deadline - Date.now())
-    const bounded = async <T>(work: Promise<T>): Promise<T> => {
-      let timer: NodeJS.Timeout | undefined
-      try {
-        return await Promise.race([
-          work,
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new KnownRenderError('The story took too long to render')), left())
-          }),
-        ])
-      } finally {
-        clearTimeout(timer)
-      }
-    }
-    /* the capture runs in an isolated world: it sees the DOM and CSSOM but none of the page's JavaScript, so page script cannot change what it measures or returns */
-    /* `isolatedRealm` is in puppeteer-core's CDP frame but not in its public types (25.9, the pinned version); the browser test fails if an upgrade drops it */
-    const isolatedWorld = () => (raw.mainFrame() as unknown as { isolatedRealm(): IsolatedRealm }).isolatedRealm()
-    const page: StoryPage = {
-      installProbe: (source) => raw.evaluateOnNewDocument(source).then(() => undefined),
-      async goto(url, timeoutMs) {
-        /* a navigation failure's own text can name internal hosts and ports: only a fixed line leaves */
-        const response = await raw
-          .goto(url, { waitUntil: 'domcontentloaded', timeout: Math.min(timeoutMs, left()) })
-          .catch(() => {
-            throw new KnownRenderError('The story page could not be loaded in time')
-          })
-        const status = response?.status() ?? 0
-        if (status === 401 || status === 403) {
-          const error = new StorybookAccessError(undefined, true)
-          denied(error)
-          throw error
-        }
-        if (status >= 400) throw new KnownRenderError(`Storybook answered ${status} for the story`)
-        const landed = new URL(raw.url())
-        if (SIGN_IN_PATH.test(landed.pathname) && !SIGN_IN_PATH.test(new URL(url).pathname)) {
-          const error = new StorybookAccessError(undefined, true)
-          denied(error)
-          throw error
-        }
-        if (landed.origin !== origin) {
-          throw new KnownRenderError(`Storybook redirected the story to another address (${landed.origin})`)
-        }
+    const page = storyPageAdapter(raw, {
+      origin,
+      /* the server shows only fixed lines: a navigation error's own text can name internal hosts and ports */
+      errors: {
+        access: () => new StorybookAccessError(undefined, true),
+        render: (message) => new KnownRenderError(message),
       },
-      async waitForState(probe, timeoutMs) {
-        /* the probe leaves its verdict on the document element; the wait itself runs in the isolated world, where page script cannot touch it. `probe` is a random hex name we made, never page text */
-        const handle = await isolatedWorld()
-          .waitForFunction(`document.documentElement.getAttribute(${JSON.stringify(probeAttribute(probe))}) || false`, {
-            timeout: Math.min(timeoutMs, left()),
-            polling: 100,
-          })
-          .catch(() => {
-            throw new KnownRenderError('The story did not finish rendering in time')
-          })
-        const verdict = await handle.jsonValue()
-        return verdict === 'error' || verdict === 'needs_worker' ? verdict : 'ready'
-      },
-      async applyArgs(probe, storyId, args) {
-        /* both strings are ours: the random probe name, and the args as JSON text embedded as a string literal */
-        await bounded(
-          raw.evaluate(
-            `window[${JSON.stringify(probe)}].applyArgs(${JSON.stringify(storyId)}, ${JSON.stringify(JSON.stringify(args))})`,
-          ),
-        )
-        const handle = await isolatedWorld()
-          .waitForFunction(
-            `document.documentElement.getAttribute(${JSON.stringify(probeAppliedAttribute(probe))}) || false`,
-            { timeout: Math.min(STORYBOOK_LIMITS.renderMs, left()), polling: 100 },
-          )
-          .catch(() => {
-            throw new KnownRenderError('The story did not render again with those args in time')
-          })
-        return (await handle.jsonValue()) === 'error' ? 'error' : 'ready'
-      },
-      async readMeta(probe, storyId) {
-        /* a plain Runtime.evaluate of an expression: it needs nothing from the page's builtins */
-        const result = await bounded(raw.evaluate(`window[${JSON.stringify(probe)}].meta(${JSON.stringify(storyId)})`))
-        deps.observe?.({ step: 'meta', bytes: answerSize(result) })
-        return result
-      },
-      async evaluate(fn, arg) {
-        const result = await bounded(isolatedWorld().evaluate(fn as never, arg as never))
-        deps.observe?.({ step: 'capture', bytes: answerSize(result) })
-        return result as never
-      },
-      evaluateSource: (source) => bounded(isolatedWorld().evaluate(source)),
-    }
+      denied,
+      observe: deps.observe,
+    })
     return { page, close: () => isolated.close() }
   } catch (error) {
     await isolated.close()

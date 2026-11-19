@@ -26,6 +26,9 @@ export const SLOT_SUGGEST_ATTR = 'data-doop-slot-suggest'
 export const BIND_ATTR = 'data-doop-prop'
 /** `showIcon`, `!showIcon`, `tone=ghost` or `tone!=ghost`: the element exists only when this holds. */
 export const IF_ATTR = 'data-doop-if'
+/** `data-no-visuals: trailingVisual!=SearchIcon & !hasIcon; title: titled`: attributes the template writes literally, each kept on
+ *  the rendered element only while every condition after its name holds (see `parseAttrConditions`). Removal only: it never adds one. */
+export const ATTR_IF_ATTR = 'data-doop-attr-if'
 
 /** Attributes that carry a URL (or, for srcset, a list of them, or for SVG animation the value one will set): the importer's
  *  sanitizer checks them in markup and the engine checks a value bound to one, so a prop can never become a script address. */
@@ -328,6 +331,64 @@ export function parseCondition(value: string): Condition | null {
 export function conditionHolds(condition: Condition, value: string | undefined): boolean {
   const holds = condition.equals !== undefined ? value === condition.equals : value !== undefined && value !== 'false'
   return condition.negate ? !holds : holds
+}
+
+export interface AttrCondition {
+  /** the attribute the entry keeps or removes */
+  attr: string
+  /** all of these hold to keep it */
+  conditions: Condition[]
+}
+
+/** The characters an `data-doop-attr-if` condition value escapes with a backslash, since they split entries and conditions. */
+const ATTR_IF_ESCAPED = /[\\;&]/g
+
+/** Entries `<attribute>: <cond>[ & <cond>…]` joined by `;`. The name ends at the first colon followed by whitespace (so
+ *  `xlink:href` is one name); a `\;`, `\&` or `\\` inside a condition is a literal character. An entry whose name or any
+ *  condition does not parse is left out, so its attribute simply stays. */
+export function parseAttrConditions(value: string): AttrCondition[] {
+  const entries: AttrCondition[] = []
+  for (const entry of splitEscaped(value, ';')) {
+    const match = /^\s*([^\s:][^\s]*?):\s+([\s\S]*)$/.exec(entry)
+    if (!match) continue
+    const [, attr = '', rest = ''] = match
+    const conditions = splitEscaped(rest, '&').map((part) => parseCondition(part.replace(/\\([\\;&])/g, '$1')))
+    if (!conditions.length || conditions.some((condition) => !condition)) continue
+    entries.push({ attr, conditions: conditions as Condition[] })
+  }
+  return entries
+}
+
+/** The attribute value for entries, the inverse of `parseAttrConditions`. */
+export function formatAttrConditions(entries: readonly AttrCondition[]): string {
+  const one = (condition: Condition) =>
+    condition.equals === undefined
+      ? `${condition.negate ? '!' : ''}${condition.prop}`
+      : `${condition.prop}${condition.negate ? '!=' : '='}${condition.equals.replace(ATTR_IF_ESCAPED, '\\$&')}`
+  return entries.map((entry) => `${entry.attr}: ${entry.conditions.map(one).join(' & ')}`).join('; ')
+}
+
+function splitEscaped(value: string, separator: string): string[] {
+  const parts: string[] = []
+  let current = ''
+  for (let at = 0; at < value.length; at++) {
+    const char = value[at]!
+    if (char === '\\' && at + 1 < value.length) {
+      current += char + value[++at]
+    } else if (char === separator) {
+      parts.push(current)
+      current = ''
+    } else current += char
+  }
+  parts.push(current)
+  return parts
+}
+
+/** The attributes of an element that its `data-doop-attr-if` removes for these prop values. */
+export function attrsToRemove(value: string, propValue: (prop: string) => string | undefined): string[] {
+  return parseAttrConditions(value)
+    .filter((entry) => !entry.conditions.every((condition) => conditionHolds(condition, propValue(condition.prop))))
+    .map((entry) => entry.attr)
 }
 
 export interface Binding {

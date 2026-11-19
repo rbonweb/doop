@@ -1,11 +1,13 @@
 import { parseFragment, type DefaultTreeAdapterTypes as Tree } from 'parse5'
 import {
   BIND_ATTR,
+  ATTR_IF_ATTR,
   IF_ATTR,
   SLOT_ATTR,
   USE_TAG,
   isPropName,
   parseBindings,
+  parseAttrConditions,
   parseCondition,
   parseStyle,
   serializeStyle,
@@ -15,7 +17,7 @@ import {
   type Condition,
   type InstanceOverrides,
 } from '../../shared/components.ts'
-import type { ComponentCode } from '../../shared/componentCode.ts'
+import { isBareSpecifier, type ComponentCode } from '../../shared/componentCode.ts'
 import {
   attrOf,
   isElement,
@@ -27,7 +29,14 @@ import {
 } from '../componentEngine.ts'
 import { moduleClassName, safeClass, safeClassCss, splitComponentCss, type CssModuleSplit } from './cssSplit.ts'
 import { componentDocument, googleFontsUrl, hostedFontUrl } from './fonts.ts'
-import { nodeToJsx, htmlToJsx, styleToJsx, type HtmlToJsxOptions, type JsxContext } from './htmlToJsx.ts'
+import {
+  nodeToJsx,
+  htmlToJsx,
+  styleToJsx,
+  type AttrGuards,
+  type HtmlToJsxOptions,
+  type JsxContext,
+} from './htmlToJsx.ts'
 import { isUnsafeUrl, jsString, type ExportIssue } from './issues.ts'
 import { NameAllocator, componentName, isIdentifier, propName } from './names.ts'
 import { cssToTailwind, tailwindClassName, type TailwindSplit } from './tailwind.ts'
@@ -120,6 +129,19 @@ export interface SlotPlan {
   ts: string
 }
 
+/** An enum prop whose values are components the export takes by reference: where they come from and the export each value names (null for a value that is not a usable identifier). */
+export interface ComponentValues {
+  importFrom?: string
+  exports: Map<string, string | null>
+}
+
+/** A component an export file imports to pass by reference: `importFrom` is where it lives, `local` the name the file uses for it. */
+export interface ComponentRef {
+  importFrom: string
+  exportName: string
+  local: string
+}
+
 export interface MappedImport {
   importFrom: string
   exportName: string
@@ -131,6 +153,8 @@ export interface MappedImport {
   slotTargets: Map<string, string | null>
   /** Doop prop -> value map, own keys only */
   values: Map<string, Map<string, string | number | boolean>>
+  /** Doop prop -> its values as component references, for an enum the mapping marks `component` */
+  components: Map<string, ComponentValues>
 }
 
 export interface ComponentPlan {
@@ -216,11 +240,26 @@ export class ExportSession {
   private readonly urlMemo = new Map<string, boolean>()
   private readonly droppedDefaults = new Set<string>()
   private readonly droppedUses = new Set<string>()
+  private readonly refs = new Map<string, ComponentRef>()
 
   constructor(options: SessionOptions) {
     this.defs = options.components
     this.urls = options.urls
     this.styling = options.styling
+  }
+
+  /** A component a mapped prop passes by reference (an icon): imported once per export, under a name no component or earlier import has. */
+  ref(importFrom: string, exportName: string): ComponentRef {
+    const key = `${importFrom}\u0000${exportName}`
+    const known = this.refs.get(key)
+    if (known) return known
+    /* a prop local is camelCase, so a capitalized import name can never be shadowed by one */
+    const wanted = /^[A-Z]/.test(exportName)
+      ? exportName
+      : `${exportName.charAt(0).toUpperCase()}${exportName.slice(1)}`
+    const ref = { importFrom, exportName, local: this.names.take(wanted) }
+    this.refs.set(key, ref)
+    return ref
   }
 
   /** A component by id, then by name (exact, then case-insensitive): how the canvas resolves a reference. */
@@ -376,14 +415,6 @@ export class ExportSession {
   }
 }
 
-/** A bare package specifier (`@scope/name`, `name`, either with a subpath): never a relative or absolute path or a URL. */
-const SPECIFIER = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*(?:\/[A-Za-z0-9._~@-]+)*$/
-const ALIAS = /^(?:@|~)\/[A-Za-z0-9_./-]+$/
-const isBareSpecifier = (value: string): boolean =>
-  value.length <= 214 &&
-  (SPECIFIER.test(value) || ALIAS.test(value)) &&
-  !value.includes('//') &&
-  !value.split('/').some((part) => part === '.' || part === '..')
 const TARGET_NAME = /^[A-Za-z_$][\w$]*$/
 const REACT_OWNED = new Set(['key', 'ref', 'dangerouslysetinnerhtml'])
 
@@ -410,6 +441,8 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
   const propTargets = new Map<string, string | null>()
   const slotTargets = new Map<string, string | null>()
   const values = new Map<string, Map<string, string | number | boolean>>()
+  const components = new Map<string, ComponentValues>()
+  const toChildren: string[] = []
   const claim = (label: string, wanted: string, renamed: boolean): string | null => {
     const lower = wanted.toLowerCase()
     if (REACT_OWNED.has(lower)) {
@@ -420,7 +453,8 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
       refuse(`${label} is passed as ${jsString(wanted)}, which is not a prop name: it was left out`)
       return null
     }
-    if (wanted !== 'children') {
+    if (wanted === 'children') toChildren.push(label)
+    else {
       if (used.has(wanted)) {
         refuse(`${label} is passed as ${jsString(wanted)}, which another prop or slot already uses: it was left out`)
         return null
@@ -437,7 +471,21 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
       continue
     }
     propTargets.set(prop.name, claim(`prop ${jsString(prop.name)}`, rule?.name ?? prop.name, rule?.name !== undefined))
-    if (rule?.values) {
+    if (rule?.component && prop.type === 'enum') {
+      const importFrom = rule.component.importFrom
+      const usable = importFrom !== undefined && isBareSpecifier(importFrom)
+      if (importFrom !== undefined && !usable)
+        refuse(
+          `prop ${jsString(prop.name)} imports its components from ${jsString(importFrom)}, which is not a package name such as @scope/name: they are left for you to import`,
+        )
+      const exports = new Map<string, string | null>()
+      for (const option of prop.options ?? []) {
+        const named = own(rule.values, option)
+        const wanted = typeof named === 'string' ? named : option
+        exports.set(option, isIdentifier(wanted) ? wanted : null)
+      }
+      components.set(prop.name, { ...(usable ? { importFrom } : {}), exports })
+    } else if (rule?.values) {
       const map = new Map<string, string | number | boolean>()
       const allowed =
         prop.type === 'boolean' ? ['true', 'false'] : prop.type === 'enum' ? (prop.options ?? []) : undefined
@@ -457,6 +505,10 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
     const wanted = own(code.slots, slot.name) ?? slot.name
     slotTargets.set(slot.name, claim(`slot ${jsString(slot.name)}`, wanted, own(code.slots, slot.name) !== undefined))
   }
+  if (toChildren.length > 1)
+    refuse(
+      `${toChildren.join(' and ')} are all passed as the children of ${jsString(code.exportName)}, so they render one after another: send all but one to a prop`,
+    )
   return {
     mapped: {
       importFrom: code.importFrom,
@@ -466,6 +518,7 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
       propTargets,
       slotTargets,
       values,
+      components,
     },
     issues,
   }
@@ -554,6 +607,9 @@ export interface FileInlined {
 export class FileCtx {
   readonly generated = new Set<ComponentPlan>()
   readonly mapped = new Set<ComponentPlan>()
+  /** components passed by reference (icons) this file imports from a package */
+  readonly refs = new Map<string, ComponentRef>()
+  private readonly noted = new Set<string>()
   /** module sheets this file refers to by `styles[...]` */
   readonly styleUses = new Set<ComponentPlan>()
   usesCx = false
@@ -577,6 +633,20 @@ export class FileCtx {
 
   note(kind: ExportIssue['kind'], detail: string): void {
     this.issues.push({ kind, detail })
+  }
+
+  /** One report line per distinct problem, however often a file repeats it. */
+  noteOnce(kind: ExportIssue['kind'], detail: string): void {
+    if (this.noted.has(detail)) return
+    this.noted.add(detail)
+    this.note(kind, detail)
+  }
+
+  /** A component a mapped prop passes by reference, imported by this file: the name it goes by here. */
+  ref(importFrom: string, exportName: string): string {
+    const ref = this.session.ref(importFrom, exportName)
+    this.refs.set(`${ref.importFrom}\u0000${ref.exportName}`, ref)
+    return ref.local
   }
 
   /** the className value for classes inside `plan`'s own markup */
@@ -689,7 +759,7 @@ export function renderUseCall(fc: FileCtx, call: UseCall): string {
   const children: string[] = []
   const mapped = plan.mapped
   const addValue = (target: string, value: string, isBare: boolean) => {
-    if (target === 'children') children.push(`{${value}}`)
+    if (target === 'children') children.push(jsxChild(value))
     else if (isBare) attrs.push(target)
     else attrs.push(`${target}={${value}}`)
   }
@@ -707,10 +777,22 @@ export function renderUseCall(fc: FileCtx, call: UseCall): string {
     }
   } else {
     for (const entry of plan.props) {
-      const value = call.values.get(entry.prop.name)
       const target = mapped.propTargets.get(entry.prop.name)
-      if (!value || !target) continue
+      if (!target) continue
+      const value = call.values.get(entry.prop.name)
+      if (!value) {
+        /* an export whose children are its label has nothing to show without them: the design shows the template's own text */
+        const text = target === 'children' ? (entry.derived ?? entry.prop.default) : undefined
+        if (text !== undefined && text !== '') addValue(target, jsString(text), false)
+        continue
+      }
+      const references = mapped.components.get(entry.prop.name)
+      if (references) {
+        addValue(target, componentValue(fc, plan, entry, references, value), false)
+        continue
+      }
       const mappedValue = mapValue(entry, mapped.values.get(entry.prop.name), value)
+      if (target === 'children' && mappedValue === '""') continue
       addValue(target, mappedValue, mappedValue === 'true')
     }
     for (const slot of plan.slots) {
@@ -725,6 +807,56 @@ export function renderUseCall(fc: FileCtx, call: UseCall): string {
   const head = oneLine.length > 90 && attrs.length > 1 ? `${plan.name}\n${indentText(attrs.join('\n'))}\n` : oneLine
   if (children.length === 0) return `<${head}${head.endsWith('\n') ? '' : ' '}/>`
   return `<${head}>\n${indentText(children.join('\n'))}\n</${plan.name}>`
+}
+
+/** A string literal child as JSX text when it needs no escaping, else as the `{"…"}` expression. */
+function jsxChild(expr: string): string {
+  if (expr.startsWith('"')) {
+    try {
+      const text: unknown = JSON.parse(expr)
+      if (typeof text === 'string' && /^[^\s{}<>&"'`\\]+(?: [^\s{}<>&"'`\\]+)*$/u.test(text)) return text
+    } catch {
+      /* not a plain literal: the expression form */
+    }
+  }
+  return `{${expr}}`
+}
+
+/** An enum prop whose values are components, as what the export receives: the component itself, imported. A value with no known package, or no usable export name, is left for the developer: `undefined` with the value in a comment, and a report line naming the component, the prop and the value. */
+function componentValue(
+  fc: FileCtx,
+  plan: ComponentPlan,
+  entry: PropPlan,
+  references: ComponentValues,
+  value: CallValue,
+): string {
+  const { importFrom } = references
+  const left = (option: string): string => {
+    const exported = references.exports.get(option)
+    fc.noteOnce(
+      'dropped-attribute',
+      `${plan.name}: prop ${jsString(entry.prop.name)} is ${jsString(option)}, a component${importFrom ? '' : ' with no known package'}: it was left for you to pass${exported ? ` (import ${exported} and pass it)` : ''}. Set code.props[${jsString(entry.prop.name)}].component.importFrom on the component to export it`,
+    )
+    return exported ? `undefined /* TODO: pass ${exported} */` : 'undefined'
+  }
+  const known = (option: string): string | undefined => {
+    const exported = references.exports.get(option)
+    return importFrom && exported ? exported : undefined
+  }
+  if (value.literal !== undefined) {
+    const exported = known(value.literal)
+    return exported && importFrom ? fc.ref(importFrom, exported) : left(value.literal)
+  }
+  /* a value known only when the component runs: a lookup over every option, or the placeholder when any cannot be passed */
+  const options = entry.kind.k === 'enum' ? entry.kind.options : []
+  const missing = options.filter((option) => !known(option))
+  if (!options.length || missing.length || !importFrom) {
+    for (const option of missing.length ? missing : options) left(option)
+    return 'undefined'
+  }
+  const table = options.map((option) => `${jsString(option)}: ${fc.ref(importFrom, known(option) ?? option)}`)
+  const lookup = `({ ${table.join(', ')} } as const)[${value.expr}]`
+  return entry.hasDefault ? lookup : `${value.expr} === undefined ? undefined : ${lookup}`
 }
 
 /** The expression passed for a value a mapping may rewrite: literals go through the map directly, a runtime value through a lookup that covers every option. */
@@ -796,6 +928,43 @@ export function condExpr(plan: ComponentPlan, condition: Condition): string {
     default:
       return wrap(`${ts} !== undefined && ${ts} !== "false"`)
   }
+}
+
+/** `data-doop-attr-if` as one JS condition per attribute (lowercased name): each entry's conditions joined with `&&`, a condition that always holds left out and one that never holds making it `'false'`. Undefined when the element has none. */
+function attrGuards(plan: ComponentPlan, el: Element): AttrGuards | undefined {
+  const raw = attrOf(el, ATTR_IF_ATTR)
+  if (raw === undefined) return undefined
+  const terms = new Map<string, string[] | 'false'>()
+  for (const { attr, conditions } of parseAttrConditions(raw)) {
+    const key = attr.toLowerCase()
+    const held = terms.get(key) ?? []
+    if (held === 'false') continue
+    const next: string[] = []
+    for (const condition of conditions) {
+      const expr = condExpr(plan, condition)
+      if (expr === 'false') {
+        next.length = 0
+        terms.set(key, 'false')
+        break
+      }
+      if (expr !== 'true') next.push(expr)
+    }
+    if (terms.get(key) !== 'false') terms.set(key, [...held, ...next])
+  }
+  const guards: Record<string, string> = {}
+  for (const [key, held] of terms) guards[key] = held === 'false' ? 'false' : held.length ? held.join(' && ') : 'true'
+  return Object.keys(guards).length ? guards : undefined
+}
+
+/** A `"name": value` spread entry under its guard: unchanged, dropped (an empty list) or `"name": cond ? value : undefined`. */
+function guardSpreadEntry(entry: string, guards: AttrGuards | undefined): string[] {
+  if (!guards) return [entry]
+  const at = entry.indexOf(':')
+  const name = (JSON.parse(entry.slice(0, at)) as string).toLowerCase()
+  const cond = guards[name]
+  if (cond === undefined || cond === 'true') return [entry]
+  if (cond === 'false') return []
+  return [`${entry.slice(0, at)}: ${cond} ? ${entry.slice(at + 1).trim()} : undefined`]
 }
 
 /** A style attribute holding custom properties as a JSX attribute override: React's `CSSProperties` has no `--x` keys, so the object is asserted to it. */
@@ -1269,6 +1438,11 @@ export function importLines(fc: FileCtx, self: ComponentPlan | null, from: 'comp
     lines.push(`import { ${generated.map((plan) => plan.name).join(', ')} } from '../components'`)
   }
   const packages = new Map<string, { named: string[]; defaults: string[] }>()
+  for (const ref of fc.refs.values()) {
+    const group = packages.get(ref.importFrom) ?? { named: [], defaults: [] }
+    group.named.push(ref.local === ref.exportName ? ref.local : `${ref.exportName} as ${ref.local}`)
+    packages.set(ref.importFrom, group)
+  }
   for (const plan of fc.mapped) {
     const mapped = plan.mapped
     if (!mapped) continue
@@ -1300,10 +1474,11 @@ function componentOptions(fc: FileCtx, plan: ComponentPlan, root: Element, marke
       const styled = customPropertyStyle(fc, el)
       const loose = staticSpread(fc, el)
       const plain = !special && !loose.entries.length
-      if (plain && condRaw === undefined && !styled) return undefined
+      const guards = attrGuards(plan, el)
+      if (plain && condRaw === undefined && !styled && !guards) return undefined
       let rendered = plain
-        ? ctx.element(styled)
-        : renderCustomized(fc, plan, el, ctx, options, isRoot, slotName, marker)
+        ? ctx.element(styled, undefined, guards)
+        : renderCustomized(fc, plan, el, ctx, options, isRoot, slotName, marker, guards)
       const condition = condRaw === undefined ? undefined : parseCondition(condRaw)
       if (condition) rendered = wrapCondition(rendered, condExpr(plan, condition))
       return rendered
@@ -1321,6 +1496,7 @@ function renderCustomized(
   isRoot: boolean,
   slotName: string | undefined,
   marker: string,
+  guards: AttrGuards | undefined,
 ): string {
   const bound: BoundElement =
     slotName === undefined
@@ -1358,8 +1534,8 @@ function renderCustomized(
   const spreadEntries = [
     ...loose.entries.filter((entry) => !boundKeys.has(entry.slice(0, entry.indexOf(':')))),
     ...bound.spread,
-  ]
-  let rendered = withSpread(ctx.element(attrs, children), spreadEntries)
+  ].flatMap((entry) => guardSpreadEntry(entry, guards))
+  let rendered = withSpread(ctx.element(attrs, children, guards), spreadEntries)
   if (bound.text) rendered = rendered.replace(`{${jsString(bound.text.marker)}}`, bound.text.jsx)
   return rendered
 }

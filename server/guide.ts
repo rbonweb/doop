@@ -880,7 +880,7 @@ Read the component files and their TypeScript prop types, and take the variants 
 
 Write each component's default render as one root element of plain HTML and CSS. Bind text with data-doop-prop="label" and slots with data-doop-slot="children". An enum variant is variants[prop][value].css written against the default html; a variant that changes the structure is variants[prop][value].html instead.
 
-Fill code so export_react imports the real component: importFrom, exportName, props (name to rename one, values to map enum or boolean values, omit: true for a prop the export does not take) and slots (each slot to "children" or the export's prop name).
+Fill code so export_react imports the real component: importFrom, exportName, props (name to rename one, values to map enum or boolean values, omit: true for a prop the export does not take, component: { importFrom } for an enum whose values are components the export takes by reference, an icon prop, each value being the component's export name) and slots (each slot to "children" or the export's prop name). A text prop that is the component's label maps to children with props: { label: { name: "children" } }.
 
 Call import_components({ canvas_id, bundle, dry_run: true }) first, then for real. One call takes at most 60 components. A bundle over 300 KB goes through create_import_ticket and curl -T bundle.json <upload_url> instead, or the same upload URL with ?dry_run=1 to preview.
 

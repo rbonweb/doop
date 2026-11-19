@@ -19,6 +19,8 @@ export interface ArgProp extends ComponentProp {
   arg: string
   /** the story's initial value, when it is a plain string, number or boolean */
   initial?: ArgValue
+  /** an enum whose argType `mapping` turns each option into a component (Primer's icon props): option -> the component's export name, from its display name else the option itself */
+  componentExports?: Record<string, string>
 }
 
 export interface ReadArgTypes {
@@ -157,6 +159,30 @@ function optionSource(argType: Dict): unknown {
   return type ? own(type, 'value') : undefined
 }
 
+const EXPORT_NAME = /^[A-Za-z_$][A-Za-z0-9_$]*$/
+
+/** An enum argType's `mapping` read as components: every option maps to something that is not a plain value (the probe leaves a component's display name, or nothing where a function stood), so the option names the component and the mapped value is a component reference. One plain value among them (`none: null`, `small: 12`) means the mapping is data, not components, and so does a mapping where no entry carries a display name. */
+function readComponentExports(argType: Dict, options: string[]): Record<string, string> | undefined {
+  const mapping = ownRecord(own(argType, 'mapping'))
+  if (!mapping) return undefined
+  const exports: Record<string, string> = {}
+  let named = false
+  for (const option of options) {
+    const mapped = own(mapping, option)
+    if (mapped === null || ['string', 'number', 'boolean'].includes(typeof mapped)) return undefined
+    const shown = ownRecord(mapped) ? own(mapped as Dict, 'displayName') : undefined
+    if (typeof shown === 'string' && EXPORT_NAME.test(shown)) named = true
+    const name = typeof shown === 'string' && EXPORT_NAME.test(shown) ? shown : option
+    if (!EXPORT_NAME.test(name)) return undefined
+    exports[option] = name
+  }
+  /* at least one entry must carry a component's display name: a mapping of nothing, or of elements, is not a list of components */
+  return named ? exports : undefined
+}
+
+/** The prop name Storybook's own `children` arg gets: `children` is reserved here (a template has none), and the text a component shows is what people call its label. */
+const CHILDREN_NAMES = ['label', 'content', 'text']
+
 /** How many skipped controls an issue names. */
 const MAX_DROPPED_NAMES = 12
 
@@ -185,6 +211,8 @@ export function readArgTypes(argTypes: unknown, initialArgs: unknown): ReadArgTy
       drop(arg, 'the name cannot be passed in a story URL')
       continue
     }
+    /* the story's own children are read once the other props have their names */
+    if (arg === 'children') continue
     const argType = ownRecord(own(table, arg))
     if (!argType) {
       drop(arg, 'its definition is not an object')
@@ -225,6 +253,8 @@ export function readArgTypes(argTypes: unknown, initialArgs: unknown): ReadArgTy
       }
       if (bad) drop(arg, `${bad} options were unusable or over the ${MAX_OPTIONS} cap`)
       prop.options = options
+      const components = bad ? undefined : readComponentExports(argType, options)
+      if (components) prop.componentExports = components
       const fallback = value === undefined ? undefined : String(value)
       if (fallback !== undefined && options.includes(fallback)) prop.default = fallback
     } else if (kind === 'boolean') {
@@ -244,6 +274,23 @@ export function readArgTypes(argTypes: unknown, initialArgs: unknown): ReadArgTy
     names.add(name)
     props.push(prop)
   }
+  /* a `children` arg that is text is the component's label: a text prop (the capture binds the element showing it), passed back to the export as its children */
+  const childrenType = ownRecord(own(table, 'children'))
+  const children = primitive(own(initial, 'children') ?? (childrenType ? own(childrenType, 'defaultValue') : undefined))
+  if (typeof children === 'string' && children.trim()) {
+    const free = CHILDREN_NAMES.find((candidate) => !names.has(candidate))
+    if (free && props.length < MAX_PROPS) {
+      const description = childrenType ? plainText(own(childrenType, 'description'), MAX_DESCRIPTION) : undefined
+      props.push({
+        name: free,
+        type: 'text',
+        arg: 'children',
+        initial: children,
+        ...(description ? { description } : {}),
+      })
+      names.add(free)
+    } else drop('children', 'no name is free for it')
+  } else if (childrenType) drop('children', 'it is not text')
   if (droppedCount) {
     const more = droppedCount - dropped.length
     issues.push({

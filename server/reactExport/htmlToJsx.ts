@@ -16,8 +16,11 @@ export interface JsxContext {
   /** the default rendering of this element's children (JSX children text, already escaped) */
   children(): string
   /** the default rendering of the element itself; `attrs` replaces or adds JSX attributes (name -> full JSX attribute value text, e.g. '{label}' or '{"x"}'), `null` drops one */
-  element(attrs?: Record<string, string | null>, children?: string): string
+  element(attrs?: Record<string, string | null>, children?: string, guards?: AttrGuards): string
 }
+
+/** Lowercased source attribute name to a JS condition: the attribute is written only while it holds (`name={cond ? value : undefined}`, a boolean attribute as `name={cond}`); `'false'` drops it. */
+export type AttrGuards = Readonly<Record<string, string>>
 
 export interface HtmlToJsxOptions {
   /** called for every element before the default; return a JSX string to replace the whole element (an element, a fragment, or `{expression}`), or undefined for the default. It sees the original attributes, data-doop-* included. */
@@ -309,6 +312,22 @@ const isHtmlTag = (el: Element, ...names: string[]): boolean =>
 const isBlockElement = (node: ChildNode | undefined): boolean =>
   !!node && isElement(node) && node.namespaceURI === htmlNs.NS.HTML && BLOCK_ELEMENTS.has(node.tagName)
 
+/** The attributes with each guarded one written under its condition; a value is a JS string literal or a `{expression}` (see `attrValue`). */
+function guardedAttrs(attrs: JsxAttr[], guards: AttrGuards): JsxAttr[] {
+  const out: JsxAttr[] = []
+  for (const attr of attrs) {
+    const cond = attr.source === undefined ? undefined : guards[attr.source.toLowerCase()]
+    if (cond === undefined || cond === 'true') out.push(attr)
+    else if (cond === 'false') continue
+    else if (attr.value === null) out.push({ ...attr, value: `{${cond}}` })
+    else {
+      const inner = attr.value.startsWith('{') && attr.value.endsWith('}') ? attr.value.slice(1, -1) : attr.value
+      out.push({ ...attr, value: `{${cond} ? ${inner} : undefined}` })
+    }
+  }
+  return out
+}
+
 /** a JSX attribute value for a string: the plain `"v"` form when nothing in it needs escaping, else `{"v"}` */
 function attrValue(value: string): string {
   return PLAIN_ATTR_VALUE.test(value) ? `"${value}"` : `{${jsString(value)}}`
@@ -469,6 +488,8 @@ function reactAttrName(name: string, inSvg: boolean, custom = false): string | n
 
 interface JsxAttr {
   name: string
+  /** the attribute's name in the markup, for guards; unset on attributes added by an override */
+  source?: string
   /** the text after the `=`, or null for a bare boolean attribute */
   value: string | null
 }
@@ -569,13 +590,13 @@ class Converter {
     }
     const blocked = blockedElement(el)
     let reported = false
-    const element = (overrides?: Record<string, string | null>, childrenText?: string): string => {
+    const element = (overrides?: Record<string, string | null>, childrenText?: string, guards?: AttrGuards): string => {
       if (blocked) {
         if (!reported) issue(this.issues, blocked.kind, blocked.detail, path)
         reported = true
         return ''
       }
-      return this.defaultElement(el, attrs(), overrides, childrenText, children, path)
+      return this.defaultElement(el, attrs(), overrides, childrenText, children, path, guards)
     }
 
     const ctx: JsxContext = { issues: this.issues, inSvg: isSvg(el), children, element }
@@ -591,6 +612,7 @@ class Converter {
     childrenOverride: string | undefined,
     children: () => string,
     path: string,
+    guards?: AttrGuards,
   ): string {
     let list = attrs
     const extra: JsxAttr[] = []
@@ -602,12 +624,12 @@ class Converter {
           continue
         }
         if (value === null) merged.delete(name)
-        else if (merged.has(name)) merged.set(name, { name, value })
-        else extra.push({ name, value })
+        else if (merged.has(name)) merged.set(name, { name, value, source: merged.get(name)?.source })
+        else extra.push({ name, value, source: name })
       }
       list = [...merged.values()].filter((attr): attr is JsxAttr => attr !== null)
     }
-    const all = [...list, ...extra]
+    const all = guards ? guardedAttrs([...list, ...extra], guards) : [...list, ...extra]
     const tag = el.tagName
     let body: string
     if (childrenOverride !== undefined) body = childrenOverride
@@ -657,7 +679,7 @@ class Converter {
         return
       }
       used.add(attr.name)
-      out.push(attr)
+      out.push({ ...attr, source })
     }
 
     for (const attr of el.attrs) {

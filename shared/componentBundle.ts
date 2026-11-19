@@ -54,7 +54,7 @@ export const bundleComponentSchema = z
     description: z.string().max(MAX_COMPONENT_DESCRIPTION).optional(),
     /** Storybook title path ("Inputs/Button"), for the layout on the page */
     group: z.string().max(200).optional(),
-    /** One root element, the default render; may carry data-doop-prop / data-doop-slot / data-doop-if and <doop-use> */
+    /** One root element, the default render; may carry data-doop-prop / data-doop-slot / data-doop-if / data-doop-attr-if and <doop-use> */
     html: z.string().max(MAX_BUNDLE_HTML_BYTES),
     css: z.string().max(MAX_BUNDLE_CSS_BYTES).optional(),
     props: z.array(propSchema).max(40).optional(),

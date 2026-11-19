@@ -1,5 +1,19 @@
-import { defaultTreeAdapter, html as parse5Html, serializeOuter, type DefaultTreeAdapterTypes as Tree } from 'parse5'
-import { IF_ATTR } from '../shared/components.ts'
+import {
+  defaultTreeAdapter,
+  html as parse5Html,
+  serializeOuter,
+  type DefaultTreeAdapterTypes as Tree,
+  type Token,
+} from 'parse5'
+import {
+  ATTR_IF_ATTR,
+  IF_ATTR,
+  conditionHolds,
+  formatAttrConditions,
+  parseAttrConditions,
+  parseCondition,
+  type Condition as PropCondition,
+} from '../shared/components.ts'
 import type { BundleComponent } from '../shared/componentBundle.ts'
 import { parseCss, serializeNodes, splitTopLevel, type CssNode } from './componentCss.ts'
 import { attrOf, isElement, kidsOf, rootFragment, setAttr } from './componentEngine.ts'
@@ -113,17 +127,26 @@ function meaningful(parent: Tree.ParentNode): Node[] {
   return parent.childNodes.filter((node) => isElement(node) || (isText(node) && node.value.trim() !== ''))
 }
 
-function bare(el: Tree.Element): Tree.Element {
+/** Whether a part an earlier value folded in (or a hidden default) is already not rendered for this value: its condition names this prop and does not hold. */
+function hiddenUnder(node: Node, fold: Fold): boolean {
+  if (!isElement(node)) return false
+  const raw = attrOf(node, IF_ATTR)
+  const condition = raw === undefined ? null : parseCondition(raw)
+  return !!condition && condition.prop === fold.prop.name && !conditionHolds(condition, fold.value)
+}
+
+/** The element as the render for this value sees it: its own condition does not set it apart, unless it is hidden for this value (then it equals nothing). */
+function bare(el: Tree.Element, fold: Fold): Tree.Element {
   const clone = defaultTreeAdapter.createElement(el.tagName, el.namespaceURI, [...el.attrs])
-  setAttr(clone, IF_ATTR, null)
+  if (!hiddenUnder(el, fold)) setAttr(clone, IF_ATTR, null)
   clone.childNodes = el.childNodes
   return clone
 }
 
-function signature(node: Node, memo: Map<Node, string>): string {
+function signature(node: Node, memo: Map<Node, string>, fold: Fold): string {
   const known = memo.get(node)
   if (known !== undefined) return known
-  const value = isText(node) ? `T:${node.value.trim()}` : isElement(node) ? `E:${serializeOuter(bare(node))}` : ''
+  const value = isText(node) ? `T:${node.value.trim()}` : isElement(node) ? `E:${serializeOuter(bare(node, fold))}` : ''
   memo.set(node, value)
   return value
 }
@@ -131,31 +154,103 @@ function signature(node: Node, memo: Map<Node, string>): string {
 /** A binding says what follows a prop, not what the element is: a render without it is the same element, and the default's binding stays. */
 const PROP_ATTR = 'data-doop-prop'
 
-function sameShell(a: Tree.Element, b: Tree.Element): boolean {
-  if (a.tagName !== b.tagName) return false
-  const shell = (el: Tree.Element) =>
-    JSON.stringify(
-      el.attrs
-        .filter((attr) => attr.name !== IF_ATTR && attr.name !== PROP_ATTR)
-        .map((attr) => [attr.name, attr.value])
-        .sort(),
-    )
-  return shell(a) === shell(b)
+/** The attributes that say what an element is: the conditions and bindings the template carries on top of it are not part of it. */
+function shellAttrs(el: Tree.Element): Map<string, string> {
+  const attrs = new Map<string, string>()
+  for (const attr of el.attrs)
+    if (attr.name !== IF_ATTR && attr.name !== PROP_ATTR && attr.name !== ATTR_IF_ATTR) attrs.set(attr.name, attr.value)
+  return attrs
+}
+
+/** What folding one variant value in asks of a pair of elements: `show` and `hide` are its conditions as `data-doop-attr-if` reads them. */
+interface Fold {
+  prop: BundleProp
+  value: string
+  condition: Condition
+  show: PropCondition | null
+  hide: PropCondition | null
+}
+
+function foldFor(prop: BundleProp, value: string): Fold {
+  const condition = conditionFor(prop, value)
+  return { prop, value, condition, show: parseCondition(condition.show), hide: parseCondition(condition.hide) }
+}
+
+/** The attributes that differ in presence only between a default element and a variant's: those the variant drops (kept in the default under the `hide` condition) and those it adds. */
+interface ShellChange {
+  hide: string[]
+  add: Token.Attribute[]
+}
+
+/** Whether an element's `data-doop-attr-if` entry keeps its attribute when this prop has this value (conditions on other props are not this value's to say). */
+function keptUnder(entry: { conditions: PropCondition[] } | undefined, fold: Fold): boolean {
+  return (entry?.conditions ?? []).every((one) => one.prop !== fold.prop.name || conditionHolds(one, fold.value))
+}
+
+/**
+ * Whether `alt` is the same element as `base` once this value is folded in, and what that takes.
+ * Attributes both have with one value are the same; both with different values are another element (`null`).
+ * An attribute only one has is a `data-doop-attr-if` entry on the kept element, since a condition can only remove an attribute: the default's
+ * goes under the `hide` condition, the variant's is added and kept only under the `show` one. A variant attribute the default element already carries
+ * under a condition of its own (an earlier value added it) cannot be kept for two values at once: that is another element too.
+ * The root is only ever asked about the default's own extra attributes: its other differences are the variant css's to say.
+ */
+function planShell(base: Tree.Element, alt: Tree.Element, fold: Fold, root = false): ShellChange | null {
+  if (base.tagName !== alt.tagName) return null
+  const left = shellAttrs(base)
+  const right = shellAttrs(alt)
+  const entries = parseAttrConditions(attrOf(base, ATTR_IF_ATTR) ?? '')
+  const entryOf = (name: string) => entries.find((entry) => entry.attr.toLowerCase() === name)
+  const change: ShellChange = { hide: [], add: [] }
+  const reflected = `data-${fold.prop.name}`
+  for (const [name, value] of left) {
+    const other = right.get(name)
+    const entry = entryOf(name)
+    if (other === undefined) {
+      if (root && name === reflected) continue
+      if (!fold.hide) return root ? change : null
+      if (keptUnder(entry, fold)) change.hide.push(name)
+    } else if (other !== value) {
+      if (!root) return null
+    } else if (!root && !keptUnder(entry, fold)) return null
+  }
+  if (root) return change
+  for (const attr of alt.attrs) {
+    if (attr.name === IF_ATTR || attr.name === PROP_ATTR || attr.name === ATTR_IF_ATTR || left.has(attr.name)) continue
+    if (!fold.show || entryOf(attr.name)) return null
+    change.add.push(attr)
+  }
+  return change
+}
+
+function applyShell(el: Tree.Element, change: ShellChange, fold: Fold) {
+  if (!change.hide.length && !change.add.length) return
+  const entries = parseAttrConditions(attrOf(el, ATTR_IF_ATTR) ?? '')
+  for (const name of change.hide) {
+    const entry = entries.find((one) => one.attr.toLowerCase() === name)
+    if (entry) entry.conditions.push(fold.hide!)
+    else entries.push({ attr: name, conditions: [fold.hide!] })
+  }
+  for (const attr of change.add) {
+    el.attrs.push({ name: attr.name, value: attr.value })
+    entries.push({ attr: attr.name, conditions: [fold.show!] })
+  }
+  setAttr(el, ATTR_IF_ATTR, formatAttrConditions(entries))
 }
 
 /** The pairs of equal children, in order (a longest common subsequence over their serialized markup). */
-function commonChildren(a: Node[], b: Node[], memo: Map<Node, string>): [number, number][] | null {
+function commonChildren(a: Node[], b: Node[], memo: Map<Node, string>, fold: Fold): [number, number][] | null {
   if (a.length * b.length > MAX_DIFF_CELLS) return null
   const table: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0))
   for (let i = a.length - 1; i >= 0; i--)
     for (let j = b.length - 1; j >= 0; j--)
       table[i]![j] =
-        signature(a[i]!, memo) === signature(b[j]!, memo)
+        signature(a[i]!, memo, fold) === signature(b[j]!, memo, fold)
           ? table[i + 1]![j + 1]! + 1
           : Math.max(table[i + 1]![j]!, table[i]![j + 1]!)
   const pairs: [number, number][] = []
   for (let i = 0, j = 0; i < a.length && j < b.length;) {
-    if (signature(a[i]!, memo) === signature(b[j]!, memo)) pairs.push([i++, j++])
+    if (signature(a[i]!, memo, fold) === signature(b[j]!, memo, fold)) pairs.push([i++, j++])
     else if (table[i + 1]![j]! >= table[i]![j + 1]!) i++
     else j++
   }
@@ -195,15 +290,11 @@ function conditional(node: Node, condition: string): Node {
   return node
 }
 
-function diffChildren(
-  base: Tree.ParentNode,
-  alt: Tree.ParentNode,
-  condition: Condition,
-  memo: Map<Node, string>,
-): boolean {
+function diffChildren(base: Tree.ParentNode, alt: Tree.ParentNode, fold: Fold, memo: Map<Node, string>): boolean {
+  const condition = fold.condition
   const left = meaningful(base)
   const right = meaningful(alt)
-  const pairs = commonChildren(left, right, memo)
+  const pairs = commonChildren(left, right, memo, fold)
   if (!pairs) return false
   const next: Node[] = []
   /* whitespace and other text between kept nodes is kept as it was: only meaningful nodes are rebuilt */
@@ -215,19 +306,14 @@ function diffChildren(
     const rightGap = right.slice(ri, pr)
     const one = leftGap[0]
     const other = rightGap[0]
-    if (
-      leftGap.length === 1 &&
-      rightGap.length === 1 &&
-      one &&
-      other &&
-      isElement(one) &&
-      isElement(other) &&
-      sameShell(one, other)
-    ) {
-      if (!diffChildren(one, other, condition, memo)) return false
+    const change =
+      one && other && isElement(one) && isElement(other) && !hiddenUnder(one, fold) ? planShell(one, other, fold) : null
+    if (leftGap.length === 1 && rightGap.length === 1 && one && other && isElement(one) && isElement(other) && change) {
+      applyShell(one, change, fold)
+      if (!diffChildren(one, other, fold, memo)) return false
       next.push(one)
     } else {
-      for (const node of leftGap) next.push(conditional(node, condition.hide))
+      for (const node of leftGap) next.push(hiddenUnder(node, fold) ? node : conditional(node, condition.hide))
       for (const node of rightGap) next.push(conditional(node, condition.show))
     }
     if (pl < left.length) next.push(left[pl]!)
@@ -249,7 +335,10 @@ function withAlternative(baseHtml: string, altHtml: string, prop: BundleProp, va
   const alt = firstRoot(altHtml)
   if (!base || !alt || base.tagName !== alt.tagName) return null
   const memo = new Map<Node, string>()
-  if (!diffChildren(base, alt, conditionFor(prop, value), memo)) return null
+  const fold = foldFor(prop, value)
+  const rootChange = planShell(base, alt, fold, true)
+  if (rootChange) applyShell(base, rootChange, fold)
+  if (!diffChildren(base, alt, fold, memo)) return null
   return serializeOuter(base)
 }
 

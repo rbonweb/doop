@@ -100,7 +100,7 @@ export type CaptureResult = string | { ok: false; reason: string; bytes?: number
 /** Elements in the story's tree over which it is not captured. */
 export const MAX_CAPTURE_ELEMENTS = 20_000
 
-/** Lets a story come to rest before it is captured: fonts, images and two frames, no longer than `maxMs`. */
+/** Lets a story come to rest before it is captured: fonts, images, two frames, then a short quiet spell with no change to the story's DOM (a framework commits an args update a beat after the render event that announced it), no longer than `maxMs` in all. */
 export async function settleStory(maxMs: number): Promise<void> {
   const end = performance.now() + maxMs
   const capped = (work: Promise<unknown>) =>
@@ -114,6 +114,27 @@ export async function settleStory(maxMs: number): Promise<void> {
         })
   await capped(Promise.all([document.fonts.ready, ...Array.from(document.images, loaded)]))
   await capped(new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))))
+  const host = document.querySelector('#storybook-root') ?? document.querySelector('#root')
+  if (!host) return
+  /* a story that never stops changing (a timer, a spinner) is captured after the cap, as before */
+  await capped(
+    new Promise((done) => {
+      let quiet: ReturnType<typeof setTimeout>
+      const watcher = new MutationObserver(() => {
+        clearTimeout(quiet)
+        quiet = setTimeout(finish, 150)
+      })
+      const cap = setTimeout(finish, 800)
+      function finish() {
+        clearTimeout(quiet)
+        clearTimeout(cap)
+        watcher.disconnect()
+        done(undefined)
+      }
+      watcher.observe(host, { subtree: true, childList: true, attributes: true, characterData: true })
+      quiet = setTimeout(finish, 150)
+    }),
+  )
 }
 
 /** The first element rendered into the story root, as passive html, the CSS that applies to it and what a variant needs to be diffed against it. Never mutates the live story. */
@@ -296,6 +317,31 @@ export function captureStory(options: CaptureOptions): CaptureResult {
     }
   }
   const unscoped = (selector: string) => selector.replace(dynamic, '').replace(/\s+/g, ' ').trim()
+  /* A data attribute with one value across the tree is a state of the component (data-variant="default"); one with several names its parts (data-component="text"). A rule for another value of a state (primary's icon colour: the variant attribute plus the icon's class) needs this render's markup (the icon) and a value this render does not have, while the render that has the value (variant=primary) has no icon, so no single render matches it and the rule would be lost. It counts as reaching when it would with the state taken away, and is kept as written, so an instance that has both still matches it. Attributes that say what an element is or wrap the component are never a state: they would let other components' rules in. */
+  const identity =
+    /^data-(?:doop-.*|component|testid|test-id|slot|name|id|part|key|portal-root|color-mode|color-scheme|light-theme|dark-theme|a11y-.*)$/i
+  const attributeValues = new Map<string, Set<string>>()
+  for (const el of liveEls) {
+    for (const attr of Array.from(el.attributes)) {
+      if (!attr.name.startsWith('data-') || identity.test(attr.name)) continue
+      const values = attributeValues.get(attr.name) ?? new Set<string>()
+      values.add(attr.value)
+      attributeValues.set(attr.name, values)
+    }
+  }
+  const stateNames = Array.from(attributeValues)
+    .filter(([, values]) => values.size === 1)
+    .map(([name]) => name.replace(/[^\w-]/g, ''))
+  const stateAttribute = stateNames.length
+    ? `\\[(?:${stateNames.join('|')})(?:[~|^$*]?=(?:"[^"]*"|'[^']*'|[^\\]]*))?\\]`
+    : undefined
+  /* the selector with its state attributes taken away: a compound made only of them becomes `*`, so `[data-x="a"] > .y` stays valid, and a selector with nothing but state in it reaches nothing (it would match every element) */
+  const withoutState = (selector: string) => {
+    if (!stateAttribute) return selector
+    const whole = new RegExp(`(^|[\\s>+~,(])(?:${stateAttribute})+(?=[\\s>+~,)]|$)`, 'gi')
+    const out = selector.replace(whole, '$1*').replace(new RegExp(stateAttribute, 'gi'), '').trim()
+    return out.replace(/:(?:where|is)\(|[)\s*>+~,]/g, '') === '' ? '' : out
+  }
   const internal = /(?:^|[\s.#>+~,])(?:\.sb-|#storybook-|\.docs-story|\.sb_)/
   const used = {
     fonts: new Set(
@@ -363,7 +409,10 @@ export function captureStory(options: CaptureOptions): CaptureResult {
         if (selectors.length && selectors.every((s) => globalOnly.test(unscoped(s)))) {
           const text = internal.test(style.selectorText) ? undefined : textOf(style)
           if (text !== undefined) shared.push(absolutize(text, base))
-        } else if (!internal.test(style.selectorText) && selectors.some((s) => reaches(s) || reaches(unscoped(s)))) {
+        } else if (
+          !internal.test(style.selectorText) &&
+          selectors.some((s) => reaches(s) || reaches(unscoped(s)) || reaches(withoutState(unscoped(s))))
+        ) {
           const text = textOf(style)
           if (text !== undefined) out.push(absolutize(text, base))
         }

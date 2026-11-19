@@ -330,7 +330,7 @@ describe('components mapped to code', () => {
     )
     const home = fileOf(out, 'src/pages/Home.tsx')
     expect(home).toContain('import { Button } from "@acme/ui"')
-    expect(home).toMatch(/<Button kind=\{"outline"\} active=\{"yes"\}>\s*\{"Save"\}\s*<\/Button>/)
+    expect(home).toMatch(/<Button kind=\{"outline"\} active=\{"yes"\}>\s*Save\s*<\/Button>/)
     expect(home).toMatch(/startIcon=\{<span>/)
     expect(home).toContain('{"r"}')
     expect(home).not.toContain('size')
@@ -354,6 +354,169 @@ describe('components mapped to code', () => {
     expect(home).toContain('import { Thing as Thing3 } from "@c/ui"')
     expect(home).toContain('<Thing />')
     expect(home).toContain('<Thing2 />')
+  })
+})
+
+describe('children and component props of a mapped export', () => {
+  const OCTICONS = '@primer/octicons-react'
+  const ICON_OPTIONS = ['EyeIcon', 'HeartIcon', 'XIcon']
+  const button = (code: NonNullable<ComponentDef['code']>, extra: Partial<ComponentDef> = {}) =>
+    def('Btn', '<button data-doop-part="r"><span data-doop-part="l" data-doop-prop="label">Go</span></button>', {
+      props: [
+        { name: 'label', type: 'text' },
+        { name: 'variant', type: 'enum', options: ['default', 'primary'], default: 'default' },
+        { name: 'trailing-visual', type: 'enum', options: ICON_OPTIONS },
+      ],
+      code: { importFrom: '@primer/react', exportName: 'Button', props: { label: { name: 'children' } }, ...code },
+      ...extra,
+    })
+  const use = (target: ComponentDef, attrs: string) => `<doop-use component="${target.id}" ${attrs}></doop-use>`
+  const homeOf = (target: ComponentDef, body: string, extra: ComponentDef[] = []) => {
+    const out = exportOf([target, ...extra], frame(body))
+    return { out, home: fileOf(out, 'src/pages/Home.tsx') }
+  }
+
+  it('passes a label mapped to children as JSX text, and the design text when the instance sets none', () => {
+    const btn = button({})
+    const { home } = homeOf(btn, `${use(btn, 'label="Buy now" variant="primary"')}${use(btn, '')}`)
+    expect(home).toMatch(/<Button variant=\{"primary"\}>\s*Buy now\s*<\/Button>/)
+    expect(home).toMatch(/<Button>\s*Go\s*<\/Button>/)
+  })
+
+  it('keeps anything that is not plain text a string literal: braces, tags, quotes, ampersands, edge spaces', () => {
+    const btn = button({})
+    for (const label of ['a {b}', '<b>x</b>', 'say "hi"', 'Tom & Jerry', ' padded ', "it's", 'back\\slash']) {
+      const { home } = homeOf(btn, use(btn, `label="${label.replace(/"/g, '&quot;')}"`))
+      expect(home).toMatch(/<Button>\s*\{"/)
+      expect(home).not.toMatch(/<Button>\s*[^{\s]/)
+    }
+    const { home } = homeOf(btn, use(btn, 'label="</Button><script>alert(1)</script>"'))
+    expect(home).not.toContain('<script')
+    expect(home).toContain('\\u003c/Button>')
+  })
+
+  it('leaves an empty label out and self-closes', () => {
+    const btn = button({})
+    const { home } = homeOf(btn, use(btn, 'label=""'))
+    expect(home).toContain('<Button />')
+  })
+
+  it('passes an icon enum as the imported component, once per package however often it is used', () => {
+    const btn = button({
+      props: {
+        label: { name: 'children' },
+        'trailing-visual': { name: 'trailingVisual', component: { importFrom: OCTICONS } },
+      },
+    })
+    const { out, home } = homeOf(
+      btn,
+      `${use(btn, 'label="A" trailing-visual="HeartIcon"')}${use(btn, 'label="B" trailing-visual="HeartIcon"')}${use(btn, 'label="C" trailing-visual="XIcon"')}`,
+    )
+    expect(home).toMatch(/<Button trailingVisual=\{HeartIcon\}>\s*A\s*<\/Button>/)
+    expect(home).toMatch(/<Button trailingVisual=\{XIcon\}>\s*C\s*<\/Button>/)
+    expect(home).not.toContain('"HeartIcon"')
+    expect(home.match(/from "@primer\/octicons-react"/g)).toHaveLength(1)
+    expect(home).toContain('import { HeartIcon, XIcon } from "@primer/octicons-react"')
+    expect(out.report.issues).toEqual([])
+  })
+
+  it('takes the export name from values when it differs from the option', () => {
+    const btn = button({
+      props: { 'trailing-visual': { component: { importFrom: OCTICONS }, values: { HeartIcon: 'HeartFillIcon' } } },
+    })
+    const { home } = homeOf(btn, use(btn, 'trailing-visual="HeartIcon"'))
+    expect(home).toContain('trailing-visual={HeartFillIcon}'.replace('trailing-visual', 'trailing-visual'))
+  })
+
+  it('looks a runtime value up over every option and imports them all', () => {
+    const btn = button({
+      props: { 'trailing-visual': { name: 'trailingVisual', component: { importFrom: OCTICONS } } },
+    })
+    const wrap = def('Wrap', `<div data-doop-part="r">${use(btn, 'data-doop-prop="trailing-visual:glyph"')}</div>`, {
+      props: [{ name: 'glyph', type: 'enum', options: ICON_OPTIONS }],
+    })
+    const out = exportOf([btn, wrap], [], { componentIds: [wrap.id] })
+    const tsx = componentOf(out, 'Wrap')
+    expect(tsx).toContain(
+      'trailingVisual={glyph === undefined ? undefined : ({ "EyeIcon": EyeIcon, "HeartIcon": HeartIcon, "XIcon": XIcon } as const)[glyph]}',
+    )
+    expect(tsx).toContain('import { EyeIcon, HeartIcon, XIcon } from "@primer/octicons-react"')
+  })
+
+  it("names a different local when a component of the export already has the icon's name", () => {
+    const btn = button({
+      props: { 'trailing-visual': { name: 'trailingVisual', component: { importFrom: OCTICONS } } },
+    })
+    const clash = def('HeartIcon', '<i data-doop-part="r"></i>')
+    const { home } = homeOf(btn, `${use(clash, '')}${use(btn, 'trailing-visual="HeartIcon"')}`, [clash])
+    expect(home).toContain('import { HeartIcon as HeartIcon2 } from "@primer/octicons-react"')
+    expect(home).toContain('trailingVisual={HeartIcon2}')
+  })
+
+  it('never writes a string for a component it cannot import: undefined with the value in a comment, and a report line', () => {
+    const btn = button({ props: { 'trailing-visual': { name: 'trailingVisual', component: {} } } })
+    const { out, home } = homeOf(
+      btn,
+      `${use(btn, 'trailing-visual="HeartIcon"')}${use(btn, 'trailing-visual="HeartIcon"')}`,
+    )
+    expect(home).toContain('trailingVisual={undefined /* TODO: pass HeartIcon */}')
+    expect(home).not.toContain('"HeartIcon"')
+    expect(home).not.toContain('octicons')
+    const lines = out.report.issues.filter((issue) => issue.detail.includes('HeartIcon'))
+    expect(lines).toHaveLength(1)
+    expect(lines[0]?.detail).toContain('Button:')
+    expect(lines[0]?.detail).toContain('"trailing-visual"')
+  })
+
+  it('refuses a package that is a path, and passes values that are not identifiers as nothing', () => {
+    const btn = button({
+      props: { 'trailing-visual': { name: 'trailingVisual', component: { importFrom: '../../etc/icons' } } },
+    })
+    const { out, home } = homeOf(btn, use(btn, 'trailing-visual="EyeIcon"'))
+    expect(home).not.toContain('../../etc')
+    expect(home).toContain('trailingVisual={undefined /* TODO: pass EyeIcon */}')
+    expect(out.report.issues.some((issue) => issue.detail.includes('not a package name'))).toBe(true)
+    const odd = button({
+      props: {
+        'trailing-visual': { name: 'trailingVisual', component: { importFrom: OCTICONS }, values: { EyeIcon: 'a-b' } },
+      },
+    })
+    expect(homeOf(odd, use(odd, 'trailing-visual="EyeIcon"')).home).toContain('trailingVisual={undefined}')
+  })
+
+  it('gives a lowercase export a capitalized local so a prop of a generated component cannot shadow it', () => {
+    const btn = button({
+      props: { 'trailing-visual': { name: 'trailingVisual', component: { importFrom: OCTICONS } } },
+    })
+    const wrap = def(
+      'Wrap',
+      `<div data-doop-part="r"><span data-doop-part="t" data-doop-prop="heart">x</span>${use(btn, 'trailing-visual="heart"')}</div>`,
+      {
+        props: [{ name: 'heart', type: 'text' }],
+      },
+    )
+    const odd = {
+      ...btn,
+      props: btn.props.map((prop) =>
+        prop.name === 'trailing-visual' ? { ...prop, options: ['heart', 'XIcon'] } : prop,
+      ),
+    }
+    const out = exportOf([odd, wrap], [], { componentIds: [wrap.id] })
+    const tsx = componentOf(out, 'Wrap')
+    expect(tsx).toContain('import { heart as Heart } from "@primer/octicons-react"')
+    expect(tsx).toContain('trailingVisual={Heart}')
+  })
+
+  it('reports two props mapped to children', () => {
+    const btn = button({ props: { label: { name: 'children' }, variant: { name: 'children' } } })
+    const { out } = homeOf(btn, use(btn, 'label="A" variant="primary"'))
+    expect(out.report.issues.some((issue) => /all passed as the children of "Button"/.test(issue.detail))).toBe(true)
+  })
+
+  it('leaves a plain enum a string', () => {
+    const btn = button({})
+    const { home } = homeOf(btn, use(btn, 'trailing-visual="HeartIcon"'))
+    expect(home).toContain('trailing-visual={"HeartIcon"}')
   })
 })
 
@@ -963,4 +1126,69 @@ describe('empty stylesheets', () => {
       expect(componentOf(inked, 'Inked')).toContain("import styles from './Inked.module.css'")
     })
   }
+})
+
+describe('data-doop-attr-if', () => {
+  const BUTTON = def(
+    'Pbutton',
+    `<button class="b" data-no-visuals="true" data-doop-part="r" data-doop-attr-if="data-no-visuals: trailing-visual!=SearchIcon &amp; trailing-visual!=EyeIcon"><span data-doop-part="l">Go</span><i data-doop-part="e" hidden title="x" data-doop-attr-if="hidden: !quiet; title: quiet &amp; tone=ghost; data-gone: tone=none">e</i></button>`,
+    {
+      props: [
+        { name: 'trailing-visual', type: 'enum', options: ['none', 'SearchIcon', 'EyeIcon'], default: 'none' },
+        { name: 'quiet', type: 'boolean', default: 'false' },
+        { name: 'tone', type: 'enum', options: ['primary', 'ghost'], default: 'primary' },
+      ],
+    },
+  )
+
+  it('writes each attribute under its conditions, a boolean attribute as the condition itself', () => {
+    const tsx = componentOf(exportOf([BUTTON], [], { componentIds: [BUTTON.id] }), 'Pbutton')
+    expect(tsx).toContain(
+      `data-no-visuals={trailingVisual !== "SearchIcon" && trailingVisual !== "EyeIcon" ? "true" : undefined}`,
+    )
+    expect(tsx).toContain('hidden={!quiet}')
+    expect(tsx).toMatch(/title=\{quiet && tone === "ghost" \? "x" : undefined\}/)
+    expect(tsx).not.toContain('data-doop-attr-if')
+    expect(tsx).not.toContain('data-gone')
+  })
+
+  it('type-checks and renders the DOM Doop renders for each option', async () => {
+    const result = exportOf([BUTTON], [], { componentIds: [BUTTON.id] })
+    const project = writeProject(result.files)
+    try {
+      expect(typecheck(project)).toEqual([])
+      const cases: Record<string, Record<string, string | boolean>> = {
+        plain: {},
+        search: { trailingVisual: 'SearchIcon' },
+        quietGhost: { trailingVisual: 'EyeIcon', quiet: true, tone: 'ghost' },
+      }
+      const out = await renderAll(
+        project,
+        Object.fromEntries(
+          Object.entries(cases).map(([key, props]) => [
+            key,
+            { from: './src/components/Pbutton', name: 'Pbutton', props },
+          ]),
+        ),
+      )
+      const doop = (props: Record<string, string>) => normalize(instance(BUTTON, [BUTTON], { props }))
+      expect(normalize(out.plain!)).toBe(doop({}))
+      expect(normalize(out.search!)).toBe(doop({ 'trailing-visual': 'SearchIcon' }))
+      expect(normalize(out.quietGhost!)).toBe(doop({ 'trailing-visual': 'EyeIcon', quiet: 'true', tone: 'ghost' }))
+      expect(normalize(out.plain!)).toContain('data-no-visuals="true"')
+      expect(normalize(out.search!)).not.toContain('data-no-visuals')
+    } finally {
+      project.cleanup()
+    }
+  })
+
+  it('still calls a component with a package mapping from its package', () => {
+    const mapped = def('Mapped', BUTTON.template, {
+      props: BUTTON.props,
+      code: { importFrom: '@acme/ui', exportName: 'Button' },
+    })
+    const out = exportOf([mapped], frame(`<doop-use component="${mapped.id}"></doop-use>`))
+    expect(fileOf(out, 'src/pages/Home.tsx')).toContain('from "@acme/ui"')
+    expect(fileOf(out, 'src/pages/Home.tsx')).toMatch(/<Button\b[^>]*\/>/)
+  })
 })
