@@ -9,6 +9,7 @@ import {
   activeComponents,
   MAX_COMPONENT_NAME,
   MAX_COMPONENTS,
+  parseBindings,
   USE_TAG,
   type ComponentDef,
   type ComponentProp,
@@ -21,7 +22,7 @@ import { prepareComponent } from './bundleVariants.ts'
 import { sanitizeStylesheet, unsafeCssValue } from './bundleSanitize.ts'
 import { ComponentError, createComponentFromHtml, updateComponent } from './componentActions.ts'
 import { parseCss, serializeNodes, splitTopLevel, type CssNode } from './componentCss.ts'
-import { inferBindings, kidsOf, rootFragment } from './componentEngine.ts'
+import { inferBindings, inferLabel, kidsOf, rootFragment } from './componentEngine.ts'
 import { serializeOuter } from 'parse5'
 import { savepoint, transaction } from './journal.ts'
 import { store } from './store.ts'
@@ -442,12 +443,58 @@ function propsForUpdate(bundled: BundleComponent['props'], existing: readonly Co
 
 /** The markup as a new component would store it: with no bindings of its own, the text, image and link props a main infers.
  *  An update sends the same, so an unchanged bundle leaves the definition as it was. */
-function withInferredBindings(html: string, fromClasses = true): string {
-  if (html.includes('data-doop-prop')) return html
+function withInferredBindings(html: string, fromClasses = true, bundled?: readonly string[]): string {
+  /* a captured main that already follows props (a variant attribute) has no other inference, but its one text is still its label */
+  if (html.includes('data-doop-prop')) {
+    if (!bundled) return html
+    const roots = kidsOf(rootFragment(html.trim()))
+    if (roots.length !== 1) return html
+    return inferLabel(roots[0]!, new Set([...bundled, ...boundProps(html).all])) ? serializeOuter(roots[0]!) : html
+  }
   const roots = kidsOf(rootFragment(html.trim()))
   if (roots.length !== 1) return html
   inferBindings(roots[0]!, undefined, { fromClasses })
   return serializeOuter(roots[0]!)
+}
+
+/** The props a main's markup binds: all of them, and the ones that set an element's text. */
+function boundProps(html: string): { all: Set<string>; text: Set<string> } {
+  const all = new Set<string>()
+  const text = new Set<string>()
+  for (const match of html.matchAll(/<([a-z][a-z0-9-]*)\b[^>]*?\sdata-doop-prop="([^"]*)"/gi)) {
+    for (const { target, prop } of parseBindings(match[2] ?? '', match[1])) {
+      all.add(prop)
+      if (target === null) text.add(prop)
+    }
+  }
+  return { all, text }
+}
+
+/** A re-import keeps what a person or agent set on the stored mapping: per prop, the stored rule's fields win over the import's, and the import fills the fields and props the stored one lacks. */
+function withStoredRules(fresh: ComponentCode, stored: ComponentCode | undefined): ComponentCode {
+  if (!stored?.props) return fresh
+  const props: NonNullable<ComponentCode['props']> = { ...fresh.props }
+  for (const [name, rule] of Object.entries(stored.props)) {
+    const imported = props[name]
+    props[name] = {
+      ...imported,
+      ...rule,
+      ...(imported?.component || rule.component ? { component: { ...imported?.component, ...rule.component } } : {}),
+    }
+  }
+  return { ...fresh, props }
+}
+
+/** A React export shows a component's label as its children. When the importer had to find the text itself (the Storybook has no prop for it) and the component shows exactly one, that prop is passed as the export's `children`; a prop the Storybook named, or any mapping the bundle already made for it, is left as it is. */
+function withChildrenMapping(code: ComponentCode, html: string, bundled: readonly string[]): ComponentCode {
+  const inferred = [...boundProps(html).text].filter((name) => !bundled.includes(name))
+  const [label] = inferred
+  if (inferred.length !== 1 || !label) return code
+  const claimed =
+    Object.values(code.slots ?? {}).includes('children') ||
+    Object.values(code.props ?? {}).some((rule) => rule.name === 'children')
+  if (claimed || (code.props && label in code.props)) return code
+  return { ...code, props: { ...code.props, [label]: { name: 'children' } } }
 }
 
 /** The components a new main names in a <doop-use> that resolved to nothing. */
@@ -532,19 +579,25 @@ function writeOne(
   if (match) {
     const before = fingerprint(match)
     const mark = savepoint()
-    const result = withCodeMapping(component.name, code, issues, (mapping) =>
-      updateComponent(
-        ctx.canvasId,
-        match.id,
-        {
-          description: component.description,
-          props: propsForUpdate(prepared.props, match.props),
-          code: mapping,
-          html: withInferredBindings(prepared.html, !ctx.captured),
-          css: prepared.css,
-        },
-        ctx.actor,
-      ),
+    const bundled = (component.props ?? []).map((prop) => prop.name)
+    const html = withInferredBindings(prepared.html, !ctx.captured, ctx.captured ? bundled : undefined)
+    const result = withCodeMapping(
+      component.name,
+      withStoredRules(ctx.captured ? withChildrenMapping(code, html, bundled) : code, match.code),
+      issues,
+      (mapping) =>
+        updateComponent(
+          ctx.canvasId,
+          match.id,
+          {
+            description: component.description,
+            props: propsForUpdate(prepared.props, match.props),
+            code: mapping,
+            html,
+            css: prepared.css,
+          },
+          ctx.actor,
+        ),
     )
     const same = fingerprint(result.component) === before
     if (same || dryRun) mark.undo()
@@ -563,22 +616,28 @@ function writeOne(
     reserved.add(name.toLowerCase())
     return { kind: 'created', id: '', name }
   }
-  const { component: def } = withCodeMapping(component.name, code, issues, (mapping) =>
-    createComponentFromHtml(
-      ctx.canvasId,
-      {
-        name,
-        description: component.description,
-        props: prepared.props as ComponentProp[] | undefined,
-        code: mapping,
-        html: ctx.captured ? withInferredBindings(prepared.html, false) : prepared.html,
-        css: prepared.css,
-        width: MAIN_WIDTH,
-        height: MAIN_HEIGHT,
-        ...(where && pageId ? { place: { pageId, ...where } } : {}),
-      },
-      ctx.actor,
-    ),
+  const bundled = (component.props ?? []).map((prop) => prop.name)
+  const html = ctx.captured ? withInferredBindings(prepared.html, false, bundled) : prepared.html
+  const { component: def } = withCodeMapping(
+    component.name,
+    ctx.captured ? withChildrenMapping(code, html, bundled) : code,
+    issues,
+    (mapping) =>
+      createComponentFromHtml(
+        ctx.canvasId,
+        {
+          name,
+          description: component.description,
+          props: prepared.props as ComponentProp[] | undefined,
+          code: mapping,
+          html,
+          css: prepared.css,
+          width: MAIN_WIDTH,
+          height: MAIN_HEIGHT,
+          ...(where && pageId ? { place: { pageId, ...where } } : {}),
+        },
+        ctx.actor,
+      ),
   )
   const missing = missingNested(def)
   if (missing.length)

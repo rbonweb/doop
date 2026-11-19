@@ -18,7 +18,7 @@ import * as actions from '../server/actions.ts'
 import { blankComponent, contextFor } from '../server/components.ts'
 import { renderInstanceHtml } from '../server/componentEngine.ts'
 import { buildReactExport, componentReactFiles, type ReactExportInput } from '../server/reactExport/index.ts'
-import { COMPONENT_ATTR, activeComponents, type ComponentProp } from '../shared/components.ts'
+import { COMPONENT_ATTR, activeComponents, type ComponentDef, type ComponentProp } from '../shared/components.ts'
 import type { Actor } from '../shared/types.ts'
 import { normalize, renderAll, typecheck, writeProject, type Project } from './reactExportHarness'
 
@@ -219,6 +219,134 @@ describe('React export end to end, a component mapped to the team package', () =
       })
       expect(out.card).toContain('<button class="acme-btn">Buy</button>')
       expect(card.id).toBeTruthy()
+    } finally {
+      project.cleanup()
+    }
+  })
+})
+
+describe('React export end to end, a Primer-shaped Button with children and icon components', () => {
+  const stubs = (withIcons: boolean): Record<string, string> => ({
+    '@primer/react/package.json': '{"name":"@primer/react","main":"index.js","types":"index.d.ts"}\n',
+    '@primer/react/index.d.ts': [
+      "import type { ElementType, ReactNode } from 'react'",
+      'export declare function Button(props: {',
+      "  variant?: 'default' | 'primary' | 'danger'",
+      "  size?: 'small' | 'medium' | 'large'",
+      '  trailingVisual?: ElementType',
+      '  leadingVisual?: ElementType',
+      '  children?: ReactNode',
+      '}): JSX.Element',
+      '',
+    ].join('\n'),
+    '@primer/react/index.js': [
+      'const { createElement } = require("react")',
+      'exports.Button = ({ variant = "default", trailingVisual, children }) =>',
+      '  createElement("button", { "data-variant": variant }, children, trailingVisual ? createElement(trailingVisual) : null)',
+      '',
+    ].join('\n'),
+    ...(withIcons
+      ? {
+          '@primer/octicons-react/package.json':
+            '{"name":"@primer/octicons-react","main":"index.js","types":"index.d.ts"}\n',
+          '@primer/octicons-react/index.d.ts':
+            'export declare const HeartIcon: () => JSX.Element\nexport declare const XIcon: () => JSX.Element\n',
+          '@primer/octicons-react/index.js': [
+            'const { createElement } = require("react")',
+            'const icon = (name) => () => createElement("svg", { className: "octicon octicon-" + name })',
+            'exports.HeartIcon = icon("heart")',
+            'exports.XIcon = icon("x")',
+            '',
+          ].join('\n'),
+        }
+      : {}),
+  })
+
+  const primerButton = (importFrom: string | undefined): ComponentDef => ({
+    id: 'c-button',
+    name: 'Button',
+    description: '',
+    template:
+      '<button data-doop-part="r" data-doop-prop="data-variant:variant"><span data-doop-part="l" data-doop-prop="label">Button</span></button>',
+    css: '',
+    rawCss: '',
+    head: [],
+    props: [
+      { name: 'label', type: 'text' },
+      { name: 'variant', type: 'enum', options: ['default', 'primary', 'danger'], default: 'default' },
+      { name: 'trailing-visual', type: 'enum', options: ['HeartIcon', 'XIcon'] },
+    ],
+    slots: [],
+    rev: 1,
+    mainFrameId: null,
+    history: [],
+    createdAt: 0,
+    updatedAt: 0,
+    updatedBy: 'test',
+    code: {
+      importFrom: '@primer/react',
+      exportName: 'Button',
+      props: {
+        label: { name: 'children' },
+        'trailing-visual': { name: 'trailingVisual', component: importFrom ? { importFrom } : {} },
+      },
+    },
+  })
+
+  const exportPage = (importFrom: string | undefined) => {
+    const button = primerButton(importFrom)
+    const body =
+      `<doop-use component="c-button" label="Buy" variant="primary" trailing-visual="HeartIcon"></doop-use>` +
+      `<doop-use component="c-button" label="Close &amp; go" trailing-visual="XIcon"></doop-use>`
+    return buildReactExport({
+      canvasName: 'primer',
+      components: [button],
+      frames: [
+        {
+          id: 'f1',
+          name: 'Home',
+          html: `<!doctype html><html><head></head><body>${body}</body></html>`,
+        },
+      ],
+      tokens: [],
+      themeOrder: [],
+      styling: 'modules',
+      assetOrigin: 'https://doop.example',
+    })
+  }
+
+  it('passes the label as children and the icons as imported components, and type-checks against the package typings', async () => {
+    const result = exportPage('@primer/octicons-react')
+    const home = result.files.find((file) => file.path === 'src/pages/Home.tsx')!.content
+    expect(home).toContain('import { Button } from "@primer/react"')
+    expect(home).toContain('import { HeartIcon, XIcon } from "@primer/octicons-react"')
+    expect(home).toMatch(/<Button variant=\{"primary"\} trailingVisual=\{HeartIcon\}>\s*Buy\s*<\/Button>/)
+    expect(home).toMatch(/<Button trailingVisual=\{XIcon\}>\s*\{"Close & go"\}\s*<\/Button>/)
+    expect(result.report.issues).toEqual([])
+    const project = writeProject(result.files, stubs(true))
+    try {
+      expect(typecheck(project)).toEqual([])
+      const out = await renderAll(project, { home: { from: './src/pages/Home', name: 'Home' } })
+      expect(out.home).toContain('<button data-variant="primary">Buy<svg class="octicon octicon-heart"></svg></button>')
+      expect(out.home).toContain(
+        '<button data-variant="default">Close &amp; go<svg class="octicon octicon-x"></svg></button>',
+      )
+    } finally {
+      project.cleanup()
+    }
+  })
+
+  it('still type-checks and renders when the icon package is unknown: the prop is left out and the report says so', async () => {
+    const result = exportPage(undefined)
+    const home = result.files.find((file) => file.path === 'src/pages/Home.tsx')!.content
+    expect(home).toContain('trailingVisual={undefined /* TODO: pass HeartIcon */}')
+    expect(home).not.toContain('octicons')
+    expect(result.report.issues.map((issue) => issue.detail).join('\n')).toMatch(/"trailing-visual" is "HeartIcon"/)
+    const project = writeProject(result.files, stubs(false))
+    try {
+      expect(typecheck(project)).toEqual([])
+      const out = await renderAll(project, { home: { from: './src/pages/Home', name: 'Home' } })
+      expect(out.home).toContain('<button data-variant="primary">Buy</button>')
     } finally {
       project.cleanup()
     }
