@@ -5,6 +5,9 @@ import {
   describeSkipped,
   argsParam,
   groupStories,
+  isPageLike,
+  PAGE_ELEMENTS,
+  PAGE_ROOTS_ELEMENTS,
   pickDefaultStory,
   planVariants,
   STORYBOOK_LIMITS,
@@ -27,6 +30,55 @@ describe('pickDefaultStory', () => {
     expect(pickDefaultStory([story('B', 'Large'), story('B', 'Primary')])?.name).toBe('Primary')
     expect(pickDefaultStory([story('B', 'Large'), story('B', 'Small')])?.name).toBe('Large')
     expect(pickDefaultStory([])).toBeUndefined()
+  })
+})
+
+describe('groupStories documentation pages', () => {
+  const shadbook = [
+    story('Components/Button', 'Default'),
+    story('Components/Typography', 'Headings'),
+    story('Components/Typography', 'Lists'),
+    story('Components/Icons', 'Icon Grid'),
+    story('Components/Colors', 'Palette'),
+    story('Introduction', 'Welcome'),
+    story('Components/Badge', 'Default'),
+  ]
+
+  it('leaves out titles named like documentation pages that have no component file, and says so', () => {
+    const { groups, issues } = groupStories(shadbook)
+    expect(groups.map((group) => group.name)).toEqual(['Button', 'Badge'])
+    const skipped = issues.filter((issue) => issue.code === 'not_a_component')
+    expect(skipped.map((issue) => issue.component)).toEqual([
+      'Components/Typography',
+      'Components/Icons',
+      'Components/Colors',
+      'Introduction',
+    ])
+    expect(skipped[0]?.message).toContain('Components/Typography')
+  })
+
+  it('keeps a docs-worded title that has a component behind it, and one named in include', () => {
+    const icons = { ...story('Components/Icons', 'Default'), componentPath: './src/icons/index.tsx' }
+    expect(groupStories([icons, story('Components/Button', 'A')]).groups.map((group) => group.name)).toEqual([
+      'Icons',
+      'Button',
+    ])
+    const named = groupStories(shadbook, { include: ['Components/Typography'] })
+    expect(named.groups.map((group) => group.name)).toEqual(['Typography'])
+    expect(named.issues.map((issue) => issue.code)).not.toContain('not_a_component')
+  })
+})
+
+describe('isPageLike', () => {
+  it('is a page when there are no controls and a great many elements, or several roots and a page of them', () => {
+    expect(isPageLike({ elements: 20, multipleRoots: false, hasProps: false })).toBe(false)
+    expect(isPageLike({ elements: PAGE_ELEMENTS, multipleRoots: false, hasProps: false })).toBe(true)
+    expect(isPageLike({ elements: PAGE_ROOTS_ELEMENTS, multipleRoots: true, hasProps: false })).toBe(true)
+    expect(isPageLike({ elements: PAGE_ROOTS_ELEMENTS, multipleRoots: false, hasProps: false })).toBe(false)
+  })
+
+  it('never calls a component with controls a page', () => {
+    expect(isPageLike({ elements: 500, multipleRoots: true, hasProps: true })).toBe(false)
   })
 })
 

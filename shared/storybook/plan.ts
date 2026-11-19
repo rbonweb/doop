@@ -167,6 +167,45 @@ function matchesInclude(title: string, include: string[] | undefined): boolean {
   })
 }
 
+/** Last title segments that name a documentation or catalogue page rather than a component. Only a secondary signal: a title also needs no component file behind it (`componentPath`), and an explicit `include` turns the rule off. */
+const DOCS_PAGE_SEGMENTS = new Set([
+  'introduction',
+  'getting started',
+  'colors',
+  'colours',
+  'typography',
+  'icons',
+  'overview',
+  'changelog',
+  'welcome',
+])
+
+/** Whether a title reads as a documentation page: its last segment is a docs word and none of its stories names a component file. */
+function looksLikeDocsPage(title: string, members: StoryEntry[]): boolean {
+  const last = (title.split('/').pop() ?? '').trim().toLowerCase()
+  return DOCS_PAGE_SEGMENTS.has(last) && !members.some((entry) => entry.componentPath)
+}
+
+/** What a rendered default story says about itself, for `isPageLike`. */
+export interface RenderedShape {
+  /** elements in the captured markup */
+  elements: number
+  /** the story rendered several root elements, not one */
+  multipleRoots: boolean
+  /** the story has controls (args or argTypes) */
+  hasProps: boolean
+}
+
+/** elements a story without controls may hold before it reads as a page, and the lower bar when it also renders several roots */
+export const PAGE_ELEMENTS = 150
+export const PAGE_ROOTS_ELEMENTS = 60
+
+/** A story that is a whole page or a catalogue, not one component: it has no controls and a great many elements, or it renders several roots with a page's worth of elements. A component with controls is never a page. */
+export function isPageLike(shape: RenderedShape): boolean {
+  if (shape.hasProps) return false
+  return shape.elements >= PAGE_ELEMENTS || (shape.multipleRoots && shape.elements >= PAGE_ROOTS_ELEMENTS)
+}
+
 /** The most components a plan line lists; what an import takes is STORYBOOK_LIMITS.components of them. */
 export const MAX_PLANNED_COMPONENTS = 500
 
@@ -186,6 +225,14 @@ export function groupStories(entries: StoryEntry[], options: { include?: string[
   const candidates: StoryGroup[] = []
   const names = new Set<string>()
   for (const [title, members] of owned) {
+    if (!options.include?.length && looksLikeDocsPage(title, members)) {
+      issues.push({
+        component: title,
+        code: 'not_a_component',
+        message: `"${title}" looks like a documentation page, not a component, so it was left out. Name it in include to import it anyway`,
+      })
+      continue
+    }
     /* the component's own stories come first, so its default is one of them rather than an example's */
     const own = (entry: StoryEntry) => normalizedTitle(entry.title) === title
     const stories = [...members.filter(own), ...members.filter((entry) => !own(entry))]

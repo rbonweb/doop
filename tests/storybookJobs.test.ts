@@ -133,12 +133,14 @@ describe('a Storybook import job', () => {
     })
     expect(started.job_id).toMatch(/^[A-Za-z0-9_-]{22}$/)
 
-    handle.options.onRender({ rendered: 2, total: 5, component: 'Button\u0000<b>' })
+    /* the importer's own total is ignored: the job's total is the plan's component count, and rendered never passes it */
+    handle.options.onRender({ rendered: 1, total: 5, component: 'Button\u0000<b>' })
+    handle.options.onRender({ rendered: 2, total: 6, component: 'Button' })
     expect(readStorybookJob(started.job_id, 'canvas-1', mine(who))).toMatchObject({
       status: 'running',
-      rendered: 2,
-      total: 5,
-      component: 'Button b',
+      rendered: 1,
+      total: 1,
+      component: 'Button',
     })
 
     await handle.finish()

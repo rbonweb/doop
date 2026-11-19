@@ -21,7 +21,7 @@ import type { Actor } from '../shared/types.ts'
  * POST /api/canvases/:id/import/storybook { url, package?, include?, dryRun? } (session, edit role, checked by the caller).
  * The answer is application/x-ndjson, one JSON object a line, flushed as it goes:
  *   { type: 'plan', components: [{ name, group, stories, renders }], renders }   once the index is read
- *   { type: 'progress', rendered, total, component }                              after each render (total only grows)
+ *   { type: 'progress', rendered, total, component }                              after each component (total is the plan's `renders`, fixed)
  *   { type: 'result', result, issues } or { type: 'error', code, message }       the last line
  * A dry run reads the index and plans only. A refusal before streaming starts is an ordinary JSON error. Closing the
  * request aborts the import.
