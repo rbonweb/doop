@@ -894,6 +894,102 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     }
   })
 
+  it('flattens cascade layers into true cascade order, keeps the theme and the registered properties, and the utilities beat the reset', async () => {
+    const page = await (await getBrowser()).newPage()
+    const bare = await (await getBrowser()).newPage()
+    try {
+      /* the shape of a Tailwind v4 stylesheet: the layer statement, a theme on :root,:host, a reset in base, utilities, @property registrations and the @layer properties fallback that Chromium does not apply */
+      await page.setContent(`<!doctype html>
+<style>
+@layer theme, base, components, utilities;
+@layer theme{:root,:host{--spacing:.25rem;--text-sm:.875rem;--text-sm--line-height:calc(1.25/.875);--font-weight-medium:500;--default-font-family:"Inter",sans-serif}}
+@layer base{*,:after,:before,::backdrop{box-sizing:border-box;border:0 solid;margin:0;padding:0}html,:host{font-family:var(--default-font-family,sans-serif);line-height:1.5}}
+@layer utilities{
+.inline-flex{display:inline-flex}
+.px-4{padding-inline:calc(var(--spacing)*4)}
+.border{border-style:var(--tw-border-style);border-width:1px}
+.text-sm{font-size:var(--text-sm);line-height:var(--tw-leading,var(--text-sm--line-height))}
+.font-medium{--tw-font-weight:var(--font-weight-medium);font-weight:var(--font-weight-medium)}
+}
+@property --tw-border-style{syntax:"*";inherits:false;initial-value:solid}
+@property --tw-unused{syntax:"*";inherits:false;initial-value:7}
+@property --tw-leading{syntax:"*";inherits:false}
+@layer properties{@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b)))){*,:before,:after,::backdrop{--tw-border-style:solid}}}
+</style>
+<style>
+@layer components{.btn{padding:1px;margin-left:9px}}
+@media (min-width: 1px){@layer utilities{.py-2{padding-block:calc(var(--spacing)*2)}}@layer components{.btn{margin-left:3px}}}
+@layer base{body{background:#fff}}
+</style>
+<div id="storybook-root"><button class="btn inline-flex px-4 py-2 border text-sm font-medium">Button</button></div>`)
+      await page.evaluate(CAPTURE_PRELUDE)
+      const options = {
+        textArgs: [],
+        styleProperties: STYLE_PROPERTIES,
+        maxBytes: STORYBOOK_LIMITS.captureBytes,
+        maxElements: 300,
+      }
+      const shot = JSON.parse((await page.evaluate(captureStory, options)) as string) as {
+        ok: boolean
+        css: string
+        sharedRules: string[]
+        rootFont?: string
+      }
+      expect(shot.ok).toBe(true)
+      const sharedText = shot.sharedRules.join('\n')
+      expect(shot.css).not.toContain('@layer')
+      expect(sharedText).not.toContain('@layer')
+      /* theme first, then the reset, then the later base rule: the layer's order, not the source's */
+      const at = (text: string) => shot.sharedRules.findIndex((rule) => rule.includes(text))
+      expect(at('--spacing')).toBeGreaterThanOrEqual(0)
+      expect(shot.sharedRules[at('--spacing')]).toContain(':root')
+      expect(at('--spacing')).toBeLessThan(at('box-sizing'))
+      expect(at('box-sizing')).toBeLessThan(at('background'))
+      /* @property fallback comes first of all, only for the property a kept rule reads and that has an initial value */
+      expect(at('--tw-border-style: solid')).toBe(0)
+      expect(sharedText).not.toContain('--tw-unused')
+      expect(sharedText).not.toContain('--tw-leading')
+      /* the @supports fallback stays conditional, never applied unconditionally */
+      expect(shot.sharedRules.filter((rule) => rule.startsWith('@supports'))).toHaveLength(1)
+      /* components before utilities, and a media group holding two layers is split, each part wrapped by the same condition */
+      expect(shot.css.indexOf('.btn')).toBeLessThan(shot.css.indexOf('.px-4'))
+      const groups = shot.css.match(/@media \(min-width: 1px\) \{/g) ?? []
+      expect(groups).toHaveLength(2)
+      expect(shot.css.lastIndexOf('.py-2')).toBeGreaterThan(shot.css.indexOf('.btn {\n  margin-left: 3px'))
+      expect(shot.rootFont).toBe(await page.evaluate(() => getComputedStyle(document.body).fontFamily))
+      expect(shot.rootFont).toContain('sans-serif')
+
+      /* what the frame will hold: the shared rules, then the component's, with nothing else of the page's */
+      await bare.setContent(
+        `<!doctype html><style>${shot.sharedRules.join('\n')}\n${shot.css}</style><button class="btn inline-flex px-4 py-2 border text-sm font-medium">Button</button>`,
+      )
+      const look = await bare.evaluate(() => {
+        const style = getComputedStyle(document.querySelector('button')!)
+        return {
+          left: style.paddingLeft,
+          top: style.paddingTop,
+          borderStyle: style.borderTopStyle,
+          borderWidth: style.borderTopWidth,
+          size: style.fontSize,
+          weight: style.fontWeight,
+          margin: style.marginLeft,
+        }
+      })
+      expect(look).toEqual({
+        left: '16px',
+        top: '8px',
+        borderStyle: 'solid',
+        borderWidth: '1px',
+        size: '14px',
+        weight: '500',
+        margin: '3px',
+      })
+    } finally {
+      await page.close()
+      await bare.close()
+    }
+  })
+
   it('stops the whole import when a story page answers 403', async () => {
     const error = await storybookBundle(`${storybook.origin}/lockedframe/`, {}, deps(storybook.origin)).catch(
       (caught: unknown) => caught,

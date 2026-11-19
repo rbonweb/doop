@@ -18,6 +18,7 @@ export const capturedStorySchema = z
     html: z.string().max(MAX_HTML),
     css: z.string().max(MAX_CSS),
     sharedRules: z.array(z.string().max(MAX_RULE)).max(500),
+    rootFont: z.string().max(500).optional(),
     shape: z.string().max(20_000),
     paths: z.array(z.string().max(MAX_CELL)).max(MAX_ELEMENTS),
     styles: z

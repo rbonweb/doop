@@ -352,6 +352,26 @@ export function plannedList(groups: { name: string; title: string; stories: unkn
   }))
 }
 
+/** What a bundle's shared CSS needs so imported components keep the Storybook's font: when no shared rule on html, body, :root or :host sets `font-family`, the page's own body font becomes `--font-root` (which the importer makes a token) and the body's font. Nothing when the page has none, or when the font could break out of a declaration. */
+export function rootFontRules(sharedRules: Iterable<string>, rootFont: string | undefined): string[] {
+  const font = rootFont?.trim()
+  if (!font || font.length > 500 || /[;{}<>\\\r\n]|\/\*|\(/.test(font)) return []
+  const document = /^(?:html|body|:root|:host)$/i
+  for (const rule of sharedRules) {
+    const open = rule.indexOf('{')
+    if (open < 0 || rule.trimStart().startsWith('@')) continue
+    if (
+      rule
+        .slice(0, open)
+        .split(',')
+        .some((selector) => document.test(selector.trim())) &&
+      /(?:^|[;{\s])font-family\s*:/i.test(rule.slice(open))
+    )
+      return []
+  }
+  return [`:root { --font-root: ${font} }`, 'body { font-family: var(--font-root) }']
+}
+
 /** Stories to a bundle, inside STORYBOOK_LIMITS: components, renders and the whole import's time. A component whose default story fails is left out and said so; a variant that fails is left out and said so. Throws only when nothing at all could be imported or the signal aborts. */
 export async function buildComponentBundle(input: BundleInput): Promise<BundleResult> {
   const now = input.now ?? Date.now
@@ -369,6 +389,8 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   const concurrency = input.concurrency ?? 1
   const components: BundleComponent[] = []
   const shared = new Set<string>()
+  /* the story page's own body font, from the first component captured */
+  let rootFont: string | undefined
   let renders = 0
 
   /* a page that cannot be opened (the renderer is busy, the browser would not start) is not a story that failed: the import carries on without that render, and gives up with what it has after a few in a row */
@@ -436,6 +458,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       continue
     }
     for (const rule of capture.sharedRules) shared.add(rule)
+    rootFont ??= capture.rootFont
 
     let props = base.props.map((prop) => ({ ...prop }))
     /* the story whose controls are varied, and what it looks like at its own resting args: the default story, unless it has no controls and a sibling (a Playground) does */
@@ -665,6 +688,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       failure?.code === 'story_needs_worker' && allNeedWorker ? 'needs_worker' : undefined,
     )
   }
+  for (const rule of rootFontRules(shared, rootFont)) shared.add(rule)
   let css = ''
   for (const rule of shared) {
     if (css.length + rule.length + 1 > MAX_BUNDLE_CSS_BYTES) {

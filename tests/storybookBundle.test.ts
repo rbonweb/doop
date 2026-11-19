@@ -8,6 +8,7 @@ import {
   BundleImportError,
   buildComponentBundle,
   diffStyles,
+  rootFontRules,
   isEmittedPath,
   KnownRenderError,
   renderStory,
@@ -51,7 +52,12 @@ function shot(overrides: Partial<CapturedStory> = {}): CapturedStory {
 /** A page that renders every story as one button with a tone enum, and counts renders. */
 function fakePage(
   log: string[],
-  options: { fail?: (url: string) => boolean; withoutControls?: (storyId: string) => boolean; perStory?: boolean } = {},
+  options: {
+    fail?: (url: string) => boolean
+    withoutControls?: (storyId: string) => boolean
+    perStory?: boolean
+    extra?: Partial<CapturedStory>
+  } = {},
 ): StoryPage {
   let url = ''
   return {
@@ -94,7 +100,7 @@ function fakePage(
                 paths: [playground ? 'button.pg' : 'div.df'],
                 shape: playground ? '0button' : '0div',
               })
-            : shot({ styles }),
+            : shot({ styles, ...options.extra }),
         )
       }
       throw new Error('unexpected evaluate')
@@ -138,6 +144,52 @@ describe('diffStyles', () => {
   })
 })
 
+describe('rootFontRules', () => {
+  it('gives the bundle the page font when no shared rule on the document sets one', () => {
+    expect(rootFontRules(['*{margin:0}', ':root{--a:1}'], 'Inter, sans-serif')).toEqual([
+      ':root { --font-root: Inter, sans-serif }',
+      'body { font-family: var(--font-root) }',
+    ])
+  })
+
+  it('adds nothing when html, body, :root or :host already set a font', () => {
+    for (const rule of [
+      'html,:host{line-height:1.5;font-family:var(--default-font-family)}',
+      'body { font-family: Georgia }',
+      ':root{font-family:serif}',
+    ]) {
+      expect(rootFontRules([rule], 'Inter')).toEqual([])
+    }
+  })
+
+  it('is not fooled by a font in a font face, a custom property or another selector', () => {
+    const rules = [
+      '@font-face{font-family:"X";src:url("https://a.test/x.woff2")}',
+      ':root{--font-family:x}',
+      '.card{font-family:serif}',
+    ]
+    expect(rootFontRules(rules, 'Inter')).toHaveLength(2)
+  })
+
+  it('refuses a font that could break out of a declaration, and an empty one', () => {
+    for (const font of [
+      'a; color: red',
+      'a } b { c',
+      'a</style>',
+      'a\nb',
+      'a\\',
+      'url(x)',
+      'a /* b',
+      '',
+      '  ',
+      undefined,
+      'x'.repeat(501),
+    ]) {
+      expect(rootFontRules([], font)).toEqual([])
+    }
+  })
+})
+
 describe('buildComponentBundle', () => {
   const source = { kind: 'storybook' as const, url: 'https://sb.test/' }
 
@@ -152,6 +204,24 @@ describe('buildComponentBundle', () => {
     expect(componentBundleSchema.safeParse(bundle).success).toBe(true)
     expect(bundle.components[0]?.code?.exportName).toBe('MyButton')
     expect(renders).toBe(log.length)
+  })
+
+  it('carries the story page font into the shared css when its rules set none', async () => {
+    const { bundle } = await buildComponentBundle({
+      entries: [entry('A/Button')],
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withPage([], { extra: { rootFont: 'Inter, sans-serif', sharedRules: ['*{margin:0}'] } }),
+    })
+    expect(bundle.css).toContain(':root { --font-root: Inter, sans-serif }')
+    expect(bundle.css).toContain('body { font-family: var(--font-root) }')
+    const withFont = await buildComponentBundle({
+      entries: [entry('A/Button')],
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withPage([], { extra: { rootFont: 'Inter', sharedRules: ['html,:host{font-family:serif}'] } }),
+    })
+    expect(withFont.bundle.css).not.toContain('--font-root')
   })
 
   it('renders each component once and its variants inside the 8 values and 4 axes limits', async () => {

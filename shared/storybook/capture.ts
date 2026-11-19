@@ -79,6 +79,8 @@ export interface CapturedStory {
   css: string
   /** rules that style the document rather than the tree (resets, `:root` variables, font faces), one entry per rule */
   sharedRules: string[]
+  /** the story page's own font: the computed `font-family` of its body (at most 500 characters; absent when empty or longer), for a bundle whose shared rules set none */
+  rootFont?: string
   /** the tree's shape (depth and tag of every element, in order), equal when two renders can be diffed */
   shape: string
   /** one selector for each element in `html`, root first: the root's tag and classes, then each descendant's path of `tag:nth-child(n)` from the root's children down, so scoped under the root they match the same element */
@@ -308,7 +310,7 @@ export function captureStory(options: CaptureOptions): CaptureResult {
     out.push(text.slice(start))
     return out.map((part) => part.trim()).filter(Boolean)
   }
-  const globalOnly = /^(?:\*|html|body|:root|html body|html > body)?$/i
+  const globalOnly = /^(?:\*|html|body|:root|:host|html body|html > body)?$/i
   const reaches = (selector: string): boolean => {
     try {
       return live.matches(selector) || !!live.querySelector(selector)
@@ -373,8 +375,35 @@ export function captureStory(options: CaptureOptions): CaptureResult {
         return whole
       }
     })
-  const css: string[] = []
-  const shared: string[] = []
+  /* Cascade layers are flattened here: Doop's own component CSS and a frame's CSS are unlayered, so a layered rule would lose to every one of them. Each rule keeps the layers it sat in as a sort key (the first-appearance index of each layer on its path, `Infinity` where the rule is not in a deeper layer), and the output is emitted in true cascade order with no `@layer` left. */
+  interface Piece {
+    text: string
+    key: number[]
+    shared: boolean
+  }
+  const layerIndex = new Map<string, number>()
+  /* the layer path a name opens inside `layers` (each entry the full dotted name), registering every layer it passes in first-appearance order; an anonymous layer is its own entry */
+  const enter = (layers: string[], name: string): string[] => {
+    let path = layers
+    for (const part of name ? name.split('.') : [`#anonymous${layerIndex.size}`]) {
+      const parent = path[path.length - 1]
+      const full = parent === undefined ? part : `${parent}.${part}`
+      if (!layerIndex.has(full)) layerIndex.set(full, layerIndex.size)
+      path = [...path, full]
+    }
+    return path
+  }
+  const keyOf = (layers: string[]) => layers.map((name) => layerIndex.get(name) ?? Infinity)
+  const byCascade = (a: Piece, b: Piece) => {
+    for (let i = 0; i < Math.max(a.key.length, b.key.length); i++) {
+      const left = a.key[i] ?? Infinity
+      const right = b.key[i] ?? Infinity
+      if (left !== right) return left < right ? -1 : 1
+    }
+    return 0
+  }
+  /* `@property` initial values, by name: a registered property has its initial value on every element, which an unregistered one (the browser here knows the registration, a frame does not carry it) lacks */
+  const registered = new Map<string, string>()
   let crossOrigin = 0
   let oversize = 0
   let cssChars = 0
@@ -388,15 +417,23 @@ export function captureStory(options: CaptureOptions): CaptureResult {
     return text
   }
   let scanned = 0
-  const walk = (rules: CSSRuleList, base: string, depth: number): string[] => {
-    const out: string[] = []
+  const walk = (rules: CSSRuleList, base: string, depth: number, layers: string[]): Piece[] => {
+    const out: Piece[] = []
+    const emit = (text: string, isShared: boolean) => out.push({ text, key: keyOf(layers), shared: isShared })
     for (const rule of Array.from(rules)) {
       if (scanned++ > 30000 || performance.now() - started > 4000) break
       if (rule.constructor.name === 'CSSImportRule') {
-        const imported = (rule as CSSImportRule).styleSheet
-        if (imported && depth < 6) {
+        const imported = rule as CSSImportRule & { layerName?: string | null }
+        if (imported.styleSheet && depth < 6) {
           try {
-            out.push(...walk(imported.cssRules, imported.href ?? base, depth + 1))
+            out.push(
+              ...walk(
+                imported.styleSheet.cssRules,
+                imported.styleSheet.href ?? base,
+                depth + 1,
+                typeof imported.layerName === 'string' ? enter(layers, imported.layerName) : layers,
+              ),
+            )
           } catch {
             crossOrigin++
           }
@@ -408,47 +445,75 @@ export function captureStory(options: CaptureOptions): CaptureResult {
         const selectors = splitList(style.selectorText)
         if (selectors.length && selectors.every((s) => globalOnly.test(unscoped(s)))) {
           const text = internal.test(style.selectorText) ? undefined : textOf(style)
-          if (text !== undefined) shared.push(absolutize(text, base))
+          if (text !== undefined) emit(absolutize(text, base), true)
         } else if (
           !internal.test(style.selectorText) &&
           selectors.some((s) => reaches(s) || reaches(unscoped(s)) || reaches(withoutState(unscoped(s))))
         ) {
           const text = textOf(style)
-          if (text !== undefined) out.push(absolutize(text, base))
+          if (text !== undefined) emit(absolutize(text, base), false)
         }
         continue
       }
       const type = rule.constructor.name
-      if (type === 'CSSFontFaceRule') {
+      if (type === 'CSSLayerStatementRule') {
+        for (const name of (rule as unknown as { nameList?: string[] }).nameList ?? []) enter(layers, name)
+      } else if (type === 'CSSLayerBlockRule') {
+        if (depth < 6) {
+          out.push(
+            ...walk(
+              (rule as CSSGroupingRule).cssRules,
+              base,
+              depth + 1,
+              enter(layers, (rule as { name?: string }).name ?? ''),
+            ),
+          )
+        }
+      } else if (type === 'CSSPropertyRule') {
+        const property = rule as unknown as { name: string; initialValue: string | null }
+        const value = property.initialValue?.trim()
+        if (value && value.length <= 1000 && /^--[\w-]+$/.test(property.name) && !/[{};<>\\]|\/\*|[\r\n]/.test(value)) {
+          registered.set(property.name, absolutize(value, base))
+        }
+      } else if (type === 'CSSFontFaceRule') {
         const family = (rule as CSSFontFaceRule).style
           .getPropertyValue('font-family')
           .replace(/^["']|["']$/g, '')
           .toLowerCase()
         const text = used.fonts.has(family) ? textOf(rule) : undefined
-        if (text !== undefined) shared.push(absolutize(text, base))
+        if (text !== undefined) emit(absolutize(text, base), true)
       } else if (type === 'CSSKeyframesRule') {
         const text = used.animations.has((rule as CSSKeyframesRule).name) ? textOf(rule) : undefined
-        if (text !== undefined) out.push(text)
-      } else if ('cssRules' in rule && depth < 6 && /^CSS(?:Media|Supports|Container|LayerBlock)Rule$/.test(type)) {
-        const inner = walk((rule as CSSGroupingRule).cssRules, base, depth + 1)
-        const head = inner.length ? (rule as CSSGroupingRule & { conditionText?: string }) : undefined
-        if (head) {
-          const kind = type
-            .replace(/^CSS|Rule$/g, '')
-            .replace('LayerBlock', 'layer')
-            .toLowerCase()
-          const label = [
-            (rule as { containerName?: string }).containerName,
-            head.conditionText ?? (rule as { name?: string }).name,
-          ]
-            .filter(Boolean)
-            .join(' ')
-          out.push(`@${kind} ${label} {\n${inner.join('\n')}\n}`)
+        if (text !== undefined) emit(text, false)
+      } else if ('cssRules' in rule && depth < 6 && /^CSS(?:Media|Supports|Container)Rule$/.test(type)) {
+        const inner = walk((rule as CSSGroupingRule).cssRules, base, depth + 1, layers)
+        if (!inner.length) continue
+        const kind = type.replace(/^CSS|Rule$/g, '').toLowerCase()
+        const label = [
+          (rule as { containerName?: string }).containerName,
+          (rule as { conditionText?: string }).conditionText,
+        ]
+          .filter(Boolean)
+          .join(' ')
+        /* a group holding rules of several layers is split, each layer's rules wrapped by the same condition, so every part sorts by its own layer */
+        const groups = new Map<string, Piece[]>()
+        for (const piece of inner) {
+          const id = `${piece.shared ? 's' : 'c'}${piece.key.join(',')}`
+          groups.set(id, [...(groups.get(id) ?? []), piece])
+        }
+        for (const pieces of groups.values()) {
+          const first = pieces[0]!
+          out.push({
+            text: `@${kind} ${label} {\n${pieces.map((piece) => piece.text).join('\n')}\n}`,
+            key: first.key,
+            shared: first.shared,
+          })
         }
       }
     }
     return out
   }
+  const pieces: Piece[] = []
   const sheets: CSSStyleSheet[] = [
     ...Array.from(document.styleSheets),
     ...Array.from(document.adoptedStyleSheets ?? []),
@@ -456,11 +521,37 @@ export function captureStory(options: CaptureOptions): CaptureResult {
   for (const sheet of sheets) {
     if (sheet.disabled) continue
     try {
-      css.push(...walk(sheet.cssRules, sheet.href ?? document.baseURI, 0))
+      pieces.push(...walk(sheet.cssRules, sheet.href ?? document.baseURI, 0, []))
     } catch {
       crossOrigin++
     }
   }
+  /* a registered property a kept rule reads becomes a rule that gives every element its initial value, ahead of every layer: a frame has no registration, so `var(--tw-border-style)` would otherwise be undefined */
+  if (registered.size) {
+    const read = new Set<string>()
+    for (const piece of pieces) for (const match of piece.text.matchAll(/var\(\s*(--[^\s,)]+)/g)) read.add(match[1]!)
+    const declarations = Array.from(registered).filter(([name]) => read.has(name))
+    const selector = '*, ::before, ::after, ::backdrop'
+    for (let from = 0; from < declarations.length;) {
+      let body = ''
+      while (from < declarations.length && body.length < 12_000) {
+        const [name, value] = declarations[from++]!
+        body += `${name}: ${value}; `
+      }
+      pieces.push({ text: `${selector} { ${body.trim()} }`, key: [-Infinity], shared: true })
+    }
+  }
+  pieces.sort(byCascade)
+  const css = pieces.filter((piece) => !piece.shared).map((piece) => piece.text)
+  /* a rule that appears twice keeps its later place, the one that wins */
+  const shared = Array.from(
+    new Set(
+      pieces
+        .filter((piece) => piece.shared)
+        .map((piece) => piece.text)
+        .reverse(),
+    ),
+  ).reverse()
   if (crossOrigin) {
     issues.push({
       code: 'css_cross_origin',
@@ -477,12 +568,16 @@ export function captureStory(options: CaptureOptions): CaptureResult {
     issues.push({ code: 'css_scan_capped', message: 'The page has so many CSS rules that only part of them were read' })
   }
 
+  const bodyFont = document.body ? getComputedStyle(document.body).fontFamily : ''
+  const rootFont = bodyFont.length <= 500 ? bodyFont : ''
+
   /* serialized and measured here, where page script cannot reach JSON.stringify: the server never receives more than the cap */
   const text = JSON.stringify({
     ok: true,
     html,
     css: css.join('\n'),
-    sharedRules: Array.from(new Set(shared)),
+    sharedRules: shared,
+    ...(rootFont ? { rootFont } : {}),
     shape,
     paths,
     styles,
