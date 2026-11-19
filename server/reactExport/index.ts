@@ -242,7 +242,7 @@ export function buildReactExport(input: ReactExportInput): ReactExportResult {
   files.push({
     path: 'src/components/index.ts',
     content: exported.length
-      ? `${exported.map((plan) => `export { ${plan.name} } from './${plan.name}'\nexport type { ${plan.propsName} } from './${plan.name}'`).join('\n')}\n`
+      ? `${exported.map((plan) => `export { ${plan.name} } from './${plan.name}'\nexport type { ${[plan.propsName, ...plan.itemTypes].join(', ')} } from './${plan.name}'`).join('\n')}\n`
       : 'export {}\n',
   })
   for (const page of built.pages) {
