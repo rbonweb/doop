@@ -94,6 +94,43 @@ describe('parseStorybookIndex', () => {
     expect(issues).toEqual([])
   })
 
+  it('skips docs pages of a shadbook-shaped index: type docs, and MDX tagged entries filed as stories', () => {
+    const { entries } = parseStorybookIndex({
+      v: 5,
+      entries: {
+        'introduction--docs': {
+          type: 'docs',
+          id: 'introduction--docs',
+          name: 'Docs',
+          title: 'Introduction',
+          tags: ['dev', 'unattached-mdx'],
+        },
+        'colors--docs': {
+          type: 'docs',
+          id: 'colors--docs',
+          name: 'Docs',
+          title: 'Components/Colors',
+          tags: ['dev', 'autodocs'],
+        },
+        'colors--mdx': {
+          type: 'story',
+          id: 'colors--mdx',
+          name: 'Page',
+          title: 'Components/Colors',
+          tags: ['dev', 'attached-mdx'],
+        },
+        'button--default': {
+          type: 'story',
+          id: 'button--default',
+          name: 'Default',
+          title: 'Components/Button',
+          tags: ['dev', 'test', 'autodocs'],
+        },
+      },
+    })
+    expect(entries.map((entry) => entry.id)).toEqual(['button--default'])
+  })
+
   it('says so when only docs are listed', () => {
     const { entries, issues } = parseStorybookIndex({
       v: 5,

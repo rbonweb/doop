@@ -71,6 +71,9 @@ function cleanTags(raw: unknown): string[] {
   return tags
 }
 
+/** Tags Storybook puts on entries that exist for documentation: MDX pages, however they are filed. */
+const DOCS_ONLY_TAGS = new Set(['unattached-mdx', 'attached-mdx', 'docs-only'])
+
 function isDocsOnly(parameters: unknown): boolean {
   if (typeof parameters !== 'object' || parameters === null) return false
   return (parameters as { docsOnly?: unknown }).docsOnly === true
@@ -114,7 +117,11 @@ export function parseStorybookIndex(json: unknown): ParsedIndex {
       continue
     }
     const raw = parsed.data
-    if (raw.type === 'docs' || (v === 3 && isDocsOnly(raw.parameters))) {
+    if (
+      raw.type === 'docs' ||
+      (v === 3 && isDocsOnly(raw.parameters)) ||
+      (Array.isArray(raw.tags) && raw.tags.some((tag) => typeof tag === 'string' && DOCS_ONLY_TAGS.has(tag)))
+    ) {
       docs++
       continue
     }

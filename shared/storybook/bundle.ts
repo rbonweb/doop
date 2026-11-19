@@ -24,6 +24,7 @@ import { captureRefusalSchema, storyCaptureSchema, storyMetaSchema } from './sch
 import {
   describeSkipped,
   groupStories,
+  isPageLike,
   MAX_PLANNED_COMPONENTS,
   planVariants,
   STORYBOOK_LIMITS,
@@ -302,7 +303,7 @@ export interface BundleInput {
   onProgress?: (done: number, total: number) => void
   /** the components the import will render, once the stories are grouped and before the first render */
   onPlan?: (components: PlannedComponent[], info: PlanInfo) => void
-  /** after each render: `total` is what is planned so far (a component's variants join it once its default has been read), so it only grows */
+  /** after each component is finished (imported, left out or failed): `rendered` counts components done and `total` is the number the import takes, fixed from the plan on, since a component's variant renders are only known once its default has been read */
   onRender?: (event: { rendered: number; total: number; component: string }) => void
 }
 
@@ -384,8 +385,11 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     capped: grouped.candidates.length > MAX_PLANNED_COMPONENTS,
     importing: grouped.groups.length,
   })
-  let plannedTotal = grouped.groups.length
-  let renderedCount = 0
+  /** a component is done: the one progress unit, so `total` is known from the plan and never grows */
+  const finish = (index: number, component: string) => {
+    input.onProgress?.(index + 1, grouped.groups.length)
+    input.onRender?.({ rendered: index + 1, total: grouped.groups.length, component })
+  }
   const concurrency = input.concurrency ?? 1
   const components: BundleComponent[] = []
   const shared = new Set<string>()
@@ -436,25 +440,42 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     renders++
     const base = await render({ storyId: group.defaultStory.id, args: {}, readMeta: true })
     for (const issue of base.issues) note(issue.code, issue.message)
-    renderedCount++
-    input.onRender?.({
-      rendered: renderedCount,
-      total: Math.max(plannedTotal, renderedCount),
-      component: group.name,
-    })
     const capture = base.capture
+    /* an empty root or a page-sized render is a docs page, a catalogue or a layout, not a component */
+    if (!capture.ok && /rendered nothing|too many elements/.test(capture.reason)) {
+      note(
+        'not_a_component',
+        `"${group.title}" is not a component: its story ${capture.reason.replace(/^The (rendered )?story /, '')}, so it was left out`,
+      )
+      finish(index, group.name)
+      continue
+    }
     if (!capture.ok) {
       note(
         capture.code ?? 'story_failed',
         `The default story "${group.defaultStory.name}" could not be captured: ${capture.reason}`,
       )
-      input.onProgress?.(index + 1, grouped.groups.length)
+      finish(index, group.name)
+      continue
+    }
+    if (
+      isPageLike({
+        elements: capture.paths.length,
+        multipleRoots: capture.issues.some((issue) => issue.code === 'multiple_roots'),
+        hasProps: base.props.length > 0,
+      })
+    ) {
+      note(
+        'not_a_component',
+        `"${group.title}" is not a component: its story renders a whole page (${capture.paths.length} elements, no controls), so it was left out`,
+      )
+      finish(index, group.name)
       continue
     }
     for (const issue of capture.issues) note(issue.code, issue.message)
     if (capture.html.length > MAX_BUNDLE_HTML_BYTES || capture.css.length > MAX_BUNDLE_CSS_BYTES) {
       note('component_too_large', 'The component renders more html or css than a bundle holds, so it was left out')
-      input.onProgress?.(index + 1, grouped.groups.length)
+      finish(index, group.name)
       continue
     }
     for (const rule of capture.sharedRules) shared.add(rule)
@@ -473,14 +494,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         let probe: StoryRender | undefined
         for (let attempt = 0; attempt < 2 && renders < STORYBOOK_LIMITS.renders; attempt++) {
           renders++
-          plannedTotal++
           probe = await render({ storyId: candidate.id, args: {}, readMeta: true })
-          renderedCount++
-          input.onRender?.({
-            rendered: renderedCount,
-            total: Math.max(plannedTotal, renderedCount),
-            component: group.name,
-          })
           if (probe.capture.ok) break
         }
         if (!probe) break
@@ -511,27 +525,15 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     const plan = planVariants(props, variantAllowance(renders, grouped.groups.length - index - 1))
     for (const message of describeSkipped(plan.skipped)) note('variants_skipped', message)
     renders += plan.renders.length
-    plannedTotal += plan.renders.length
     const rendered = await inPool(plan.renders, concurrency, async (variant) => {
       const request = { storyId: controls.storyId, args: { [variant.arg]: variant.argValue }, readMeta: false }
-      const tick = () => {
-        renderedCount++
-        input.onRender?.({
-          rendered: renderedCount,
-          total: Math.max(plannedTotal, renderedCount),
-          component: group.name,
-        })
-      }
       let result = await render(request)
-      tick()
       /* a render that looks exactly like the default was probably captured before the story took the new args (the page announced the render a beat before the framework committed it), and one that ran out of time or lost its page is a dropped request: ask again once on a fresh page. A value that really changes nothing is told apart by the second render being the same too */
       const again = (shot: StoryCapture) => (shot.ok ? sameRender(controls.base, shot) : isTransientFailure(shot))
       let identical = result.capture.ok && sameRender(controls.base, result.capture)
       if (again(result.capture) && renders < STORYBOOK_LIMITS.renders && !input.signal?.aborted) {
         renders++
-        plannedTotal++
         result = await render(request)
-        tick()
         identical = result.capture.ok && sameRender(controls.base, result.capture)
       }
       return { variant, result, identical }
@@ -671,14 +673,17 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         },
       },
     })
-    input.onProgress?.(index + 1, grouped.groups.length)
+    finish(index, group.name)
   }
 
   if (!components.length) {
     const stories = issues.filter((issue) => issue.code === 'story_failed' || issue.code === 'story_needs_worker')
     /* only when every story that failed needs the worker is the CLI the way in */
     const allNeedWorker = stories.length > 0 && stories.every((issue) => issue.code === 'story_needs_worker')
-    const failure = issues.find((issue) => issue.code === 'renderer_unavailable') ?? stories[0]
+    const failure =
+      issues.find((issue) => issue.code === 'renderer_unavailable') ??
+      stories[0] ??
+      issues.find((issue) => issue.code === 'not_a_component')
     /* the error is not a card row, so it names its component itself */
     throw new BundleImportError(
       failure

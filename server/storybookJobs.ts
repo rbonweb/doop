@@ -33,7 +33,7 @@ const MAX_LISTED = 60
 export type JobStatus = 'running' | 'cancelling' | 'done' | 'failed' | 'cancelled'
 
 export interface JobPlan {
-  /** renders the import will start with, and how many components the Storybook offers in all */
+  /** the components the import takes (its progress total, fixed from the plan), and how many components the Storybook offers in all */
   renders: number
   total: number
   capped?: boolean
@@ -231,9 +231,9 @@ export async function startStorybookJob(input: StartJobInput): Promise<JobView> 
           job.total = info.importing
           planKnown()
         },
-        onRender: ({ rendered, total, component }) => {
-          job.rendered = rendered
-          job.total = total
+        onRender: ({ rendered, component }) => {
+          /* the total is the plan's component count and never moves; progress only counts components done */
+          job.rendered = Math.min(rendered, job.total)
           job.component = cleanLabel(component) || 'Component'
         },
       }),
@@ -241,7 +241,6 @@ export async function startStorybookJob(input: StartJobInput): Promise<JobView> 
   )
   finished.then(
     ({ result, issues, renders }) => {
-      job.rendered = Math.max(job.rendered, renders)
       settle('done', { result, issues, renders })
     },
     (error: unknown) => {

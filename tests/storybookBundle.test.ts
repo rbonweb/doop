@@ -431,19 +431,89 @@ describe('buildComponentBundle', () => {
     for (const selector of selectors) expect(selectAll(selector, doc).length, selector).toBeGreaterThan(0)
   })
 
-  it('never reports more renders done than planned, probes for controls included', async () => {
-    const events: { rendered: number; total: number }[] = []
-    await buildComponentBundle({
-      entries: [entry('Kit/Btn', 'Default'), { ...entry('Kit/Btn', 'Playground'), id: 'kit-btn-features--playground' }],
+  it('counts components, so the total is fixed from the plan whatever the variants and probes render', async () => {
+    const events: { rendered: number; total: number; component: string }[] = []
+    const plans: number[] = []
+    const result = await buildComponentBundle({
+      entries: [
+        entry('Kit/Btn', 'Default'),
+        { ...entry('Kit/Btn', 'Playground'), id: 'kit-btn-features--playground' },
+        entry('Kit/Tag', 'Default'),
+      ],
       source,
       baseUrl: 'https://sb.test/',
       withPage: withPage([], { withoutControls: (id) => id === 'kit-btn--default' }),
+      onPlan: (_components, info) => plans.push(info.importing),
       onRender: (event) => events.push(event),
     })
-    expect(events.length).toBeGreaterThan(3)
-    for (const event of events) expect(event.total).toBeGreaterThanOrEqual(event.rendered)
-    const totals = events.map((event) => event.total)
-    expect(totals).toEqual([...totals].sort((a, b) => a - b))
+    /* many more renders than components: the default, a controls probe and a dozen variants */
+    expect(result.renders).toBeGreaterThan(10)
+    expect(plans).toEqual([2])
+    expect(events.map((event) => event.total)).toEqual([2, 2])
+    expect(events.map((event) => event.rendered)).toEqual([1, 2])
+    expect(events.map((event) => event.component)).toEqual(['Btn', 'Tag'])
+  })
+
+  it('leaves a page-sized story out as not_a_component, still counting it as done', async () => {
+    const page = (log: string[]): StoryPage => {
+      const inner = fakePage(log, { withoutControls: (id) => id.includes('catalogue') })
+      return {
+        ...inner,
+        evaluate: (async (fn: unknown, arg: unknown) => {
+          if (fn === captureStory && new URL(log.at(-1)!).searchParams.get('id')?.includes('catalogue')) {
+            const many = Array.from({ length: 200 }, (_, index) => (index ? `div:nth-child(${index})` : 'div.page'))
+            return JSON.stringify(
+              shot({
+                html: '<div class="page"></div>',
+                paths: many,
+                shape: many.map(() => '0div').join(','),
+                styles: many.map(() => STYLE_PROPERTIES.map(() => '')),
+              }),
+            )
+          }
+          return (inner.evaluate as (fn: unknown, arg: unknown) => Promise<unknown>)(fn, arg)
+        }) as StoryPage['evaluate'],
+      }
+    }
+    const events: { rendered: number; total: number }[] = []
+    const result = await buildComponentBundle({
+      entries: [entry('Kit/Btn'), entry('Pages/Catalogue')],
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: async (use) => use(page([])),
+      onRender: (event) => events.push(event),
+    })
+    expect(result.bundle.components.map((component) => component.name)).toEqual(['Btn'])
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({
+        code: 'not_a_component',
+        component: 'Catalogue',
+        message: expect.stringContaining('Pages/Catalogue'),
+      }),
+    )
+    expect(events.map((event) => [event.rendered, event.total])).toEqual([
+      [1, 2],
+      [2, 2],
+    ])
+  })
+
+  it('leaves a story that renders nothing out as not_a_component', async () => {
+    const empty = (log: string[]): StoryPage => ({
+      ...fakePage(log),
+      evaluate: (async (fn: unknown) => {
+        if (fn === captureStory)
+          return JSON.stringify({ ok: false, reason: 'The story rendered nothing into #storybook-root' })
+        return undefined
+      }) as StoryPage['evaluate'],
+    })
+    await expect(
+      buildComponentBundle({
+        entries: [entry('Docs/Blank')],
+        source,
+        baseUrl: 'https://sb.test/',
+        withPage: async (use) => use(empty([])),
+      }),
+    ).rejects.toBeInstanceOf(BundleImportError)
   })
 
   it('leaves a failing story out and throws when nothing imports', async () => {

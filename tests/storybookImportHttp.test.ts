@@ -127,11 +127,12 @@ describe.skipIf(!findBrowserPath())(
         total: number
         component: string
       }[]
-      expect(progress.length).toBeGreaterThan(3)
+      /* one line per component, against the total the plan announced, which never moves */
+      const planned = out[0] as unknown as { renders: number }
+      expect(progress.length).toBe(planned.renders)
       progress.forEach((entry, index) => {
         expect(entry.rendered).toBe(index + 1)
-        expect(entry.total).toBeGreaterThanOrEqual(entry.rendered)
-        if (index) expect(entry.total).toBeGreaterThanOrEqual(progress[index - 1]!.total)
+        expect(entry.total).toBe(planned.renders)
       })
       expect(progress.map((entry) => entry.component)).toContain('Button')
       const last = out.at(-1)! as unknown as {
@@ -173,8 +174,8 @@ describe.skipIf(!findBrowserPath())(
       expect(started.planned?.components.map((c) => c.name)).toEqual(['Button'])
       const done = await untilNotRunning(agent, canvasId, started.job_id)
       expect(done.status).toBe('done')
-      expect(done.rendered).toBeGreaterThanOrEqual(2)
-      expect(done.total).toBeGreaterThanOrEqual(done.rendered)
+      expect(done.total).toBe(started.planned?.renders)
+      expect(done.rendered).toBe(done.total)
       expect(done.result?.created).toEqual([])
       expect([...(done.result?.updated ?? []), ...(done.result?.unchanged ?? [])].map((entry) => entry.name)).toEqual([
         'Button',
