@@ -741,8 +741,19 @@ async function writeFrameRow(f: Frame) {
   const { id, createdAt, ...set } = row
   await db.insert(t.frames).values(row).onConflictDoUpdate({ target: t.frames.id, set })
   /* a save made while this one was in flight keeps the frame dirty */
-  if (dirtyFrames.get(f.id) === generation) dirtyFrames.delete(f.id)
+  if (dirtyFrames.get(f.id) === generation) {
+    dirtyFrames.delete(f.id)
+    for (const listener of frameStoredListeners) listener(f.id)
+  }
   await syncAssetRefs(f.id, row.html)
+}
+
+const frameStoredListeners = new Set<(frameId: string) => void>()
+
+/** Told each time a frame's latest state has been written (its debounce, a write that followed it). */
+export function onFrameStored(listener: (frameId: string) => void): () => void {
+  frameStoredListeners.add(listener)
+  return () => frameStoredListeners.delete(listener)
 }
 
 /** A frame whose latest state is not yet stored: waiting on its debounce,

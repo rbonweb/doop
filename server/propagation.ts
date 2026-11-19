@@ -104,10 +104,31 @@ const handlers = new Map<FrameTask, FrameTaskHandler>()
 /** Where queue rows are kept: set once at server start; without one (unit tests) the queue is memory only. */
 export interface QueueStore {
   write(upserts: PropagationRow[], removals: { frameId: string; task: string }[]): Promise<void>
+  /** Is the frame's latest html still on its way to the database? A visited frame's row is kept
+   *  until it is not: a kill before the write would otherwise lose both the change and the work. */
+  frameWritePending?(frameId: string): boolean
+  /** Call `listener` each time a frame's latest state has been stored. */
+  onFrameStored?(listener: (frameId: string) => void): void
 }
 let queueStore: QueueStore | undefined
 export function useQueueStore(next: QueueStore | undefined) {
   queueStore = next
+  next?.onFrameStored?.(frameStored)
+}
+
+/** Component work is not stopped by `DOOP_PROPAGATION_PAUSED` in production: it is a test switch. */
+export function paused(): boolean {
+  return env.DOOP_PROPAGATION_PAUSED && env.NODE_ENV !== 'production'
+}
+
+/** frame id -> tasks whose row waits for the frame's write to reach the database before it is deleted */
+const heldRemovals = new Map<string, Set<FrameTask>>()
+
+function frameStored(frameId: string) {
+  const held = heldRemovals.get(frameId)
+  if (!held) return
+  heldRemovals.delete(frameId)
+  for (const task of held) forgetRow(task, frameId, true)
 }
 
 /** Row changes not yet sent: the latest word per frame and task (a row, or null for "delete"),
@@ -118,6 +139,7 @@ const rowKey = (task: FrameTask, frameId: string) => `${task}\0${frameId}`
 
 function rememberRow(canvasId: string, task: FrameTask, frameId: string, componentIds: Iterable<string>, actor: Actor) {
   if (!queueStore) return
+  heldRemovals.get(frameId)?.delete(task)
   dirtyRows.set(rowKey(task, frameId), {
     frameId,
     task,
@@ -129,8 +151,14 @@ function rememberRow(canvasId: string, task: FrameTask, frameId: string, compone
   scheduleFlush()
 }
 
-function forgetRow(task: FrameTask, frameId: string) {
+function forgetRow(task: FrameTask, frameId: string, durable = !queueStore?.frameWritePending?.(frameId)) {
   if (!queueStore) return
+  if (!durable) {
+    let held = heldRemovals.get(frameId)
+    if (!held) heldRemovals.set(frameId, (held = new Set()))
+    held.add(task)
+    return
+  }
   dirtyRows.set(rowKey(task, frameId), null)
   scheduleFlush()
 }
@@ -193,6 +221,22 @@ function unmarkCatching(canvasId: string, frameIds: string[]) {
 function release(canvasId: string, task: FrameTask, frameId: string) {
   forgetRow(task, frameId)
   if (handlers.get(task)?.waits) unmarkCatching(canvasId, [frameId])
+}
+
+/** The frame was deleted: whatever it was owed, in the queue or kept for a stream, is owed no more. */
+export function frameDeleted(frameId: string) {
+  heldRemovals.delete(frameId)
+  const owed = deferred.get(frameId)
+  deferred.delete(frameId)
+  const canvasId = owed?.canvasId
+  for (const task of handlers.keys()) {
+    const state = [...jobs.values()].flatMap((job) => (job.tasks.get(task)?.todo.has(frameId) ? [job] : []))
+    for (const job of state) job.tasks.get(task)?.todo.delete(frameId)
+    if (owed?.tasks.has(task) || state.length) {
+      forgetRow(task, frameId, true)
+      if (handlers.get(task)?.waits) unmarkCatching(canvasId ?? state[0]!.canvasId, [frameId])
+    }
+  }
 }
 
 /** A canvas that is gone, or a job given up: its queued frames are owed nothing. */
@@ -335,7 +379,7 @@ export function wake() {
 }
 
 function schedule() {
-  if (scheduled || !ring.length || env.DOOP_PROPAGATION_PAUSED) return
+  if (scheduled || !ring.length || paused()) return
   scheduled = true
   /* detached: a tick is scheduled from inside whatever asked for work, and must never
      join that request's write boundary (server/journal.ts) */
@@ -503,7 +547,8 @@ export function pendingFrames(canvasId: string): number {
 /** Resolves when the canvas has no work pending, with what its queue did since it last was idle. */
 export function whenCanvasIdle(canvasId: string): Promise<DrainReports> {
   const job = jobs.get(canvasId)
-  if (!job) return Promise.resolve({})
+  /* a held queue (a test switch) would never answer */
+  if (!job || paused()) return Promise.resolve({})
   return new Promise((resolve) => job.waiters.push(resolve))
 }
 

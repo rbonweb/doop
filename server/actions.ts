@@ -2478,7 +2478,7 @@ export async function resumePropagationQueue(): Promise<{ frames: number; canvas
     frames += live.length
     canvases += 1
     propagation.restore(canvasId, live)
-    if (!env.DOOP_PROPAGATION_PAUSED) await propagation.whenCanvasIdle(canvasId)
+    await propagation.whenCanvasIdle(canvasId)
   }
   if (gone.length) await persist.writePropagationRows([], gone)
   return { frames, canvases, dropped: gone.length }
@@ -2491,7 +2491,7 @@ export async function resumePropagationQueue(): Promise<{ frames: number; canvas
  */
 export async function catchUpComponentsBehind(): Promise<{ components: number; canvases: number }> {
   /* propagation switched off: frames follow on their own next write, by choice */
-  if (env.DOOP_DEFER_COMPONENT_PROPAGATION || env.DOOP_PROPAGATION_PAUSED) return { components: 0, canvases: 0 }
+  if (env.DOOP_DEFER_COMPONENT_PROPAGATION || propagation.paused()) return { components: 0, canvases: 0 }
   const behind = await persist.componentsBehind()
   const byCanvas = new Map<string, Set<string>>()
   for (const { canvasId, componentId } of behind)
@@ -3032,6 +3032,8 @@ export const deleteFrame = atomic(function deleteFrame(frameId: string, actor: A
   const doomedNotes = doomed ? (doomedCanvas?.notes ?? []).filter((n) => n.frameId === frameId) : []
   const frame = store.deleteFrame(frameId)
   if (!frame) return undefined
+  /* what the frame was owed from the component queue goes with it, once the delete commits */
+  afterCommit(() => propagation.frameDeleted(frameId))
   /* a note that went with its frame is remembered once the delete commits, so an undone one leaves no tombstone */
   afterCommit(() => {
     for (const note of doomedNotes)

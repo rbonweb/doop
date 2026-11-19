@@ -68,11 +68,22 @@ const restyle = (frameId: string, cls: string) =>
     actor,
   )
 
+/** frames whose latest html the fake database has not stored yet, and who to tell when it has */
+const unstored = new Set<string>()
+let stored: (frameId: string) => void = () => {}
+
 beforeEach(() => {
+  unstored.clear()
   rows.clear()
   changes.length = 0
   write.mockClear()
-  propagation.useQueueStore({ write })
+  propagation.useQueueStore({
+    write,
+    frameWritePending: (frameId) => unstored.has(frameId),
+    onFrameStored: (listener) => {
+      stored = listener
+    },
+  })
   propagation.onCatchingUp((canvasId, added, removed) => changes.push({ canvasId, added, removed }))
 })
 
@@ -125,6 +136,57 @@ describe('the queue in the database', () => {
     await propagation.whenIdle()
     await propagation.flushQueueStore()
     expect(rows.size).toBe(0)
+  })
+
+  it("keeps a visited frame's row until its new html is stored", async () => {
+    const { canvas, main, using } = kit(2)
+    await propagation.whenIdle()
+    await propagation.flushQueueStore()
+    rows.clear()
+    for (const frame of using) unstored.add(frame.id)
+
+    restyle(main.id, 'durable')
+    await propagation.whenIdle()
+    await propagation.flushQueueStore()
+    for (const frame of using) expect(store.getFrame(frame.id)!.html).toContain('btn durable')
+    /* visited, but not yet stored: the rows stay, so a kill now would still be resumed */
+    expect(
+      [...rows.values()]
+        .filter((row) => row.canvasId === canvas.id)
+        .map((row) => row.frameId)
+        .sort(),
+    ).toEqual(using.map((f) => f.id).sort())
+
+    unstored.clear()
+    for (const frame of using) stored(frame.id)
+    await propagation.flushQueueStore()
+    expect(rows.size).toBe(0)
+  })
+
+  it('drops what a frame is owed when the frame is deleted', async () => {
+    const { canvas, main, using } = kit(2)
+    await propagation.whenIdle()
+    await propagation.flushQueueStore()
+    rows.clear()
+    stubEnv('DOOP_PROPAGATION_PAUSED', 'true')
+    restyle(main.id, 'gone')
+    actions.deleteFrame(using[0]!.id, actor)
+    await propagation.flushQueueStore()
+    expect([...rows.values()].map((row) => row.frameId)).not.toContain(using[0]!.id)
+    expect(rows.size).toBe(2)
+    expect(propagation.catchingUp(canvas.id)).toEqual([using[1]!.id])
+  })
+
+  it('does not make a wait hang while the queue is held', async () => {
+    const { canvas, main } = kit(1)
+    await propagation.whenIdle()
+    stubEnv('DOOP_PROPAGATION_PAUSED', 'true')
+    restyle(main.id, 'held')
+    await expect(propagation.whenCanvasIdle(canvas.id)).resolves.toEqual({})
+    stubEnv('BETTER_AUTH_SECRET', 'x'.repeat(40))
+    stubEnv('BETTER_AUTH_URL', 'https://doop.example')
+    stubEnv('NODE_ENV', 'production')
+    expect(propagation.paused()).toBe(false)
   })
 
   it('drops the rows of a canvas that is gone, and ignores rows for one that is', async () => {

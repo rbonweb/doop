@@ -15,7 +15,12 @@ export function FrameCatchingUpBadge({ frameId }: { frameId: string }) {
         data-frame-catching-up=""
         className="flex shrink-0 items-center gap-1 rounded-pill bg-surface px-1.5 py-px text-micro font-medium text-ink-soft shadow-ring"
       >
-        <SyncIcon width={10} height={10} aria-hidden className="shrink-0 animate-spin [animation-duration:2.4s]" />
+        <SyncIcon
+          width={10}
+          height={10}
+          aria-hidden
+          className="shrink-0 animate-spin [animation-duration:2.4s] motion-reduce:animate-none"
+        />
         {t('stage.catchingUp')}
       </span>
     </Tooltip>

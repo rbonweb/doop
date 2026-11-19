@@ -293,6 +293,9 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     propagation
       .flushQueueStore()
       .then(() => persist.flush((id) => store.getFrame(id)))
+      /* frames stored by the flush release their queue rows */
+      .then(() => propagation.flushQueueStore())
+      .then(() => persist.flush((id) => store.getFrame(id)))
       .catch((err) => console.error('flush on shutdown failed', err))
       .finally(() => process.exit(0))
   })
@@ -511,7 +514,11 @@ function agentTouch(
 /* claims change when an agent claims, releases or lets one lapse: the room always gets the whole list */
 onClaimsChange((canvasId, claims) => broadcast(canvasId, claimsMessage(canvasId, claims)))
 /* the component work queue is kept in the database, so a restart resumes it (actions.resumePropagationQueue) */
-propagation.useQueueStore({ write: persist.writePropagationRows })
+propagation.useQueueStore({
+  write: persist.writePropagationRows,
+  frameWritePending: persist.frameWritePending,
+  onFrameStored: (listener) => void persist.onFrameStored(listener),
+})
 
 setInterval(() => {
   const now = Date.now()
@@ -598,7 +605,7 @@ app.get('/healthz/store', (_req, res) => {
 
 /* the component work queue: canvases and frames waiting for a visit (server/propagation.ts) */
 app.get('/healthz/propagation', (_req, res) => {
-  res.json({ ...propagation.stats(), paused: env.DOOP_PROPAGATION_PAUSED })
+  res.json({ ...propagation.stats(), paused: propagation.paused() })
 })
 
 /* every request is one operation: the component engine's work budget is counted against

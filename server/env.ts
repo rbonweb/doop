@@ -209,7 +209,8 @@ const schema = {
      other frame synchronously (each catches up on its own next write) */
   DOOP_DEFER_COMPONENT_PROPAGATION: bool({ default: false }),
   /* holds the component work queue (server/propagation.ts): frames are queued and stored but not
-     visited until the next boot without it; for tests of the restart path and for an operator */
+     visited until the next boot without it. Test-only, for the restart test: ignored when NODE_ENV
+     is production, and while it holds, waits on the queue (update_library_everywhere) return at once */
   DOOP_PROPAGATION_PAUSED: bool({ default: false }),
   /* what one operation (a request, a tool call, one frame of the propagation queue) may
      hand the component engine's HTML parser, and how long it may spend in it
