@@ -47,7 +47,8 @@ export const componentVariants = {
   previewHint: 'Shows a combination on the main. Nothing is saved.',
   previewAria: 'Preview {prop}',
   editing: 'Editing {combination}',
-  editingHint: 'Style changes now apply to this combination only.',
+  editingHint:
+    'Style changes in this panel and resizing now apply to this combination only, and ⌘Z cannot undo them. Moving, turning and aligning are off until you go back to the base.',
   backToBase: 'Back to base',
   styledProperties: {
     one: '{count} property styled for this combination.',
@@ -56,5 +57,7 @@ export const componentVariants = {
 
   failed: 'The variants could not be changed.',
   styleFailed: 'The variant style could not be saved.',
+  refused:
+    'A variant is being previewed: go back to the base to do this. Here it would change the component itself and every instance.',
   noPart: 'This layer has no key to style per variant. Go back to the base to edit it.',
 } as const

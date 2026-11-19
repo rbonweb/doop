@@ -25,7 +25,7 @@ import {
   type SizeMode,
 } from '../lib/cssValues'
 import { flexSizeAxis } from '../lib/flexLayout'
-import { variantEditTarget, writeVariantStyle } from '../lib/variantPreview'
+import { refuseWhileVariantPreview, variantEditTarget, writeVariantStyle } from '../lib/variantPreview'
 import { cn } from '@/lib/utils'
 import { LayerKindIcon } from './LayerKindIcon'
 import { FlexLayoutControls, PaddingControls } from './FlexLayoutControls'
@@ -234,18 +234,20 @@ export function ElementPanel({
   function apply(styles: StylePatch) {
     if (!info) return
     /* while a variant combination is previewed the edit belongs to that combination, not to the element's own style */
-    if (variantEditTarget(frame, selector)) {
+    const variant = variantEditTarget(frame, selector)
+    if (variant) {
       if (variantGesture.current) {
         Object.assign(variantGesture.current, styles)
         updateRead(styleElement(frame.id, selector, styles))
-      } else writeVariantStyle(frame, selector, styles)
+      } else writeVariantStyle(frame, selector, styles, variant)
       return
     }
     updateRead(styleElement(frame.id, selector, styles))
   }
 
   function editGeometry(edit: GeometryEdit) {
-    if (info) updateRead(editElementGeometry(frame.id, selector, edit))
+    if (info && !refuseWhileVariantPreview(frame.id, selector))
+      updateRead(editElementGeometry(frame.id, selector, edit))
   }
 
   function scrub(phase: 'begin' | 'commit' | 'cancel') {

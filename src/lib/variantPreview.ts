@@ -95,10 +95,31 @@ export interface VariantEditTarget {
 }
 
 /** Where a style edit to this element goes: the previewed combination, when a non-default one is previewed on this
- *  frame and the element is the main or inside it. Null means an ordinary inline edit. */
+ *  frame and the element is the main or inside it. Null means an ordinary inline edit. The answer is kept for the
+ *  last frame text, selector and preview, so the steps of a scrub parse the frame once. */
+let lastTarget: {
+  html: string
+  selector: string
+  preview: VariantPreview | null
+  target: VariantEditTarget | null
+} | null = null
 export function variantEditTarget(frame: Frame, selector: string): VariantEditTarget | null {
   const { preview } = useVariantPreview.getState()
   if (!preview || preview.frameId !== frame.id || Object.keys(preview.when).length === 0) return null
+  if (
+    lastTarget &&
+    lastTarget.preview === preview &&
+    lastTarget.selector === selector &&
+    lastTarget.html === frame.html
+  ) {
+    return lastTarget.target
+  }
+  const target = resolveTarget(frame, selector, preview)
+  lastTarget = { html: frame.html, selector, preview, target }
+  return target
+}
+
+function resolveTarget(frame: Frame, selector: string, preview: VariantPreview): VariantEditTarget | null {
   const context = componentContextOf(frame.html, selector, useStore.getState().canvas?.components ?? [])
   if (!context || context.kind !== 'main' || context.def.id !== preview.componentId) return null
   if (context.isRoot) return { preview, canvasId: frame.canvasId, element: 'root' }
@@ -110,6 +131,20 @@ export function variantEditTarget(frame: Frame, selector: string): VariantEditTa
     key = null
   }
   return { preview, canvasId: frame.canvasId, element: key }
+}
+
+/** For a writer that cannot be sent to a variant (a move, a turn, an align, a paste of styles): true after telling the
+ *  person to go back to the base, when one of these elements is the previewed main or inside it. The writer returns
+ *  without writing, since an inline style on the main would land in the component and every instance. */
+export function refuseWhileVariantPreview(frameId: string, selectors: string | readonly string[]): boolean {
+  const { preview } = useVariantPreview.getState()
+  if (!preview || preview.frameId !== frameId || Object.keys(preview.when).length === 0) return false
+  const frame = useStore.getState().canvas?.frames.find((f) => f.id === frameId)
+  if (!frame) return false
+  const list = typeof selectors === 'string' ? [selectors] : selectors
+  if (!list.some((selector) => variantEditTarget(frame, selector))) return false
+  useStore.getState().pushNotice(t('componentVariants.refused'))
+  return true
 }
 
 /* Edits to one element arrive many times a second (a colour drag, a typed value): they merge into one write per
@@ -147,8 +182,13 @@ async function flush(): Promise<void> {
 
 /** Queue a Design panel patch for the previewed combination. False when the element is not under a previewed
  *  combination (the caller writes it inline as usual). */
-export function writeVariantStyle(frame: Frame, selector: string, patch: StylePatch): boolean {
-  const target = variantEditTarget(frame, selector)
+export function writeVariantStyle(
+  frame: Frame,
+  selector: string,
+  patch: StylePatch,
+  resolved: VariantEditTarget | null = variantEditTarget(frame, selector),
+): boolean {
+  const target = resolved
   if (!target) return false
   if (target.element === null) {
     useStore.getState().pushNotice(t('componentVariants.noPart'))

@@ -46,7 +46,8 @@ export const componentVariants = {
   previewHint: 'Mostra uma combinação no principal. Nada é salvo.',
   previewAria: 'Visualizar {prop}',
   editing: 'Editando {combination}',
-  editingHint: 'As mudanças de estilo agora valem só para essa combinação.',
+  editingHint:
+    'As mudanças de estilo neste painel e o redimensionamento agora valem só para essa combinação, e ⌘Z não as desfaz. Mover, girar e alinhar ficam desligados até você voltar à base.',
   backToBase: 'Voltar à base',
   styledProperties: {
     one: '{count} propriedade com estilo nesta combinação.',
@@ -55,5 +56,7 @@ export const componentVariants = {
 
   failed: 'Não foi possível alterar as variantes.',
   styleFailed: 'Não foi possível salvar o estilo da variante.',
+  refused:
+    'Uma variante está em visualização: volte à base para fazer isso. Aqui isso mudaria o próprio componente e todas as instâncias.',
   noPart: 'Esta camada não tem chave para estilizar por variante. Volte à base para editá-la.',
 }
