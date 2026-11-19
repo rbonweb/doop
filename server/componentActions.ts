@@ -779,6 +779,8 @@ export interface UpdateInput {
   replace?: string
   expectedRev?: number
   dryRun?: boolean
+  /** server-side only (variant edits): rewrites the main frame's other stylesheets in the same write as the main */
+  restyle?: (html: string) => string
 }
 
 export interface UpdateResult {
@@ -905,7 +907,8 @@ export const updateComponent = atomic(function updateComponent(
   const propsChanged = nextProps !== undefined && JSON.stringify(nextProps) !== JSON.stringify(def.props)
   /* this function is one unit (server/journal.ts): a refusal anywhere in it, the work budget
      included, undoes the name, props and revision saved below along with the main's write */
-  const writesMain = nextRoot !== undefined || input.css !== undefined || input.props !== undefined
+  const writesMain =
+    nextRoot !== undefined || input.css !== undefined || input.props !== undefined || input.restyle !== undefined
   const root = writesMain ? (nextRoot ?? alignedRoot(def.template, def)) : undefined
   const meta: ComponentDef = {
     ...(propsChanged ? bumpRevision(def, actor.name) : def),
@@ -920,7 +923,8 @@ export const updateComponent = atomic(function updateComponent(
   store.saveComponent(canvasId, meta)
 
   if (root) {
-    const write = () => writeMain(canvasId, meta, root, input.css, actor, input.head ? def.head : undefined)
+    const write = () =>
+      writeMain(canvasId, meta, root, input.css, actor, input.head ? def.head : undefined, input.restyle)
     /* the props above opened a revision: the main's write is the rest of it, not another */
     if (propsChanged) withinRevision(canvasId, def.id, write)
     else write()
@@ -969,6 +973,7 @@ function writeMain(
   css: string | undefined,
   actor: Actor,
   replacedHead?: string[],
+  restyle?: (html: string) => string,
 ) {
   const frame = def.mainFrameId ? store.getFrame(def.mainFrameId) : undefined
   const rendered = serializeOuter(root)
@@ -992,6 +997,7 @@ function writeMain(
       )
   }
   let html = splice(frame.html, [{ start: located.start, end: located.end, text }])
+  if (restyle) html = restyle(html)
   if (css !== undefined) html = withSourceCss(html, def.id, css)
   if (replacedHead) html = withHeadTags(html, replacedHead, def.head)
   actions.updateFrame(frame.id, { html }, actor)
@@ -1113,6 +1119,8 @@ export interface InstanceChange {
   detach?: boolean
   /** show another component at one nested part of this instance; `component: null` puts the template's back */
   swap?: { part: string; component: string | null }
+  /** server-side only (variant edits): rewrites the stored prop values after the changes above, with no check against the definition */
+  mapProps?: (props: Record<string, string>) => Record<string, string>
 }
 
 /** One instance's swap of a nested component for another (or back): checked here, stored as `parts[part].swap`. */
@@ -1185,6 +1193,11 @@ function applyChange(state: InstanceOverrides, change: InstanceChange): Instance
   }
 }
 
+function withMappedProps(state: InstanceOverrides, map: NonNullable<InstanceChange['mapProps']>): InstanceOverrides {
+  const props = map({ ...state.props })
+  return { ...(Object.keys(props).length ? { props } : {}), ...(state.parts ? { parts: state.parts } : {}) }
+}
+
 /** One frame write however many instances change, so the whole batch is one undo step. */
 export const changeInstances = atomic(function changeInstances(
   canvasId: string,
@@ -1225,7 +1238,8 @@ export const changeInstances = atomic(function changeInstances(
       /* a rich-text value is stored in its safe form, and the agent hears what was taken out of it */
       const props = cleanPropValues(def, change.props, ctx)
       const changed = applyChange(state.overrides, props === change.props ? change : { ...change, props })
-      const next = change.swap ? applySwap(changed, def, change.swap, canvasId) : changed
+      const swapped = change.swap ? applySwap(changed, def, change.swap, canvasId) : changed
+      const next = change.mapProps ? withMappedProps(swapped, change.mapProps) : swapped
       const rendered = renderInstance(def, def, next, id, { ctx, stack: [] })
       if (!rendered) continue
       /* below another instance, this root is that instance's part */
