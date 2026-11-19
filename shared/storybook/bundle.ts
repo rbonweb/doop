@@ -116,6 +116,23 @@ function controlStories(group: { defaultStory: { id: string }; stories: { id: st
 /** How many other stories are rendered to find controls the default story lacks. */
 const MAX_CONTROL_PROBES = 2
 
+/** The marker attribute every captured element carries (`data-doop-m-<random>="<index>"`), which differs per render and says nothing about the story. */
+const RENDER_MARKER = / data-doop-m-[0-9a-f]+="\d{1,6}"/g
+
+/** Whether two captures are the same render: the same markup, rules and computed looks, ignoring the per-render markers. */
+export function sameRender(a: CapturedStory, b: CapturedStory): boolean {
+  return (
+    a.html.replace(RENDER_MARKER, '') === b.html.replace(RENDER_MARKER, '') &&
+    a.css === b.css &&
+    JSON.stringify(a.styles) === JSON.stringify(b.styles)
+  )
+}
+
+/** A capture that failed for a reason that says nothing about the story: the render ran out of time, the page would not load, or the renderer could not open it. A story that errors or needs a worker would fail the same way again. */
+function isTransientFailure(capture: { ok: false; reason: string; code?: string }): boolean {
+  return !capture.code && (capture.reason === RENDER_FAILED || /in time|took too long/.test(capture.reason))
+}
+
 /** One story, rendered and captured. A failure to load, a story that errors or one that never renders is a `capture` with `ok: false`, never a throw (an abort is the only throw). */
 export async function renderStory(page: StoryPage, request: RenderRequest, signal?: AbortSignal): Promise<StoryRender> {
   const issues: StorybookIssue[] = []
@@ -471,18 +488,28 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     renders += plan.renders.length
     plannedTotal += plan.renders.length
     const rendered = await inPool(plan.renders, concurrency, async (variant) => {
-      const result = await render({
-        storyId: controls.storyId,
-        args: { [variant.arg]: variant.argValue },
-        readMeta: false,
-      })
-      renderedCount++
-      input.onRender?.({
-        rendered: renderedCount,
-        total: Math.max(plannedTotal, renderedCount),
-        component: group.name,
-      })
-      return { variant, result }
+      const request = { storyId: controls.storyId, args: { [variant.arg]: variant.argValue }, readMeta: false }
+      const tick = () => {
+        renderedCount++
+        input.onRender?.({
+          rendered: renderedCount,
+          total: Math.max(plannedTotal, renderedCount),
+          component: group.name,
+        })
+      }
+      let result = await render(request)
+      tick()
+      /* a render that looks exactly like the default was probably captured before the story took the new args (the page announced the render a beat before the framework committed it), and one that ran out of time or lost its page is a dropped request: ask again once on a fresh page. A value that really changes nothing is told apart by the second render being the same too */
+      const again = (shot: StoryCapture) => (shot.ok ? sameRender(controls.base, shot) : isTransientFailure(shot))
+      let identical = result.capture.ok && sameRender(controls.base, result.capture)
+      if (again(result.capture) && renders < STORYBOOK_LIMITS.renders && !input.signal?.aborted) {
+        renders++
+        plannedTotal++
+        result = await render(request)
+        tick()
+        identical = result.capture.ok && sameRender(controls.base, result.capture)
+      }
+      return { variant, result, identical }
     })
     const variants: NonNullable<BundleComponent['variants']> = {}
     const reflected = new Set<string>()
@@ -496,11 +523,17 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     )
     const known = new Set(splitRules(shipped.css).rules)
     const extraRules: string[] = []
-    for (const { variant, result } of rendered) {
+    for (const { variant, result, identical } of rendered) {
       const shot = result.capture
       if (!shot.ok) {
         note('variant_failed', `${variant.prop}=${variant.value} could not be captured: ${shot.reason}`)
         continue
+      }
+      if (identical) {
+        note(
+          'variant_identical',
+          `${variant.prop}=${variant.value} rendered exactly like the default, twice, so it adds nothing: either the value changes nothing visible or the story did not take it`,
+        )
       }
       for (const rule of shot.sharedRules) shared.add(rule)
       if (bound.has(variant.prop)) {

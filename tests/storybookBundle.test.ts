@@ -12,6 +12,7 @@ import {
   KnownRenderError,
   renderStory,
   safeDeclarationValue,
+  sameRender,
   type StoryPage,
 } from '../shared/storybook/bundle.ts'
 import { captureStory, settleStory, STYLE_PROPERTIES, type CapturedStory } from '../shared/storybook/capture.ts'
@@ -380,6 +381,86 @@ describe('buildComponentBundle', () => {
         signal: controller.signal,
       }),
     ).rejects.toThrow('cancelled')
+  })
+})
+
+describe('a variant captured before the story took its args', () => {
+  const source = { kind: 'storybook' as const, url: 'https://sb.test/' }
+  /** the page shows the default look for the first `stale` visits to the tone=b story (Storybook announced the render before the framework committed the new args) */
+  const stalePage = (log: string[], stale: number, count: { visits: number }): StoryPage => {
+    const page = fakePage(log)
+    return {
+      ...page,
+      goto: async (url, timeoutMs) => {
+        const next = new URL(url)
+        if (next.searchParams.get('args')?.includes('tone:b') && count.visits++ < stale) {
+          next.searchParams.set('args', 'tone:a')
+          return page.goto(next.href, timeoutMs)
+        }
+        return page.goto(url, timeoutMs)
+      },
+    }
+  }
+  const build = (log: string[], stale: number, count = { visits: 0 }) =>
+    buildComponentBundle({
+      entries: [entry('A/Button')],
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: async (use) => use(stalePage(log, stale, count)),
+    })
+
+  it('asks for the render again and keeps the variant when the second render carries the args', async () => {
+    const log: string[] = []
+    const count = { visits: 0 }
+    const { bundle, issues } = await build(log, 1, count)
+    expect(bundle.components[0]?.variants?.tone?.b).toBeDefined()
+    expect(issues.some((issue) => issue.code === 'variant_identical')).toBe(false)
+    expect(count.visits).toBe(2)
+  })
+
+  it('names the prop and value when the render is still the default after the second try, instead of dropping it silently', async () => {
+    const log: string[] = []
+    const { bundle, issues } = await build(log, 2)
+    expect(bundle.components[0]?.variants?.tone?.b).toBeUndefined()
+    const issue = issues.find((candidate) => candidate.code === 'variant_identical')
+    expect(issue?.message).toContain('tone=b')
+    expect(bundle.components[0]?.variants?.tone?.c).toBeDefined()
+  })
+
+  it('asks again once when a variant render runs out of time, and keeps it when the second try works', async () => {
+    const log: string[] = []
+    let tries = 0
+    const withSlowFirst = async <T>(use: (page: StoryPage) => Promise<T>) => {
+      const page = fakePage(log)
+      let asked = false
+      return use({
+        ...page,
+        goto: async (url, timeoutMs) => {
+          asked = new URL(url).searchParams.get('args')?.includes('tone:b') ?? false
+          return page.goto(url, timeoutMs)
+        },
+        waitForState: async (probe, timeoutMs) => {
+          if (asked && tries++ === 0) throw new KnownRenderError('The story did not finish rendering in time')
+          return page.waitForState(probe, timeoutMs)
+        },
+      })
+    }
+    const { bundle, issues } = await buildComponentBundle({
+      entries: [entry('A/Button')],
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withSlowFirst,
+    })
+    expect(tries).toBe(2)
+    expect(bundle.components[0]?.variants?.tone?.b).toBeDefined()
+    expect(issues.some((issue) => issue.code === 'variant_failed')).toBe(false)
+  })
+
+  it('does not count the per-render marker attributes as a difference', () => {
+    const a = shot({ html: '<button data-doop-m-aaaa="0">x</button>' })
+    const b = shot({ html: '<button data-doop-m-bbbb="0">x</button>' })
+    expect(sameRender(a, b)).toBe(true)
+    expect(sameRender(a, shot({ html: '<button data-doop-m-bbbb="0">y</button>' }))).toBe(false)
   })
 })
 
