@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { nanoid } from 'nanoid'
-import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, lt, or, sql } from 'drizzle-orm'
 import { db } from './index.ts'
 import * as t from './schema.ts'
 import { extractAssetIds } from '../assets.ts'
@@ -16,6 +16,7 @@ import { unloadHtml } from '../frameHtml.ts'
 import type {
   AccessRequest,
   ActivityItem,
+  Actor,
   ActorKind,
   AgentTask,
   CanvasNote,
@@ -343,6 +344,64 @@ export async function componentsBehind(): Promise<{ canvasId: string; componentI
     cross join lateral regexp_matches(f.html, 'data-doop-instance="' || c.id || '" data-doop-rev="(\\d+)"', 'g') as m
     where coalesce(c.status, 'active') = 'active' and c.rev > 1 and m[1]::int < c.rev`)
   return (result as unknown as { rows: { canvasId: string; componentId: string }[] }).rows
+}
+
+/** One frame's owed component work, as stored (server/propagation.ts). */
+export interface PropagationRow {
+  frameId: string
+  task: string
+  canvasId: string
+  componentIds: string[]
+  actor: Actor
+  queuedAt: number
+}
+
+/** Writes to the propagation queue's table run one after another, so a frame's delete can
+ *  never overtake the upsert that preceded it. */
+let propagationWrites: Promise<void> = Promise.resolve()
+
+/** Upsert and delete queue rows, in order. Never rejects: a failed write is logged, and the
+ *  frame is then simply not resumed after a restart (it still catches up on its next write). */
+export function writePropagationRows(upserts: PropagationRow[], removals: { frameId: string; task: string }[]) {
+  propagationWrites = propagationWrites
+    .then(async () => {
+      const q = t.componentPropagationQueue
+      for (let from = 0; from < upserts.length; from += 500) {
+        await db
+          .insert(q)
+          .values(upserts.slice(from, from + 500))
+          .onConflictDoUpdate({
+            target: [q.frameId, q.task],
+            set: {
+              canvasId: sql`excluded.canvas_id`,
+              componentIds: sql`excluded.component_ids`,
+              actor: sql`excluded.actor`,
+            },
+          })
+      }
+      for (let from = 0; from < removals.length; from += 500) {
+        const batch = removals.slice(from, from + 500)
+        await db.delete(q).where(or(...batch.map((row) => and(eq(q.frameId, row.frameId), eq(q.task, row.task)))))
+      }
+    })
+    .catch((err) => console.error('[db] propagation queue write failed', err))
+  return propagationWrites
+}
+
+/** Resolves once every queued propagation row write has landed (shutdown, tests). */
+export function propagationRowsWritten(): Promise<void> {
+  return propagationWrites
+}
+
+export async function loadPropagationRows(): Promise<PropagationRow[]> {
+  return db.select().from(t.componentPropagationQueue).orderBy(t.componentPropagationQueue.queuedAt)
+}
+
+export function deletePropagationRowsOf(canvasId: string) {
+  propagationWrites = propagationWrites
+    .then(() => db.delete(t.componentPropagationQueue).where(eq(t.componentPropagationQueue.canvasId, canvasId)))
+    .then(() => undefined)
+    .catch((err) => console.error('[db] propagation queue delete failed', err))
 }
 
 export function deleteComponent(canvasId: string, id: string) {
@@ -682,8 +741,19 @@ async function writeFrameRow(f: Frame) {
   const { id, createdAt, ...set } = row
   await db.insert(t.frames).values(row).onConflictDoUpdate({ target: t.frames.id, set })
   /* a save made while this one was in flight keeps the frame dirty */
-  if (dirtyFrames.get(f.id) === generation) dirtyFrames.delete(f.id)
+  if (dirtyFrames.get(f.id) === generation) {
+    dirtyFrames.delete(f.id)
+    for (const listener of frameStoredListeners) listener(f.id)
+  }
   await syncAssetRefs(f.id, row.html)
+}
+
+const frameStoredListeners = new Set<(frameId: string) => void>()
+
+/** Told each time a frame's latest state has been written (its debounce, a write that followed it). */
+export function onFrameStored(listener: (frameId: string) => void): () => void {
+  frameStoredListeners.add(listener)
+  return () => frameStoredListeners.delete(listener)
 }
 
 /** A frame whose latest state is not yet stored: waiting on its debounce,
@@ -931,6 +1001,7 @@ export function deleteCanvas(canvasId: string) {
     pendingComponentWrites(canvasId).then(() => db.delete(t.components).where(eq(t.components.canvasId, canvasId))),
   )
   swallow(db.delete(t.libraryComponents).where(eq(t.libraryComponents.canvasId, canvasId)))
+  deletePropagationRowsOf(canvasId)
   swallow(db.delete(t.guidelineVersions).where(eq(t.guidelineVersions.canvasId, canvasId)))
   swallow(
     pendingTokenWrites(canvasId).then(() => db.delete(t.designTokens).where(eq(t.designTokens.canvasId, canvasId))),
@@ -1417,6 +1488,7 @@ export async function flush(getFrame: (id: string) => Frame | undefined): Promis
   draining = true
   for (const wake of [...retryWaits]) wake()
   await pendingComponentWrites()
+  await propagationWrites
 }
 
 /* ------------------------------------------------------------------ */

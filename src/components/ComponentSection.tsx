@@ -377,6 +377,7 @@ function PropField({
         )
       }
       case 'text':
+      case 'richtext':
       case 'link':
         return (
           <TextField

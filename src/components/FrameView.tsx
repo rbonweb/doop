@@ -39,6 +39,7 @@ import { DEFAULT_ROLE_ID } from '../../shared/agents'
 import { posthog } from '../lib/posthog'
 import { isResidentLimit } from './TeamAllowance'
 import { MarkDot } from './MarkDot'
+import { FrameCatchingUpBadge } from './FrameCatchingUpBadge'
 import { FrameClaimBadge } from './FrameClaimBadge'
 import { useFrameMark } from '../lib/marks'
 import { CommentComposer, CommentPin, CommentThread } from './CommentPopovers'
@@ -1942,6 +1943,7 @@ export const FrameView = memo(function FrameView({
               <span className="min-w-0 overflow-hidden text-ellipsis">{frame.name}</span>
               <FrameApprovalBadge frame={frame} />
               <FrameClaimBadge frameId={frame.id} />
+              <FrameCatchingUpBadge frameId={frame.id} />
               {frame.slide && (
                 <Tooltip label={t('stage.slideTip')} side="top" align="start">
                   <span className="flex shrink-0 items-center gap-1 rounded-full bg-ink px-1.5 py-px text-micro font-semibold text-paper">

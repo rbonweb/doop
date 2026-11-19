@@ -757,6 +757,8 @@ export type ServerMessage =
       role: CanvasRole
       /** a signed-out visitor: capped at comment, sees frames, comments and presence only */
       guest?: boolean
+      /** frames still waiting for a change of a component's main to reach them */
+      catchingUp?: string[]
     }
   /** this connection's role changed (the owner edited sharing, or the share link changed) */
   | { type: 'role'; role: CanvasRole }
@@ -791,6 +793,8 @@ export type ServerMessage =
   | { type: 'frame:streaming'; frameId: string; active: boolean; actor: Actor }
   /** the advisory claims on this canvas's frames, whole list on every change and on join */
   | { type: 'frame:claims'; canvasId: string; claims: FrameClaimView[] }
+  /** frames waiting for a change of a component's main to reach them: ids that began waiting and ids that were visited */
+  | { type: 'frame:catching-up'; canvasId: string; added: string[]; removed: string[] }
   | { type: 'canvas:renamed'; name: string; actor: Actor }
   | { type: 'canvas:pages'; pages: CanvasPageInfo[]; actor: Actor }
   /** a sticky note was created or changed (position, size, text, colour) */

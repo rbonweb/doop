@@ -28,6 +28,7 @@ import { store } from '../server/store.ts'
 import { runOperation } from '../server/workBudget.ts'
 import { activeComponents, MAX_COMPONENTS, unsafeUrl } from '../shared/components.ts'
 import { cleanLabel, qualifierOf } from '../server/componentBundleImport.ts'
+import { primerCapturedButton } from './primerButtonBundle.ts'
 
 const OWNER = 'owner-1'
 const actor = actions.resolveActor({ name: 'Importer', kind: 'agent', userId: OWNER })
@@ -349,7 +350,8 @@ describe('importing a component bundle', () => {
     const def = activeComponents(store.getComponents(canvasId))[0]!
     expect(def.template).toContain('Go')
     expect(def.code?.exportName).toBe('Button')
-    expect(def.code?.props).toEqual({ tone: { name: 'kind' } })
+    /* the one text is the label, so a captured component's export gets it as its children */
+    expect(def.code?.props).toEqual({ tone: { name: 'kind' }, label: { name: 'children' } })
   })
 
   it('names no prop after a class of a captured component, and keeps doing so for an agent bundle', () => {
@@ -509,6 +511,180 @@ describe('a CLI bundle imported twice', () => {
     const css = findComponent(canvasId, result.created[0]!.id)!.rawCss
     expect(css).not.toContain(':root')
     expect(css).toContain('margin: 0')
+  })
+})
+
+describe('the one text of a captured component', () => {
+  const bundleOf = (kind: 'storybook' | 'cli' | 'agent', component: object) => ({
+    version: 1,
+    source: { kind, name: 'Primer' },
+    package: '@primer/react',
+    components: [component],
+  })
+  const created = (result: ImportResult) => findComponent(canvasId, result.created[0]!.id)!
+
+  it.each(['storybook', 'cli'] as const)(
+    'binds it as label and maps it to children on a %s bundle whose markup already holds bindings',
+    (kind) => {
+      const def = created(run(bundleOf(kind, primerCapturedButton())))
+      expect(def.template).toMatch(/<span data-component="text" data-doop-prop="label"[^>]*>Button<\/span>/)
+      expect(def.template).toContain('data-doop-prop="data-variant:variant"')
+      expect(def.props.find((prop) => prop.name === 'label')).toMatchObject({ type: 'text' })
+      expect(def.code?.props?.label).toEqual({ name: 'children' })
+    },
+  )
+
+  it('leaves an agent bundle alone: no label binding and no children mapping', () => {
+    const def = created(run(bundleOf('agent', primerCapturedButton())))
+    expect(def.template).not.toContain('data-doop-prop="label"')
+    expect(def.props.some((prop) => prop.name === 'label')).toBe(false)
+    expect(def.code?.props?.label).toBeUndefined()
+  })
+
+  it('leaves a prop the Storybook named, and the mapping it made, as they were', () => {
+    const named = {
+      ...primerCapturedButton(
+        '<button class="btn" data-variant="default" data-doop-prop="data-variant:variant"><span data-doop-prop="label">Button</span></button>',
+      ),
+      props: [
+        { name: 'variant', type: 'enum' as const, options: ['default', 'primary'], default: 'default' },
+        { name: 'label', type: 'text' as const },
+      ],
+      code: { exportName: 'Button', props: { label: { name: 'caption' } } },
+    }
+    const def = created(run(bundleOf('storybook', named)))
+    expect(def.code?.props?.label).toEqual({ name: 'caption' })
+    expect(def.props.filter((prop) => prop.name === 'label')).toHaveLength(1)
+  })
+
+  it('infers no second label when the Storybook named one that the markup does not bind', () => {
+    const unbound = {
+      ...primerCapturedButton(),
+      props: [
+        { name: 'variant', type: 'enum' as const, options: ['default', 'primary'], default: 'default' },
+        { name: 'label', type: 'text' as const },
+      ],
+    }
+    const def = created(run(bundleOf('storybook', unbound)))
+    expect(def.template).toContain('Button</span>')
+    expect(def.template).not.toMatch(/<span[^>]*data-doop-prop="label"/)
+    expect(def.code?.props?.label).toBeUndefined()
+  })
+
+  it('infers nothing when the markup shows two texts', () => {
+    const two = primerCapturedButton(
+      '<button class="btn" data-variant="default" data-doop-prop="data-variant:variant"><span>One</span><span>Two</span></button>',
+    )
+    const def = created(run(bundleOf('storybook', two)))
+    expect(def.template).not.toContain('data-doop-prop="label"')
+    expect(def.code?.props?.label).toBeUndefined()
+  })
+
+  it('maps the label to children even when an unrelated prop is omitted', () => {
+    const omitted = {
+      ...primerCapturedButton(),
+      code: { exportName: 'Button', props: { variant: { omit: true as const } } },
+    }
+    const def = created(run(bundleOf('storybook', omitted)))
+    expect(def.code?.props?.label).toEqual({ name: 'children' })
+  })
+
+  it('does not pass a rule it would clash with: a children slot or a prop already sent to children', () => {
+    const slotted = {
+      ...primerCapturedButton(),
+      code: { exportName: 'Button', props: { variant: { name: 'children' } } },
+    }
+    const def = created(run(bundleOf('storybook', slotted)))
+    expect(def.props.find((prop) => prop.name === 'label')).toBeDefined()
+    expect(def.code?.props?.label).toBeUndefined()
+  })
+
+  it('does not add the inferred label to children when a person moved children to another prop', () => {
+    const first = run(bundleOf('storybook', primerCapturedButton()))
+    const id = first.created[0]!.id
+    const stored = findComponent(canvasId, id)!
+    store.saveComponent(canvasId, {
+      ...stored,
+      code: { ...stored.code, props: { variant: { name: 'children' } } },
+    })
+    run(bundleOf('storybook', primerCapturedButton()))
+    const props = findComponent(canvasId, id)!.code?.props
+    expect(props?.variant).toEqual({ name: 'children' })
+    expect(props?.label).toBeUndefined()
+  })
+
+  it('reports a second import of the same bundle as unchanged', () => {
+    run(bundleOf('storybook', primerCapturedButton()))
+    const again = run(bundleOf('storybook', primerCapturedButton()))
+    expect(again.created).toEqual([])
+    expect(again.updated).toEqual([])
+    expect(again.unchanged.map((entry) => entry.name)).toEqual(['Button'])
+    expect(run(bundleOf('storybook', primerCapturedButton()), true).unchanged).toHaveLength(1)
+  })
+})
+
+describe('a component-valued enum in a bundle code mapping', () => {
+  const icons = (code: object, props?: object[]) => ({
+    version: 1,
+    source: { kind: 'storybook', name: 'Primer' },
+    package: '@primer/react',
+    components: [
+      {
+        name: 'IconButton',
+        html: '<button class="b" data-icon="HeartIcon" data-doop-prop="data-icon:icon">x</button>',
+        props: props ?? [{ name: 'icon', type: 'enum', options: ['HeartIcon', 'StarIcon'] }],
+        code: { exportName: 'IconButton', ...code },
+      },
+    ],
+  })
+
+  it('keeps component, importFrom and the renamed values on the stored mapping', () => {
+    const mapping = {
+      icon: { component: { importFrom: '@primer/octicons-react' }, values: { StarIcon: 'StarFillIcon' } },
+    }
+    const result = run(icons({ props: mapping }))
+    expect(result.created).toHaveLength(1)
+    const def = findComponent(canvasId, result.created[0]!.id)!
+    expect(def.code?.props?.icon).toEqual(mapping.icon)
+    expect(run(icons({ props: mapping })).unchanged).toHaveLength(1)
+  })
+
+  it('keeps a hand-edited mapping on re-import, and lets the import fill what the stored rule lacks', () => {
+    const mapping = {
+      icon: { component: { importFrom: '@primer/octicons-react' }, values: { StarIcon: 'StarFillIcon' } },
+    }
+    const first = run(icons({ props: mapping }))
+    const id = first.created[0]!.id
+    const stored = findComponent(canvasId, id)!
+    store.saveComponent(canvasId, {
+      ...stored,
+      code: {
+        ...stored.code,
+        props: {
+          icon: { name: 'glyph', component: { importFrom: '@acme/icons' }, values: { StarIcon: 'StarSolidIcon' } },
+        },
+      },
+    })
+    const again = run(icons({ props: mapping }))
+    expect(again.updated).toEqual([])
+    expect(findComponent(canvasId, id)!.code?.props?.icon).toEqual({
+      name: 'glyph',
+      component: { importFrom: '@acme/icons' },
+      values: { StarIcon: 'StarSolidIcon' },
+    })
+    /* a stored rule with no package takes the import's */
+    const bare = findComponent(canvasId, id)!
+    store.saveComponent(canvasId, { ...bare, code: { ...bare.code, props: { icon: { component: {} } } } })
+    run(icons({ props: mapping }))
+    expect(findComponent(canvasId, id)!.code?.props?.icon).toEqual(mapping.icon)
+  })
+
+  it('refuses a component mapping on a prop that is not an enum, naming it, and writes no mapping', () => {
+    const result = run(icons({ props: { icon: { component: {} } } }, [{ name: 'icon', type: 'text' }]))
+    expect(result.created).toEqual([])
+    expect(result.skipped).toHaveLength(1)
+    expect(result.skipped[0]?.reason).toMatch(/code\.props\.icon\.component belongs to an enum prop/)
+    expect(activeComponents(store.getComponents(canvasId))).toEqual([])
   })
 })
 

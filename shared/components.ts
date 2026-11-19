@@ -116,7 +116,19 @@ export const MAX_NESTING_DEPTH = 8
 /** instances inside instances however they got there, slot content included: the render stops here */
 export const MAX_INSTANCE_DEPTH = 32
 
-export const PROP_TYPES = ['text', 'image', 'link', 'enum', 'boolean', 'number', 'color', 'instance'] as const
+export const PROP_TYPES = [
+  'text',
+  'image',
+  'link',
+  'enum',
+  'boolean',
+  'number',
+  'color',
+  'instance',
+  'richtext',
+] as const
+/** the longest rich-text value a prop takes: the sanitizer bounds its work by it (server/richText.ts) */
+export const MAX_RICHTEXT_CHARS = 20_000
 export type ComponentPropType = (typeof PROP_TYPES)[number]
 
 export interface ComponentProp {
@@ -277,6 +289,9 @@ export type ComponentIssueCode =
   | 'css_not_kept'
   | 'empty_template'
   | 'unclosed_use'
+  | 'richtext_sanitized'
+  | 'unnamed_slot_content'
+  | 'unknown_slot'
 
 /** Something an agent should hear about instead of finding out from a screenshot. */
 export interface ComponentIssue {
@@ -571,6 +586,10 @@ export function propValueProblem(prop: ComponentProp, value: string, lookup?: Co
     case 'image':
       return unsafeUrl(value)
         ? 'use a web address, mailto:, tel: or a relative path, not a javascript:, vbscript: or data:text/html address'
+        : undefined
+    case 'richtext':
+      return value.length > MAX_RICHTEXT_CHARS
+        ? `use at most ${MAX_RICHTEXT_CHARS.toLocaleString('en-US')} characters of text with <b>, <i>, <strong>, <em>, <br>, <a href="https://…"> and <span class="…">`
         : undefined
     case 'color':
       return isColorValue(value)

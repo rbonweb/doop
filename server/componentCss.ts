@@ -5,6 +5,7 @@ import { CSS_ATTR, DETACHED_CSS_ATTR, HEAD_ATTR, INSTANCE_ATTR } from '../shared
 import { TOKEN_BLOCK_ATTR } from '../shared/designTokens.ts'
 import { FONT_BLOCK_ATTR } from '../shared/fonts.ts'
 import { WEB_FONT_LINK_ATTR } from '../shared/webFonts.ts'
+import { SCOPE_MARK, restoreStyleText, withSubjectSuffix } from './frameIsolation.ts'
 
 /**
  * What a main element takes along from its frame: the rules it uses, scoped so
@@ -254,6 +255,9 @@ interface SubtreeTokens {
 interface Relevant {
   selector: string
   prefix: string
+  /** the subject is a nested component's element, reached from one of this component's own: that is the
+   *  documented way to restyle what the component holds, so nothing keeps it out of nested instances */
+  nestedSubject: boolean
 }
 
 /** The selector as far as it concerns the subtree: compounds naming ancestors outside it are cut off.
@@ -266,7 +270,8 @@ function relevantSelector(selector: string, { own, nested, ancestors }: SubtreeT
   const isOwn = (index: number) => compoundMatches(compounds[index]!.compound, own)
   const isNested = (index: number) => compoundMatches(compounds[index]!.compound, nested)
   let first = compounds.length - 1
-  if (!isOwn(first)) {
+  const nestedSubject = !isOwn(first)
+  if (nestedSubject) {
     if (!isNested(first)) return null
     while (first > 0 && !isOwn(first - 1) && isNested(first - 1)) first--
     if (first === 0 || !isOwn(first - 1)) return null
@@ -274,7 +279,7 @@ function relevantSelector(selector: string, { own, nested, ancestors }: SubtreeT
   while (first > 0 && isOwn(first - 1)) first--
   const prefix = keptAncestors(compounds, first, ancestors)
   if (prefix === null) return null
-  return { selector: joinCompounds(compounds.slice(first)), prefix }
+  return { selector: joinCompounds(compounds.slice(first)), prefix, nestedSubject }
 }
 
 function joinCompounds(pieces: { compound: string; combinator: string }[]): string {
@@ -336,13 +341,22 @@ function withoutTheme(compound: string): string {
   return bare || '*'
 }
 
-/** A selector scoped to the instance root: at or below it, its pseudo-classes left in place. */
-export function scopeSelector(selector: string, scope: string, prefix = ''): string {
+/** A selector scoped to the instance root: at or below it, its pseudo-classes left in place.
+ *  `contained` (the isolating form) also keeps it out of what other components' instances hold, with a
+ *  zero-specificity exclusion on the subject, and keeps a sibling combinator from reaching past the root. */
+export function scopeSelector(selector: string, scope: string, prefix = '', contained = false): string {
   const where = `:where(${scope})`
-  const lead = /^(\*|[a-zA-Z][\w-]*)?((?:[.#](?:[\w\u0080-\uffff-]|\\.)+|\[[^\]]*\])*)/.exec(selector)?.[0] ?? ''
+  const own = contained ? withSubjectSuffix(selector, nestedExclusion(scope)) : selector
+  const lead = /^(\*|[a-zA-Z][\w-]*)?((?:[.#](?:[\w\u0080-\uffff-]|\\.)+|\[[^\]]*\])*)/.exec(own)?.[0] ?? ''
   const before = prefix ? `${prefix} ` : ''
-  return `${before}${where} ${selector}, ${before}${lead}${where}${selector.slice(lead.length)}`
+  const inside = `${before}${where} ${own}`
+  /* `.card:where(scope) + .card` would style the root's next sibling, outside the instance */
+  if (contained && /^\s*[+~]/.test(own.slice(lead.length))) return inside
+  return `${inside}, ${before}${lead}${where}${own.slice(lead.length)}`
 }
+
+/** An element inside an instance of another component, which sits inside one of this component's. */
+export const nestedExclusion = (scope: string) => `:not(:where(${scope} [${INSTANCE_ATTR}]:not(${scope}) *))`
 
 function isDocumentSelector(selector: string): boolean {
   return /^(:root|html|body)$/i.test(selector.trim())
@@ -446,7 +460,7 @@ export function frameStylesheets(html: string): string {
     if (el.tagName !== 'style') return
     if (el.attrs.some((attr) => MANAGED_STYLE_ATTRS.has(attr.name))) return
     const text = el.childNodes[0]
-    if (text && 'value' in text) parts.push(text.value)
+    if (text && 'value' in text) parts.push(restoreStyleText(text.value))
   })
   /* the walk runs last-to-first: put the sheets back in cascade order */
   return parts.reverse().join('\n')
@@ -472,6 +486,49 @@ export interface ExtractedCss {
   css: string
   /** the same rules unscoped: what a regenerated main's own stylesheet holds */
   rawCss: string
+  /** the custom properties the main's frame declares on the document, which the isolating form
+   *  hands to the component as `var()` fallbacks; its template's inline styles take them too */
+  customProps: ReadonlyMap<string, string>
+}
+
+/** Every `var(--x)` without a fallback gets the main's own value as one: a consuming frame that defines
+ *  `--x` wins, and one that does not still renders like the main. Values naming other properties get
+ *  theirs too. A name the main does not declare (a canvas token, which is live in every frame) is left. */
+export function withVarFallbacks(
+  text: string,
+  props: ReadonlyMap<string, string>,
+  seen: ReadonlySet<string> = new Set(),
+): string {
+  if (!props.size || !text.includes('var(')) return text
+  return text.replace(/var\(\s*(--[\w-]+)\s*\)/g, (match, name: string) => {
+    const value = props.get(name)
+    if (value === undefined || seen.has(name)) return match
+    const resolved = withVarFallbacks(value.replace(/\s*!important\s*$/i, ''), props, new Set([...seen, name]))
+    return `var(${name}, ${resolved})`
+  })
+}
+
+/** The inline styles of a template, with the main's custom properties as fallbacks. */
+export function templateWithFallbacks(template: string, props: ReadonlyMap<string, string>): string {
+  if (!props.size) return template
+  /* the substitution runs on the attribute's value, not on its escaped text, and the result is escaped
+     again: a custom property holding `"Inter", sans-serif` or a quote must not end the attribute */
+  return template.replace(/(\sstyle=")([^"]*)(")/g, (match, open: string, escaped: string, close: string) => {
+    const value = unescapeAttr(escaped)
+    const next = withVarFallbacks(value, props)
+    return next === value ? match : `${open}${escapeAttr(next)}${close}`
+  })
+}
+
+const unescapeAttr = (text: string) =>
+  text.replace(/&(quot|amp|lt|gt);/g, (_m, name: string) => ({ quot: '"', amp: '&', lt: '<', gt: '>' })[name]!)
+const escapeAttr = (text: string) =>
+  text.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+
+export interface ExtractOptions {
+  /** the form before isolation: custom properties frozen onto the instance root, no containment.
+   *  A stored definition whose main has not changed is compared in this form, so it stays as it is. */
+  legacy?: boolean
 }
 
 /** `variantAttrs` are attributes instances wear and the main need not: `data-<enum prop>` on the root. */
@@ -480,7 +537,9 @@ export function extractComponentCss(
   root: Element,
   componentId: string,
   variantAttrs: string[] = [],
+  options: ExtractOptions = {},
 ): ExtractedCss {
+  const contained = !options.legacy
   const scope = `[${INSTANCE_ATTR}="${componentId}"]`
   const tokens = mainTokens(root, variantAttrs)
   const nodes = parseCss(sheet)
@@ -512,9 +571,11 @@ export function extractComponentCss(
       })
       return selectors.length ? [`${selectors.join(', ')} {${node.body}}`] : []
     })
-  const rules = keptRules(nodes, ({ selector, prefix }) => scopeSelector(selector, scope, prefix))
+  const rules = keptRules(nodes, ({ selector, prefix, nestedSubject }) =>
+    scopeSelector(selector, scope, prefix, contained && !nestedSubject),
+  )
   const rawRules = keptRules(nodes, ({ selector, prefix }) => (prefix ? `${prefix} ${selector}` : selector))
-  const ruleText = rules.join('\n')
+  const ruleText = contained ? withVarFallbacks(rules.join('\n'), customProps) : rules.join('\n')
 
   /* inherited and custom properties land on the instance root, so its text
      looks the same wherever it is placed */
@@ -532,7 +593,11 @@ export function extractComponentCss(
     const value = customProps.get(name)
     return value === undefined ? [] : [`${name}: ${value}`]
   })
-  const rootDeclarations = [...vars, ...rootStyle]
+  /* isolating form: the main's custom properties are fallbacks, not values declared on the root */
+  const rootDeclarations = contained
+    ? rootStyle.map((entry) => withVarFallbacks(entry, customProps))
+    : [...vars, ...rootStyle]
+  const rawDeclarations = [...vars, ...rootStyle]
 
   /* @keyframes and @font-face the kept rules name, wherever they were declared */
   const fonts = usedFonts(`${ruleText} ${rootStyle.join(';')} ${inlineStyle}`)
@@ -578,15 +643,18 @@ export function extractComponentCss(
   collectAtomics(nodes)
 
   const declarations = rootDeclarations.join('; ')
+  const rawDeclaration = rawDeclarations.join('; ')
   return {
+    customProps,
     css: [
-      ...scopedAtomics,
+      ...(contained ? [SCOPE_MARK] : []),
+      ...(contained ? scopedAtomics.map((text) => withVarFallbacks(text, customProps)) : scopedAtomics),
       ...(declarations ? [`:where(${scope}) {${declarations}}`] : []),
       withOwnAnimations(ruleText, keyframes, componentId),
     ]
       .filter(Boolean)
       .join('\n'),
-    rawCss: [...atomics, ...(declarations ? [`:root {${declarations}}`] : []), ...rawRules].join('\n'),
+    rawCss: [...atomics, ...(rawDeclaration ? [`:root {${rawDeclaration}}`] : []), ...rawRules].join('\n'),
   }
 }
 

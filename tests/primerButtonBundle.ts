@@ -23,3 +23,16 @@ export function primerButton() {
     },
   }
 }
+
+/** A Primer Button as a capture leaves it: the root follows a `variant` enum through its own data-variant attribute, so the markup already holds a data-doop-prop, and the label is a text nothing binds. */
+export function primerCapturedButton(html?: string) {
+  return {
+    name: 'Button',
+    html:
+      html ??
+      '<button class="btn" data-variant="default" data-doop-prop="data-variant:variant"><span data-component="text">Button</span></button>',
+    css: '.btn { padding: 8px 16px; }',
+    props: [{ name: 'variant', type: 'enum' as const, options: ['default', 'primary'], default: 'default' }],
+    code: { exportName: 'Button' },
+  }
+}

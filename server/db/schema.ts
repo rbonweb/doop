@@ -12,7 +12,7 @@ import {
   customType,
 } from 'drizzle-orm/pg-core'
 import { open, seal } from '../secretBox.ts'
-import type { CanvasGuide, CanvasPageInfo, CommentAnchor, FrameApproval } from '../../shared/types.ts'
+import type { Actor, CanvasGuide, CanvasPageInfo, CommentAnchor, FrameApproval } from '../../shared/types.ts'
 import type { AssetSource } from '../../shared/assetSource.ts'
 import type { AutomationRunState, AutomationTrigger, Schedule, Step } from '../../shared/automations.ts'
 import type {
@@ -615,6 +615,24 @@ export const agentOverrides = pgTable(
     updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
   },
   (t) => [primaryKey({ columns: [t.scope, t.roleId] })],
+)
+
+/** Whole-canvas component work still owed to a frame (server/propagation.ts): one row per
+ *  frame and task, written when the work is queued and deleted once the frame has had its turn,
+ *  so a restart picks the queue up where it stopped. `task` is 'propagate' or 'detach'. */
+export const componentPropagationQueue = pgTable(
+  'component_propagation_queue',
+  {
+    frameId: text('frame_id').notNull(),
+    task: text('task').notNull(),
+    canvasId: text('canvas_id').notNull(),
+    /* the components asking for the frame */
+    componentIds: jsonb('component_ids').$type<string[]>().notNull(),
+    /* who the work is done in the name of */
+    actor: jsonb('actor').$type<Actor>().notNull(),
+    queuedAt: bigint('queued_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.frameId, t.task] }), index('component_propagation_queue_canvas_idx').on(t.canvasId)],
 )
 
 /** Named design docs per canvas (brand rules, style recipes) — markdown

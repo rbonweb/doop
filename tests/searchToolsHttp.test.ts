@@ -98,6 +98,30 @@ async function versionCount(frameId: string): Promise<number> {
   return (listed.versions as unknown[]).length
 }
 
+describe('find_frames and get_frame in a frame whose stylesheet is isolated from its instances', () => {
+  it('search and expand_components read the author text, not the stored exclusion', async () => {
+    const canvas = await created('create_canvas', { name: 'Isolated' })
+    const canvasId = canvas.id as string
+    await created('create_component', {
+      canvas_id: canvasId,
+      name: 'Tile',
+      html: '<section class="tile"><h2>T</h2></section>',
+      css: '.tile h2 { margin: 0 }',
+    })
+    const page = await created('create_frame', {
+      canvas_id: canvasId,
+      name: 'Page',
+      html: '<!doctype html><html><head><style>h2 { margin: 40px }</style></head><body><doop-use component="Tile"></doop-use></body></html>',
+    })
+    const frameId = (page.frame as { id: string }).id
+    const found = await created('find_frames', { canvas_id: canvasId, html: 'h2 { margin: 40px }' })
+    expect((found.frames as { name: string }[]).map((frame) => frame.name)).toEqual(['Page'])
+    const expanded = await created('get_frame', { frame_id: frameId, expand_components: true })
+    expect(expanded.html as string).toContain('h2 { margin: 40px }')
+    expect(expanded.html as string).not.toContain(':not(:where([data-doop-instance]')
+  })
+})
+
 describe('find_frames', () => {
   it('matches name, rendered text, source and image URLs, in canvas order', async () => {
     const { canvasId } = await seed()
