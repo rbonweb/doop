@@ -243,6 +243,64 @@ describe('buildComponentBundle', () => {
     for (const url of variantUrls) expect(url).toContain(`id=${entries[1]!.id}`)
   })
 
+  /* Primer: the default story has no argTypes, its Playground (same title) has them all, and the Features stories sit under a sub-title */
+  const primerShaped = [
+    entry('Kit/Btn', 'Default'),
+    entry('Kit/Btn', 'Playground'),
+    entry('Kit/Btn/Features', 'Primary'),
+    entry('Kit/Btn/Features', 'Danger'),
+  ]
+
+  it('finds the controls on a sibling Playground when the rest of the group sits under a sub-title', async () => {
+    const log: string[] = []
+    const result = await buildComponentBundle({
+      entries: primerShaped,
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withPage(log, { withoutControls: (id) => id === 'kit-btn--default' }),
+    })
+    const [component] = result.bundle.components
+    expect(component?.props?.map((prop) => prop.name)).toEqual(['tone', 'on'])
+    expect(Object.keys(component?.variants ?? {})).toContain('tone')
+    expect(component?.code?.origin?.storyId).toBe('kit-btn--playground')
+    expect(log.filter((url) => url.includes('id=kit-btn-features'))).toEqual([])
+  })
+
+  it('tries a Playground that fails to render once more, so one dropped request does not lose the controls', async () => {
+    let playgroundLoads = 0
+    const result = await buildComponentBundle({
+      entries: primerShaped,
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withPage([], {
+        withoutControls: (id) => id === 'kit-btn--default',
+        fail: (url) => url.includes('id=kit-btn--playground') && ++playgroundLoads === 1,
+      }),
+    })
+    expect(playgroundLoads).toBeGreaterThan(1)
+    expect(result.bundle.components[0]?.props?.map((prop) => prop.name)).toEqual(['tone', 'on'])
+    expect(result.bundle.components[0]?.code?.origin?.storyId).toBe('kit-btn--playground')
+  })
+
+  it('says so when the stories that might hold the controls cannot be captured', async () => {
+    const result = await buildComponentBundle({
+      entries: primerShaped,
+      source,
+      baseUrl: 'https://sb.test/',
+      withPage: withPage([], {
+        withoutControls: (id) => id === 'kit-btn--default',
+        fail: (url) => url.includes('id=kit-btn--playground'),
+      }),
+    })
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({
+        code: 'controls_probe_failed',
+        component: 'Btn',
+        message: expect.stringContaining('Playground'),
+      }),
+    )
+  })
+
   it('ships the story that has the controls, so every variant rule matches an element of the markup', async () => {
     const entries = [
       entry('Kit/Btn', 'Default'),
