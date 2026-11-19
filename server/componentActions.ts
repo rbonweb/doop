@@ -1066,6 +1066,8 @@ export interface InstanceChange {
   detach?: boolean
   /** show another component at one nested part of this instance; `component: null` puts the template's back */
   swap?: { part: string; component: string | null }
+  /** server-side only (variant edits): rewrites the stored prop values after the changes above, with no check against the definition */
+  mapProps?: (props: Record<string, string>) => Record<string, string>
 }
 
 /** One instance's swap of a nested component for another (or back): checked here, stored as `parts[part].swap`. */
@@ -1138,6 +1140,11 @@ function applyChange(state: InstanceOverrides, change: InstanceChange): Instance
   }
 }
 
+function withMappedProps(state: InstanceOverrides, map: NonNullable<InstanceChange['mapProps']>): InstanceOverrides {
+  const props = map({ ...state.props })
+  return { ...(Object.keys(props).length ? { props } : {}), ...(state.parts ? { parts: state.parts } : {}) }
+}
+
 /** One frame write however many instances change, so the whole batch is one undo step. */
 export const changeInstances = atomic(function changeInstances(
   canvasId: string,
@@ -1176,7 +1183,8 @@ export const changeInstances = atomic(function changeInstances(
       if (!state) continue
       validateProps(def, change.props, ctx.find)
       const changed = applyChange(state.overrides, change)
-      const next = change.swap ? applySwap(changed, def, change.swap, canvasId) : changed
+      const swapped = change.swap ? applySwap(changed, def, change.swap, canvasId) : changed
+      const next = change.mapProps ? withMappedProps(swapped, change.mapProps) : swapped
       const rendered = renderInstance(def, def, next, id, { ctx, stack: [] })
       if (!rendered) continue
       /* below another instance, this root is that instance's part */

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { activeComponents, USE_TAG, type ComponentDef } from '../shared/components.ts'
-import { codeSchema, propSchema } from '../shared/componentSchemas.ts'
+import { codeSchema, propSchema, variantOpSchema } from '../shared/componentSchemas.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
 import {
   catalog,
@@ -35,6 +35,7 @@ import {
   usageOf,
   waitingLibraryUpdates,
 } from './componentActions.ts'
+import { editVariants, MAX_VARIANT_OPS } from './componentVariants.ts'
 import { isLibrary, librariesForCanvas } from './componentLibrary.ts'
 import * as actions from './actions.ts'
 import { componentReuseNotes, componentSystemNotes, frameReuseNotes } from './reuseNotes.ts'
@@ -567,6 +568,50 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
                 isLibrary(canvas.id) ? `${IMPACT_NOTE} ${LIBRARY_NOTE}` : IMPACT_NOTE,
                 ...(optional(() => componentReuseNotes(canvas, result.component)) ?? []),
               ].join('\n'),
+              frames: outcomeFrames({ canvas } as ToolContext, result.component),
+            }),
+      }
+    },
+  },
+  {
+    name: 'edit_component_variants',
+    title: "Edit a component's variants",
+    description: `Add, rename, remove or style the variants of a component (an enum prop such as size = sm | md | lg, or a boolean such as disabled) without rewriting its CSS by hand. Use it instead of update_component whenever the change is "a new size", "rename ghost to outline", "make it styleable when disabled" or "what does lg look like": the server keeps props, the [data-<prop>="<value>"] rules and every instance consistent in one revision. ops run in order, at most ${MAX_VARIANT_OPS}: add_enum, add_value, rename_value (instances holding the old value and its CSS follow), remove_value (instances fall back to the default; new_default when removing the default), set_default, add_boolean, rename_prop, remove_prop, set_style (declarations for one element, a data-doop-part key or "root", under a variant combination such as { "size": "lg" }; null removes a property) and clear_style. Style lands as a rule in the component's stylesheet, never inline on the main. Values may not hold url(), braces, semicolons or @import. dry_run=true plans the edit and counts the instances that would be rewritten. Answers with the component's variant props and every variant rule.`,
+    readOnly: false,
+    destructive: true,
+    shape: {
+      component: COMPONENT_REF,
+      ops: z.array(variantOpSchema).min(1).max(MAX_VARIANT_OPS),
+      expected_rev: z.number().optional().describe('Refuse if the component has moved past this revision'),
+      dry_run: z.boolean().optional().describe('Plan the edit and change nothing'),
+    },
+    run(input, { canvas, actor }) {
+      const result = editVariants(
+        canvas.id,
+        String(input.component),
+        {
+          ops: input.ops as never,
+          ...(input.expected_rev !== undefined ? { expectedRev: Number(input.expected_rev) } : {}),
+          dryRun: input.dry_run === true,
+        },
+        actor,
+      )
+      return {
+        data: {
+          ok: true,
+          dry_run: result.dry_run,
+          component: summary(canvas, result.component),
+          rev: result.component.rev,
+          props: result.props,
+          rules: result.rules,
+          instances_updated: result.instances_updated,
+          frames_updated: result.frames_updated,
+          impact: result.impact,
+        },
+        ...(result.dry_run
+          ? {}
+          : {
+              note: [...propagationNote(result), IMPACT_NOTE].join('\n'),
               frames: outcomeFrames({ canvas } as ToolContext, result.component),
             }),
       }
