@@ -534,6 +534,11 @@ export function captureStory(options: CaptureOptions): CaptureResult {
           const id = `${piece.shared ? 's' : 'c'}${piece.key.join(',')}`
           groups.set(id, [...(groups.get(id) ?? []), piece])
         }
+        /* the condition is repeated once per layer part, so it counts toward the size cap like rule text, and a huge one is not repeated at all */
+        if (groups.size > 1 && (label.length > 1000 || (cssChars += label.length * (groups.size - 1)) > 2_000_000)) {
+          oversize++
+          continue
+        }
         for (const pieces of groups.values()) {
           const first = pieces[0]!
           out.push({
@@ -563,7 +568,16 @@ export function captureStory(options: CaptureOptions): CaptureResult {
   if (registered.size) {
     const read = new Set<string>()
     for (const piece of pieces) for (const match of piece.text.matchAll(/var\(\s*(--[^\s,)]+)/g)) read.add(match[1]!)
-    const declarations = Array.from(registered).filter(([name]) => read.has(name))
+    /* each value is screened on its own, so one odd default costs only itself and not the chunk it would have shared: balanced quotes, no `@`, no `src()` or `image-set()`, and a `url()` only of http(s) or an inline image or font */
+    const plain = (value: string) => {
+      if (/@|\b(?:src|image-set|-webkit-image-set)\s*\(/i.test(value)) return false
+      if ((value.match(/"/g) ?? []).length % 2 || (value.match(/'/g) ?? []).length % 2) return false
+      for (const match of value.matchAll(/url\(\s*(["']?)([^)"']*)\1\s*\)/gi)) {
+        if (!/^(?:https?:\/\/|data:image\/|data:font\/)/i.test(match[2]!.trim())) return false
+      }
+      return !/url\((?!\s*(["']?)[^)"']*\1\s*\))/i.test(value)
+    }
+    const declarations = Array.from(registered).filter(([name, value]) => read.has(name) && plain(value))
     const selector = '*, ::before, ::after, ::backdrop'
     for (let from = 0; from < declarations.length;) {
       let body = ''

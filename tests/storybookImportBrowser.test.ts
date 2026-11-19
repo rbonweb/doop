@@ -990,6 +990,40 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
     }
   })
 
+  it('screens each registered property value on its own, so one bad default costs only itself', async () => {
+    const page = await (await getBrowser()).newPage()
+    try {
+      await page.setContent(`<!doctype html>
+<style>
+.a{color:var(--tw-good);margin:var(--tw-bad);padding:var(--tw-quote);border:var(--tw-url);top:var(--tw-also-good)}
+@property --tw-good{syntax:"*";inherits:false;initial-value:solid}
+@property --tw-bad{syntax:"*";inherits:false;initial-value:url(javascript:alert(1))}
+@property --tw-also-good{syntax:"*";inherits:false;initial-value:7}
+@property --tw-url{syntax:"*";inherits:false;initial-value:url(file:///etc/passwd)}
+@property --tw-quote{syntax:"*";inherits:false;initial-value:'a"b'}
+</style>
+<div id="storybook-root"><p class="a">x</p></div>`)
+      await page.evaluate(CAPTURE_PRELUDE)
+      const shot = JSON.parse(
+        (await page.evaluate(captureStory, {
+          textArgs: [],
+          styleProperties: STYLE_PROPERTIES,
+          maxBytes: STORYBOOK_LIMITS.captureBytes,
+          maxElements: 300,
+        })) as string,
+      ) as { ok: boolean; sharedRules: string[] }
+      expect(shot.ok).toBe(true)
+      const text = shot.sharedRules.join('\n')
+      expect(text).toContain('--tw-good: solid')
+      expect(text).toContain('--tw-also-good: 7')
+      expect(text).not.toContain('--tw-bad:')
+      expect(text).not.toContain('--tw-quote:')
+      expect(text).not.toContain('--tw-url:')
+    } finally {
+      await page.close()
+    }
+  })
+
   it('stops the whole import when a story page answers 403', async () => {
     const error = await storybookBundle(`${storybook.origin}/lockedframe/`, {}, deps(storybook.origin)).catch(
       (caught: unknown) => caught,

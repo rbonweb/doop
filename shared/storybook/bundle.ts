@@ -362,7 +362,8 @@ export function plannedList(groups: { name: string; title: string; stories: unkn
 /** What a bundle's shared CSS needs so imported components keep the Storybook's font: when no shared rule on html, body, :root or :host sets `font-family`, the page's own body font becomes `--font-root` (which the importer makes a token) and the body's font. Nothing when the page has none, or when the font could break out of a declaration. */
 export function rootFontRules(sharedRules: Iterable<string>, rootFont: string | undefined): string[] {
   const font = rootFont?.trim()
-  if (!font || font.length > 500 || /[;{}<>\\\r\n]|\/\*|\(/.test(font)) return []
+  if (!font || font.length > 500 || !/^[\w ,.'"-]+$/.test(font)) return []
+  if ((font.match(/"/g) ?? []).length % 2 || (font.match(/'/g) ?? []).length % 2) return []
   const document = /^(?:html|body|:root|:host)$/i
   for (const rule of sharedRules) {
     const open = rule.indexOf('{')
@@ -376,7 +377,9 @@ export function rootFontRules(sharedRules: Iterable<string>, rootFont: string | 
     )
       return []
   }
-  return [`:root { --font-root: ${font} }`, 'body { font-family: var(--font-root) }']
+  /* both rules survive the guard or neither is emitted, so the body never points at a variable that was dropped */
+  const rules = [`:root { --font-root: ${font} }`, 'body { font-family: var(--font-root) }']
+  return guardCss(rules.join('\n')).dropped ? [] : rules
 }
 
 /** Stories to a bundle, inside STORYBOOK_LIMITS: components, renders and the whole import's time. A component whose default story fails is left out and said so; a variant that fails is left out and said so. Throws only when nothing at all could be imported or the signal aborts. */

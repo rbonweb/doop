@@ -190,6 +190,16 @@ describe('rootFontRules', () => {
       expect(rootFontRules([], font)).toEqual([])
     }
   })
+
+  it('accepts only plain font-family text with balanced quotes, and emits both rules or neither', () => {
+    for (const font of ['x"', "x'", 'a @import "x"', 'a !important', 'a\\62', 'a\tb;c', 'a"b\'']) {
+      expect(rootFontRules([], font)).toEqual([])
+    }
+    const plain = '"Inter Var", system-ui, Helvetica-Neue, sans_serif'
+    const rules = rootFontRules([], plain)
+    expect(rules).toHaveLength(2)
+    expect(guardCss(rules.join('\n')).dropped).toBe(0)
+  })
 })
 
 describe('buildComponentBundle', () => {
