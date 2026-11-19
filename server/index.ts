@@ -42,6 +42,8 @@ import {
 import { z } from 'zod'
 import { previewDocument } from './componentPreview.ts'
 import { codeSchema, propSchema } from './componentTools.ts'
+import { variantOpSchema } from '../shared/componentSchemas.ts'
+import { editVariants, MAX_VARIANT_OPS, readVariants } from './componentVariants.ts'
 import { activeComponents } from '../shared/components.ts'
 import { PRO_UPLOAD_BYTES } from '../shared/billing.ts'
 import { canvasPages, framePageId, normalizePageTree, samePages, validatePageTree } from '../shared/pages.ts'
@@ -2736,6 +2738,12 @@ const componentPatchBody = z.object({
   dryRun: z.boolean().optional(),
 })
 
+const componentVariantsBody = z.object({
+  ops: z.array(variantOpSchema).min(1).max(MAX_VARIANT_OPS),
+  expectedRev: z.number().optional(),
+  dryRun: z.boolean().optional(),
+})
+
 function componentBody<T>(res: express.Response, schema: z.ZodType<T>, body: unknown): T | undefined {
   const parsed = schema.safeParse(body ?? {})
   if (parsed.success) return parsed.data
@@ -3011,6 +3019,35 @@ app.patch('/api/canvases/:id/components/:componentId', (req, res) => {
   componentRoute(res, () =>
     updateComponent(canvas.id, req.params.componentId, { ...body, props: body.props as never }, userActor(req)),
   )
+})
+
+/* the Design tab's variant editor: the variant props and rules to draw, and one ordered list of edits to apply */
+app.get('/api/canvases/:id/components/:componentId/variants', (req, res) => {
+  const canvas = requireCanvas(req, res, req.params.id, 'view')
+  if (!canvas) return
+  componentRoute(res, () => {
+    const { props, rules } = readVariants(canvas.id, req.params.componentId)
+    return { props, rules }
+  })
+})
+
+app.post('/api/canvases/:id/components/:componentId/variants', (req, res) => {
+  const canvas = requireCanvas(req, res, req.params.id, 'edit')
+  if (!canvas) return
+  const body = componentBody(res, componentVariantsBody, req.body)
+  if (!body) return
+  componentRoute(res, () => {
+    const result = editVariants(canvas.id, req.params.componentId, body, userActor(req))
+    return {
+      component: result.component,
+      props: result.props,
+      rules: result.rules,
+      instances_updated: result.instances_updated,
+      frames_updated: result.frames_updated,
+      impact: result.impact,
+      propagation: result.propagation,
+    }
+  })
 })
 
 app.delete('/api/canvases/:id/components/:componentId', (req, res) => {
