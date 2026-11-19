@@ -19,7 +19,8 @@ import {
   styleText,
   COMPONENT_REF,
 } from '../shared/components.ts'
-import { extractComponentCss, frameHeadTags, frameStylesheets } from './componentCss.ts'
+import { extractComponentCss, frameHeadTags, frameStylesheets, templateWithFallbacks } from './componentCss.ts'
+import { SCOPE_MARK, isolateFrameStyles } from './frameIsolation.ts'
 import {
   attrOf,
   derivePropsAndSlots,
@@ -255,8 +256,8 @@ function prepareMains(
     claimed.add(id)
     const stamped = stampParts(found.el)
     if (stamped) edits.push({ start: found.start, end: found.end, text: serializeOuter(found.el) })
-    const template = templateFromMain(found.el, ctx)
-    if (wouldCycle(canvas.id, id, template)) {
+    const plainTemplate = templateFromMain(found.el, ctx)
+    if (wouldCycle(canvas.id, id, plainTemplate)) {
       ctx.issues.push({
         code: 'nesting_cycle',
         message: `component “${def.name}” cannot contain itself; its change was not applied to other instances`,
@@ -264,7 +265,14 @@ function prepareMains(
       continue
     }
     const variants = variantAttrs(def.props)
-    const { css, rawCss } = extractComponentCss(sheet(), found.el, id, variants)
+    /* a definition stored before isolation, whose main is as it was, stays as it is: it is compared in
+       the form it was written in. Once the main changes it is extracted in the isolating form */
+    const isolating = extractComponentCss(sheet(), found.el, id, variants)
+    const legacy = extractComponentCss(sheet(), found.el, id, variants, { legacy: true })
+    const unchangedLegacy =
+      def.rev > 0 && !def.css.includes(SCOPE_MARK) && def.css === legacy.css && def.template === plainTemplate
+    const { css, rawCss } = unchangedLegacy ? legacy : isolating
+    const template = unchangedLegacy ? plainTemplate : templateWithFallbacks(plainTemplate, isolating.customProps)
     const head = headTags()
     const { props, slots } = derivePropsAndSlots(template, def.props, ctx.find)
     const same =
@@ -379,7 +387,7 @@ export function prepareFrameHtml(
     const expanded = expandUses(incoming, ctx, [], 0, { final: true })
     const mains = prepareMains(canvas, frameId, expanded, by, ctx)
     const instances = prepareInstances(mains.html, ctx)
-    const html = syncComponentHead(instances, closureOf(usedComponentIds(instances), canvas.id))
+    const html = isolateFrameStyles(syncComponentHead(instances, closureOf(usedComponentIds(instances), canvas.id)))
     return {
       html,
       issues: dedupeIssues([...ctx.issues, ...removedInstanceIssues(priorHtml, html)]),

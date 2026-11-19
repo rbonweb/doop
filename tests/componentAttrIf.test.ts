@@ -218,6 +218,13 @@ describe('stored markup without data-doop-attr-if', () => {
         .replaceAll(icon.id, 'INNER')
         .replaceAll(def.id, 'DEF')
         .replace(/data-doop-id="[^"]*"/g, 'data-doop-id="ID"')
+        /* the css of a new definition is in the isolating form; this test is about the markup */
+        .replaceAll('\n/* doop-scope:2 */', '')
+        .replaceAll(
+          ':not(:where([data-doop-instance="DEF"] [data-doop-instance]:not([data-doop-instance="DEF"]) *))',
+          '',
+        )
+        .replace(/<style data-doop-component-css="INNER">\n<\/style>\n/, '')
     const stored = store.getFrame(page.id)!.html
     expect(plain(stored)).toBe(OLD_PAGE)
     expect(plain(store.getComponents(canvas.id).find((one) => one.id === def.id)!.template)).toBe(OLD_TEMPLATE)
