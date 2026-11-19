@@ -458,6 +458,63 @@ describe('a main made from an element in a design frame', () => {
   })
 })
 
+describe('two mains in one design frame', () => {
+  async function twoMains() {
+    const canvas = store.createCanvas('Two', OWNER)
+    const frameId = await screen(
+      canvas.id,
+      'Design',
+      '<span class="pill" data-doop-id="pil">p</span><span class="tag" data-doop-id="tag">t</span>',
+    )
+    const frame = store.getFrame(frameId)!
+    frame.html = frame.html.replace(
+      '<head></head>',
+      '<head><style>.pill[data-size="sm"]{color:red} .pill[data-size="lg"]{color:green} .tag[data-size="sm"]{color:blue} .tag[data-size="lg"]{color:teal}</style></head>',
+    )
+    const make = async (name: string, element: string) =>
+      (
+        await call('create_component', {
+          canvas_id: canvas.id,
+          name,
+          frame_id: frameId,
+          element,
+          props: [{ name: 'size', type: 'enum', options: ['sm', 'lg'] }],
+        })
+      ).data.component.id as string
+    const pill = await make('Pill', 'pil')
+    const tag = await make('Tag', 'tag')
+    return { canvas, frameId, pill, tag }
+  }
+
+  it('renames, removes and clears only this main rules and leaves the other main and its revision alone', async () => {
+    const { canvas, frameId, pill, tag } = await twoMains()
+    const tagBefore = findComponent(canvas.id, tag)!
+    const rule = (selector: string) => store.getFrame(frameId)!.html.includes(selector)
+    expect((await edit(canvas.id, pill, [{ op: 'rename_value', prop: 'size', from: 'sm', to: 'small' }])).isError).toBe(
+      false,
+    )
+    expect(rule('.pill[data-size="small"]') || rule('.pill [data-size="small"]')).toBe(true)
+    expect(rule('.tag[data-size="sm"]')).toBe(true)
+    expect(rule('.pill[data-size="sm"]')).toBe(false)
+    expect(
+      (await edit(canvas.id, pill, [{ op: 'remove_value', prop: 'size', value: 'lg', new_default: 'small' }])).isError,
+    ).toBe(false)
+    expect(rule('.tag[data-size="lg"]')).toBe(true)
+    expect(rule('.pill[data-size="lg"]')).toBe(false)
+    expect((await edit(canvas.id, pill, [{ op: 'clear_style', when: { size: 'small' } }])).isError).toBe(false)
+    expect(rule('.tag[data-size="sm"]')).toBe(true)
+    const tagAfter = findComponent(canvas.id, tag)!
+    expect(tagAfter.rev).toBe(tagBefore.rev)
+    expect(propsOf(canvas.id, tag).options).toEqual(['sm', 'lg'])
+  })
+
+  it('leaves no empty source block behind when only the design stylesheet changed', async () => {
+    const { canvas, frameId, pill } = await twoMains()
+    await edit(canvas.id, pill, [{ op: 'rename_value', prop: 'size', from: 'sm', to: 'small' }])
+    expect(store.getFrame(frameId)!.html).not.toMatch(/data-doop-component-source="[^"]*">\s*<\/style>/)
+  })
+})
+
 describe('guards', () => {
   it('refuses a stale expected_rev on a real write, a dry run and a no-op', async () => {
     const { canvas, id } = await setup()
