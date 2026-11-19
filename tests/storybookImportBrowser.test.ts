@@ -178,10 +178,12 @@ function wrappedPage(): string {
 /* Primer's Button: colours are custom properties on a theme wrapper (`[data-color-mode]`), the variant is an attribute on the button that rules keyed on the class style, and an icon adds a child and drops `data-no-visuals`, so that render is a different tree. */
 function themedPage(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><style>
-[data-color-mode="light"] { --btn-primary-bg: #00aa55; --btn-primary-fg: #ffffff; }
+[data-color-mode="light"] { --btn-primary-bg: #1f883d; --btn-primary-fg: #ffffff; }
 .btn { background-color: transparent; color: #222222; border: 0; padding: 4px 8px; }
 .btn:where([data-variant="primary"]) { background-color: var(--btn-primary-bg, #1f883d); color: var(--btn-primary-fg, #fff); }
 .btn:where([data-no-visuals]) { padding: 8px; }
+.btn :where(.visual) { color: #59636e; fill: currentColor; }
+.btn:where([data-variant="primary"]) .visual { color: var(--btn-primary-fg, #fff); }
 </style></head><body class="sb-show-preparing-story"><div id="storybook-root"></div><script>
 (function () {
   var args = { variant: 'default', icon: 'none' }
@@ -199,7 +201,7 @@ function themedPage(): string {
     document.getElementById('storybook-root').innerHTML =
       '<div data-component="ThemeProvider" data-color-mode="light"><button data-component="Button" class="btn"' +
       (eye ? '' : ' data-no-visuals="true"') + ' data-variant="' + args.variant + '">' +
-      (eye ? '<svg width="8" height="8"></svg>' : '') + '<span>Go</span></button></div>'
+      (eye ? '<svg class="visual" width="8" height="8"></svg>' : '') + '<span>Go</span></button></div>'
   }
   draw()
   window.__STORYBOOK_PREVIEW__ = { channel: channel, currentRender: { phase: 'finished', story: { id: 'themed-button--default',
@@ -795,8 +797,55 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
           icon,
           `${icon}:`,
         )
-        expect(background).toBe(`${icon}:rgb(0, 170, 85)`)
+        expect(background).toBe(`${icon}:rgb(31, 136, 61)`)
       }
+    } finally {
+      await page.close()
+    }
+  })
+
+  it('keeps the library rule that colours an icon for a variant no render shows with an icon', async () => {
+    const { bundle } = await storybookBundle(`${storybook.origin}/themed/`, {}, deps(storybook.origin))
+    const button = bundle.components[0]!
+    /* the rule needs the primary variant and the icon, and no render has both: the default has no icon, the icon render is the default variant */
+    const rule = '[data-variant="primary"]) .visual'
+    expect(
+      [button.css, ...Object.values(button.variants?.icon ?? {}).map((variant) => variant.css)].join('\n'),
+    ).toContain(rule)
+    const prepared = prepareComponent(button, bundle.css ?? '')
+    const page = await (await getBrowser()).newPage()
+    try {
+      await page.setContent(`<!doctype html><style>${prepared.css}</style>${prepared.html}`)
+      const look = await page.evaluate(() => {
+        /* an instance with variant=primary and icon=eye */
+        const root = document.body.firstElementChild!
+        root.setAttribute('data-icon', 'eye')
+        for (const el of Array.from(document.querySelectorAll('[data-doop-if]'))) {
+          const condition = el.getAttribute('data-doop-if') ?? ''
+          const [name = '', value = ''] = condition.split(/!?=/)
+          if (name === 'icon' && (value === 'eye') === condition.includes('!=')) el.remove()
+        }
+        const button = document.querySelector('[data-component="Button"]')!
+        button.setAttribute('data-variant', 'primary')
+        const icon = button.querySelector('svg')!
+        const channel = (value: number) => {
+          const unit = value / 255
+          return unit <= 0.03928 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4
+        }
+        const luminance = (colour: string) => {
+          const [r = 0, g = 0, b = 0] = (colour.match(/[\d.]+/g) ?? []).map(Number)
+          return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        }
+        /* fill is currentColor in the fixture, and Chrome reports it resolved */
+        const fill = getComputedStyle(icon).fill
+        const resolved = fill.startsWith('rgb') ? fill : getComputedStyle(icon).color
+        const background = getComputedStyle(button).backgroundColor
+        const [light, dark] = [luminance(resolved), luminance(background)].sort((a, b) => b - a)
+        return { fill: resolved, background, contrast: (light! + 0.05) / (dark! + 0.05) }
+      })
+      expect(look.background).toBe('rgb(31, 136, 61)')
+      expect(look.fill).toBe('rgb(255, 255, 255)')
+      expect(look.contrast).toBeGreaterThan(3)
     } finally {
       await page.close()
     }
