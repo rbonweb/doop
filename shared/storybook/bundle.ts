@@ -359,12 +359,13 @@ export function plannedList(groups: { name: string; title: string; stories: unkn
   }))
 }
 
-/** What a bundle's shared CSS needs so imported components keep the Storybook's font: when no shared rule on html, body, :root or :host sets `font-family`, the page's own body font becomes `--font-root` (which the importer makes a token) and the body's font. Nothing when the page has none, or when the font could break out of a declaration. */
+/** What a bundle's shared CSS needs so imported components keep the Storybook's font: the page's own body font becomes `--font-root` (which the importer makes a token), and the body's font too when no shared rule on html, body, :root or :host sets `font-family`. Nothing when the page has none, or when the font could break out of a declaration. */
 export function rootFontRules(sharedRules: Iterable<string>, rootFont: string | undefined): string[] {
   const font = rootFont?.trim()
   if (!font || font.length > 500 || !/^[\w ,.'"-]+$/.test(font)) return []
   if ((font.match(/"/g) ?? []).length % 2 || (font.match(/'/g) ?? []).length % 2) return []
   const document = /^(?:html|body|:root|:host)$/i
+  let documentFont = false
   for (const rule of sharedRules) {
     const open = rule.indexOf('{')
     if (open < 0 || rule.trimStart().startsWith('@')) continue
@@ -374,12 +375,27 @@ export function rootFontRules(sharedRules: Iterable<string>, rootFont: string | 
         .split(',')
         .some((selector) => document.test(selector.trim())) &&
       /(?:^|[;{\s])font-family\s*:/i.test(rule.slice(open))
-    )
-      return []
+    ) {
+      documentFont = true
+      break
+    }
   }
-  /* both rules survive the guard or neither is emitted, so the body never points at a variable that was dropped */
-  const rules = [`:root { --font-root: ${font} }`, 'body { font-family: var(--font-root) }']
+  /* the token is always there for a component root to name; the body rule survives the guard with it or neither is emitted, so the body never points at a variable that was dropped */
+  const rules = [`:root { --font-root: ${font} }`, ...(documentFont ? [] : ['body { font-family: var(--font-root) }'])]
   return guardCss(rules.join('\n')).dropped ? [] : rules
+}
+
+/** The elements a browser gives a font of their own and a reset (Tailwind's preflight `button, input, select, optgroup, textarea { font: inherit }`) hands back to their parent. */
+const FONT_RESET_TAGS = new Set(['button', 'input', 'select', 'optgroup', 'textarea'])
+
+/** The rule that keeps a component's root on the Storybook's font when the root is a control whose reset (`button:where([data-doop-instance]) { font: inherit }`, specificity 0,0,1) beats the root font the importer carries onto the instance (`:where([data-doop-instance]) { font-family }`, 0), so the control would inherit the frame's own font. At equal specificity it comes after the shared css and wins over the reset, while a utility class (0,1,0) still wins over it. Only a root that is such a control and whose own computed font is the page's body font; undefined otherwise (a plain root inherits the carried font already, and a bare `div` rule would also override a descendant's own font). */
+export function rootFontControlRule(capture: CapturedStory, pageFont: string | undefined): string | undefined {
+  const font = (capture.rootFont ?? pageFont)?.trim()
+  const own = capture.styles?.[0]?.[STYLE_PROPERTIES.indexOf('font-family')]?.trim()
+  if (!font || !own || own !== font) return undefined
+  const tag = /^[a-zA-Z][\w-]*/.exec(capture.paths[0] ?? '')?.[0]?.toLowerCase()
+  if (!tag || !FONT_RESET_TAGS.has(tag)) return undefined
+  return `${tag} { font-family: var(--font-root) }`
 }
 
 /** Stories to a bundle, inside STORYBOOK_LIMITS: components, renders and the whole import's time. A component whose default story fails is left out and said so; a variant that fails is left out and said so. Throws only when nothing at all could be imported or the signal aborts. */
@@ -406,6 +422,8 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   const shared = new Set<string>()
   /* the story page's own body font, from the first component captured */
   let rootFont: string | undefined
+  /* the control roots that must name the page font themselves (see rootFontControlRule), by component name */
+  const controlRoots = new Map<string, string>()
   let renders = 0
 
   /* a page that cannot be opened (the renderer is busy, the browser would not start) is not a story that failed: the import carries on without that render, and gives up with what it has after a few in a row */
@@ -722,6 +740,8 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         return Object.keys(mapping).length ? [[prop.name, mapping] as const] : []
       }),
     )
+    const controlRule = rootFontControlRule(shipped, rootFont)
+    if (controlRule) controlRoots.set(group.name, controlRule)
     components.push({
       name: group.name,
       group: group.title.slice(0, 200),
@@ -774,7 +794,17 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       failure?.code === 'story_needs_worker' && allNeedWorker ? 'needs_worker' : undefined,
     )
   }
-  for (const rule of rootFontRules(shared, rootFont)) shared.add(rule)
+  const fontRules = rootFontRules(shared, rootFont)
+  for (const rule of fontRules) shared.add(rule)
+  /* a control's rule names `--font-root`, so only when the token rule was emitted; it ends the component's own css, after the shared reset */
+  if (fontRules.length) {
+    for (const component of components) {
+      const rule = controlRoots.get(component.name)
+      if (!rule || guardCss(rule).dropped) continue
+      const joined = [component.css, rule].filter(Boolean).join('\n')
+      if (joined.length <= MAX_BUNDLE_CSS_BYTES) component.css = joined
+    }
+  }
   let css = ''
   for (const rule of shared) {
     if (css.length + rule.length + 1 > MAX_BUNDLE_CSS_BYTES) {

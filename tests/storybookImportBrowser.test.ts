@@ -6,6 +6,10 @@ import { CAPTURE_PRELUDE, captureStory, STYLE_PROPERTIES } from '../shared/story
 import { MAX_PROBE_CHARS } from '../shared/storybook/probe.ts'
 import { STORYBOOK_LIMITS } from '../shared/storybook/plan.ts'
 import { prepareComponent } from '../server/bundleVariants.ts'
+import { extractComponentCss } from '../server/componentCss.ts'
+import { rootFontControlRule, rootFontRules } from '../shared/storybook/bundle.ts'
+import { parseFragment } from 'parse5'
+import type { DefaultTreeAdapterTypes as Tree } from 'parse5'
 import { failedBeforeRendering } from '../server/storybookImportRun.ts'
 import * as screenshot from '../server/screenshot.ts'
 import { findBrowserPath, getBrowser } from '../server/screenshot.ts'
@@ -984,6 +988,64 @@ describe.skipIf(!findBrowserPath())('Storybook import in the hardened renderer',
         weight: '500',
         margin: '3px',
       })
+    } finally {
+      await page.close()
+      await bare.close()
+    }
+  })
+
+  it('keeps a control root on the Storybook font when the preflight reset would hand it back to the frame', async () => {
+    const page = await (await getBrowser()).newPage()
+    const bare = await (await getBrowser()).newPage()
+    try {
+      /* a Tailwind v4 story page: the font is set on html,:host, and the preflight makes every control inherit it */
+      await page.setContent(`<!doctype html>
+<style>
+@layer theme, base, utilities;
+@layer theme{:root,:host{--font-sans:"Test Sans",sans-serif;--default-font-family:var(--font-sans)}}
+@layer base{*,:after,:before{box-sizing:border-box;margin:0}html,:host{font-family:var(--default-font-family,ui-sans-serif)}button,input,select,optgroup,textarea,::file-selector-button{font:inherit}}
+@layer utilities{.px-4{padding-inline:16px}.font-mono{font-family:ui-monospace,monospace}}
+</style>
+<div id="storybook-root"><button class="px-4">Button</button></div>`)
+      await page.evaluate(CAPTURE_PRELUDE)
+      const shot = JSON.parse(
+        (await page.evaluate(captureStory, {
+          textArgs: [],
+          styleProperties: STYLE_PROPERTIES,
+          maxBytes: STORYBOOK_LIMITS.captureBytes,
+          maxElements: 300,
+        })) as string,
+      ) as Parameters<typeof rootFontControlRule>[0]
+      expect(shot.rootFont).toContain('Test Sans')
+
+      const shared = [...shot.sharedRules, ...rootFontRules(shot.sharedRules, shot.rootFont)]
+      /* a document rule sets the font already, so only the token is added */
+      expect(shared.join('\n')).toContain('--font-root')
+      expect(shared.join('\n')).not.toContain('body { font-family: var(--font-root) }')
+      const rule = rootFontControlRule(shot, undefined)
+      expect(rule).toBe('button { font-family: var(--font-root) }')
+
+      /* what an instance is: the sheet scoped to its attribute, in a frame that has its own (serif) font */
+      const frameFor = (componentCss: string) => {
+        const html = `<button class="px-4 font-mono" data-main>Button</button>`
+        const root = parseFragment(html).childNodes[0] as Tree.Element
+        /* a utility the story did not use is added by hand: it stands for the font utility a variant would carry */
+        const sheet = [...shared, componentCss, '.font-mono{font-family:monospace}'].join('\n')
+        const { css } = extractComponentCss(sheet, root, 'cmp')
+        return `<!doctype html><style>${css}</style><body style="font-family: serif"><button class="px-4" data-doop-instance="cmp">Button</button><button class="px-4 font-mono" data-doop-instance="cmp">Mono</button>`
+      }
+      const fonts = async (componentCss: string) => {
+        await bare.setContent(frameFor(componentCss))
+        return bare.evaluate(() =>
+          [...document.querySelectorAll('button')].map((button) => getComputedStyle(button).fontFamily),
+        )
+      }
+      /* without the rule the reset (0,0,1) beats the carried root font (0) and the button is the frame's serif: the case that failed */
+      const without = await fonts(shot.css)
+      expect(without[0]).toBe('serif')
+      const [plain, mono] = await fonts(`${shot.css}\n${rule}`)
+      expect(plain).toContain('Test Sans')
+      expect(mono).toContain('monospace')
     } finally {
       await page.close()
       await bare.close()

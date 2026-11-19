@@ -8,6 +8,7 @@ import {
   BundleImportError,
   buildComponentBundle,
   diffStyles,
+  rootFontControlRule,
   rootFontRules,
   isEmittedPath,
   KnownRenderError,
@@ -154,13 +155,13 @@ describe('rootFontRules', () => {
     ])
   })
 
-  it('adds nothing when html, body, :root or :host already set a font', () => {
+  it('gives only the token, not the body rule, when html, body, :root or :host already set a font', () => {
     for (const rule of [
       'html,:host{line-height:1.5;font-family:var(--default-font-family)}',
       'body { font-family: Georgia }',
       ':root{font-family:serif}',
     ]) {
-      expect(rootFontRules([rule], 'Inter')).toEqual([])
+      expect(rootFontRules([rule], 'Inter')).toEqual([':root { --font-root: Inter }'])
     }
   })
 
@@ -199,6 +200,27 @@ describe('rootFontRules', () => {
     const rules = rootFontRules([], plain)
     expect(rules).toHaveLength(2)
     expect(guardCss(rules.join('\n')).dropped).toBe(0)
+  })
+})
+
+describe('rootFontControlRule', () => {
+  const font = '"Inter", sans-serif'
+  const styles = (value: string) => [STYLE_PROPERTIES.map((p) => (p === 'font-family' ? value : ''))]
+  it('is the root control tag with the font token, for each tag a preflight resets', () => {
+    for (const tag of ['button', 'input', 'select', 'optgroup', 'textarea']) {
+      expect(rootFontControlRule(shot({ rootFont: font, styles: styles(font), paths: [`${tag}.x`] }), undefined)).toBe(
+        `${tag} { font-family: var(--font-root) }`,
+      )
+    }
+  })
+  it('takes the bundle font when the capture has none, and is undefined without a font, styles or a match', () => {
+    expect(rootFontControlRule(shot({ styles: styles(font) }), font)).toBe('button { font-family: var(--font-root) }')
+    expect(rootFontControlRule(shot({ styles: styles(font) }), undefined)).toBeUndefined()
+    expect(rootFontControlRule(shot({ rootFont: font, styles: null }), undefined)).toBeUndefined()
+    expect(rootFontControlRule(shot({ rootFont: font, styles: styles('Georgia') }), undefined)).toBeUndefined()
+    expect(
+      rootFontControlRule(shot({ rootFont: font, styles: styles(font), paths: ['div.x'] }), undefined),
+    ).toBeUndefined()
   })
 })
 
@@ -264,7 +286,31 @@ describe('buildComponentBundle', () => {
       baseUrl: 'https://sb.test/',
       withPage: withPage([], { extra: { rootFont: 'Inter', sharedRules: ['html,:host{font-family:serif}'] } }),
     })
-    expect(withFont.bundle.css).not.toContain('--font-root')
+    expect(withFont.bundle.css).toContain(':root { --font-root: Inter }')
+    expect(withFont.bundle.css).not.toContain('body { font-family: var(--font-root) }')
+  })
+
+  it('names the page font on a control root, and only on a root that inherits it', async () => {
+    const font = 'Inter, sans-serif'
+    const family = (value: string) => [STYLE_PROPERTIES.map((p) => (p === 'font-family' ? value : ''))]
+    const build = async (extra: Partial<CapturedStory>) =>
+      (
+        await buildComponentBundle({
+          entries: [entry('A/Button')],
+          source,
+          baseUrl: 'https://sb.test/',
+          withPage: withPage([], { extra: { rootFont: font, sharedRules: ['*{margin:0}'], ...extra } }),
+        })
+      ).bundle.components[0]?.css ?? ''
+    expect(await build({ styles: family(font) })).toContain('button { font-family: var(--font-root) }')
+    /* a root with a font of its own keeps it */
+    expect(await build({ styles: family('Georgia') })).not.toContain('--font-root')
+    /* a root that is not a control inherits the carried font already, and a bare tag rule would reach its descendants */
+    expect(
+      await build({ styles: family(font), paths: ['div.card'], html: '<div class="card">x</div>', shape: '0div' }),
+    ).not.toContain('--font-root')
+    /* nothing names a token that was never emitted */
+    expect(await build({ styles: family(font), rootFont: 'a; color: red' })).not.toContain('--font-root')
   })
 
   it('renders each component once and its variants inside the 8 values and 4 axes limits', async () => {
