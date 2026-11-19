@@ -19,8 +19,13 @@ import {
   componentSignature,
   isDeleted,
   isHollow,
+  isListFieldName,
   isPropName,
+  LIST_FIELD_TYPES,
+  listJson,
+  MAX_LIST_FIELDS,
   parseBindings,
+  readList,
   propValueProblem,
   variantAttrs,
   type ComponentLookup,
@@ -28,6 +33,8 @@ import {
   type ComponentDef,
   type ComponentProp,
   type InstanceOverrides,
+  type ListField,
+  type ListFieldType,
   type LibraryComponent,
   type PartOverride,
   styleText,
@@ -44,7 +51,7 @@ import { unmatchedSelectors } from './componentCss.ts'
 import {
   alignParts,
   attrOf,
-  cleanRichProps,
+  cleanPropValues,
   compactDocument,
   detachedMarkup,
   effectiveComponent,
@@ -69,8 +76,11 @@ import {
   renderInstance,
   setAttr,
   shapeOf,
+  STYLE_VALUE_RULE,
+  styleBound,
   splice,
   stampParts,
+  unsafeStyleValue,
   useMarkup,
   withDetachedCss,
 } from './componentEngine.ts'
@@ -236,6 +246,27 @@ function finiteNumber(prop: string, field: string, value: unknown): number {
   return number
 }
 
+/** The fields of a list prop: named like props, of a type an item can hold, at least one and at most MAX_LIST_FIELDS. */
+function validListFields(prop: string, raw: unknown): Record<string, ListField> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Object.keys(raw).length)
+    fail(`list prop “${prop}” needs fields, e.g. { "title": { "type": "text" }, "url": { "type": "link" } }`)
+  const entries = Object.entries(raw as Record<string, unknown>)
+  if (entries.length > MAX_LIST_FIELDS)
+    fail(`list prop “${prop}” has ${entries.length} fields; at most ${MAX_LIST_FIELDS}`)
+  const fields: Record<string, ListField> = {}
+  for (const [name, field] of entries) {
+    if (!isListFieldName(name))
+      fail(
+        `list prop “${prop}”: field name “${String(name).slice(0, 40)}” must be lowercase letters, digits and hyphens (like a prop name), and not constructor or prototype`,
+      )
+    const type = field && typeof field === 'object' ? (field as { type?: unknown }).type : field
+    if (typeof type !== 'string' || !(LIST_FIELD_TYPES as readonly string[]).includes(type))
+      fail(`list prop “${prop}”: field “${name}” needs a type of ${LIST_FIELD_TYPES.join(', ')}`)
+    fields[name] = { type: type as ListFieldType }
+  }
+  return fields
+}
+
 /** The typed fields of one prop, each allowed on its own type only. */
 function typedFields(name: string, type: ComponentProp['type'], raw: Partial<ComponentProp>) {
   const only = (field: keyof ComponentProp, allowed: ComponentProp['type']) => {
@@ -247,7 +278,9 @@ function typedFields(name: string, type: ComponentProp['type'], raw: Partial<Com
   only('step', 'number')
   only('accepts', 'instance')
   only('reflect', 'boolean')
+  only('fields', 'list')
   const fields: Partial<ComponentProp> = {}
+  if (type === 'list') fields.fields = validListFields(name, raw.fields)
   if (raw.min !== undefined) fields.min = finiteNumber(name, 'min', raw.min)
   if (raw.max !== undefined) fields.max = finiteNumber(name, 'max', raw.max)
   if (fields.min !== undefined && fields.max !== undefined && fields.min > fields.max)
@@ -292,6 +325,11 @@ export function validProps(props: unknown): ComponentProp[] {
       ...typedFields(raw.name, type, raw),
       ...(raw.description ? { description: String(raw.description).slice(0, 300) } : {}),
     }
+    if (type === 'list' && prop.default !== undefined) {
+      const read = readList(prop, prop.default)
+      if (read.problem) fail(`prop “${prop.name}”: the default does not fit — ${read.problem}`)
+      prop.default = listJson(read.items ?? [])
+    }
     if (prop.default !== undefined && (type === 'number' || type === 'color' || type === 'instance')) {
       const problem = propValueProblem(prop, prop.default)
       if (problem) fail(`prop “${prop.name}”: default “${prop.default}” does not fit — ${problem}`)
@@ -310,7 +348,16 @@ export function usageExample(def: Pick<ComponentDef, 'name' | 'props' | 'slots'>
   const props = def.props
     .filter((prop) => prop.type !== 'boolean')
     .slice(0, 4)
-    .map((prop) => ` ${prop.name}="${prop.options?.[0] ?? `…`}"`)
+    .map((prop) =>
+      prop.type === 'list'
+        ? ` ${prop.name}='[{${
+            Object.keys(prop.fields ?? {})
+              .slice(0, 2)
+              .map((field) => `"${field}":"…"`)
+              .join(',') || '…'
+          }}]'`
+        : ` ${prop.name}="${prop.options?.[0] ?? `…`}"`,
+    )
     .join('')
   const slots = def.slots.map((slot) => `<template slot="${slot.name}">…</template>`).join('')
   return `<${USE_TAG} component="${def.name}"${props}>${slots}</${USE_TAG}>`
@@ -413,6 +460,8 @@ export function componentDetail(canvas: Canvas, def: ComponentDef) {
     tag: info.el.tagName,
     ...(attrOf(info.el, 'class') ? { class: attrOf(info.el, 'class') } : {}),
     ...(info.textProp ? { text_prop: info.textProp } : {}),
+    ...(info.each ? { repeats_for: info.each } : {}),
+    ...(info.inEach && !info.each ? { item_of: info.inEach } : {}),
     ...(info.isSlot ? { slot: attrOf(info.el, SLOT_ATTR) } : {}),
     ...(info.isUse ? { component: attrOf(info.el, 'component') } : {}),
   }))
@@ -1190,7 +1239,7 @@ export const changeInstances = atomic(function changeInstances(
       if (!state) continue
       validateProps(def, change.props, ctx.find)
       /* a rich-text value is stored in its safe form, and the agent hears what was taken out of it */
-      const props = cleanRichProps(def, change.props, ctx)
+      const props = cleanPropValues(def, change.props, ctx)
       const changed = applyChange(state.overrides, props === change.props ? change : { ...change, props })
       const swapped = change.swap ? applySwap(changed, def, change.swap, canvasId) : changed
       const next = change.mapProps ? withMappedProps(swapped, change.mapProps) : swapped
@@ -1206,7 +1255,9 @@ export const changeInstances = atomic(function changeInstances(
   const next = html !== frame.html ? actions.updateFrame(frame.id, { html }, actor) : frame
   if (!next) fail('frame not found')
   /* the write just replaced what the frame had to say about its components: add what the sanitiser said */
-  for (const issue of ctx.issues) if (issue.code === 'richtext_sanitized') actions.addComponentIssue(frame.id, issue)
+  for (const issue of ctx.issues)
+    if (issue.code === 'richtext_sanitized' || issue.code === 'list_field_dropped')
+      actions.addComponentIssue(frame.id, issue)
   return { frame: next, missing: changes.map((change) => change.instanceId).filter((id) => !seen.has(id)) }
 })
 
@@ -1230,8 +1281,15 @@ function detachAll(html: string, def: ComponentDef): { html: string; count: numb
 function checkPropValues(def: ComponentDef, props: Record<string, string> | undefined, lookup: ComponentLookup) {
   for (const [name, value] of Object.entries(props ?? {})) {
     const prop = def.props.find((candidate) => candidate.name === name)
+    if (prop && prop.type !== 'list' && unsafeStyleValue(value) && styleBound(def.template, name))
+      fail(`${def.name}: ${name} was not set — it is bound to a style, and ${STYLE_VALUE_RULE}`)
     const problem = prop && value !== '' ? propValueProblem(prop, value, lookup) : undefined
-    if (problem) fail(`${def.name}: "${value}" is not a value of ${name} — ${problem}`)
+    if (problem)
+      fail(
+        prop?.type === 'list'
+          ? `${def.name}: ${name} was not set — ${problem}`
+          : `${def.name}: "${value}" is not a value of ${name} — ${problem}`,
+      )
   }
 }
 
