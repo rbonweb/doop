@@ -442,6 +442,7 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
   const slotTargets = new Map<string, string | null>()
   const values = new Map<string, Map<string, string | number | boolean>>()
   const components = new Map<string, ComponentValues>()
+  const toChildren: string[] = []
   const claim = (label: string, wanted: string, renamed: boolean): string | null => {
     const lower = wanted.toLowerCase()
     if (REACT_OWNED.has(lower)) {
@@ -452,7 +453,8 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
       refuse(`${label} is passed as ${jsString(wanted)}, which is not a prop name: it was left out`)
       return null
     }
-    if (wanted !== 'children') {
+    if (wanted === 'children') toChildren.push(label)
+    else {
       if (used.has(wanted)) {
         refuse(`${label} is passed as ${jsString(wanted)}, which another prop or slot already uses: it was left out`)
         return null
@@ -503,6 +505,10 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
     const wanted = own(code.slots, slot.name) ?? slot.name
     slotTargets.set(slot.name, claim(`slot ${jsString(slot.name)}`, wanted, own(code.slots, slot.name) !== undefined))
   }
+  if (toChildren.length > 1)
+    refuse(
+      `${toChildren.join(' and ')} are all passed as the children of ${jsString(code.exportName)}, so they render one after another: send all but one to a prop`,
+    )
   return {
     mapped: {
       importFrom: code.importFrom,

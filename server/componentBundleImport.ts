@@ -583,7 +583,9 @@ function writeOne(
     const html = withInferredBindings(prepared.html, !ctx.captured, ctx.captured ? bundled : undefined)
     const result = withCodeMapping(
       component.name,
-      withStoredRules(ctx.captured ? withChildrenMapping(code, html, bundled) : code, match.code),
+      ctx.captured
+        ? withChildrenMapping(withStoredRules(code, match.code), html, bundled)
+        : withStoredRules(code, match.code),
       issues,
       (mapping) =>
         updateComponent(
