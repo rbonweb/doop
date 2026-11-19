@@ -25,6 +25,8 @@ import {
   type ComponentContext,
 } from '../lib/components'
 import { useT } from '../lib/i18n'
+import { listItemsOf, listSample, listValue } from '../lib/listProps'
+import { richTextTemplateValue } from '../lib/richTextProp'
 import { isLayerLocked } from '../lib/layerEdits'
 import { canEditOpenCanvas, useStore } from '../lib/store'
 import { Button } from './ui/button'
@@ -32,6 +34,8 @@ import { Dot } from './ui/dot'
 import { IconButton } from './ui/icon-button'
 import { ComponentIcon, UndoIcon } from './ui/icons'
 import { ImagePicker } from './ImageFill'
+import { ListPropEditor } from './ListPropEditor'
+import { RichTextPropField } from './RichTextPropField'
 import { ColorField, NumberField, PropertyRow, SelectField, TextField } from './ui/property-field'
 import { Switch } from './ui/switch'
 import { Textarea } from './ui/textarea'
@@ -122,8 +126,11 @@ function InstanceControls({
     const current = useStore.getState().canvas?.frames.find((f) => f.id === frame.id)
     return current && !isLayerLocked(current, selector) ? current : undefined
   }
-  const fallbackOf = (prop: ComponentProp) =>
-    prop.default ?? (prop.type === 'boolean' ? 'true' : templateValue(def, prop.name))
+  const fallbackOf = (prop: ComponentProp) => {
+    if (prop.type === 'list') return prop.default ?? listValue(listSample(def, prop))
+    if (prop.type === 'richtext') return richTextTemplateValue(def.template, prop.name)
+    return prop.default ?? (prop.type === 'boolean' ? 'true' : templateValue(def, prop.name))
+  }
   const overriddenProps = def.props.filter((prop) => {
     const value = context.props[prop.name]
     return value !== undefined && value !== fallbackOf(prop)
@@ -265,16 +272,35 @@ function PropField({
     setError(problem && problem.charAt(0).toUpperCase() + problem.slice(1))
     if (!problem) onChange(next)
   }
+  const reset = overridden
+    ? { label: t('components.resetProp', { name: prop.name }), onReset: () => commit(''), disabled }
+    : undefined
+  /* a list and a rich-text field need the panel's width: their own block, not a row beside the label */
+  if (prop.type === 'list')
+    return (
+      <ListPropEditor
+        canvasId={canvasId}
+        prop={prop}
+        items={listItemsOf(prop, shown)}
+        disabled={disabled}
+        overridden={reset}
+        error={error}
+        onChange={(items) => commit(listValue(items))}
+      />
+    )
+  if (prop.type === 'richtext')
+    return (
+      <RichTextPropField
+        label={prop.name}
+        value={shown}
+        disabled={disabled}
+        overridden={reset}
+        error={error}
+        onCommit={commit}
+      />
+    )
   return (
-    <PropertyRow
-      label={prop.name}
-      error={error}
-      overridden={
-        overridden
-          ? { label: t('components.resetProp', { name: prop.name }), onReset: () => commit(''), disabled }
-          : undefined
-      }
-    >
+    <PropertyRow label={prop.name} error={error} overridden={reset}>
       {propControl()}
     </PropertyRow>
   )
@@ -377,8 +403,11 @@ function PropField({
           />
         )
       }
-      case 'text':
+      case 'list':
       case 'richtext':
+        /* drawn as a block above; here for the switch to stay exhaustive */
+        return null
+      case 'text':
       case 'link':
         return (
           <TextField

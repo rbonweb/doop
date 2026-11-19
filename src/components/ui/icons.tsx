@@ -13,6 +13,7 @@
 import type { ComponentType, SVGProps } from 'react'
 import {
   Angle,
+  GripVertical,
   Bold,
   Italic,
   Underline,
@@ -205,6 +206,8 @@ export const RowGapIcon = icon(GapVertical)
 export const WrapTextIcon = icon(WrapText)
 export const SquareDashedIcon = icon(SquareDashed)
 export const MoreHorizontalIcon = icon(Ellipsis)
+/** the grab handle of a row that can be dragged to a new place */
+export const GripVerticalIcon = icon(GripVertical)
 export const ShareIcon = icon(Share2)
 export const CopyIcon = icon(Copy)
 export const ClipboardIcon = icon(Clipboard)
