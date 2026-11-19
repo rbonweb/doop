@@ -10,7 +10,7 @@ export const componentFields = {
   moveDown: 'Mover para baixo',
   duplicateItem: 'Duplicar',
   removeItem: 'Remover',
-  fieldImageAria: '{field}, item {n}',
+  fieldAria: '{field}, item {n}',
   listFull: 'Uma lista tem no máximo {max} itens.',
   richAria: '{name}, texto formatado',
   bold: 'Negrito',

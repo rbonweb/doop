@@ -145,16 +145,16 @@ it('draws one row per item with an input for each declared field', () => {
   expect(rows()).toHaveLength(2)
   expect(rows()[0]?.textContent).toContain('1. Write')
   expect(rows()[1]?.textContent).toContain('2. Ship')
-  expect(byLabel<HTMLInputElement>('title, 1').value).toBe('Write')
-  expect(byLabel<HTMLInputElement>('site, 2').placeholder).toBe('https://…')
-  expect(byLabel<HTMLElement>('done, 1').getAttribute('aria-checked')).toBe('true')
-  expect(byLabel<HTMLElement>('done, 2').getAttribute('aria-checked')).toBe('false')
+  expect(byLabel<HTMLInputElement>('title, item 1').value).toBe('Write')
+  expect(byLabel<HTMLInputElement>('site, item 2').placeholder).toBe('https://…')
+  expect(byLabel<HTMLElement>('done, item 1').getAttribute('aria-checked')).toBe('true')
+  expect(byLabel<HTMLElement>('done, item 2').getAttribute('aria-checked')).toBe('false')
 })
 
 it('shows the main’s one sample item for an instance that has no items of its own', () => {
   show(def([LIST]))
   expect(rows()).toHaveLength(1)
-  expect(byLabel<HTMLInputElement>('title, 1').value).toBe('Sample')
+  expect(byLabel<HTMLInputElement>('title, item 1').value).toBe('Sample')
   /* nothing was overridden, so there is nothing to reset */
   expect(container.querySelector('[data-slot="override-dot"]')).toBeNull()
 })
@@ -168,25 +168,26 @@ it('adds an item with every on/off field off, as one save of the whole list', as
 
 it('saves an edited field, and drops a cleared one from the item', async () => {
   show(def([LIST]), { tasks: TWO })
-  type(byLabel<HTMLInputElement>('title, 2'), 'Ship it')
+  type(byLabel<HTMLInputElement>('title, item 2'), 'Ship it')
   await act(async () => {})
   expect(saved().at(-1)).toEqual({ tasks: '[{"done":true,"title":"Write"},{"title":"Ship it"}]' })
 
-  type(byLabel<HTMLInputElement>('title, 1'), '')
+  type(byLabel<HTMLInputElement>('title, item 1'), '')
   await act(async () => {})
   expect(saved().at(-1)).toEqual({ tasks: '[{"done":true},{"title":"Ship"}]' })
 })
 
 it('refuses an address a list link field may not hold, and says why', async () => {
   show(def([LIST]), { tasks: TWO })
-  type(byLabel<HTMLInputElement>('site, 1'), 'javascript:alert(1)')
+  type(byLabel<HTMLInputElement>('site, item 1'), 'javascript:alert(1)')
+  await act(async () => {})
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('web address')
   expect(mocks.changeInstances).not.toHaveBeenCalled()
 })
 
 it('flips an on/off field', async () => {
   show(def([LIST]), { tasks: TWO })
-  act(() => byLabel<HTMLButtonElement>('done, 2').click())
+  act(() => byLabel<HTMLButtonElement>('done, item 2').click())
   await act(async () => {})
   expect(saved().at(-1)).toEqual({ tasks: '[{"done":true,"title":"Write"},{"done":true,"title":"Ship"}]' })
 })
@@ -220,12 +221,115 @@ it('cannot move the first item up or the last item down', async () => {
 it('moves an item with ⌥↑ and ⌥↓ on its card', async () => {
   show(def([LIST]), { tasks: TWO })
   act(() => {
-    byLabel<HTMLInputElement>('title, 2').dispatchEvent(
+    byLabel<HTMLInputElement>('title, item 2').dispatchEvent(
       new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true, cancelable: true }),
     )
   })
   await act(async () => {})
   expect(saved().at(-1)).toEqual({ tasks: '[{"title":"Ship"},{"done":true,"title":"Write"}]' })
+})
+
+/** A server that stores what it is sent: the frame is drawn again with the new props, as the store's upsert would. */
+function storing(props: Record<string, string>, gate?: () => Promise<void>) {
+  let current = props
+  mocks.changeInstances.mockImplementation(async (_frameId: string, changes: { props: Record<string, string> }[]) => {
+    await gate?.()
+    current = { ...current, ...changes[0]!.props }
+    const next = instanceFrame(current)
+    mocks.frames = [next]
+    act(() => root.render(<ComponentSection frame={next} selector="[data-doop-id='inst01']" />))
+    return { frame: next, missing: [] }
+  })
+}
+const THREE = JSON.stringify([{ title: 'A' }, { title: 'B' }, { title: 'C' }])
+const titles = () =>
+  Array.from(container.querySelectorAll<HTMLInputElement>('[data-slot="list-item"] input'))
+    .filter((input) => input.getAttribute('aria-label')?.startsWith('title'))
+    .map((input) => input.value)
+const altDown = (el: Element) =>
+  el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true, cancelable: true }))
+
+it('keeps the keyboard on the same item through reorders: ⌥↓ twice on A,B,C gives B,C,A', async () => {
+  storing({ tasks: THREE })
+  show(def([LIST]), { tasks: THREE })
+  const first = byLabel<HTMLInputElement>('title, item 1')
+  first.focus()
+  act(() => void altDown(first))
+  await act(async () => {})
+  expect(titles()).toEqual(['B', 'A', 'C'])
+  expect(container.contains(first) && first.value).toBe('A')
+  act(() => void altDown(first))
+  await act(async () => {})
+  expect(titles()).toEqual(['B', 'C', 'A'])
+  expect(saved().at(-1)).toEqual({ tasks: '[{"title":"B"},{"title":"C"},{"title":"A"}]' })
+})
+
+it('does not lose a quick second edit: two moves before the first save returns both land', async () => {
+  let release!: () => void
+  const gate = () => new Promise<void>((resolve) => (release = resolve))
+  storing({ tasks: THREE }, gate)
+  show(def([LIST]), { tasks: THREE })
+  const first = byLabel<HTMLInputElement>('title, item 1')
+  act(() => {
+    altDown(first)
+    altDown(first)
+  })
+  await act(async () => {})
+  /* saves go one at a time, and the second starts from the list the first left */
+  expect(mocks.changeInstances).toHaveBeenCalledTimes(1)
+  release()
+  await act(async () => {})
+  expect(mocks.changeInstances).toHaveBeenCalledTimes(2)
+  release()
+  await act(async () => {})
+  expect(saved()).toEqual([
+    { tasks: '[{"title":"B"},{"title":"A"},{"title":"C"}]' },
+    { tasks: '[{"title":"B"},{"title":"C"},{"title":"A"}]' },
+  ])
+})
+
+it('keeps both items of two quick adds', async () => {
+  storing({ tasks: TWO })
+  show(def([LIST]), { tasks: TWO })
+  act(() => {
+    byLabel<HTMLButtonElement>('Add item').click()
+    byLabel<HTMLButtonElement>('Add item').click()
+  })
+  await act(async () => {})
+  await act(async () => {})
+  expect(saved().at(-1)).toEqual({
+    tasks: '[{"done":true,"title":"Write"},{"title":"Ship"},{"done":false},{"done":false}]',
+  })
+  expect(rows()).toHaveLength(4)
+})
+
+it('keeps a half-typed field with its item when another item is removed above it', async () => {
+  storing({ tasks: THREE })
+  show(def([LIST]), { tasks: THREE })
+  const second = byLabel<HTMLInputElement>('title, item 2')
+  const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+  act(() => {
+    set.call(second, 'Bee')
+    second.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await openMenu(byLabel('Actions for item 1'))
+  await pick('Remove')
+  await act(async () => {})
+  expect(container.contains(second)).toBe(true)
+  expect(second.value).toBe('Bee')
+  expect(byLabel<HTMLInputElement>('title, item 1')).toBe(second)
+})
+
+it('makes no request for a move that changes nothing', async () => {
+  show(def([LIST]), { tasks: TWO })
+  act(() => {
+    byLabel<HTMLInputElement>('title, item 1').dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true, cancelable: true }),
+    )
+    altDown(byLabel<HTMLInputElement>('title, item 2'))
+  })
+  await act(async () => {})
+  expect(mocks.changeInstances).not.toHaveBeenCalled()
 })
 
 it('reorders by dragging the grip onto another card', async () => {
@@ -340,7 +444,11 @@ it('asks for an http(s) address before it makes a link', () => {
   const input = byLabel<HTMLInputElement>('Link address')
   expect(input).toBeTruthy()
 
-  type(input, 'javascript:alert(1)')
+  const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+  act(() => {
+    set.call(input, 'javascript:alert(1)')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
   act(
     () => void container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })),
   )
@@ -356,5 +464,5 @@ it('leaves a locked frame’s rich text and list uneditable', () => {
   expect(editor().getAttribute('contenteditable')).toBe('false')
   expect(container.querySelector('[aria-label="Bold"]')).toBeNull()
   expect(container.querySelector('[aria-label="Add item"]')).toBeNull()
-  expect(byLabel<HTMLInputElement>('title, 1').disabled).toBe(true)
+  expect(byLabel<HTMLInputElement>('title, item 1').disabled).toBe(true)
 })

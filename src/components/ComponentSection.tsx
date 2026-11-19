@@ -163,9 +163,9 @@ function InstanceControls({
             const current = live()
             if (!current) return
             /* "" clears the prop back to the main's value, which is how a cleared field resets */
-            void (value === ''
+            return value === ''
               ? resetInstanceProp(current, instanceId, prop.name)
-              : changeInstance(current, { instanceId, props: { [prop.name]: value } }))
+              : changeInstance(current, { instanceId, props: { [prop.name]: value } })
           }}
         />
       ))}
@@ -250,8 +250,8 @@ function PropField({
   disabled: boolean
   value: string | undefined
   fallback: string
-  /** "" puts the main's value back */
-  onChange: (value: string) => void
+  /** "" puts the main's value back; resolves once the change is stored, so a caller can queue the next after it */
+  onChange: (value: string) => Promise<void> | void
 }) {
   const t = useT()
   const tokens = useStore((s) => s.canvas?.tokens)
@@ -270,7 +270,8 @@ function PropField({
   const commit = (next: string) => {
     const problem = next === '' ? undefined : propValueProblem(prop, next, lookup)
     setError(problem && problem.charAt(0).toUpperCase() + problem.slice(1))
-    if (!problem) onChange(next)
+    if (problem) return
+    return onChange(next)
   }
   const reset = overridden
     ? { label: t('components.resetProp', { name: prop.name }), onReset: () => commit(''), disabled }
@@ -338,7 +339,7 @@ function PropField({
             className="h-[26px] min-w-0 flex-1 gap-1.5 rounded-row px-[3px] text-caption"
             onPick={async (resolve) => {
               const url = await resolve()
-              if (url !== shown) commit(url)
+              if (url !== shown) await commit(url)
             }}
             onClear={() => commit('')}
           />

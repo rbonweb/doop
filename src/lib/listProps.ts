@@ -58,19 +58,19 @@ export function setListField(
   })
 }
 
-export function addListItem(items: readonly ListItem[], item: ListItem, after = items.length - 1): ListItem[] {
+export function addListItem<T>(items: readonly T[], item: T, after = items.length - 1): T[] {
   if (items.length >= MAX_LIST_ITEMS) return [...items]
   const next = [...items]
   next.splice(after + 1, 0, item)
   return next
 }
 
-export function removeListItem(items: readonly ListItem[], at: number): ListItem[] {
+export function removeListItem<T>(items: readonly T[], at: number): T[] {
   return items.filter((_item, index) => index !== at)
 }
 
 /** An item moved to a new place (`to` is where it ends up); a move off either end, or onto itself, changes nothing. */
-export function moveListItem(items: readonly ListItem[], from: number, to: number): ListItem[] {
+export function moveListItem<T>(items: readonly T[], from: number, to: number): T[] {
   if (from === to || from < 0 || to < 0 || from >= items.length || to >= items.length) return [...items]
   const next = [...items]
   const [moved] = next.splice(from, 1)
