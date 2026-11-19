@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { MAX_RICHTEXT_CHARS } from '../shared/components.ts'
-import { MAX_RICHTEXT_DEPTH, describeRemoved, sanitizeRichText } from '../server/richText.ts'
+import { MAX_RICHTEXT_DEPTH, describeRemoved, safeName, sanitizeRichText, shown } from '../server/richText.ts'
 
 const clean = (value: string) => sanitizeRichText(value).html
 
@@ -107,8 +107,28 @@ describe('sanitizeRichText: hostile input', () => {
     expect(clean('<a>x</a>')).toBe('x')
   })
 
-  it('never lets nested links nest', () => {
-    expect(clean('<a href="https://a.com"><a href="https://b.com">nest</a></a>')).not.toMatch(/<a [^>]*><a /)
+  it('never lets nested links nest, and leaves no empty link behind', () => {
+    expect(clean('<a href="https://a.com"><a href="https://b.com">nest</a></a>')).toBe(
+      '<a href="https://b.com">nest</a>',
+    )
+    expect(clean('<a href="https://a.com"></a>text')).toBe('text')
+  })
+
+  it('takes control characters out of text, with or without markup around it', () => {
+    expect(clean('a\u0000b\u0001c\u007fd')).toBe('abcd')
+    expect(clean('<b>a\u0000b</b>')).toBe('<b>ab</b>')
+    expect(clean('a\r\nb\rc')).toBe('a\nb\nc')
+    expect(clean('tab\tand\nnewline')).toBe('tab\tand\nnewline')
+  })
+
+  it('shows tag, attribute and slot-like names short and in a plain charset', () => {
+    const long = 'x'.repeat(200)
+    const { removed } = sanitizeRichText(`<${long} ${long}="1">t</${long}><b ${long}="1">u</b><x-y"z>`)
+    for (const entry of removed) expect(entry.length).toBeLessThan(80)
+    expect(removed.join(' ')).not.toContain('"')
+    expect(safeName('a<b>"c\n')).toBe('a?b??c?')
+    expect(shown('x'.repeat(100))).toHaveLength(81)
+    expect(shown('short')).toBe('short')
   })
 
   it('names what it removed without echoing the value', () => {
@@ -127,6 +147,15 @@ describe('sanitizeRichText: bounds and idempotence', () => {
 
   it('takes a value at the cap', () => {
     expect(clean('x'.repeat(MAX_RICHTEXT_CHARS))).toHaveLength(MAX_RICHTEXT_CHARS)
+  })
+
+  it('caps what is stored too: escaping that grows a value past the cap refuses it, and what passes stays stable', () => {
+    const grows = sanitizeRichText('&'.repeat(MAX_RICHTEXT_CHARS))
+    expect(grows.html).toBe('')
+    expect(grows.removed[0]).toContain('20,000')
+    const fits = clean('&'.repeat(MAX_RICHTEXT_CHARS / 5 - 1))
+    expect(fits.length).toBeLessThanOrEqual(MAX_RICHTEXT_CHARS)
+    expect(clean(fits)).toBe(fits)
   })
 
   it('flattens nesting past the depth limit and keeps the text', () => {

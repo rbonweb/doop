@@ -68,6 +68,28 @@ function hasControlOrSpace(value: string): boolean {
   return false
 }
 
+/** A name from untrusted markup (tag, attribute, slot) as an issue may show it: short, in a plain charset. */
+export function safeName(value: string): string {
+  return value.slice(0, 40).replace(/[^\w .:-]/g, '?')
+}
+
+/** A value as an issue may quote it: never past 80 characters. */
+export function shown(value: string, max = 80): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value
+}
+
+/** Text with the control characters a parser would drop or keep unevenly taken out, and line ends made `\n`. */
+function withoutControls(value: string): string {
+  let out = ''
+  for (let at = 0; at < value.length; at++) {
+    const code = value.charCodeAt(at)
+    if (code === 0x0d) {
+      if (value.charCodeAt(at + 1) !== 0x0a) out += '\n'
+    } else if (code === 0x09 || code === 0x0a || (code > 0x1f && code !== 0x7f)) out += value[at]
+  }
+  return out
+}
+
 const isElement = (node: ChildNode): node is Element => 'tagName' in node
 
 function safeHref(value: string): boolean {
@@ -129,18 +151,18 @@ function pass(fragment: Tree.DocumentFragment, note: Pass): Tree.DocumentFragmen
     const tag = child.tagName.toLowerCase()
     const foreign = child.namespaceURI !== parse5Html.NS.HTML
     if (foreign || DROPPED_WITH_CONTENT.has(tag)) {
-      note.removed.add(`<${tag}> and its content`)
+      note.removed.add(`<${safeName(tag)}> and its content`)
       continue
     }
     const below = child
     if (!KEPT.has(tag)) {
-      note.removed.add(`<${tag}> tag`)
+      note.removed.add(`<${safeName(tag)}> tag`)
       stack.push({ source: below, target: frame.target, at: 0, depth: frame.depth })
       continue
     }
     for (const attr of child.attrs)
       if (!(tag === 'a' && attr.name === 'href') && !(tag === 'span' && attr.name === 'class'))
-        note.removed.add(`${attr.name} attribute on <${tag}>`)
+        note.removed.add(`${safeName(attr.name)} attribute on <${tag}>`)
     if (tag === 'br') {
       append(frame.target, make('br', []))
       continue
@@ -180,31 +202,48 @@ function pass(fragment: Tree.DocumentFragment, note: Pass): Tree.DocumentFragmen
   return out
 }
 
+/** A link with nothing in it is invisible, and what a refused nested link leaves behind: drop it. */
+function withoutEmptyLinks(root: Tree.DocumentFragment) {
+  const stack: ParentNode[] = [root]
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    node.childNodes = node.childNodes.filter(
+      (child) => !(isElement(child) && child.tagName === 'a' && !child.childNodes.length),
+    )
+    for (const child of node.childNodes) if (isElement(child)) stack.push(child)
+  }
+}
+
 const empty = (removed: string[]): RichTextResult => ({ html: '', removed })
 
 function once(markup: string, note: Pass): string {
-  return serialize(pass(parseFragment(markup), note))
+  const tree = pass(parseFragment(markup), note)
+  withoutEmptyLinks(tree)
+  return serialize(tree)
 }
 
 /** The safe form of a rich-text value, and what had to go. `sanitizeRichText(sanitizeRichText(x).html).html` is the same string. */
 export function sanitizeRichText(value: string): RichTextResult {
-  if (value.length > MAX_RICHTEXT_CHARS)
-    return empty([
-      `the value (it is over ${MAX_RICHTEXT_CHARS.toLocaleString('en-US')} characters, so none of it was kept)`,
-    ])
-  if (!value.includes('<') && !value.includes('&')) return { html: serialize(textOnly(value)), removed: [] }
+  const tooLong = () =>
+    empty([`the value (it is over ${MAX_RICHTEXT_CHARS.toLocaleString('en-US')} characters, so none of it was kept)`])
+  if (value.length > MAX_RICHTEXT_CHARS) return tooLong()
+  const input = withoutControls(value)
+  if (!input.includes('<') && !input.includes('&')) {
+    const html = serialize(textOnly(input))
+    return html.length > MAX_RICHTEXT_CHARS ? tooLong() : { html, removed: [] }
+  }
   const note: Pass = { removed: new Set() }
-  let html = once(value, note)
+  let html = once(input, note)
   /* a fixed point: the output must read back as itself, or the parser and the serialiser disagree about it */
   for (let round = 0; round < 3; round++) {
+    /* escaping can make the output longer than the input: the cap holds for what is stored */
+    if (html.length > MAX_RICHTEXT_CHARS) return tooLong()
     const again = once(html, { removed: new Set() })
     if (again === html) return { html, removed: [...note.removed] }
     html = again
   }
-  return {
-    html: serialize(textOnly(plainText(html))),
-    removed: [...note.removed, 'markup that would not read back the same'],
-  }
+  const plain = serialize(textOnly(plainText(html)))
+  if (plain.length > MAX_RICHTEXT_CHARS) return tooLong()
+  return { html: plain, removed: [...note.removed, 'markup that would not read back the same'] }
 }
 
 function textOnly(value: string): Tree.DocumentFragment {

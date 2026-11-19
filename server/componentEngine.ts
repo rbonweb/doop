@@ -53,7 +53,7 @@ import {
   COMPONENT_REF,
 } from '../shared/components.ts'
 import { ELEMENT_ID_ATTR, isElementId, newElementId } from '../shared/elementId.ts'
-import { describeRemoved, sanitizeRichText } from './richText.ts'
+import { describeRemoved, safeName, sanitizeRichText, shown } from './richText.ts'
 
 /**
  * The component engine: pure string-and-tree work with no store behind it.
@@ -606,7 +606,7 @@ function forwardingOf(
     }
     const outerProp = outer.props.find((candidate) => candidate.name === prop)
     if (!outerProp) {
-      skip(`“${outer.name}” has no prop “${prop}”, so there is nothing to forward`)
+      skip(`“${outer.name}” has no prop “${safeName(prop)}”, so there is nothing to forward`)
       continue
     }
     if (target === 'component' && outerProp.type !== 'instance') {
@@ -622,7 +622,7 @@ function forwardingOf(
         if (report)
           ctx.issues.push({
             code: 'invalid_prop_value',
-            message: `${outer.name}: "${value}" is not a value of ${prop} — ${problem}`,
+            message: `${outer.name}: "${shown(value)}" is not a value of ${prop} — ${problem}`,
           })
         continue
       }
@@ -630,7 +630,7 @@ function forwardingOf(
         if (report)
           ctx.issues.push({
             code: 'invalid_prop_value',
-            message: `${outer.name}: "${value}" would put “${outer.name}” inside itself, so ${prop} was ignored and the component written in the template renders`,
+            message: `${outer.name}: "${shown(value)}" would put “${outer.name}” inside itself, so ${prop} was ignored and the component written in the template renders`,
           })
         continue
       }
@@ -690,7 +690,7 @@ function forwardedState(
       if (!swapped)
         ctx.issues.push({
           code: 'ignored_attribute',
-          message: `${BIND_ATTR} on <${USE_TAG} component="${nested.name}"> forwards to “${target}”, which “${nested.name}” does not have (it has ${nested.props.map((p) => p.name).join(', ') || 'no props'})`,
+          message: `${BIND_ATTR} on <${USE_TAG} component="${nested.name}"> forwards to “${safeName(target)}”, which “${nested.name}” does not have (it has ${nested.props.map((p) => p.name).join(', ') || 'no props'})`,
         })
       continue
     }
@@ -698,7 +698,7 @@ function forwardedState(
     if (problem) {
       ctx.issues.push({
         code: 'invalid_prop_value',
-        message: `${nested.name}: "${value}" is not a value of ${target} — ${problem}`,
+        message: `${nested.name}: "${shown(value)}" is not a value of ${target} — ${problem}`,
       })
       continue
     }
@@ -1466,7 +1466,7 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
       if (problem) {
         ctx.issues.push({
           code: 'invalid_prop_value',
-          message: `${def.name}: "${attr.value}" is not a value of ${name} — ${problem}`,
+          message: `${def.name}: "${shown(attr.value)}" is not a value of ${name} — ${problem}`,
         })
         continue
       }
@@ -1479,7 +1479,7 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
     }
     ctx.issues.push({
       code: 'unknown_prop',
-      message: `${def.name} has no prop “${name}” — it has ${def.props.map((p) => p.name).join(', ') || 'no props'}`,
+      message: `${def.name} has no prop “${safeName(name)}” — it has ${def.props.map((p) => p.name).join(', ') || 'no props'}`,
     })
   }
   /* `<template slot="x">` and plain children go to their slots */
@@ -1500,19 +1500,18 @@ function assignSlots(use: Element, def: Revision, parts: Record<string, PartOver
   const fallback = slotParts[0]![0]
   /* a component with one slot takes everything without comment; with several, content that names no slot is a guess worth reporting */
   const several = slotParts.length > 1
-  const names = [...byName.keys()].map((name) => name || 'default')
+  const names = [...byName.keys()].map((name) => safeName(name) || 'default')
   /* where unnamed content has always gone: the first slot the template walk finds */
-  const fallbackName = attrOf(slotParts[0]![1].el, SLOT_ATTR) || 'default'
+  const fallbackName = safeName(attrOf(slotParts[0]![1].el, SLOT_ATTR) ?? '') || 'default'
   const unknown = new Set<string>()
   const unnamed: string[] = []
   for (const child of use.childNodes) {
     if (isElement(child)) {
       const slotName = attrOf(child, 'slot')
       if (slotName !== undefined) {
-        /* `default` is the name the catalog gives a slot with no name of its own */
-        const known = byName.has(slotName) ? slotName : slotName === 'default' && byName.has('') ? '' : undefined
-        if (known === undefined && several) unknown.add(slotName)
-        const key = (known !== undefined ? byName.get(known) : undefined) ?? fallback
+        const known = byName.has(slotName)
+        if (!known && several) unknown.add(safeName(slotName))
+        const key = byName.get(slotName) ?? fallback
         const content = child.tagName === 'template' ? templateInner(child) : serializeOuterWithoutSlot(child)
         const existing = parts[key]?.slot
         parts[key] = { ...parts[key], slot: existing ? `${existing}${content}` : content }

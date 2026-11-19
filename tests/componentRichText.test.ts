@@ -325,6 +325,20 @@ describe('rich-text props', () => {
       expect(html(write(markup))).toContain('F')
     })
 
+    it('keeps slot="default" going where it always went, and tells the author the slot does not exist', () => {
+      const def = panel()
+      const issues = issuesOf(`<doop-use component="${def.id}"><template slot="default">D</template></doop-use>`)
+      expect(issues.map((issue) => issue.code)).toEqual(['unknown_slot'])
+    })
+
+    it('shows a long slot name short', () => {
+      const def = panel()
+      const [issue] = issuesOf(
+        `<doop-use component="${def.id}"><template slot="${'s'.repeat(300)}">x</template></doop-use>`,
+      )
+      expect(issue!.message.length).toBeLessThan(250)
+    })
+
     it('stays quiet for named content and for a component with one slot', () => {
       const several = panel()
       expect(issuesOf(`<doop-use component="${several.id}"><template slot="header">H</template></doop-use>`)).toEqual(
