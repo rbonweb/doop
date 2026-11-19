@@ -54,6 +54,7 @@ export const panels = {
   pagesExpand: 'Expand {name}',
   pagesCollapse: 'Collapse {name}',
   pagesHiddenSubpages: { one: '{count} hidden subpage', other: '{count} hidden subpages' },
+  pagesResize: 'Resize pages',
 
   memoryIntro: 'Memory is how this canvas remembers your taste — and how every agent designs with it.',
   memoryReferences: 'References',

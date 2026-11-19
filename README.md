@@ -33,7 +33,7 @@ runs on **GPT, Claude, Gemini, DeepSeek, Kimi or Qwen** models
   OpenAI, Claude, Gemini, DeepSeek, Kimi or OpenRouter key), or on the server's `ANTHROPIC_API_KEY` for as many
   free tasks as `RESIDENT_TASK_LIMIT` grants (none by default) ([setup](#the-doop-agent)); the
   first-canvas welcome performance is scripted and runs without any of it.
-- **Pages within a canvas** — organize frames into named pages from the Layers panel, and nest a page under another to group related ones (two levels of subpages, collapsible). Add, rename, drag to reorder or nest, or right-click to add a subpage, rename and delete empty pages. Page edits support Undo/Redo; selected frames can move between pages. Each page can wear a canvas colour of its own, as in Figma: with nothing selected, the sliders icon on the right opens the Page panel with its Background swatch (agents: `set_page_background`); cleared, the page shows the theme paper again. Agents list pages with `get_canvas`, manage them with `set_canvas_pages` (a page nests under another with `parent_id`; pass the original list as `expectedPages` to protect collaborators), add one with `create_canvas_page`, and target frames with `pageId`.
+- **Pages within a canvas** — organize frames into named pages from the Layers panel, and nest a page under another to group related ones (two levels of subpages, collapsible). Add, rename, drag to reorder or nest, or right-click for page actions (add a subpage, rename, copy a link, delete empty pages) without switching away from the open page. Page edits support Undo/Redo; selected frames can move between pages. Each page can wear a canvas colour of its own, as in Figma: with nothing selected, the sliders icon on the right opens the Page panel with its Background swatch (agents: `set_page_background`); cleared, the page shows the theme paper again. Agents list pages with `get_canvas`, manage them with `set_canvas_pages` (a page nests under another with `parent_id`; pass the original list as `expectedPages` to protect collaborators), add one with `create_canvas_page`, and target frames with `pageId`.
 - **Clickable prototypes** — wire elements to other frames (click, hover, press, key or delay; navigate, overlay, back, scroll or link, with transitions) in Prototype mode or straight in the HTML, then click through the flow with Play or share `/c/<id>/proto`. `data-goto` links keep working in the player too. Agents use the same `data-doop-*` attributes plus `get_prototype` / `set_prototype_start`.
 - **A real canvas editor** — draw frames, shapes, pen paths and text, edit any element's fill, type and flex layout, snap to rulers and guides, zoom from 8% to 1600% ([the editor](#the-canvas-editor)).
 - **True multiplayer** — live cursors, presence, follow mode, per-frame editing indicators, undo/redo, threaded comments pinned to elements or the canvas, sticky notes, and an activity feed, all over one WebSocket room.
@@ -150,7 +150,7 @@ The bottom toolbar holds the tools; every one has a single-key shortcut. Shapes 
 - **Rulers and guides** — ⇧R shows rulers; drag out of one to add a guide. Guides belong to the page, undo like any edit, and everything snaps to them within 8 screen pixels.
 - **Zoom** — 8% to 1600%. Wheel pans, ⌘/Ctrl + wheel or a pinch zooms; a 1px pixel grid fades in from 300%. The zoom menu has 50/100/200% presets and the rulers toggle, and the zoom field takes a typed value.
 - **Board view** — **View → Board** (or **Board** in the ⌘K palette) lays the page's frames out as a board of cards; it works exactly as it did before and leaves the canvas as you left it.
-- **Panels** — the right side panel has **Agents**, **Comments**, **Activity** and **Memory** tabs; Layers and the side panel can be resized, and ⌘. hides all UI.
+- **Panels** — the right side panel has **Agents**, **Comments**, **Activity** and **Memory** tabs; Layers and the side panel can be resized. Drag the divider between Pages and Layers to change their split; arrow keys move it, Home and End reach its limits, and Doop remembers it per canvas. Pages starts compact until you resize it. ⌘. hides all UI.
 - **Themes** — Light, Dark or System under Settings → Appearance.
 - **Phones** — the canvas works on a phone: one-finger pan, pinch zoom, tap to comment, and bottom sheets for canvas actions, Layers and the Inspector.
 
@@ -724,11 +724,16 @@ docker run -p 4400:4400 -e BETTER_AUTH_URL=http://localhost:4400 -e BETTER_AUTH_
 Every variable is optional except the two marked required in production. Each one is declared and
 validated once at boot ([`server/env.ts`](server/env.ts)) and documented in
 [`.env.example`](.env.example), which also lists endpoint overrides and other rarely needed knobs.
+
+The server listens on port `4400` on all interfaces by default (IPv6 when available, otherwise IPv4;
+most operating systems also accept IPv4 on the default IPv6 listener). Set `HOST=127.0.0.1` to restrict
+it to local IPv4 connections, or `HOST=::1` for local IPv6, and `PORT` to change the listening port.
+
 This is the short list a self-hoster usually touches:
 
 | What               | Variables                                                                                                                                                            | Without them                                                                       |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Core               | `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` (both required in production), `DATABASE_URL`, `TRUSTED_ORIGINS`, `PORT`                                                     | Embedded PGlite in `data/pg`, localhost origins                                    |
+| Core               | `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` (both required in production), `DATABASE_URL`, `TRUSTED_ORIGINS`, `HOST`, `PORT`                                             | Embedded PGlite in `data/pg`, localhost origins                                    |
 | Sign-in            | `OIDC_*`, `GOOGLE_*`, `MICROSOFT_*`, `APPLE_*`, `SIGNUP_EMAIL_DOMAINS`, `ADMIN_EMAILS` ([Accounts](#accounts))                                                       | Email/password only, open signup                                                   |
 | Email              | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_SECURE`, `EMAIL_FROM`, `REQUIRE_EMAIL_VERIFICATION`                                                        | Emails print to the server log; no verification                                    |
 | Object storage     | `BUCKET`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `ENDPOINT`, `REGION` (any S3-compatible store)                                                                       | Uploaded assets stored under `data/assets`                                         |

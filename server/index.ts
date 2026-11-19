@@ -210,6 +210,7 @@ import type {
 } from '../shared/types.ts'
 
 const PORT = env.PORT
+const HOST = env.HOST
 
 /* Identifies the client bundle this process serves. Hashing dist/index.html
    works because Vite writes hashed asset names into it — any frontend change
@@ -3915,8 +3916,9 @@ wss.on('connection', (ws, upgradeReq) => {
   })
 })
 
-server.listen(PORT, () => {
-  console.log(`⟡ doop server     http://localhost:${PORT}`)
+server.listen({ port: PORT, host: HOST }, () => {
+  const displayHost = HOST?.includes(':') ? `[${HOST}]` : (HOST ?? 'localhost')
+  console.log(`⟡ doop server     http://${displayHost}:${PORT}`)
   /* persisted renders of a frame's old versions are removed in the background */
   startRenderSweep((id) => store.getFrame(id)?.updatedAt)
   /* a Dokploy install: finish the record of the update this process came from, and back the database up every night */
