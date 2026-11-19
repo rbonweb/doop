@@ -21,6 +21,7 @@ import {
   type ListFieldType,
   type ListItem,
   readList,
+  unsafeBindingTarget,
 } from '../../shared/components.ts'
 import { isBareSpecifier, type ComponentCode } from '../../shared/componentCode.ts'
 import {
@@ -687,7 +688,7 @@ function planList(
       skipped.push(name.slice(0, 40).replace(/[^\w .:-]/g, '?'))
       continue
     }
-    fields.push({ name, ts: propName(name, used), type: field.type, boundUrl: false, forwards: [] })
+    fields.push({ name, ts: names ? propName(name, used) : name, type: field.type, boundUrl: false, forwards: [] })
   }
   if (skipped.length)
     issues.push({
@@ -1534,6 +1535,13 @@ export function bindElement(
       if (expr) styleEntries.push({ key, expr, name })
       continue
     }
+    if (unsafeBindingTarget(target, el.tagName)) {
+      fc.note(
+        'dropped-attribute',
+        `binding to ${jsString(target)} dropped: a component never sets event handlers, srcdoc or an animation's attributeName from a prop ${reportPath}`,
+      )
+      continue
+    }
     if (!/^[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*)?$/.test(target) || target === 'style' || /^on/.test(target)) {
       fc.note(
         'dropped-attribute',
@@ -1938,6 +1946,11 @@ function renderCustomized(
 /** A nested `<doop-use>` of a template as the component it renders: forwarded props passed through, literal attributes as props, slots as props. */
 function visitUse(fc: FileCtx, plan: ComponentPlan, use: Element, ctx: JsxContext, options: HtmlToJsxOptions): string {
   const ref = attrOf(use, 'component') ?? ''
+  if (attrOf(use, EACH_ATTR) !== undefined)
+    ctx.issues.push({
+      kind: 'dropped-attribute',
+      detail: 'data-doop-each on a nested component was ignored: Doop renders it once, so the export does too',
+    })
   const condRaw = attrOf(use, IF_ATTR)
   const condition = condRaw === undefined ? undefined : parseCondition(condRaw)
   const nestedDef = fc.session.find(ref)

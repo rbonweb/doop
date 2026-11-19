@@ -343,3 +343,75 @@ describe('rich-text props: planning', () => {
     expect(syntaxErrors(home)).toEqual([])
   })
 })
+
+describe('bound targets the engine refuses', () => {
+  const issuesOf = (result: ReactExportResult) => result.report.issues.map((issue) => issue.detail).join('\n')
+
+  it('drops srcdoc and ping bindings for a text prop and for a list field', () => {
+    const risky = def(
+      'Risky',
+      `<div data-doop-part="r"><iframe data-doop-part="i" data-doop-prop="srcdoc:doc" title="t"></iframe><a data-doop-part="p" data-doop-prop="ping:track" href="#">x</a><ul data-doop-part="ul"><li data-doop-part="l" data-doop-each="rows"><iframe data-doop-part="fi" data-doop-prop="srcdoc:html" title="t"></iframe><a data-doop-part="fa" data-doop-prop="ping:beacon,href:url" href="#">y</a></li></ul></div>`,
+      {
+        props: [
+          { name: 'doc', type: 'text' },
+          { name: 'track', type: 'text' },
+          {
+            name: 'rows',
+            type: 'list',
+            fields: { html: { type: 'text' }, beacon: { type: 'text' }, url: { type: 'link' } },
+          },
+        ],
+      },
+    )
+    for (const styling of ['modules', 'tailwind'] as const) {
+      const result = exportOf([risky], [], styling, { componentIds: [risky.id] })
+      const tsx = fileOf(result, 'src/components/Risky.tsx')
+      expect(tsx).not.toContain('srcdoc')
+      expect(tsx).not.toContain('srcDoc')
+      expect(tsx).not.toContain('ping')
+      expect(tsx).toContain('href={item.url || undefined}')
+      expect(issuesOf(result)).toContain('binding to "srcdoc" dropped')
+      expect(issuesOf(result)).toContain('binding to "ping" dropped')
+    }
+  })
+
+  it('keeps raw field names as item keys for a code-mapped component', () => {
+    const mapped = def(
+      'Menu',
+      `<ul data-doop-part="r"><li data-doop-part="l" data-doop-each="entries"><a data-doop-part="a" data-doop-prop="href:link-url,label-text" href="#">x</a></li></ul>`,
+      {
+        props: [
+          {
+            name: 'entries',
+            type: 'list',
+            fields: { 'link-url': { type: 'link' }, 'label-text': { type: 'text' }, plain: { type: 'text' } },
+          },
+        ],
+        code: { importFrom: '@acme/ui', exportName: 'Menu' },
+      },
+    )
+    const html = instance(mapped, [mapped], {
+      entries: JSON.stringify([{ 'link-url': '/a', 'label-text': 'A', plain: 'p' }]),
+    })
+    const result = exportOf([mapped], frame(html), 'modules', { componentIds: [mapped.id] })
+    const home = fileOf(result, 'src/pages/Home.tsx')
+    expect(home).toContain('"link-url": "/a"')
+    expect(home).toContain('"label-text": "A"')
+    expect(home).toContain('plain: "p"')
+    expect(syntaxErrors(home)).toEqual([])
+  })
+
+  it('reports data-doop-each on a nested component and renders it once, as Doop does', () => {
+    const chip = def('Chip', `<i data-doop-part="r">c</i>`)
+    const row = def(
+      'Row2',
+      `<div data-doop-part="r"><doop-use component="Chip" data-doop-part="u" data-doop-each="things"></doop-use></div>`,
+      { props: [{ name: 'things', type: 'list', fields: { a: { type: 'text' } } }] },
+    )
+    const result = exportOf([chip, row], [], 'modules', { componentIds: [row.id] })
+    const tsx = fileOf(result, 'src/components/Row2.tsx')
+    expect(tsx).toContain('<Chip />')
+    expect(tsx).not.toContain('.map(')
+    expect(issuesOf(result)).toContain('data-doop-each on a nested component was ignored')
+  })
+})
