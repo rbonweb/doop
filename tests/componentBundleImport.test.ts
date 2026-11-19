@@ -599,6 +599,20 @@ describe('the one text of a captured component', () => {
     expect(def.code?.props?.label).toBeUndefined()
   })
 
+  it('does not add the inferred label to children when a person moved children to another prop', () => {
+    const first = run(bundleOf('storybook', primerCapturedButton()))
+    const id = first.created[0]!.id
+    const stored = findComponent(canvasId, id)!
+    store.saveComponent(canvasId, {
+      ...stored,
+      code: { ...stored.code, props: { variant: { name: 'children' } } },
+    })
+    run(bundleOf('storybook', primerCapturedButton()))
+    const props = findComponent(canvasId, id)!.code?.props
+    expect(props?.variant).toEqual({ name: 'children' })
+    expect(props?.label).toBeUndefined()
+  })
+
   it('reports a second import of the same bundle as unchanged', () => {
     run(bundleOf('storybook', primerCapturedButton()))
     const again = run(bundleOf('storybook', primerCapturedButton()))

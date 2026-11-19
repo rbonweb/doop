@@ -507,6 +507,12 @@ describe('children and component props of a mapped export', () => {
     expect(tsx).toContain('trailingVisual={Heart}')
   })
 
+  it('reports two props mapped to children', () => {
+    const btn = button({ props: { label: { name: 'children' }, variant: { name: 'children' } } })
+    const { out } = homeOf(btn, use(btn, 'label="A" variant="primary"'))
+    expect(out.report.issues.some((issue) => /all passed as the children of "Button"/.test(issue.detail))).toBe(true)
+  })
+
   it('leaves a plain enum a string', () => {
     const btn = button({})
     const { home } = homeOf(btn, use(btn, 'trailing-visual="HeartIcon"'))
