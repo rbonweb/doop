@@ -26,6 +26,8 @@ import { actions } from './actions'
 import { plans } from './plans'
 import { reactExport } from './reactExport'
 import { componentImport } from './componentImport'
+import { componentFields } from './componentFields'
+import { componentVariants } from './componentVariants'
 
 export const ptBR: Catalog = {
   common,
@@ -55,4 +57,6 @@ export const ptBR: Catalog = {
   plans,
   reactExport,
   componentImport,
+  componentFields,
+  componentVariants,
 }

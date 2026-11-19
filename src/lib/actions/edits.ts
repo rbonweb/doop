@@ -10,6 +10,7 @@ import { readingOrder } from '../../../shared/frameOrder'
 import { normalizeRotation } from '../../../shared/frameRotation'
 import { api } from '../api'
 import { t } from '../i18n'
+import { refuseWhileVariantPreview } from '../variantPreview'
 import { canEditOpenCanvas, pickedSelectors, useStore } from '../store'
 import { currentPageCanvas } from '../pages'
 import { LAYER_TEXT_PROPERTIES } from '../richText'
@@ -139,7 +140,7 @@ async function infosOf(frame: Frame, selectors: string[]) {
 
 /** Move each picked layer to where `place` puts its box, in frame px. */
 async function arrangeLayers(p: Picked, place: (boxes: Box[]) => Spot[], min = 2): Promise<boolean> {
-  if (p.frame.locked) return false
+  if (p.frame.locked || refuseWhileVariantPreview(p.frame.id, p.selectors)) return false
   const items = await infosOf(p.frame, p.selectors)
   if (items.length < min) return false
   const spots = place(items.map(({ info }) => info.rect))
@@ -171,6 +172,7 @@ export function align(edge: AlignEdge): boolean {
   const p = pickedLayers()
   if (p && !p.standalone) {
     if (p.selectors.length === 1) {
+      if (refuseWhileVariantPreview(p.frame.id, p.selectors)) return true
       const { axis, edge: to } = ALIGN_GEOMETRY[edge]
       void editElementGeometry(p.frame.id, p.selectors[0]!, { kind: 'align', axis, edge: to })
       return true
@@ -230,7 +232,7 @@ export function roundFramesToPixel(): boolean {
 /** Flip the picked layers (frames do not flip). */
 export function flip(axis: 'x' | 'y'): boolean {
   const p = pickedLayers()
-  if (!p || p.frame.locked) return false
+  if (!p || p.frame.locked || refuseWhileVariantPreview(p.frame.id, p.selectors)) return false
   for (const selector of p.selectors) void editElementGeometry(p.frame.id, selector, { kind: 'flip', axis })
   return true
 }
@@ -239,7 +241,7 @@ export function flip(axis: 'x' | 'y'): boolean {
 export function rotateBy(by: number): boolean {
   const p = pickedLayers()
   if (p && !p.standalone) {
-    if (p.frame.locked) return false
+    if (p.frame.locked || refuseWhileVariantPreview(p.frame.id, p.selectors)) return false
     void infosOf(p.frame, p.selectors).then((items) => {
       for (const { selector, info } of items) {
         if (info.geometry.rotation === null) continue
@@ -268,6 +270,7 @@ export function groupSelection(kind: 'group' | 'frame'): boolean {
   const p = pickedLayers()
   if (!p || p.standalone || p.frame.locked) return false
   if (p.selectors.some((s) => isLayerLocked(p.frame, s))) return false
+  if (refuseWhileVariantPreview(p.frame.id, p.selectors)) return true
   void groupKeepingLayout(p, kind === 'group' ? t('actions.groupName') : t('actions.frameName'))
   return true
 }
@@ -555,6 +558,7 @@ async function groupKeepingLayout(p: Picked, name: string) {
 export function ungroupSelection(): boolean {
   const p = pickedLayers()
   if (!p || p.standalone || p.frame.locked) return false
+  if (refuseWhileVariantPreview(p.frame.id, p.selectors)) return true
   void ungroupKeepingPlaces(p)
   return true
 }
@@ -607,7 +611,7 @@ async function rectsOf(frameId: string, selectors: string[]): Promise<Box[]> {
  *  so nothing moves. */
 export async function addAutoLayout(): Promise<boolean> {
   const p = pickedLayers()
-  if (!p || p.standalone || p.frame.locked) return false
+  if (!p || p.standalone || p.frame.locked || refuseWhileVariantPreview(p.frame.id, p.selectors)) return false
   const { frame, selectors } = p
   if (selectors.length === 1) {
     const selector = selectors[0]!
@@ -678,7 +682,7 @@ export function removeAutoLayout(): boolean {
 /** The same inline styles on every picked layer, saved as one edit. */
 export function styleEach(styles: StylePatch | ((info: ElementInfo) => StylePatch | null)): boolean {
   const p = pickedLayers()
-  if (!p || p.frame.locked) return false
+  if (!p || p.frame.locked || refuseWhileVariantPreview(p.frame.id, p.selectors)) return false
   for (const selector of p.selectors) {
     if (typeof styles !== 'function') {
       void styleElement(p.frame.id, selector, styles)
@@ -780,7 +784,7 @@ export function pasteProperties(): boolean {
   const clip = styleClip()
   if (!clip) return false
   const p = pickedLayers()
-  if (!p || p.frame.locked) return false
+  if (!p || p.frame.locked || refuseWhileVariantPreview(p.frame.id, p.selectors)) return false
   for (const selector of p.selectors) {
     void inspectElement(p.frame.id, selector).then((info) => {
       if (!info) return

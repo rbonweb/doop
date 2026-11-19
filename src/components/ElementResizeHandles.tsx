@@ -7,6 +7,7 @@ import { visibleGuides } from '../lib/guides'
 import { guideDelta } from '../lib/snap'
 import { flexSizeAxis } from '../lib/flexLayout'
 import { editElementGeometry, styleElement, styleGesture, type ElementInfo, type StylePatch } from '../lib/frameBridge'
+import { refuseWhileVariantPreview, variantEditTarget, writeVariantStyle } from '../lib/variantPreview'
 import {
   RESIZE_CORNERS,
   RESIZE_EDGES,
@@ -131,6 +132,10 @@ export function ElementResizeHandles({
     let current: Size | null = null
     let original: StylePatch | null = null
     let flexAxis: 'width' | 'height' | null = null
+    /* a previewed variant takes the size: the grips still preview it live, and what the drag chose is written to the
+       variant once, instead of inline on the main */
+    const variant = variantEditTarget(frame, selector)
+    const variantPatch: StylePatch = {}
     /* a scaled element renders larger than its layout box: the pointer's
        travel is divided by that scale so the box follows the pointer */
     let scale = { x: 1, y: 1 }
@@ -159,6 +164,7 @@ export function ElementResizeHandles({
     let ratioUsed = false
 
     function send(patch: StylePatch) {
+      if (variant) Object.assign(variantPatch, patch)
       inFlight = true
       styleElement(frame.id, selector, patch)
         .then((info: ElementInfo | null) => {
@@ -264,11 +270,16 @@ export function ElementResizeHandles({
           const final = last ? patchFor(last) : null
           if (final) send(final)
         }
-        styleGesture(frame.id, selector, phase)
+        /* a variant's size is written on its own: the gesture is put back and nothing is saved inline */
+        const settled = variant ? 'cancel' : phase
+        styleGesture(frame.id, selector, settled)
           .then((info) => {
             if (info) onGeometry(geometryOf(info))
           })
           .catch(console.error)
+        if (variant && phase === 'commit' && Object.keys(variantPatch).length) {
+          writeVariantStyle(frame, selector, variantPatch, variant)
+        }
       })
     }
     function onUp(ev: PointerEvent) {
@@ -319,6 +330,10 @@ export function ElementResizeHandles({
       : { x: e.clientX, y: e.clientY }
     const startAngle = pointerAngle(center, { x: e.clientX, y: e.clientY })
     const startRotation = rotation
+    if (refuseWhileVariantPreview(frame.id, selector)) {
+      onResizing(false)
+      return
+    }
     const ready = styleGesture(frame.id, selector, 'begin').then((info) => !!info)
     let last: { x: number; y: number; shift: boolean } | null = null
     let latest: number | null = null

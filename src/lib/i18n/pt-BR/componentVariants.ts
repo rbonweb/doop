@@ -1,0 +1,62 @@
+export const componentVariants = {
+  heading: 'Variantes',
+  empty: 'Nenhuma variante ainda. Adicione uma para dar mais de um visual ao componente.',
+  addVariant: 'Adicionar variante',
+  addChoice: 'Escolha (sm, md, lg)',
+  addBoolean: 'Ligado ou desligado',
+  nameLabel: 'Nome da variante',
+  namePlaceholder: 'ex.: size',
+  valuesLabel: 'Valores',
+  valuesPlaceholder: 'sm, md, lg',
+  add: 'Adicionar',
+  save: 'Salvar',
+  booleanTag: 'ligado / desligado',
+  defaultTag: 'padrão',
+
+  propMenuAria: 'Ações da variante {prop}',
+  renameProp: 'Renomear variante',
+  removeProp: 'Remover variante',
+  addValue: 'Adicionar valor',
+  addValueAria: 'Adicionar um valor a {prop}',
+  newValuePlaceholder: 'Novo valor',
+  newValueAria: 'Novo valor de {prop}',
+  valueAria: '{prop}: {value}',
+  makeDefault: 'Tornar padrão',
+  renameValue: 'Renomear',
+  removeValue: 'Remover',
+  renameValueAria: 'Renomear {value}',
+  renamePropAria: 'Renomear {prop}',
+
+  removeValueTitle: 'Remover “{value}” de {prop}?',
+  removePropTitle: 'Remover a variante {prop}?',
+  instancesUse: {
+    one: '{count} instância usa esse valor e volta ao padrão.',
+    other: '{count} instâncias usam esse valor e voltam ao padrão.',
+  },
+  instancesUseProp: {
+    one: '{count} instância a define e perde essa escolha.',
+    other: '{count} instâncias a definem e perdem essa escolha.',
+  },
+  noInstancesUse: 'Nenhuma instância usa esse valor.',
+  removeGoesWith: 'As regras de estilo dele são removidas junto. O editor não consegue desfazer isso.',
+  newDefaultLabel: 'Novo padrão',
+  confirmRemove: 'Remover',
+
+  previewHeading: 'Visualizar variante',
+  previewHint: 'Mostra uma combinação no principal. Nada é salvo.',
+  previewAria: 'Visualizar {prop}',
+  editing: 'Editando {combination}',
+  editingHint:
+    'As mudanças de estilo neste painel e o redimensionamento agora valem só para essa combinação, e {undo} não as desfaz. Mover, girar, agrupar e alinhar ficam desligados até você voltar à base.',
+  backToBase: 'Voltar à base',
+  styledProperties: {
+    one: '{count} propriedade com estilo nesta combinação.',
+    other: '{count} propriedades com estilo nesta combinação.',
+  },
+
+  failed: 'Não foi possível alterar as variantes.',
+  styleFailed: 'Não foi possível salvar o estilo da variante.',
+  refused:
+    'Uma variante está em visualização: volte à base para fazer isso. Aqui isso mudaria o próprio componente e todas as instâncias.',
+  noPart: 'Esta camada não tem chave para estilizar por variante. Volte à base para editá-la.',
+}

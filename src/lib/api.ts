@@ -38,6 +38,7 @@ import type { BillingInterval, Plan } from '../../shared/billing'
 import type { CanvasRole, LinkAccess } from '../../shared/canvasRole'
 import type { CommentAnchorInput } from '../../shared/comments'
 import type { ComponentCode, ComponentDef, ComponentProp, PartOverride } from '../../shared/components'
+import type { VariantsEdit, VariantsEditResult, VariantsRead } from './variantTypes'
 
 /** What the server says about a component beyond the definition itself. */
 export interface ComponentInfo {
@@ -836,6 +837,15 @@ export const api = {
   ) =>
     req<ComponentImpact>(`/api/canvases/${canvasId}/components/${componentId}`, {
       method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  /** a main's variant props and the style rules written under each combination */
+  componentVariants: (canvasId: string, componentId: string) =>
+    req<VariantsRead>(`/api/canvases/${canvasId}/components/${componentId}/variants`),
+  /** one ordered list of variant edits as one main write; `dryRun` reports the instances it would rewrite */
+  editComponentVariants: (canvasId: string, componentId: string, body: VariantsEdit) =>
+    req<VariantsEditResult>(`/api/canvases/${canvasId}/components/${componentId}/variants`, {
+      method: 'POST',
       body: JSON.stringify(body),
     }),
   /** a soft delete: no frame changes, instances keep their markup, and it can be restored */

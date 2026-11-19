@@ -54,6 +54,63 @@ export function PropertySection({
   )
 }
 
+type Overridden = { label: string; onReset: () => void; disabled?: boolean }
+
+/** The brand dot beside a label whose value differs from where it comes from; a click puts the source's value back. */
+function OverrideDot({ label, onReset, disabled }: Overridden) {
+  return (
+    <button
+      type="button"
+      data-slot="override-dot"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      className="group/reset -ml-1 grid size-4 flex-none place-items-center rounded-full hover:bg-paper-deep disabled:pointer-events-none"
+      onClick={onReset}
+    >
+      <span className="size-1.5 rounded-full bg-brand group-hover/reset:hidden" />
+      <UndoIcon size={10} className="hidden text-ink group-hover/reset:block" />
+    </button>
+  )
+}
+
+/** A property whose control needs the panel's whole width (a list of items, a rich-text field): the label, with its
+ *  reset dot and any actions, on a row of its own, and the control under it. */
+export function PropertyBlock({
+  label,
+  children,
+  overridden,
+  error,
+  actions,
+}: {
+  label: string
+  children: ReactNode
+  overridden?: Overridden
+  error?: string
+  /** beside the label, at the end of its row */
+  actions?: ReactNode
+}) {
+  return (
+    <div data-slot="property-block" className="mt-2 flex flex-col gap-1">
+      <div className="flex min-h-[22px] items-center gap-1.5">
+        <span className="flex min-w-0 flex-1 items-center gap-1 text-[11.5px] text-ink-faint">
+          {overridden && <OverrideDot {...overridden} />}
+          <span className="truncate" title={label}>
+            {label}
+          </span>
+        </span>
+        {actions}
+      </div>
+      {children}
+      {error && (
+        <p role="alert" className="text-[10.5px] leading-[1.35] text-accent-ink">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function PropertyRow({
   label,
   children,
@@ -63,27 +120,14 @@ export function PropertyRow({
   label: string
   children: ReactNode
   /** the value differs from where it comes from: a dot beside the label that resets it */
-  overridden?: { label: string; onReset: () => void; disabled?: boolean }
+  overridden?: Overridden
   /** why the last entry was refused, under the field */
   error?: string
 }) {
   return (
     <div className="mt-1.5 grid min-h-[26px] grid-cols-[58px_1fr] items-center gap-x-1.5 gap-y-0.5">
       <span className="flex min-w-0 items-center gap-1 text-[11.5px] text-ink-faint">
-        {overridden && (
-          <button
-            type="button"
-            data-slot="override-dot"
-            aria-label={overridden.label}
-            title={overridden.label}
-            disabled={overridden.disabled}
-            className="group/reset -ml-1 grid size-4 flex-none place-items-center rounded-full hover:bg-paper-deep disabled:pointer-events-none"
-            onClick={overridden.onReset}
-          >
-            <span className="size-1.5 rounded-full bg-brand group-hover/reset:hidden" />
-            <UndoIcon size={10} className="hidden text-ink group-hover/reset:block" />
-          </button>
-        )}
+        {overridden && <OverrideDot {...overridden} />}
         <span className="truncate" title={label}>
           {label}
         </span>

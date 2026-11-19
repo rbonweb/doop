@@ -1,3 +1,4 @@
+import { refuseWhileVariantPreview } from '../lib/variantPreview'
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { frameDesignPoint, frameWorldPoint, rotateVector, turnedDropRect } from '../../shared/frameRotation'
 import { createPortal } from 'react-dom'
@@ -293,6 +294,10 @@ export function useElementMove(frame: Frame) {
         : elementMoveTarget(frame.id, selector, pointerX, pointerY)
     function previewLayer() {
       if (closed || !layer || !layerPoint || inFlight) return
+      if (!layerReady && refuseWhileVariantPreview(frame.id, [layer.selector, ...followers])) {
+        cancel()
+        return
+      }
       if (!layerReady) {
         const selector = layer.selector
         layerReady = finishing.current.then(async () => {
