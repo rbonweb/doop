@@ -439,6 +439,8 @@ export function readList(prop: Pick<ComponentProp, 'fields'>, value: unknown): L
     }
     items.push(item)
   }
+  if (listJson(items).length > MAX_LIST_CHARS)
+    return { problem: `${allowed}, in at most ${MAX_LIST_CHARS} characters`, dropped }
   return { items, dropped }
 }
 

@@ -637,4 +637,168 @@ describe('list props', () => {
       expect(instanceHtml(page)).toContain('>A<')
     })
   })
+
+  describe('what a list must not lose', () => {
+    const items = (page: string) => {
+      const raw = /data-doop-props="([^"]*)"/
+        .exec(html(page))![1]!
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+      return JSON.parse(JSON.parse(raw).links) as unknown[]
+    }
+    const gated = (markup: (id: string) => string) =>
+      makeComponent('Gated', markup, [
+        { name: 'show', type: 'boolean', default: 'true' },
+        { name: 'links', type: 'list', fields: { label: { type: 'text' } } },
+      ])
+
+    it.each([
+      [
+        'a false condition on the container',
+        (id: string) =>
+          `<ul ${COMPONENT_ATTR}="${id}" data-doop-if="show"><li data-doop-each="links"><b data-doop-prop="label">x</b></li></ul>`,
+      ],
+      [
+        'a false condition on the list element',
+        (id: string) =>
+          `<ul ${COMPONENT_ATTR}="${id}"><li data-doop-each="links" data-doop-if="show"><b data-doop-prop="label">x</b></li><p>after</p></ul>`,
+      ],
+      [
+        'a condition on a wrapper',
+        (id: string) =>
+          `<div ${COMPONENT_ATTR}="${id}"><section data-doop-if="show"><ul><li data-doop-each="links"><b data-doop-prop="label">x</b></li></ul></section></div>`,
+      ],
+    ])('keeps the items of a list that is not shown: %s', (_name, markup) => {
+      const def = gated(markup)
+      const page = write(
+        `<doop-use component="${def.id}" show="false" links='[{"label":"a"},{"label":"b"}]'></doop-use>`,
+      )
+      expect(items(page)).toEqual([{ label: 'a' }, { label: 'b' }])
+      /* saved again, and shown later: the items are still there */
+      actions.updateFrame(page, { html: html(page) }, actor)
+      expect(items(page)).toEqual([{ label: 'a' }, { label: 'b' }])
+      const id = /data-doop-id="([a-z0-9]+)"/.exec(html(page))![1]!
+      changeInstances(canvasId, page, [{ instanceId: id, props: { show: 'true' } }], actor)
+      expect(html(page)).toContain('>a<')
+      expect(html(page)).toContain('>b<')
+    })
+
+    it('keeps the items of a list whose part an instance hides', () => {
+      const def = gated(
+        (id) =>
+          `<div ${COMPONENT_ATTR}="${id}"><ul data-doop-part="boxx"><li data-doop-each="links"><b data-doop-prop="label">x</b></li></ul></div>`,
+      )
+      const page = write(`<doop-use component="${def.id}" links='[{"label":"a"}]'></doop-use>`)
+      const id = /data-doop-id="([a-z0-9]+)"/.exec(html(page))![1]!
+      changeInstances(canvasId, page, [{ instanceId: id, overrides: { boxx: { hidden: true } } }], actor)
+      expect(html(page)).not.toContain('>a<')
+      actions.updateFrame(page, { html: html(page) }, actor)
+      expect(items(page)).toEqual([{ label: 'a' }])
+    })
+
+    it('keeps text exactly as it was given, spaces and line breaks included', () => {
+      const def = nav()
+      const text = 'line1\nline2  x '
+      const page = write(use(def.id, [{ label: text, url: 'https://a.test', hot: true }]))
+      expect(items(page)).toEqual([{ hot: true, label: text, url: 'https://a.test' }])
+      actions.updateFrame(page, { html: html(page) }, actor)
+      expect(items(page)).toEqual([{ hot: true, label: text, url: 'https://a.test' }])
+      /* an edit that does change the words is still read */
+      edit(page, (markup) => markup.replace('>line1', '>first'))
+      expect(items(page)).toEqual([{ hot: true, label: 'first line2 x', url: 'https://a.test' }])
+    })
+
+    it('does not take an authored key that looks like a copy for one', () => {
+      const def = makeComponent(
+        'Keys',
+        (id) =>
+          `<div ${COMPONENT_ATTR}="${id}"><h2 data-doop-part="xxxx-1" data-doop-prop="title">Hello</h2><ul><li data-doop-part="xxxx" data-doop-each="links"><b data-doop-prop="label">x</b></li></ul></div>`,
+        [{ name: 'links', type: 'list', fields: { label: { type: 'text' } } }],
+      )
+      const page = write(`<doop-use component="${def.id}" links='[{"label":"a"}]'></doop-use>`)
+      edit(page, (markup) => markup.replace('>Hello<', '>Changed<'))
+      expect(html(page)).toContain('>Changed<')
+      expect(items(page)).toEqual([{ label: 'a' }])
+    })
+
+    it('finds a copy by its key when the index is missing or wrong, and keeps what its fields do not show', () => {
+      const def = nav()
+      const page = write(use(def.id, ITEMS))
+      edit(page, (markup) =>
+        markup
+          .replace(/ data-doop-item="0"/, '')
+          .replace('data-doop-item="1"', 'data-doop-item="9"')
+          .replace('>A<', '>Aa<'),
+      )
+      expect(items(page)).toEqual([
+        { hot: true, label: 'Aa', url: 'https://a.test' },
+        { label: 'B', url: 'https://b.test' },
+      ])
+    })
+  })
+
+  describe('style targets', () => {
+    const badge = (type: 'text' | 'color' = 'text') =>
+      makeComponent(
+        'Tint',
+        (id) => `<p ${COMPONENT_ATTR}="${id}" data-doop-prop="style.color:tint,--accent:accent">hi</p>`,
+        [{ name: 'tint', type }],
+      )
+
+    it.each([
+      ['red;position:fixed;inset:0'],
+      ['red}body{display:none'],
+      ['url(https://evil.test/x)'],
+      ['image-set("https://evil.test/x" 1x)'],
+      ['red /* x */'],
+      ['\\72 ed'],
+    ])('does not set the style value %j, and says so', (value) => {
+      const def = badge()
+      const markup = `<doop-use component="${def.id}" tint="${value.replace(/"/g, '&quot;')}"></doop-use>`
+      const page = write(markup)
+      expect(html(page)).not.toMatch(/style=|evil\.test|position:/)
+      expect(marker(page)).toBeUndefined()
+      const ctx = contextFor(canvasId)
+      expandUses(markup, ctx, [], 0, { final: true })
+      expect(
+        ctx.issues.some((issue) => issue.code === 'invalid_prop_value' && issue.message.includes('bound to a style')),
+      ).toBe(true)
+    })
+
+    it('still sets an ordinary value, a token and a custom property', () => {
+      const def = badge()
+      const page = write(`<doop-use component="${def.id}" tint="var(--ink)" accent="#0af"></doop-use>`)
+      expect(html(page)).toContain('color: var(--ink)')
+      expect(html(page)).toContain('--accent: #0af')
+    })
+  })
+
+  describe('style targets for list fields and update_instances', () => {
+    it('refuses a list whose field is bound to a style and carries a declaration', () => {
+      const def = makeComponent(
+        'Swatches',
+        (id) => `<ul ${COMPONENT_ATTR}="${id}"><li data-doop-each="sw" data-doop-prop="--c:color,name">x</li></ul>`,
+        [{ name: 'sw', type: 'list', fields: { color: { type: 'text' }, name: { type: 'text' } } }],
+      )
+      const ok = write(`<doop-use component="${def.id}" sw='[{"color":"#f00","name":"red"}]'></doop-use>`)
+      expect(html(ok)).toContain('--c: #f00')
+      const bad = write(`<doop-use component="${def.id}" sw='[{"color":"red;position:fixed","name":"x"}]'></doop-use>`)
+      expect(html(bad)).not.toContain('position')
+      expect(html(bad)).not.toContain('--c')
+    })
+
+    it('refuses it from update_instances', () => {
+      const def = makeComponent(
+        'Tint2',
+        (id) => `<p ${COMPONENT_ATTR}="${id}" data-doop-prop="style.color:tint">hi</p>`,
+        [{ name: 'tint', type: 'text' }],
+      )
+      const page = write(`<doop-use component="${def.id}" tint="red"></doop-use>`)
+      const id = /data-doop-id="([a-z0-9]+)"/.exec(html(page))![1]!
+      expect(() =>
+        changeInstances(canvasId, page, [{ instanceId: id, props: { tint: 'red;inset:0' } }], actor),
+      ).toThrow('bound to a style')
+      expect(html(page)).toContain('color: red')
+    })
+  })
 })
