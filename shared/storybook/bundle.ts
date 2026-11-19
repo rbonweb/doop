@@ -427,17 +427,29 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     let shipped = capture
     if (!props.length) {
       for (const candidate of controlStories(group).slice(0, MAX_CONTROL_PROBES)) {
-        if (renders >= STORYBOOK_LIMITS.renders) break
-        renders++
-        plannedTotal++
-        const probe = await render({ storyId: candidate.id, args: {}, readMeta: true })
-        renderedCount++
-        input.onRender?.({
-          rendered: renderedCount,
-          total: Math.max(plannedTotal, renderedCount),
-          component: group.name,
-        })
-        if (!probe.capture.ok || !probe.props.length) continue
+        /* a story that fails to render is tried once more: a hosted Storybook can drop a request, and a lost Playground leaves the component with no props at all */
+        let probe: StoryRender | undefined
+        for (let attempt = 0; attempt < 2 && renders < STORYBOOK_LIMITS.renders; attempt++) {
+          renders++
+          plannedTotal++
+          probe = await render({ storyId: candidate.id, args: {}, readMeta: true })
+          renderedCount++
+          input.onRender?.({
+            rendered: renderedCount,
+            total: Math.max(plannedTotal, renderedCount),
+            component: group.name,
+          })
+          if (probe.capture.ok) break
+        }
+        if (!probe) break
+        if (!probe.capture.ok) {
+          note(
+            'controls_probe_failed',
+            `The story "${candidate.name}", which may have the component's controls, could not be captured: ${probe.capture.reason}`,
+          )
+          continue
+        }
+        if (!probe.props.length) continue
         if (probe.capture.html.length > MAX_BUNDLE_HTML_BYTES || probe.capture.css.length > MAX_BUNDLE_CSS_BYTES)
           continue
         for (const issue of probe.capture.issues) note(issue.code, issue.message)
