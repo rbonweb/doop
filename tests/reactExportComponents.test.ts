@@ -964,3 +964,68 @@ describe('empty stylesheets', () => {
     })
   }
 })
+
+describe('data-doop-attr-if', () => {
+  const BUTTON = def(
+    'Pbutton',
+    `<button class="b" data-no-visuals="true" data-doop-part="r" data-doop-attr-if="data-no-visuals: trailing-visual!=SearchIcon &amp; trailing-visual!=EyeIcon"><span data-doop-part="l">Go</span><i data-doop-part="e" hidden title="x" data-doop-attr-if="hidden: !quiet; title: quiet &amp; tone=ghost; data-gone: tone=none">e</i></button>`,
+    {
+      props: [
+        { name: 'trailing-visual', type: 'enum', options: ['none', 'SearchIcon', 'EyeIcon'], default: 'none' },
+        { name: 'quiet', type: 'boolean', default: 'false' },
+        { name: 'tone', type: 'enum', options: ['primary', 'ghost'], default: 'primary' },
+      ],
+    },
+  )
+
+  it('writes each attribute under its conditions, a boolean attribute as the condition itself', () => {
+    const tsx = componentOf(exportOf([BUTTON], [], { componentIds: [BUTTON.id] }), 'Pbutton')
+    expect(tsx).toContain(
+      `data-no-visuals={trailingVisual !== "SearchIcon" && trailingVisual !== "EyeIcon" ? "true" : undefined}`,
+    )
+    expect(tsx).toContain('hidden={!quiet}')
+    expect(tsx).toMatch(/title=\{quiet && tone === "ghost" \? "x" : undefined\}/)
+    expect(tsx).not.toContain('data-doop-attr-if')
+    expect(tsx).not.toContain('data-gone')
+  })
+
+  it('type-checks and renders the DOM Doop renders for each option', async () => {
+    const result = exportOf([BUTTON], [], { componentIds: [BUTTON.id] })
+    const project = writeProject(result.files)
+    try {
+      expect(typecheck(project)).toEqual([])
+      const cases: Record<string, Record<string, string | boolean>> = {
+        plain: {},
+        search: { trailingVisual: 'SearchIcon' },
+        quietGhost: { trailingVisual: 'EyeIcon', quiet: true, tone: 'ghost' },
+      }
+      const out = await renderAll(
+        project,
+        Object.fromEntries(
+          Object.entries(cases).map(([key, props]) => [
+            key,
+            { from: './src/components/Pbutton', name: 'Pbutton', props },
+          ]),
+        ),
+      )
+      const doop = (props: Record<string, string>) => normalize(instance(BUTTON, [BUTTON], { props }))
+      expect(normalize(out.plain!)).toBe(doop({}))
+      expect(normalize(out.search!)).toBe(doop({ 'trailing-visual': 'SearchIcon' }))
+      expect(normalize(out.quietGhost!)).toBe(doop({ 'trailing-visual': 'EyeIcon', quiet: 'true', tone: 'ghost' }))
+      expect(normalize(out.plain!)).toContain('data-no-visuals="true"')
+      expect(normalize(out.search!)).not.toContain('data-no-visuals')
+    } finally {
+      project.cleanup()
+    }
+  })
+
+  it('still calls a component with a package mapping from its package', () => {
+    const mapped = def('Mapped', BUTTON.template, {
+      props: BUTTON.props,
+      code: { importFrom: '@acme/ui', exportName: 'Button' },
+    })
+    const out = exportOf([mapped], frame(`<doop-use component="${mapped.id}"></doop-use>`))
+    expect(fileOf(out, 'src/pages/Home.tsx')).toContain('from "@acme/ui"')
+    expect(fileOf(out, 'src/pages/Home.tsx')).toMatch(/<Button\b[^>]*\/>/)
+  })
+})

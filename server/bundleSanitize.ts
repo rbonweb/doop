@@ -1,5 +1,6 @@
 import { serialize, type DefaultTreeAdapterTypes as Tree, type Token } from 'parse5'
 import {
+  ATTR_IF_ATTR,
   IF_ATTR,
   SLOT_ATTR,
   BIND_ATTR,
@@ -7,6 +8,8 @@ import {
   URL_TARGETS,
   styleText,
   unsafeBindingTarget,
+  formatAttrConditions,
+  parseAttrConditions,
 } from '../shared/components.ts'
 import { attrOf, isElement, rootFragment } from './componentEngine.ts'
 import { parseCss, serializeNodes, splitTopLevel, type CssNode } from './componentCss.ts'
@@ -52,7 +55,7 @@ const DROPPED_ATTRS = new Set(['srcdoc', 'ping', 'formaction'])
 const URL_ATTRS = URL_TARGETS
 
 /** The `data-doop-*` attributes a template may carry; every other one is the editor's own bookkeeping. */
-const KEPT_DOOP_ATTRS = new Set([BIND_ATTR, SLOT_ATTR, 'data-doop-slot-suggest', IF_ATTR])
+const KEPT_DOOP_ATTRS = new Set([BIND_ATTR, SLOT_ATTR, 'data-doop-slot-suggest', IF_ATTR, ATTR_IF_ATTR])
 
 const MAX_DEPTH = 200
 const MAX_NODES = 50_000
@@ -112,13 +115,38 @@ function cleanBindings(value: string, tag: string, issues: SanitizeIssue[]): str
   return kept.join(',').trim()
 }
 
+/** Whether an attribute is removed from bundle markup whatever it holds. */
+function refusedAttribute(name: string): boolean {
+  return (
+    name.startsWith('on') || DROPPED_ATTRS.has(name) || (name.startsWith('data-doop-') && !KEPT_DOOP_ATTRS.has(name))
+  )
+}
+
+/** A data-doop-attr-if list without the entries that name an attribute this sanitizer refuses (or the editor's own `data-doop-*`) and those whose conditions do not parse; the rest stays. */
+function cleanAttrConditions(value: string, issues: SanitizeIssue[]): string {
+  const entries = parseAttrConditions(value)
+  const kept = entries.filter((entry) => {
+    const name = entry.attr.toLowerCase()
+    if (!refusedAttribute(name) && !name.startsWith('data-doop-')) return true
+    issues.push({
+      code: 'attr_condition_dropped',
+      message: `the condition on “${entry.attr.slice(0, 60)}” was removed: a prop never decides whether ${entry.attr.slice(0, 60)} is kept`,
+    })
+    return false
+  })
+  return formatAttrConditions(kept)
+}
+
 function cleanAttributes(el: Tree.Element, issues: SanitizeIssue[]) {
   const kept: Token.Attribute[] = []
   for (const attr of el.attrs) {
     const name = attr.name.toLowerCase()
-    if (name.startsWith('on')) continue
-    if (DROPPED_ATTRS.has(name)) continue
-    if (name.startsWith('data-doop-') && !KEPT_DOOP_ATTRS.has(name)) continue
+    if (refusedAttribute(name)) continue
+    if (name === ATTR_IF_ATTR) {
+      const value = cleanAttrConditions(attr.value, issues)
+      if (value) kept.push({ ...attr, value })
+      continue
+    }
     if (name === BIND_ATTR && el.tagName.toLowerCase() !== USE_TAG) {
       const value = cleanBindings(attr.value, el.tagName, issues)
       if (value) kept.push({ ...attr, value })

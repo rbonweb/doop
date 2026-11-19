@@ -9,6 +9,7 @@ import {
 } from 'parse5'
 import { parse, parseFragment } from './workBudget.ts'
 import {
+  ATTR_IF_ATTR,
   BIND_ATTR,
   COMPONENT_ATTR,
   CSS_ATTR,
@@ -30,6 +31,8 @@ import {
   isDeleted,
   isHollow,
   isPropName,
+  attrsToRemove,
+  parseAttrConditions,
   parseBindings,
   parseCondition,
   parseStyle,
@@ -369,6 +372,23 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides,
   }
 }
 
+/** `data-doop-attr-if`: drop the template's literal attributes whose conditions do not hold for this instance's props, then the marker itself. */
+function applyAttrConditions(el: Element, def: Revision, overrides: InstanceOverrides) {
+  const raw = attrOf(el, ATTR_IF_ATTR)
+  if (raw === undefined) return
+  setAttr(el, ATTR_IF_ATTR, null)
+  const gone = new Set(attrsToRemove(raw, (prop) => propValue(def, overrides, prop)).map((name) => name.toLowerCase()))
+  /* the editor's own bookkeeping is never conditional (the sanitizer refuses such entries too) */
+  for (const name of gone) if (name.startsWith('data-doop-')) gone.delete(name)
+  if (gone.size) el.attrs = el.attrs.filter((attr) => !gone.has(attr.name.toLowerCase()))
+}
+
+/** The attributes a part's template conditions on its props: what an instance's markup shows for them follows the props, so a read-back never takes them as edits. */
+function conditionedAttrs(el: Element | undefined): Set<string> {
+  const raw = el ? attrOf(el, ATTR_IF_ATTR) : undefined
+  return new Set(raw === undefined ? [] : parseAttrConditions(raw).map((entry) => entry.attr.toLowerCase()))
+}
+
 const TAG_NAME = /^[a-z][a-z0-9-]*$/
 
 function applyPartOverride(el: Element, part: PartOverride) {
@@ -430,6 +450,7 @@ function renderPart(
   options: RenderOptions,
 ) {
   applyBindings(el, def, overrides, options.ctx)
+  applyAttrConditions(el, def, overrides)
   setAttr(el, SLOT_SUGGEST_ATTR, null)
   if (part) applyPartOverride(el, part)
   const isSlot = attrOf(el, SLOT_ATTR) !== undefined
@@ -935,8 +956,9 @@ function diffAttrs(
   into: PartOverride,
 ) {
   const names = new Set([...base.attrs, ...incoming.attrs].map((attr) => attr.name))
+  const conditioned = conditionedAttrs(info?.el)
   for (const name of names) {
-    if (!isTracked(name) || name === 'style') continue
+    if (!isTracked(name) || name === 'style' || conditioned.has(name.toLowerCase())) continue
     if (isRoot && name === ELEMENT_ID_ATTR) continue
     const before = attrOf(base, name)
     const after = attrOf(incoming, name)
@@ -1339,6 +1361,8 @@ const TEMPLATE_ONLY_ATTRS: Record<string, string> = {
   [BIND_ATTR]: `it forwards a prop of the component that holds this <doop-use>, so it only works inside a component's main. In a frame give the component fixed values (label="…"). ${FORWARD_GRAMMAR}`,
   [IF_ATTR]:
     "it shows or hides a <doop-use> inside a component's main, so it only works there. In a frame, put it on an element wrapped around the <doop-use>",
+  [ATTR_IF_ATTR]:
+    'it removes an attribute from the element that carries it, and a <doop-use> has no attributes of its own to condition: put it on an element wrapped around the <doop-use>',
   [SLOT_ATTR]: 'put it on an element wrapped around the <doop-use>, which is then the slot’s default content',
   [SLOT_SUGGEST_ATTR]: 'it belongs on the element that carries data-doop-slot',
 }
@@ -1981,8 +2005,12 @@ export function derivePropsAndSlots(
         ...descriptionOf(known),
       })
     }
-    const condition = parseCondition(attrOf(el, IF_ATTR) ?? '')
-    if (condition && isPropName(condition.prop) && !props.has(condition.prop)) {
+    const conditions = [
+      parseCondition(attrOf(el, IF_ATTR) ?? ''),
+      ...parseAttrConditions(attrOf(el, ATTR_IF_ATTR) ?? '').flatMap((entry) => entry.conditions),
+    ]
+    for (const condition of conditions) {
+      if (!condition || !isPropName(condition.prop) || props.has(condition.prop)) continue
       const known = declaredOf(declared, condition.prop)
       props.set(condition.prop, {
         name: condition.prop,
