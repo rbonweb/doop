@@ -70,6 +70,8 @@ type PropsMap = (props: Record<string, string>) => Record<string, string>
 interface Work {
   def: ComponentDef
   props: ComponentProp[]
+  /** the props before the call: a rule written for a prop an edit renames or removes is still this main's */
+  initialProps: ComponentProp[]
   propsChanged: boolean
   /** the main frame's stylesheets, in document order: the component's own source block and any block of the design the main came from */
   blocks: string[]
@@ -250,7 +252,7 @@ function rewriteSelectors(nodes: CssNode[], fn: (selector: string) => string | n
 /** Whether a rule found in a stylesheet this component does not own (its design frame's own, shared with other mains) is this main's. */
 function belongsToMain(work: Work, selector: string): boolean {
   const root = parseTemplateRoot(work.template)
-  return !!root && selectorBelongsTo(selector, root, variantAttrs(work.props))
+  return !!root && selectorBelongsTo(selector, root, variantAttrs([...work.initialProps, ...work.props]))
 }
 
 /** `fn` on every selector of the stylesheets that mention `mention`: all of the component's source block, and in a design's own
@@ -845,6 +847,7 @@ export const editVariants = atomic(function editVariants(
   const work: Work = {
     def,
     props: def.props.map((prop) => ({ ...prop })),
+    initialProps: def.props,
     propsChanged: false,
     ...loadedBlocks,
     cssChanged: false,
