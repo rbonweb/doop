@@ -1,3 +1,5 @@
+import { restoreFrameStyles } from './frameIsolation.ts'
+import { nestedExclusion } from './componentCss.ts'
 import { createHash } from 'node:crypto'
 import { indexOfAscii } from '../shared/asciiSearch.ts'
 import {
@@ -1783,7 +1785,9 @@ export function withDetachedCss(html: string, def: Pick<ComponentDef, 'id' | 're
   if (own.length) html = insertIntoHead(html, own.join('\n'))
   const key = detachedKey(def)
   if (!def.css.trim() || html.includes(`${DETACHED_CSS_ATTR}="${key}"`)) return html
+  /* what is cut loose holds no instances: the containment of the isolating form has nothing to do here */
   const css = def.css
+    .replaceAll(nestedExclusion(`[${INSTANCE_ATTR}="${def.id}"]`), '')
     .replaceAll(`[${INSTANCE_ATTR}="${def.id}"]`, `[${DETACHED_ATTR}="${key}"]`)
     .replaceAll(`__${def.id}`, `__${def.id}-${def.rev}`)
   return insertIntoHead(html, `<style ${DETACHED_CSS_ATTR}="${key}">\n${styleText(css)}\n</style>`)
@@ -1799,7 +1803,7 @@ export function splice(html: string, edits: { start: number; end: number; text: 
 /** Short form of a whole document: instances as `<doop-use>`, their CSS copies gone.
  *  What agents read: a screen of 40 buttons costs 40 lines rather than 40 subtrees. */
 export function compactDocument(html: string, ctx: EngineContext): string {
-  if (!html.includes(INSTANCE_ATTR) && !html.includes(CSS_ATTR)) return html
+  if (!html.includes(INSTANCE_ATTR) && !html.includes(CSS_ATTR)) return restoreFrameStyles(html)
   /* an instance of a deleted component stays written out: as <doop-use> it would be a new
      use of it when the frame is written back, and those are refused. One of a hollow
      component too, with its stylesheet: written back as <doop-use> it would render nothing */
@@ -1815,7 +1819,7 @@ export function compactDocument(html: string, ctx: EngineContext): string {
     end: found.end,
     text: insideMain(found.el) ? useTagFor(found.el, ctx, true, false, false, true) : useTagFor(found.el, ctx),
   }))
-  return stripComponentHead(splice(html, edits), hollow)
+  return restoreFrameStyles(stripComponentHead(splice(html, edits), hollow))
 }
 
 /** Outermost instances, also those below a main: the main itself is not an instance. */

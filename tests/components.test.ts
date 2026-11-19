@@ -68,7 +68,9 @@ describe('a main element', () => {
     expect(saved.props.map((p) => p.name).sort()).toEqual(['icon', 'label', 'tone'])
     expect(saved.css).toContain('.btn')
     expect(saved.css).not.toContain('.other')
-    expect(saved.css).toContain('--accent: #0a7')
+    /* the main's own value travels as a fallback, never as a value declared on the instance root */
+    expect(saved.css).toContain('var(--accent, #0a7)')
+    expect(saved.css).not.toMatch(/--accent\s*:/)
     expect(saved.css).not.toContain('--unused')
     /* an ancestor outside the main is cut; the hover rule survives */
     expect(saved.css).not.toContain('.page')

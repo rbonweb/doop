@@ -106,7 +106,7 @@ export function composeDocument(sources: ComposeSource[], opts: { title?: string
       base = prepared.base
       documentRulesFrom = source.frameId
     }
-    const css = extractComponentCss(prepared.sheet, root, scopeId).css.replaceAll(
+    const css = extractComponentCss(prepared.sheet, root, scopeId, [], { legacy: true }).css.replaceAll(
       `[${INSTANCE_ATTR}="${scopeId}"]`,
       `[${SECTION_ATTR}="${scopeId}"]`,
     )
