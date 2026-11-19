@@ -461,6 +461,21 @@ const OPERATIONS: Record<string, Case> = {
     run: ({ canvas }) =>
       tool('update_component', { component: 'Button', find: 'class="btn"', replace: 'class="btn big"' }, canvas),
   },
+  'edit_component_variants (the tool)': {
+    run: ({ canvas }) =>
+      tool(
+        'edit_component_variants',
+        {
+          component: 'Button',
+          ops: [
+            { op: 'add_enum', prop: 'mood', options: ['calm', 'loud'] },
+            { op: 'set_style', element: 'root', when: { mood: 'loud' }, declarations: { padding: '9px' } },
+            { op: 'rename_value', prop: 'mood', from: 'loud', to: 'shout' },
+          ],
+        },
+        canvas,
+      ),
+  },
   'insert_instance (the tool)': {
     run: ({ canvas, page }) => tool('insert_instance', { frame_id: page.id, component: 'Button' }, canvas),
   },

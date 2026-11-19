@@ -437,6 +437,11 @@ export function unmatchedSelectors(sheet: string, root: Element, variantAttrs: s
   return [...new Set(unmatched)]
 }
 
+/** Whether a rule of a shared stylesheet is this main's: the same test `extractComponentCss` keeps a rule by. */
+export function selectorBelongsTo(selector: string, root: Element, variantAttrs: string[] = []): boolean {
+  return relevantSelector(selector, mainTokens(root, variantAttrs)) !== null
+}
+
 const usedFonts = (css: string) =>
   new Set(
     [...css.matchAll(/font(?:-family)?\s*:([^;}]+)/gi)].flatMap((match) =>
@@ -450,7 +455,7 @@ function cssVarsIn(text: string): string[] {
 
 /* blocks the server writes into every frame after the components pass: not a design's own rules,
    and reading them back would freeze a token's value into a component and bump it on the next save */
-const MANAGED_STYLE_ATTRS = new Set([CSS_ATTR, DETACHED_CSS_ATTR, TOKEN_BLOCK_ATTR, FONT_BLOCK_ATTR])
+export const MANAGED_STYLE_ATTRS = new Set([CSS_ATTR, DETACHED_CSS_ATTR, TOKEN_BLOCK_ATTR, FONT_BLOCK_ATTR])
 
 /** Everything in a frame's own stylesheets (never another component's copy, nor a managed block). */
 export function frameStylesheets(html: string): string {

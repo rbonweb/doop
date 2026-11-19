@@ -95,3 +95,68 @@ export const codeSchema = z
       .describe('Where this mapping came from'),
   })
   .describe('Where this lives in code: the package export it is, and how its props and slots map onto it')
+
+const variantProp = () => z.string().describe('The variant prop: lowercase, becomes data-<prop> on every instance root')
+const variantWhen = () =>
+  z
+    .record(z.string())
+    .describe(
+      'The variant combination the style applies under, e.g. { "size": "lg" } or { "size": "lg", "tone": "ghost" }',
+    )
+
+/** One edit of a component's variants, applied in order by `edit_component_variants` and `POST …/variants`. */
+export const variantOpSchema = z.discriminatedUnion('op', [
+  z.object({
+    op: z.literal('add_enum'),
+    prop: variantProp(),
+    options: z.array(z.string()).min(1).max(40).describe('The values, first is the default unless default is given'),
+    default: z.string().optional(),
+    description: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal('add_value'),
+    prop: variantProp(),
+    value: z.string(),
+    make_default: z.boolean().optional(),
+  }),
+  z.object({
+    op: z.literal('rename_value'),
+    prop: variantProp(),
+    from: z.string(),
+    to: z.string(),
+  }),
+  z.object({
+    op: z.literal('remove_value'),
+    prop: variantProp(),
+    value: z.string(),
+    new_default: z.string().optional().describe('Needed when the value removed is the default'),
+  }),
+  z.object({ op: z.literal('set_default'), prop: variantProp(), value: z.string() }),
+  z.object({
+    op: z.literal('add_boolean'),
+    prop: variantProp(),
+    default: z.boolean().optional().describe('Off unless true'),
+    description: z.string().optional(),
+  }),
+  z.object({ op: z.literal('rename_prop'), prop: variantProp(), to: z.string() }),
+  z.object({ op: z.literal('remove_prop'), prop: variantProp() }),
+  z.object({
+    op: z.literal('set_style'),
+    element: z
+      .string()
+      .describe('A data-doop-part key of the main (get_component lists them in the template); "root" is the main root'),
+    when: variantWhen(),
+    declarations: z
+      .record(z.string().nullable())
+      .describe(
+        'CSS property -> value, merged into the variant rule; null or "" removes that property. No url(), braces, semicolons or @import',
+      ),
+  }),
+  z.object({
+    op: z.literal('clear_style'),
+    when: variantWhen(),
+    element: z.string().optional().describe('Leave out to clear every element under this combination'),
+  }),
+])
+
+export type VariantOp = z.infer<typeof variantOpSchema>
