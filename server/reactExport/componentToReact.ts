@@ -149,6 +149,8 @@ export interface MappedImport {
   code: ComponentCode
   /** Doop prop -> the prop it is passed as; `children` for the JSX children, null when omitted or refused */
   propTargets: Map<string, string | null>
+  /** Doop prop -> why an instance's value is not passed: the mapping omits it, or its own name is no JavaScript identifier and the mapping does not rename it. Reported where an instance sets one. */
+  leftOut: Map<string, 'omit' | 'name'>
   /** Doop slot -> `children` or the prop that receives it, null when refused */
   slotTargets: Map<string, string | null>
   /** Doop prop -> value map, own keys only */
@@ -439,6 +441,7 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
   }
   const used = new Set<string>()
   const propTargets = new Map<string, string | null>()
+  const leftOut = new Map<string, 'omit' | 'name'>()
   const slotTargets = new Map<string, string | null>()
   const values = new Map<string, Map<string, string | number | boolean>>()
   const components = new Map<string, ComponentValues>()
@@ -468,6 +471,13 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
     const rule = own(code.props, prop.name)
     if (rule?.omit) {
       propTargets.set(prop.name, null)
+      leftOut.set(prop.name, 'omit')
+      continue
+    }
+    if (rule?.name === undefined && !isIdentifier(prop.name)) {
+      /* a Doop prop such as `text-2` is no prop the package's component has, and the type checker rejects it: it is passed only when the mapping renames it */
+      propTargets.set(prop.name, null)
+      leftOut.set(prop.name, 'name')
       continue
     }
     propTargets.set(prop.name, claim(`prop ${jsString(prop.name)}`, rule?.name ?? prop.name, rule?.name !== undefined))
@@ -516,6 +526,7 @@ function resolveMapping(def: ComponentDef): { mapped?: MappedImport; issues: Exp
       defaultExport: code.defaultExport === true,
       code,
       propTargets,
+      leftOut,
       slotTargets,
       values,
       components,
@@ -778,7 +789,13 @@ export function renderUseCall(fc: FileCtx, call: UseCall): string {
   } else {
     for (const entry of plan.props) {
       const target = mapped.propTargets.get(entry.prop.name)
-      if (!target) continue
+      if (!target) {
+        const set = call.values.get(entry.prop.name)
+        const why = mapped.leftOut.get(entry.prop.name)
+        if (set && why && (why === 'name' || set.literal !== (entry.prop.default ?? entry.derived)))
+          reportLeftOut(fc, plan, entry.prop.name, set, why)
+        continue
+      }
       const value = call.values.get(entry.prop.name)
       if (!value) {
         /* an export whose children are its label has nothing to show without them: the design shows the template's own text */
@@ -807,6 +824,20 @@ export function renderUseCall(fc: FileCtx, call: UseCall): string {
   const head = oneLine.length > 90 && attrs.length > 1 ? `${plan.name}\n${indentText(attrs.join('\n'))}\n` : oneLine
   if (children.length === 0) return `<${head}${head.endsWith('\n') ? '' : ' '}/>`
   return `<${head}>\n${indentText(children.join('\n'))}\n</${plan.name}>`
+}
+
+/** An instance sets a prop the mapped component cannot receive: it is left out and the report names it, with the value the design had. */
+function reportLeftOut(fc: FileCtx, plan: ComponentPlan, prop: string, value: CallValue, why: 'omit' | 'name'): void {
+  const shown = value.literal ?? value.expr
+  const set = shown.length > 40 ? `${shown.slice(0, 40)}…` : shown
+  const reason =
+    why === 'omit'
+      ? 'the code mapping omits it'
+      : `${jsString(prop)} is not a JavaScript identifier, so it cannot be a prop of ${plan.mapped?.exportName ?? plan.name}`
+  fc.noteOnce(
+    'dropped-attribute',
+    `${plan.name}: prop ${jsString(prop)} was set to ${jsString(set)} on an instance and left out: ${reason}. Map it in code.props[${jsString(prop)}] (a name, or children) if the component takes it`,
+  )
 }
 
 /** A string literal child as JSX text when it needs no escaping, else as the `{"…"}` expression. */

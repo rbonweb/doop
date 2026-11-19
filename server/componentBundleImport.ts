@@ -485,16 +485,19 @@ function withStoredRules(fresh: ComponentCode, stored: ComponentCode | undefined
   return { ...fresh, props }
 }
 
-/** A React export shows a component's label as its children. When the importer had to find the text itself (the Storybook has no prop for it) and the component shows exactly one, that prop is passed as the export's `children`; a prop the Storybook named, or any mapping the bundle already made for it, is left as it is. */
+/** What a React export does with the props the importer found in the markup rather than in the Storybook (its args and argTypes name the component's real props, so the package's component has no prop called `text` or `text-2`). The one text a component shows is passed as the export's `children`, as a label is; every other inferred prop (more texts, an image, a link) is `omit: true`, so the export never passes a prop the package does not declare. A prop the Storybook named, a slot or prop already sent to `children` and any rule already on a prop (a stored one included) stand. */
 function withChildrenMapping(code: ComponentCode, html: string, bundled: readonly string[]): ComponentCode {
-  const inferred = [...boundProps(html).text].filter((name) => !bundled.includes(name))
-  const [label] = inferred
-  if (inferred.length !== 1 || !label) return code
+  const { all, text } = boundProps(html)
+  const inferred = [...all].filter((name) => !bundled.includes(name) && !(code.props && name in code.props))
+  if (inferred.length === 0) return code
   const claimed =
     Object.values(code.slots ?? {}).includes('children') ||
     Object.values(code.props ?? {}).some((rule) => rule.name === 'children')
-  if (claimed || (code.props && label in code.props)) return code
-  return { ...code, props: { ...code.props, [label]: { name: 'children' } } }
+  const texts = inferred.filter((name) => text.has(name))
+  const label = texts.length === 1 && !claimed ? texts[0] : undefined
+  const props = { ...code.props }
+  for (const name of inferred) props[name] = name === label ? { name: 'children' } : { omit: true }
+  return { ...code, props }
 }
 
 /** The components a new main names in a <doop-use> that resolved to nothing. */

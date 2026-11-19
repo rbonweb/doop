@@ -596,7 +596,7 @@ describe('the one text of a captured component', () => {
     }
     const def = created(run(bundleOf('storybook', slotted)))
     expect(def.props.find((prop) => prop.name === 'label')).toBeDefined()
-    expect(def.code?.props?.label).toBeUndefined()
+    expect(def.code?.props?.label).toEqual({ omit: true })
   })
 
   it('does not add the inferred label to children when a person moved children to another prop', () => {
@@ -610,7 +610,75 @@ describe('the one text of a captured component', () => {
     run(bundleOf('storybook', primerCapturedButton()))
     const props = findComponent(canvasId, id)!.code?.props
     expect(props?.variant).toEqual({ name: 'children' })
-    expect(props?.label).toBeUndefined()
+    expect(props?.label).toEqual({ omit: true })
+  })
+
+  describe('props the importer inferred from the markup', () => {
+    const shadcnCard = (html: string, props?: object[]) => ({
+      name: 'Card',
+      html,
+      ...(props ? { props } : {}),
+      code: { exportName: 'Card' },
+    })
+    const FOUR_TEXTS =
+      '<div class="card" data-slot="card"><h3>Sign in</h3><p>Welcome back</p><span>Step 1</span><small>Terms apply</small></div>'
+
+    it.each(['storybook', 'cli'] as const)('maps the one inferred text to children on a %s bundle', (kind) => {
+      const def = created(run(bundleOf(kind, shadcnCard('<span class="avatar">RB</span>'))))
+      expect(def.props.map((prop) => prop.name)).toEqual(['label'])
+      expect(def.code?.props).toEqual({ label: { name: 'children' } })
+    })
+
+    it('omits every inferred text of a component that shows several', () => {
+      const def = created(run(bundleOf('storybook', shadcnCard(FOUR_TEXTS))))
+      expect(def.props.map((prop) => prop.name)).toEqual(['title', 'text', 'text-2', 'caption'])
+      expect(def.code?.props).toEqual({
+        title: { omit: true },
+        text: { omit: true },
+        'text-2': { omit: true },
+        caption: { omit: true },
+      })
+    })
+
+    it('omits an inferred image and link, and sends the only text to children', () => {
+      const html = '<a class="chip" href="/x"><img src="/a/p.png" alt=""><span>Open</span></a>'
+      const def = created(run(bundleOf('cli', shadcnCard(html))))
+      expect(Object.values(def.code?.props ?? {}).filter((rule) => rule.name === 'children')).toHaveLength(1)
+      expect(Object.values(def.code?.props ?? {}).filter((rule) => rule.omit)).toHaveLength(2)
+    })
+
+    it('leaves a prop the Storybook named alone', () => {
+      const named = created(
+        run(
+          bundleOf(
+            'storybook',
+            shadcnCard('<div class="card" data-doop-prop="data-tone:tone"><h3>Hi</h3></div>', [
+              { name: 'tone', type: 'enum', options: ['a', 'b'], default: 'a' },
+            ]),
+          ),
+        ),
+      )
+      expect(named.code?.props?.tone).toBeUndefined()
+    })
+
+    it('leaves an agent bundle untouched', () => {
+      const agent = created(run(bundleOf('agent', shadcnCard(FOUR_TEXTS))))
+      expect(agent.code?.props).toBeUndefined()
+    })
+
+    it('keeps a stored rule over a re-import', () => {
+      const first = run(bundleOf('storybook', shadcnCard(FOUR_TEXTS)))
+      const id = first.created[0]!.id
+      const stored = findComponent(canvasId, id)!
+      store.saveComponent(canvasId, {
+        ...stored,
+        code: { ...stored.code, props: { ...stored.code?.props, text: { name: 'title' } } },
+      })
+      run(bundleOf('storybook', shadcnCard(FOUR_TEXTS)))
+      const props = findComponent(canvasId, id)!.code?.props
+      expect(props?.text).toEqual({ name: 'title' })
+      expect(props?.['text-2']).toEqual({ omit: true })
+    })
   })
 
   it('reports a second import of the same bundle as unchanged', () => {
