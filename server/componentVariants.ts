@@ -8,11 +8,13 @@ import {
   INSTANCE_ATTR,
   PART_ATTR,
   PROPS_ATTR,
+  SOURCE_CSS_ATTR,
   formatAttrConditions,
   isPropName,
   parseAttrConditions,
   parseBindings,
   parseCondition,
+  styleText,
   variantAttrs,
   type Condition,
   type ComponentDef,
@@ -29,7 +31,7 @@ import {
   type InstanceChange,
   type UpdateResult,
 } from './componentActions.ts'
-import { parseCss, serializeNodes, splitTopLevel, type CssNode } from './componentCss.ts'
+import { MANAGED_STYLE_ATTRS, parseCss, serializeNodes, splitTopLevel, type CssNode } from './componentCss.ts'
 import { attrOf, findAllMarked, kidsOf, parseTemplateRoot, partsOf, setAttr } from './componentEngine.ts'
 import { atomic } from './journal.ts'
 import { store } from './store.ts'
@@ -50,6 +52,7 @@ const VALUE = /^[A-Za-z0-9_][\w .-]{0,39}$/
 const PROPERTY = /^(?:--[\w-]+|-?[a-z][a-z-]*)$/
 const MAX_DECLARATION_VALUE = 400
 const ROOT_ELEMENT = 'root'
+const PART_KEY = /^[\w-]+$/
 
 const fail = (message: string): never => {
   throw new ComponentError(message)
@@ -61,7 +64,10 @@ interface Work {
   def: ComponentDef
   props: ComponentProp[]
   propsChanged: boolean
-  css: string
+  /** the main frame's stylesheets, in document order: the component's own source block and any block of the design the main came from */
+  blocks: string[]
+  /** where a new rule goes: the source block (a virtual one when the main has none yet) */
+  target: number
   cssChanged: boolean
   template: string
   templateChanged: boolean
@@ -125,23 +131,17 @@ function declarationMap(body: string): Map<string, string> {
 
 const ATTR_IN_SELECTOR = /\[\s*(data-[\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*\]/g
 
-function ruleOf(
-  selector: string,
-  body: string,
-  names: Set<string>,
-  rootKey: string | undefined,
-): VariantRule | undefined {
+/** `[data-a="x"][data-b="y"]` on the instance root, then optionally one element by part key: what `set_style` writes. */
+const CANONICAL = /^((?:\[data-[\w-]+="[^"]*"\])+)(?: \[data-doop-part="([^"]+)"\])?$/
+
+function ruleOf(selector: string, body: string, names: Set<string>): VariantRule | undefined {
   const when: Record<string, string> = {}
   for (const [, attr = '', quoted, single, bare] of selector.matchAll(ATTR_IN_SELECTOR)) {
     if (names.has(attr)) when[attr.slice('data-'.length)] = quoted ?? single ?? bare ?? ''
   }
   if (!Object.keys(when).length) return undefined
   const declarations = Object.fromEntries(declarationMap(body))
-  const canonical = rootKey
-    ? new RegExp(
-        `^\\[${PART_ATTR}="${escapeRegExp(rootKey)}"\\]((?:\\[data-[\\w-]+="[^"]*"\\])+)(?: \\[${PART_ATTR}="([^"]+)"\\])?$`,
-      ).exec(selector.trim())
-    : null
+  const canonical = CANONICAL.exec(selector.trim())
   if (!canonical) return { selector, when, declarations, custom: true }
   return { selector, when, element: canonical[2] ?? null, declarations }
 }
@@ -149,17 +149,16 @@ function ruleOf(
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /** Every rule of the stylesheet that names a variant attribute, at any depth of media and supports groups. */
-export function variantRules(def: Pick<ComponentDef, 'props' | 'rawCss' | 'template'>): VariantRule[] {
+export function variantRules(def: Pick<ComponentDef, 'props' | 'rawCss'>): VariantRule[] {
   const names = new Set(variantAttrs(def.props))
   if (!names.size || !def.rawCss) return []
-  const rootKey = attrOf(parseTemplateRoot(def.template) ?? ({ attrs: [] } as never), PART_ATTR)
   const rules: VariantRule[] = []
   const visit = (nodes: CssNode[]) => {
     for (const node of nodes) {
       if (node.kind === 'group') visit(node.nodes)
       else if (node.kind === 'rule') {
         for (const selector of splitTopLevel(node.selector, ',')) {
-          const rule = ruleOf(selector, node.body, names, rootKey)
+          const rule = ruleOf(selector, node.body, names)
           if (rule) rules.push(rule)
         }
       }
@@ -176,6 +175,41 @@ export function readVariants(canvasId: string, ref: string) {
 }
 
 /* ------------------------------------------------------------------ */
+/* The main frame's stylesheets                                        */
+/* ------------------------------------------------------------------ */
+
+interface StyleBlock {
+  start: number
+  end: number
+  text: string
+  source: boolean
+}
+
+/** The `<style>` blocks of a frame that feed a component's stylesheet: its own source block and the design's own blocks, never another component's source or a Doop-managed block. */
+function styleBlocks(html: string, id: string): StyleBlock[] {
+  const blocks: StyleBlock[] = []
+  for (const match of html.matchAll(/<style\b([^>]*)>([\s\S]*?)<\/style\s*>/gi)) {
+    const attrs = match[1] ?? ''
+    if ([...MANAGED_STYLE_ATTRS].some((name) => attrs.includes(name))) continue
+    const own = new RegExp(`${SOURCE_CSS_ATTR}="${escapeRegExp(id)}"`).test(attrs)
+    if (attrs.includes(SOURCE_CSS_ATTR) && !own) continue
+    const start = match.index + '<style'.length + attrs.length + 1
+    blocks.push({ start, end: start + (match[2] ?? '').length, text: match[2] ?? '', source: own })
+  }
+  return blocks
+}
+
+function loadBlocks(def: ComponentDef): { blocks: string[]; target: number; found: StyleBlock[] } {
+  const frame = def.mainFrameId ? store.getFrame(def.mainFrameId) : undefined
+  const found = frame ? styleBlocks(frame.html, def.id) : []
+  const source = found.findIndex((block) => block.source)
+  const blocks = found.map((block) => block.text)
+  if (source >= 0) return { blocks, target: source, found }
+  /* no source block yet: a new one takes new rules, and holds the component's rules outright when there is no main frame to read */
+  return { blocks: [...blocks, frame ? '' : def.rawCss], target: blocks.length, found }
+}
+
+/* ------------------------------------------------------------------ */
 /* Stylesheet edits                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -184,6 +218,9 @@ const attrPattern = (prop: string, value?: string) => {
     value === undefined ? '[^\\]]*' : `(?:"${escapeRegExp(value)}"|'${escapeRegExp(value)}'|${escapeRegExp(value)})`
   return new RegExp(`\\[\\s*data-${escapeRegExp(prop)}\\s*=\\s*${inner}\\s*\\]`, 'g')
 }
+
+/** The selector with its `:not(…)` groups taken out, to ask whether a value is wanted rather than excluded. */
+const withoutNegations = (selector: string) => selector.replace(/:not\((?:[^()]|\([^()]*\))*\)/g, '')
 
 const attrSelector = (prop: string, value: string) => `[data-${prop}="${value}"]`
 
@@ -204,12 +241,12 @@ function rewriteSelectors(nodes: CssNode[], fn: (selector: string) => string | n
 }
 
 function editSheet(work: Work, mention: string, fn: (selector: string) => string | null) {
-  if (!work.css.includes(mention)) return
-  const next = serializeNodes(rewriteSelectors(parseCss(work.css), fn))
-  if (next !== work.css) {
-    work.css = next
-    work.cssChanged = true
-  }
+  work.blocks = work.blocks.map((block) => {
+    if (!block.includes(mention)) return block
+    const next = serializeNodes(rewriteSelectors(parseCss(block), fn))
+    if (next !== block) work.cssChanged = true
+    return next
+  })
 }
 
 function balanced(text: string): boolean {
@@ -226,19 +263,92 @@ function balanced(text: string): boolean {
 }
 
 /** A declaration an agent or the editor may write into a variant rule: never something that fetches, ends the rule or the style element. */
+const VALUE_FUNCTIONS = new Set([
+  'var',
+  'env',
+  'calc',
+  'min',
+  'max',
+  'clamp',
+  'minmax',
+  'repeat',
+  'fit-content',
+  'rgb',
+  'rgba',
+  'hsl',
+  'hsla',
+  'hwb',
+  'lab',
+  'lch',
+  'oklab',
+  'oklch',
+  'color',
+  'color-mix',
+  'light-dark',
+  'linear-gradient',
+  'radial-gradient',
+  'conic-gradient',
+  'repeating-linear-gradient',
+  'repeating-radial-gradient',
+  'repeating-conic-gradient',
+  'translate',
+  'translatex',
+  'translatey',
+  'translatez',
+  'translate3d',
+  'scale',
+  'scalex',
+  'scaley',
+  'scalez',
+  'scale3d',
+  'rotate',
+  'rotatex',
+  'rotatey',
+  'rotatez',
+  'rotate3d',
+  'skew',
+  'skewx',
+  'skewy',
+  'matrix',
+  'matrix3d',
+  'perspective',
+  'cubic-bezier',
+  'steps',
+  'blur',
+  'brightness',
+  'contrast',
+  'drop-shadow',
+  'grayscale',
+  'hue-rotate',
+  'invert',
+  'opacity',
+  'saturate',
+  'sepia',
+])
+
+/** A declaration an agent or the editor may write into a variant rule: never something that fetches, ends the rule or the style element.
+ *  Value functions are an allowlist (colour, maths, gradient, transform, easing, filter): every other one can load a resource or run in some engine. */
 export function checkDeclaration(property: string, value: string): { property: string; value: string } {
   const name = property.trim()
-  if (!PROPERTY.test(name))
+  if (!PROPERTY.test(name) || /^-?(?:behavior|-?moz-binding)$/i.test(name))
     fail(
       `“${property}” is not a CSS property name: use lowercase letters and hyphens (color, padding-inline) or a custom property (--gap)`,
     )
   const text = value.trim()
   if (text.length > MAX_DECLARATION_VALUE)
     fail(`the value of ${name} is longer than ${MAX_DECLARATION_VALUE} characters`)
-  if (/[{};<>\\]|\/\*|\*\/|@import|url\s*\(|expression\s*\(|javascript:|-moz-binding|behavior\s*:/i.test(text))
+  if ([...text].some((char) => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f))
+    fail(`the value of ${name} may not hold control characters or line breaks`)
+  if (/[{};<>\\]|\/\*|\*\/|@import|javascript:|vbscript:|-moz-binding|behavior\s*:/i.test(text))
     fail(
-      `the value of ${name} may not hold braces, semicolons, backslashes, comments, url(), @import or script: write one plain value (var(--token), 12px, #fff, 1px solid var(--line))`,
+      `the value of ${name} may not hold braces, semicolons, backslashes, comments, @import or script URLs: write one plain value (var(--token), 12px, #fff, 1px solid var(--line))`,
     )
+  for (const [, fn = ''] of text.matchAll(/([a-zA-Z][\w-]*)\s*\(/g)) {
+    if (!VALUE_FUNCTIONS.has(fn.toLowerCase()))
+      fail(
+        `the value of ${name} uses ${fn}(): only colour, maths (calc, min, max, clamp, var, env), gradient, transform, easing and filter functions are allowed; images and fonts come from the design, not from a variant rule`,
+      )
+  }
   if (!balanced(text)) fail(`the value of ${name} has unbalanced parentheses or quotes`)
   return { property: name.startsWith('--') ? name : name.toLowerCase(), value: text }
 }
@@ -375,6 +485,9 @@ function whenSelector(work: Work, when: Record<string, string>): string {
       const value = when[name]!
       const allowed = prop.type === 'enum' ? (prop.options ?? []) : ['true', 'false']
       if (!allowed.includes(value)) fail(`“${value}” is not a value of ${name}: use ${allowed.join(' | ')}`)
+      /* a value stored before this tool existed may be anything: it never goes into a selector unchecked */
+      if (!VALUE.test(value))
+        fail(`“${value}” cannot be styled here: rename it to a short word (rename_value), then style it`)
       return attrSelector(name, value)
     })
     .join('')
@@ -388,15 +501,14 @@ function rootKeyOf(work: Work): string {
 
 function partSelector(work: Work, element: string, when: string): string {
   const rootKey = rootKeyOf(work)
-  const key = element === ROOT_ELEMENT ? rootKey : element
-  if (!partsOf(work.template).has(key)) {
-    const keys = [...partsOf(work.template).keys()]
+  if (element === ROOT_ELEMENT || element === rootKey) return when
+  if (!PART_KEY.test(element) || !partsOf(work.template).has(element)) {
+    const keys = [...partsOf(work.template).keys()].filter((key) => key !== rootKey)
     return fail(
-      `the main has no element “${element}”: its data-doop-part keys are ${keys.join(', ')} (“root” is the main root)`,
+      `the main has no element “${element}”: its data-doop-part keys are ${keys.join(', ') || '(none)'} (“root” is the main root)`,
     )
   }
-  const root = `[${PART_ATTR}="${rootKey}"]${when}`
-  return key === rootKey ? root : `${root} [${PART_ATTR}="${key}"]`
+  return `${when} [${PART_ATTR}="${element}"]`
 }
 
 function setStyle(
@@ -406,10 +518,16 @@ function setStyle(
   declarations: Record<string, string | null>,
 ) {
   const selector = partSelector(work, element, whenSelector(work, whenMap))
-  const nodes = parseCss(work.css)
-  const at = nodes.findIndex((node) => node.kind === 'rule' && node.selector.trim() === selector)
-  const existing = at >= 0 ? nodes[at] : undefined
+  /* the rule is edited where it already is (a design's own stylesheet may hold it), else it goes in the source block */
+  const holder = work.blocks.findIndex((block) =>
+    parseCss(block).some((node) => node.kind === 'rule' && node.selector.trim() === selector),
+  )
+  const at = holder >= 0 ? holder : work.target
+  const nodes = parseCss(work.blocks[at] ?? '')
+  const index = nodes.findIndex((node) => node.kind === 'rule' && node.selector.trim() === selector)
+  const existing = index >= 0 ? nodes[index] : undefined
   const current = existing?.kind === 'rule' ? declarationMap(existing.body) : new Map<string, string>()
+  const before = JSON.stringify([...current])
   for (const [property, value] of Object.entries(declarations)) {
     if (value === null || value.trim() === '') {
       current.delete(checkDeclaration(property, 'x').property)
@@ -418,6 +536,7 @@ function setStyle(
     const checked = checkDeclaration(property, value)
     current.set(checked.property, checked.value)
   }
+  if (JSON.stringify([...current]) === before) return
   const next: CssNode | undefined = current.size
     ? {
         kind: 'rule',
@@ -425,26 +544,20 @@ function setStyle(
         body: `\n${[...current].map(([name, value]) => `  ${name}: ${value};`).join('\n')}\n`,
       }
     : undefined
-  if (at >= 0) nodes.splice(at, 1, ...(next ? [next] : []))
+  if (index >= 0) nodes.splice(index, 1, ...(next ? [next] : []))
   else if (next) nodes.push(next)
-  work.css = serializeNodes(nodes)
+  work.blocks[at] = serializeNodes(nodes)
   work.cssChanged = true
 }
 
 function clearStyle(work: Work, whenMap: Record<string, string>, element?: string) {
-  const when = whenSelector(work, whenMap)
-  const rootKey = rootKeyOf(work)
-  const exact = element === undefined ? undefined : partSelector(work, element, when)
-  const root = `[${PART_ATTR}="${rootKey}"]${when}`
-  const before = work.css
-  work.css = serializeNodes(
-    rewriteSelectors(parseCss(work.css), (selector) => {
-      const text = selector.trim()
-      const mine = element === undefined ? text === root || text.startsWith(`${root} [${PART_ATTR}=`) : text === exact
-      return mine ? null : selector
-    }),
-  )
-  if (work.css !== before) work.cssChanged = true
+  const root = whenSelector(work, whenMap)
+  const exact = element === undefined ? undefined : partSelector(work, element, root)
+  editSheet(work, 'data-', (selector) => {
+    const text = selector.trim()
+    const mine = exact === undefined ? text === root || text.startsWith(`${root} [${PART_ATTR}=`) : text === exact
+    return mine ? null : selector
+  })
 }
 
 function apply(work: Work, op: VariantOp) {
@@ -522,8 +635,9 @@ function apply(work: Work, op: VariantOp) {
       }
       if (next !== undefined && !rest.includes(next)) fail(`new_default “${next}” is not one of ${rest.join(' | ')}`)
       replaceProp(work, { ...prop, options: rest, ...(next !== undefined ? { default: next } : {}) })
+      /* only a rule that asks for the value goes; one that excludes it (:not([data-size="sm"])) keeps matching the rest */
       editSheet(work, `data-${op.prop}`, (selector) =>
-        attrPattern(op.prop, op.value).test(selector) ? null : selector,
+        attrPattern(op.prop, op.value).test(withoutNegations(selector)) ? null : selector,
       )
       work.maps.push((props) => {
         if (props[op.prop] !== op.value) return props
@@ -542,7 +656,10 @@ function apply(work: Work, op: VariantOp) {
     case 'add_boolean': {
       const existing = work.props.find((prop) => prop.name === op.prop)
       if (existing) {
-        if (existing.type !== 'boolean') fail(`${work.def.name} already has a ${existing.type} prop “${op.prop}”`)
+        if (existing.type !== 'boolean')
+          fail(
+            `${work.def.name} already has ${/^[aeiou]/.test(existing.type) ? 'an' : 'a'} ${existing.type} prop “${op.prop}”`,
+          )
         if (existing.reflect) fail(`${op.prop} is already a boolean variant`)
         replaceProp(work, {
           ...existing,
@@ -622,6 +739,20 @@ function apply(work: Work, op: VariantOp) {
 /* Instances                                                           */
 /* ------------------------------------------------------------------ */
 
+/** The frame with each of its existing stylesheets that changed rewritten, last first so the offsets hold. */
+function restyleBlocks(id: string, original: StyleBlock[], next: string[]) {
+  return (html: string): string => {
+    const current = styleBlocks(html, id)
+    let out = html
+    for (let at = Math.min(current.length, original.length) - 1; at >= 0; at--) {
+      const block = current[at]!
+      if (next[at] === undefined || next[at] === original[at]!.text) continue
+      out = `${out.slice(0, block.start)}${styleText(next[at]!)}${out.slice(block.end)}`
+    }
+    return out
+  }
+}
+
 const asProps = (raw: string | undefined): Record<string, string> => {
   try {
     const parsed: unknown = raw ? JSON.parse(raw) : {}
@@ -685,11 +816,16 @@ export const editVariants = atomic(function editVariants(
   if (!def) return fail(`no component “${ref}” on this canvas`)
   if (!input.ops.length) fail('ops is empty: pass at least one edit')
   if (input.ops.length > MAX_VARIANT_OPS) fail(`at most ${MAX_VARIANT_OPS} edits in one call`)
+  if (input.expectedRev !== undefined && input.expectedRev !== def.rev)
+    fail(
+      `component “${def.name}” is at revision ${def.rev}, not ${input.expectedRev} — someone changed it; read it again`,
+    )
+  const loadedBlocks = loadBlocks(def)
   const work: Work = {
     def,
     props: def.props.map((prop) => ({ ...prop })),
     propsChanged: false,
-    css: def.rawCss,
+    ...loadedBlocks,
     cssChanged: false,
     template: def.template,
     templateChanged: false,
@@ -705,7 +841,7 @@ export const editVariants = atomic(function editVariants(
   })
   const map: PropsMap = (props) => work.maps.reduce((current, step) => step(current), props)
   if (input.dryRun) {
-    const draft = { ...def, props: work.props, rawCss: work.css, template: work.template }
+    const draft = { ...def, props: work.props, rawCss: work.blocks.join('\n'), template: work.template }
     const migrated = work.maps.length ? migrateInstances(canvasId, def, map, actor, false) : { instances: 0, frames: 0 }
     const impact = updateComponent(canvasId, def.id, { dryRun: true }, actor)
     return {
@@ -733,7 +869,8 @@ export const editVariants = atomic(function editVariants(
     def.id,
     {
       ...(work.propsChanged ? { props: work.props } : {}),
-      ...(work.cssChanged ? { css: work.css } : {}),
+      ...(work.cssChanged && work.target >= loadedBlocks.found.length ? { css: work.blocks[work.target] ?? '' } : {}),
+      ...(work.cssChanged ? { restyle: restyleBlocks(def.id, loadedBlocks.found, work.blocks) } : {}),
       ...(work.templateChanged ? { html: work.template } : {}),
       ...(input.expectedRev !== undefined ? { expectedRev: input.expectedRev } : {}),
     },

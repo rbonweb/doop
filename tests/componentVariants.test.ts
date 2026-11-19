@@ -19,6 +19,10 @@ import { findComponent } from '../server/componentActions.ts'
 import { checkDeclaration, variantRules } from '../server/componentVariants.ts'
 import { COMPONENT_TOOL_NAMES } from '../server/componentTools.ts'
 import { partsOf } from '../server/componentEngine.ts'
+import { parseCss, splitTopLevel } from '../server/componentCss.ts'
+import { elementIs } from '../server/parse5Select.ts'
+import { parse } from 'parse5'
+import type { DefaultTreeAdapterTypes as Tree } from 'parse5'
 
 const OWNER = 'owner-1'
 const AGENT = { agent_name: 'Tester' }
@@ -156,6 +160,7 @@ describe('renaming and removing a value', () => {
       'Two',
       `<doop-use component="Button" size="sm"></doop-use><doop-use component="Button"></doop-use>`,
     )
+    const rev = findComponent(canvas.id, id)!.rev
     const result = await edit(canvas.id, id, [
       { op: 'rename_value', prop: 'size', from: 'md', to: 'medium' },
       { op: 'rename_value', prop: 'size', from: 'sm', to: 'small' },
@@ -173,8 +178,8 @@ describe('renaming and removing a value', () => {
     expect(store.getFrame(two)!.html).toContain('data-size="small"')
     expect(store.getFrame(two)!.html).toContain('data-size="medium"')
     expect(store.getFrame(two)!.html).not.toContain('data-size="sm"')
-    /* the edit is one revision */
-    expect(findComponent(canvas.id, id)!.rev).toBe(def.rev)
+    /* two renames in one call are one revision */
+    expect(def.rev).toBe(rev + 1)
   })
 
   it('removes a value: its rules go and instances fall back to the default', async () => {
@@ -346,5 +351,188 @@ describe('a component without a variants block', () => {
     expect(after.template).toBe(before.template)
     expect(after.rev).toBe(before.rev)
     expect(store.getFrame(before.mainFrameId!)!.html).toBe(mainHtml)
+  })
+})
+
+function elementsOf(html: string): Tree.Element[] {
+  const out: Tree.Element[] = []
+  const walk = (node: Tree.ParentNode) => {
+    for (const child of node.childNodes) {
+      if ('tagName' in child) {
+        out.push(child)
+        walk(child)
+      }
+    }
+  }
+  walk(parse(html))
+  return out
+}
+
+/** How many elements of the consuming frame the rules of the component's scoped css that hold `needle` reach. */
+function reach(frameHtml: string, css: string, needle: string): number {
+  const els = elementsOf(frameHtml)
+  let hits = 0
+  for (const node of parseCss(css)) {
+    if (node.kind !== 'rule' || !node.body.includes(needle)) continue
+    for (const selector of splitTopLevel(node.selector, ',')) hits += els.filter((el) => elementIs(el, selector)).length
+  }
+  return hits
+}
+
+const scopedCss = (html: string) => html.match(/<style[^>]*data-doop-component-css[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? ''
+
+describe('the scoped css reaches the placed instance', () => {
+  it('styles the root and a child under an enum and a boolean variant', async () => {
+    const { canvas, id } = await setup()
+    const key = labelKey(canvas.id, id)
+    await edit(canvas.id, id, [
+      { op: 'add_boolean', prop: 'quiet' },
+      { op: 'set_style', element: 'root', when: { size: 'sm' }, declarations: { 'padding-left': '1px' } },
+      { op: 'set_style', element: key, when: { size: 'sm' }, declarations: { 'font-size': '9px' } },
+      { op: 'set_style', element: 'root', when: { quiet: 'true' }, declarations: { 'margin-left': '2px' } },
+      { op: 'set_style', element: key, when: { quiet: 'true' }, declarations: { 'letter-spacing': '3px' } },
+    ])
+    const frameId = await screen(canvas.id, 'Use', `<doop-use component="Button" size="sm" quiet="true"></doop-use>`)
+    const html = store.getFrame(frameId)!.html
+    const css = scopedCss(html)
+    expect(css).toContain('padding-left')
+    expect(reach(html, css, 'padding-left')).toBe(1)
+    expect(reach(html, css, 'font-size: 9px')).toBe(1)
+    expect(reach(html, css, 'margin-left')).toBe(1)
+    expect(reach(html, css, 'letter-spacing')).toBe(1)
+    /* a default instance (md, quiet off) gets none of them */
+    const plain = store.getFrame(await screen(canvas.id, 'Plain', `<doop-use component="Button"></doop-use>`))!.html
+    expect(reach(plain, scopedCss(plain), 'padding-left')).toBe(0)
+    expect(reach(plain, scopedCss(plain), 'font-size: 9px')).toBe(0)
+  })
+})
+
+describe('a main made from an element in a design frame', () => {
+  async function fromElement() {
+    const canvas = store.createCanvas('Design', OWNER)
+    const frameId = await screen(
+      canvas.id,
+      'Design',
+      '<span class="pill" data-doop-id="abc">x</span><p class="other">o</p>',
+    )
+    const frame = store.getFrame(frameId)!
+    frame.html = frame.html.replace(
+      '<head></head>',
+      '<head><style>.pill{padding:4px} .pill[data-tone="a"]{color:red} .other{margin:1px}</style></head>',
+    )
+    const created = await call('create_component', {
+      canvas_id: canvas.id,
+      name: 'Pill',
+      frame_id: frameId,
+      element: 'abc',
+      props: [{ name: 'tone', type: 'enum', options: ['a', 'b'] }],
+    })
+    return { canvas, frameId, id: created.data.component.id as string }
+  }
+
+  it('renames a value in the design stylesheet in place, keeping one rule and the siblings', async () => {
+    const { canvas, frameId, id } = await fromElement()
+    const result = await edit(canvas.id, id, [{ op: 'rename_value', prop: 'tone', from: 'a', to: 'z' }])
+    expect(result.isError).toBe(false)
+    const html = store.getFrame(frameId)!.html
+    expect(html).not.toContain('data-tone="a"')
+    expect(html.match(/data-tone="z"/g)).toHaveLength(1)
+    expect(html).toContain('.other')
+    expect(findComponent(canvas.id, id)!.rawCss.match(/\.pill\s*\{/g)).toHaveLength(1)
+  })
+
+  it('removes a value and clears a style from every stylesheet, and puts new rules in the source block', async () => {
+    const { canvas, frameId, id } = await fromElement()
+    await edit(canvas.id, id, [
+      { op: 'set_style', element: 'root', when: { tone: 'b' }, declarations: { color: 'blue' } },
+      { op: 'remove_value', prop: 'tone', value: 'a', new_default: 'b' },
+    ])
+    let html = store.getFrame(frameId)!.html
+    expect(html).not.toContain('data-tone="a"')
+    expect(html).toContain('data-doop-component-source')
+    expect(html).toContain('.pill {padding:4px}')
+    await edit(canvas.id, id, [{ op: 'clear_style', when: { tone: 'b' } }])
+    html = store.getFrame(frameId)!.html
+    expect(html).not.toContain('data-tone="b"')
+    expect(html).toContain('.other')
+  })
+})
+
+describe('guards', () => {
+  it('refuses a stale expected_rev on a real write, a dry run and a no-op', async () => {
+    const { canvas, id } = await setup()
+    const rev = findComponent(canvas.id, id)!.rev
+    for (const extra of [{}, { dry_run: true }]) {
+      const stale = await edit(canvas.id, id, [{ op: 'set_default', prop: 'size', value: 'sm' }], {
+        expected_rev: rev + 5,
+        ...extra,
+      })
+      expect(stale.isError).toBe(true)
+      expect(stale.text).toContain('is at revision')
+    }
+    const noop = await edit(canvas.id, id, [{ op: 'set_default', prop: 'size', value: 'md' }], {
+      expected_rev: rev + 5,
+    })
+    expect(noop.isError).toBe(true)
+  })
+
+  it('moves the revision once for a real edit', async () => {
+    const { canvas, id } = await setup()
+    const rev = findComponent(canvas.id, id)!.rev
+    await edit(canvas.id, id, [
+      { op: 'add_value', prop: 'size', value: 'lg' },
+      { op: 'set_style', element: 'root', when: { size: 'lg' }, declarations: { padding: '9px' } },
+    ])
+    expect(findComponent(canvas.id, id)!.rev).toBe(rev + 1)
+  })
+
+  it('refuses a stored value that could inject into a selector', async () => {
+    const canvas = store.createCanvas('Hostile', OWNER)
+    const { data } = await call('create_component', {
+      canvas_id: canvas.id,
+      name: 'Odd',
+      html: BUTTON,
+      props: [{ name: 'size', type: 'enum', options: ['a"] { color: red } [x="', 'b'] }],
+    })
+    const result = await edit(canvas.id, data.component.id, [
+      { op: 'set_style', element: 'root', when: { size: 'a"] { color: red } [x="' }, declarations: { color: 'blue' } },
+    ])
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('cannot be styled here')
+  })
+
+  it('keeps a :not() rule when its value is removed, and drops the rule that asks for it', async () => {
+    const { canvas, id } = await setup(
+      `${CSS}\n.btn:not([data-size="sm"]) { opacity: 0.9 }\n.btn[data-size="sm"] { padding: 2px }`,
+    )
+    await edit(canvas.id, id, [{ op: 'remove_value', prop: 'size', value: 'sm' }])
+    const css = findComponent(canvas.id, id)!.rawCss
+    expect(css).toContain(':not([data-size="sm"])')
+    expect(css).not.toMatch(/\.btn\[data-size="sm"\]\s*\{/)
+  })
+
+  it('allows colour, maths and gradients, and refuses functions that load or run', () => {
+    for (const value of [
+      'calc(100% - 2px)',
+      'rgb(0 0 0 / 50%)',
+      'linear-gradient(red, blue)',
+      'var(--x, 4px)',
+      'translate3d(0, 1px, 0)',
+    ])
+      expect(checkDeclaration('background', value).value).toBe(value)
+    for (const value of [
+      'image-set("https://x/a.png" 1x)',
+      '-webkit-image-set("a" 1x)',
+      'src("a")',
+      'image("a")',
+      'cross-fade(50% "a", red)',
+      'attr(data-x)',
+      'element(#a)',
+      'paint(x)',
+    ])
+      expect(() => checkDeclaration('background', value)).toThrow(/only colour, maths/)
+    expect(() => checkDeclaration('behavior', 'x')).toThrow(/not a CSS property/)
+    expect(() => checkDeclaration('color', 'red\u0000')).toThrow(/control characters/)
+    expect(() => checkDeclaration('color', 'red\nblue')).toThrow(/control characters/)
   })
 })

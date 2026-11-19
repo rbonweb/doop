@@ -7,6 +7,8 @@ describe('component variant routes', () => {
   let server: Server
   let owner: Client
   let stranger: Client
+  let viewer: Client
+  let commenter: Client
   let canvasId: string
   let componentId: string
 
@@ -14,6 +16,8 @@ describe('component variant routes', () => {
     server = await startServer()
     owner = await new Client(server).signUp('owner@variants.test', 'Owner')
     stranger = await new Client(server).signUp('stranger@variants.test', 'Stranger')
+    viewer = await new Client(server).signUp('viewer@variants.test', 'Viewer')
+    commenter = await new Client(server).signUp('commenter@variants.test', 'Commenter')
     canvasId = ((await (await owner.post('/api/canvases', { name: 'Variants' })).json()) as { id: string }).id
     const created = await owner.post(`/api/canvases/${canvasId}/components`, {
       name: 'Chip',
@@ -22,6 +26,8 @@ describe('component variant routes', () => {
       props: [{ name: 'size', type: 'enum', options: ['sm', 'md'] }],
     })
     componentId = ((await created.json()) as { component: { id: string } }).component.id
+    await owner.post(`/api/canvases/${canvasId}/members`, { email: 'viewer@variants.test', role: 'view' })
+    await owner.post(`/api/canvases/${canvasId}/members`, { email: 'commenter@variants.test', role: 'comment' })
   }, 60_000)
 
   afterAll(() => server?.stop())
@@ -57,5 +63,17 @@ describe('component variant routes', () => {
       ops: [{ op: 'set_default', prop: 'size', value: 'sm' }],
     })
     expect([401, 403, 404]).toContain(denied.status)
+  })
+
+  it('lets a viewer read the variants and refuses a viewer or commenter who writes, and a stale revision', async () => {
+    expect((await viewer.get(`/api/canvases/${canvasId}/components/${componentId}/variants`)).status).toBe(200)
+    const ops = { ops: [{ op: 'set_default', prop: 'size', value: 'sm' }] }
+    expect((await viewer.post(`/api/canvases/${canvasId}/components/${componentId}/variants`, ops)).status).toBe(403)
+    expect((await commenter.post(`/api/canvases/${canvasId}/components/${componentId}/variants`, ops)).status).toBe(403)
+    const stale = await owner.post(`/api/canvases/${canvasId}/components/${componentId}/variants`, {
+      ...ops,
+      expectedRev: 99,
+    })
+    expect(stale.status).toBe(400)
   })
 })
