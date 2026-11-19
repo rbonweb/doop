@@ -142,6 +142,7 @@ import { resealSecrets } from './secretBackfill.ts'
 import { encryptionConfigured } from './secretBox.ts'
 import * as authSchema from './db/auth-schema.ts'
 import * as persist from './db/persist.ts'
+import * as propagation from './propagation.ts'
 import { handleMcpRequest } from './mcp.ts'
 import {
   getAsset,
@@ -289,8 +290,12 @@ process.on('unhandledRejection', (reason) => {
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.once(sig, () => {
     setTimeout(() => process.exit(0), 1500).unref()
-    persist
-      .flush((id) => store.getFrame(id))
+    propagation
+      .flushQueueStore()
+      .then(() => persist.flush((id) => store.getFrame(id)))
+      /* frames stored by the flush release their queue rows */
+      .then(() => propagation.flushQueueStore())
+      .then(() => persist.flush((id) => store.getFrame(id)))
       .catch((err) => console.error('flush on shutdown failed', err))
       .finally(() => process.exit(0))
   })
@@ -336,6 +341,7 @@ const RESTRICTED_MESSAGES: ReadonlySet<ServerMessage['type']> = new Set([
   'frame:deleted',
   'frame:streaming',
   'frame:claims',
+  'frame:catching-up',
   'canvas:renamed',
   'canvas:pages',
   'note:upsert',
@@ -507,6 +513,12 @@ function agentTouch(
 
 /* claims change when an agent claims, releases or lets one lapse: the room always gets the whole list */
 onClaimsChange((canvasId, claims) => broadcast(canvasId, claimsMessage(canvasId, claims)))
+/* the component work queue is kept in the database, so a restart resumes it (actions.resumePropagationQueue) */
+propagation.useQueueStore({
+  write: persist.writePropagationRows,
+  frameWritePending: persist.frameWritePending,
+  onFrameStored: (listener) => void persist.onFrameStored(listener),
+})
 
 setInterval(() => {
   const now = Date.now()
@@ -589,6 +601,11 @@ app.get('/cli/:file', (req, res) => serveCli(req, res))
 /* how many canvases have their frame HTML in memory (store.load / evictIdle) */
 app.get('/healthz/store', (_req, res) => {
   res.json(store.stats())
+})
+
+/* the component work queue: canvases and frames waiting for a visit (server/propagation.ts) */
+app.get('/healthz/propagation', (_req, res) => {
+  res.json({ ...propagation.stats(), paused: propagation.paused() })
 })
 
 /* every request is one operation: the component engine's work budget is counted against
@@ -3823,6 +3840,7 @@ wss.on('connection', (ws, upgradeReq) => {
         serverBuild: BUILD_ID,
         role,
         ...(guest ? { guest: true } : {}),
+        ...(propagation.catchingUp(msg.canvasId).length ? { catchingUp: propagation.catchingUp(msg.canvasId) } : {}),
       })
       const joinClaims = claimsOn(msg.canvasId)
       if (joinClaims.length) {
@@ -3966,9 +3984,19 @@ server.listen({ port: PORT, host: HOST }, () => {
     })
     .catch((err) => console.error('[components] healing hollow definitions failed:', err))
   /* instances a propagation never reached (a restart mid-drain): queued again, while serving */
-  outsideOperation('boot catch-up: each component is queued for propagation by itself', () =>
-    actions.catchUpComponentsBehind(),
+  outsideOperation('boot resume: the queue a restart interrupted is picked up one canvas at a time', () =>
+    actions.resumePropagationQueue(),
   )
+    .then(({ frames, canvases, dropped }) => {
+      if (frames + dropped)
+        console.log(`[components] queue resumed: ${frames} frame(s) on ${canvases} canvas(es), ${dropped} dropped`)
+    })
+    .catch((err) => console.error('[components] resuming the propagation queue failed:', err))
+    .then(() =>
+      outsideOperation('boot catch-up: each component is queued for propagation by itself', () =>
+        actions.catchUpComponentsBehind(),
+      ),
+    )
     .then(({ components, canvases }) => {
       if (components)
         console.log(`[components] ${components} component(s) on ${canvases} canvas(es) had instances behind: queued`)
