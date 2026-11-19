@@ -801,4 +801,63 @@ describe('list props', () => {
       expect(html(page)).toContain('color: red')
     })
   })
+
+  describe('review follow-ups', () => {
+    const items = (page: string) => {
+      const raw = /data-doop-props="([^"]*)"/
+        .exec(html(page))![1]!
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+      return JSON.parse(JSON.parse(raw).links) as { label: string }[]
+    }
+
+    it('treats the whole style attribute as a style target, for a plain prop and a list field', () => {
+      const plain = makeComponent('Wholly', (id) => `<p ${COMPONENT_ATTR}="${id}" data-doop-prop="style:look">hi</p>`, [
+        { name: 'look', type: 'text' },
+      ])
+      const page = write(
+        `<doop-use component="${plain.id}" look="red;position:fixed;background:url(https://evil.test/x)"></doop-use>`,
+      )
+      expect(html(page)).not.toMatch(/style=|evil\.test|position:/)
+      const id = /data-doop-id="([a-z0-9]+)"/.exec(html(page))![1]!
+      expect(() =>
+        changeInstances(canvasId, page, [{ instanceId: id, props: { look: 'red;inset:0' } }], actor),
+      ).toThrow('bound to a style')
+      const listed = makeComponent(
+        'WhollyList',
+        (cid) =>
+          `<ul ${COMPONENT_ATTR}="${cid}"><li data-doop-each="rows" data-doop-prop="style:look,name">x</li></ul>`,
+        [{ name: 'rows', type: 'list', fields: { look: { type: 'text' }, name: { type: 'text' } } }],
+      )
+      const bad = write(
+        `<doop-use component="${listed.id}" rows='[{"look":"red;position:fixed;background:url(https://evil.test/x)","name":"n"}]'></doop-use>`,
+      )
+      expect(html(bad)).not.toMatch(/style=|evil\.test|position:/)
+    })
+
+    it('re-keys an authored key shaped like a copy in a main that repeats an element', () => {
+      const def = makeComponent(
+        'Keys2',
+        (id) =>
+          `<div ${COMPONENT_ATTR}="${id}"><h2 data-doop-part="xxxx-1" data-doop-prop="title">Hello</h2><ul><li data-doop-part="xxxx" data-doop-each="links"><b data-doop-prop="label">x</b></li></ul></div>`,
+        [{ name: 'links', type: 'list', fields: { label: { type: 'text' } } }],
+      )
+      expect(def.template).not.toContain('xxxx-1')
+      const page = write(
+        `<doop-use component="${def.id}" links='[{"label":"a"},{"label":"b"},{"label":"c"}]'></doop-use>`,
+      )
+      edit(page, (markup) => markup.replace('>Hello<', '>Changed<'))
+      expect(html(page)).toContain('>Changed<')
+      expect(items(page).map((item) => item.label)).toEqual(['a', 'b', 'c'])
+    })
+
+    it('leaves an authored key alone in a main with no list', () => {
+      const def = makeComponent(
+        'Plain2',
+        (id) => `<div ${COMPONENT_ATTR}="${id}"><h2 data-doop-part="xxxx-1" data-doop-prop="title">Hello</h2></div>`,
+        [],
+      )
+      expect(def.template).toContain('data-doop-part="xxxx-1"')
+    })
+  })
 })
