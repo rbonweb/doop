@@ -580,6 +580,15 @@ describe('the one text of a captured component', () => {
     expect(def.code?.props?.label).toBeUndefined()
   })
 
+  it('maps the label to children even when an unrelated prop is omitted', () => {
+    const omitted = {
+      ...primerCapturedButton(),
+      code: { exportName: 'Button', props: { variant: { omit: true as const } } },
+    }
+    const def = created(run(bundleOf('storybook', omitted)))
+    expect(def.code?.props?.label).toEqual({ name: 'children' })
+  })
+
   it('does not pass a rule it would clash with: a children slot or a prop already sent to children', () => {
     const slotted = {
       ...primerCapturedButton(),
@@ -624,6 +633,36 @@ describe('a component-valued enum in a bundle code mapping', () => {
     const def = findComponent(canvasId, result.created[0]!.id)!
     expect(def.code?.props?.icon).toEqual(mapping.icon)
     expect(run(icons({ props: mapping })).unchanged).toHaveLength(1)
+  })
+
+  it('keeps a hand-edited mapping on re-import, and lets the import fill what the stored rule lacks', () => {
+    const mapping = {
+      icon: { component: { importFrom: '@primer/octicons-react' }, values: { StarIcon: 'StarFillIcon' } },
+    }
+    const first = run(icons({ props: mapping }))
+    const id = first.created[0]!.id
+    const stored = findComponent(canvasId, id)!
+    store.saveComponent(canvasId, {
+      ...stored,
+      code: {
+        ...stored.code,
+        props: {
+          icon: { name: 'glyph', component: { importFrom: '@acme/icons' }, values: { StarIcon: 'StarSolidIcon' } },
+        },
+      },
+    })
+    const again = run(icons({ props: mapping }))
+    expect(again.updated).toEqual([])
+    expect(findComponent(canvasId, id)!.code?.props?.icon).toEqual({
+      name: 'glyph',
+      component: { importFrom: '@acme/icons' },
+      values: { StarIcon: 'StarSolidIcon' },
+    })
+    /* a stored rule with no package takes the import's */
+    const bare = findComponent(canvasId, id)!
+    store.saveComponent(canvasId, { ...bare, code: { ...bare.code, props: { icon: { component: {} } } } })
+    run(icons({ props: mapping }))
+    expect(findComponent(canvasId, id)!.code?.props?.icon).toEqual(mapping.icon)
   })
 
   it('refuses a component mapping on a prop that is not an enum, naming it, and writes no mapping', () => {

@@ -470,6 +470,21 @@ function boundProps(html: string): { all: Set<string>; text: Set<string> } {
   return { all, text }
 }
 
+/** A re-import keeps what a person or agent set on the stored mapping: per prop, the stored rule's fields win over the import's, and the import fills the fields and props the stored one lacks. */
+function withStoredRules(fresh: ComponentCode, stored: ComponentCode | undefined): ComponentCode {
+  if (!stored?.props) return fresh
+  const props: NonNullable<ComponentCode['props']> = { ...fresh.props }
+  for (const [name, rule] of Object.entries(stored.props)) {
+    const imported = props[name]
+    props[name] = {
+      ...imported,
+      ...rule,
+      ...(imported?.component || rule.component ? { component: { ...imported?.component, ...rule.component } } : {}),
+    }
+  }
+  return { ...fresh, props }
+}
+
 /** A React export shows a component's label as its children. When the importer had to find the text itself (the Storybook has no prop for it) and the component shows exactly one, that prop is passed as the export's `children`; a prop the Storybook named, or any mapping the bundle already made for it, is left as it is. */
 function withChildrenMapping(code: ComponentCode, html: string, bundled: readonly string[]): ComponentCode {
   const inferred = [...boundProps(html).text].filter((name) => !bundled.includes(name))
@@ -477,7 +492,7 @@ function withChildrenMapping(code: ComponentCode, html: string, bundled: readonl
   if (inferred.length !== 1 || !label) return code
   const claimed =
     Object.values(code.slots ?? {}).includes('children') ||
-    Object.values(code.props ?? {}).some((rule) => rule.name === 'children' || rule.omit)
+    Object.values(code.props ?? {}).some((rule) => rule.name === 'children')
   if (claimed || (code.props && label in code.props)) return code
   return { ...code, props: { ...code.props, [label]: { name: 'children' } } }
 }
@@ -568,7 +583,7 @@ function writeOne(
     const html = withInferredBindings(prepared.html, !ctx.captured, ctx.captured ? bundled : undefined)
     const result = withCodeMapping(
       component.name,
-      ctx.captured ? withChildrenMapping(code, html, bundled) : code,
+      withStoredRules(ctx.captured ? withChildrenMapping(code, html, bundled) : code, match.code),
       issues,
       (mapping) =>
         updateComponent(

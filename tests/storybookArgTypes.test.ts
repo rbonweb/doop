@@ -281,7 +281,7 @@ describe('readArgTypes component-valued enums', () => {
     })
   })
 
-  it('falls back to the option when the display name is not an identifier', () => {
+  it('is not component-valued when no entry has an identifier display name', () => {
     const { props } = read({
       icon: {
         control: 'select',
@@ -289,7 +289,7 @@ describe('readArgTypes component-valued enums', () => {
         mapping: { HeartIcon: { displayName: 'not an identifier' }, StarIcon: { displayName: 'Star-Icon' } },
       },
     })
-    expect(props[0]?.componentExports).toEqual({ HeartIcon: 'HeartIcon', StarIcon: 'StarIcon' })
+    expect(props[0]?.componentExports).toBeUndefined()
   })
 
   it('reads a mapping with a none: null entry as data, with no components', () => {
@@ -315,7 +315,7 @@ describe('readArgTypes component-valued enums', () => {
     })
     expect(props[0]?.componentExports).toEqual({ HeartIcon: 'HeartIcon', StarIcon: 'StarIcon' })
     const empty = read({ icon: { control: 'select', options: icons, mapping: {} } })
-    expect(empty.props[0]?.componentExports).toEqual({ HeartIcon: 'HeartIcon', StarIcon: 'StarIcon' })
+    expect(empty.props[0]?.componentExports).toBeUndefined()
   })
 
   it('has no components without a mapping', () => {

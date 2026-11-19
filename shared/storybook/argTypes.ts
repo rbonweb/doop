@@ -161,20 +161,23 @@ function optionSource(argType: Dict): unknown {
 
 const EXPORT_NAME = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 
-/** An enum argType's `mapping` read as components: every option maps to something that is not a plain value (the probe leaves a component's display name, or nothing where a function stood), so the option names the component and the mapped value is a component reference. One plain value among them (`none: null`, `small: 12`) means the mapping is data, not components. */
+/** An enum argType's `mapping` read as components: every option maps to something that is not a plain value (the probe leaves a component's display name, or nothing where a function stood), so the option names the component and the mapped value is a component reference. One plain value among them (`none: null`, `small: 12`) means the mapping is data, not components, and so does a mapping where no entry carries a display name. */
 function readComponentExports(argType: Dict, options: string[]): Record<string, string> | undefined {
   const mapping = ownRecord(own(argType, 'mapping'))
   if (!mapping) return undefined
   const exports: Record<string, string> = {}
+  let named = false
   for (const option of options) {
     const mapped = own(mapping, option)
     if (mapped === null || ['string', 'number', 'boolean'].includes(typeof mapped)) return undefined
     const shown = ownRecord(mapped) ? own(mapped as Dict, 'displayName') : undefined
+    if (typeof shown === 'string' && EXPORT_NAME.test(shown)) named = true
     const name = typeof shown === 'string' && EXPORT_NAME.test(shown) ? shown : option
     if (!EXPORT_NAME.test(name)) return undefined
     exports[option] = name
   }
-  return Object.keys(exports).length ? exports : undefined
+  /* at least one entry must carry a component's display name: a mapping of nothing, or of elements, is not a list of components */
+  return named ? exports : undefined
 }
 
 /** The prop name Storybook's own `children` arg gets: `children` is reserved here (a template has none), and the text a component shows is what people call its label. */

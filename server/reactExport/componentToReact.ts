@@ -253,7 +253,11 @@ export class ExportSession {
     const key = `${importFrom}\u0000${exportName}`
     const known = this.refs.get(key)
     if (known) return known
-    const ref = { importFrom, exportName, local: this.names.take(exportName) }
+    /* a prop local is camelCase, so a capitalized import name can never be shadowed by one */
+    const wanted = /^[A-Z]/.test(exportName)
+      ? exportName
+      : `${exportName.charAt(0).toUpperCase()}${exportName.slice(1)}`
+    const ref = { importFrom, exportName, local: this.names.take(wanted) }
     this.refs.set(key, ref)
     return ref
   }

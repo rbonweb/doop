@@ -484,6 +484,29 @@ describe('children and component props of a mapped export', () => {
     expect(homeOf(odd, use(odd, 'trailing-visual="EyeIcon"')).home).toContain('trailingVisual={undefined}')
   })
 
+  it('gives a lowercase export a capitalized local so a prop of a generated component cannot shadow it', () => {
+    const btn = button({
+      props: { 'trailing-visual': { name: 'trailingVisual', component: { importFrom: OCTICONS } } },
+    })
+    const wrap = def(
+      'Wrap',
+      `<div data-doop-part="r"><span data-doop-part="t" data-doop-prop="heart">x</span>${use(btn, 'trailing-visual="heart"')}</div>`,
+      {
+        props: [{ name: 'heart', type: 'text' }],
+      },
+    )
+    const odd = {
+      ...btn,
+      props: btn.props.map((prop) =>
+        prop.name === 'trailing-visual' ? { ...prop, options: ['heart', 'XIcon'] } : prop,
+      ),
+    }
+    const out = exportOf([odd, wrap], [], { componentIds: [wrap.id] })
+    const tsx = componentOf(out, 'Wrap')
+    expect(tsx).toContain('import { heart as Heart } from "@primer/octicons-react"')
+    expect(tsx).toContain('trailingVisual={Heart}')
+  })
+
   it('leaves a plain enum a string', () => {
     const btn = button({})
     const { home } = homeOf(btn, use(btn, 'trailing-visual="HeartIcon"'))
