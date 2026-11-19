@@ -4,6 +4,7 @@ import type { Frame } from '../../shared/types'
 import { api, errorMessage } from '../lib/api'
 import { onFrameChange, previewVariant } from '../lib/frameBridge'
 import { useT } from '../lib/i18n'
+import { MOD_KEY } from '../lib/keys'
 import { canEditOpenCanvas, useStore } from '../lib/store'
 import { combinationLabel, previewOf, useVariantPreview, variantDefault, variantPropsOf } from '../lib/variantPreview'
 import type { VariantOp, VariantProp, VariantRule } from '../lib/variantTypes'
@@ -434,7 +435,9 @@ export function VariantsSection({ frame, def }: { frame: Frame; def: ComponentDe
               <span className="text-label font-medium text-brand">
                 {t('componentVariants.editing', { combination: combinationLabel(preview.when) })}
               </span>
-              <span className="text-caption text-ink-soft">{t('componentVariants.editingHint')}</span>
+              <span className="text-caption text-ink-soft">
+                {t('componentVariants.editingHint', { undo: `${MOD_KEY}Z` })}
+              </span>
               {styled > 0 && (
                 <span className="text-caption text-ink-soft">
                   {t('componentVariants.styledProperties', { count: styled })}

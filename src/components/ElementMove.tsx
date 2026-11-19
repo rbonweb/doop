@@ -294,7 +294,7 @@ export function useElementMove(frame: Frame) {
         : elementMoveTarget(frame.id, selector, pointerX, pointerY)
     function previewLayer() {
       if (closed || !layer || !layerPoint || inFlight) return
-      if (!layerReady && refuseWhileVariantPreview(frame.id, layer.selector)) {
+      if (!layerReady && refuseWhileVariantPreview(frame.id, [layer.selector, ...followers])) {
         cancel()
         return
       }

@@ -5,6 +5,7 @@ import type { ReorderMove } from './keys'
 import { restack, roomAt, stackOf, type StackWrite } from '../../shared/frameStack'
 import { canEditOpenCanvas, pickedSelectors, useStore } from './store'
 import { t } from './i18n'
+import { refuseWhileVariantPreview } from './variantPreview'
 import { api, ApiError, errorMessage } from './api'
 import { formatElementText, inspectElement, nudgeElements, requestFrame } from './frameBridge'
 import { isCanvasElement } from './drawing'
@@ -272,7 +273,10 @@ export function nudgeSelection(dx: number, dy: number): boolean {
   const frame = s.canvas?.frames.find((f) => f.id === picked.frameId)
   if (!frame || isCanvasElement(frame.html)) return false
   if (frame.locked) return true
-  void nudgeElements(frame.id, pickedSelectors(s), dx, dy)
+  /* arrow keys write inline geometry, which on a main belongs to every combination: refused while one is previewed */
+  const selectors = pickedSelectors(s)
+  if (refuseWhileVariantPreview(frame.id, selectors)) return true
+  void nudgeElements(frame.id, selectors, dx, dy)
   return true
 }
 
@@ -477,7 +481,7 @@ function commitMove(frame: Frame, moved: MovedElement | null): boolean {
 
 /** Drop the element next to, or into, another; false when nothing moved. */
 export function moveLayer(frame: Frame, selector: string, target: DropTarget, flow?: FlowPlacement): boolean {
-  if (isLayerLocked(frame, selector)) return false
+  if (isLayerLocked(frame, selector) || refuseWhileVariantPreview(frame.id, selector)) return false
   return commitMove(frame, moveElement(frame.html, selector, target, flow))
 }
 
@@ -500,6 +504,7 @@ export function dropLayer(pressed: Frame, selector: string, target: DropTarget, 
 export function dropLayerCopy(pressed: Frame, selector: string, target: DropTarget, flow?: FlowPlacement): boolean {
   const frame = useStore.getState().canvas?.frames.find((f) => f.id === pressed.id)
   if (!frame || frame.html !== pressed.html || isLayerLocked(frame, selector)) return false
+  if (refuseWhileVariantPreview(frame.id, selector)) return false
   const duplicated = styledCopy(frame.html, selector)
   const copy = duplicated?.selector
   if (!duplicated || !copy) return false
@@ -947,6 +952,7 @@ export function shiftLayer(frame: Frame, selector: string, dir: -1 | 1): boolean
  *  locked or nothing could move. */
 export function reorderLayers(frame: Frame, selectors: string[], move: ReorderMove): boolean {
   if (!selectors.length || selectors.some((sel) => isLayerLocked(frame, sel))) return false
+  if (refuseWhileVariantPreview(frame.id, selectors)) return false
   const moved = reorderElements(frame.html, selectors, move)
   if (!moved) return false
   saveFrameHtml(frame, moved.html)

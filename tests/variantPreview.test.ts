@@ -9,6 +9,12 @@ const mocks = vi.hoisted(() => ({
   notices: [] as string[],
   components: [] as unknown[],
   frames: [] as unknown[],
+  picked: [] as string[],
+  nudge: vi.fn(),
+}))
+vi.mock('../src/lib/frameBridge', async (original) => ({
+  ...(await original<object>()),
+  nudgeElements: mocks.nudge,
 }))
 vi.mock('../src/lib/api', () => ({
   api: { editComponentVariants: mocks.editComponentVariants },
@@ -20,11 +26,15 @@ vi.mock('../src/lib/store', () => {
     get canvas() {
       return { id: 'canvas1', components: mocks.components, frames: mocks.frames }
     },
+    get selectedElement() {
+      return mocks.picked.length ? { frameId: 'main1', selector: mocks.picked[0] } : null
+    },
     pushNotice: (text: string) => mocks.notices.push(text),
     setComponentLocal: mocks.setComponentLocal,
   }
-  return { useStore: { getState: () => state }, canEditOpenCanvas: () => true, pickedSelectors: () => [] }
+  return { useStore: { getState: () => state }, canEditOpenCanvas: () => true, pickedSelectors: () => mocks.picked }
 })
+import { moveLayer, nudgeSelection, reorderLayers } from '../src/lib/layerEdits'
 import {
   combinationLabel,
   flushVariantStyles,
@@ -67,6 +77,8 @@ beforeEach(() => {
   mocks.components = [component]
   mocks.frames = [frame]
   mocks.notices.length = 0
+  mocks.picked = []
+  mocks.nudge.mockReset()
   mocks.editComponentVariants.mockReset()
   mocks.editComponentVariants.mockImplementation(async () => ({ component }))
   mocks.setComponentLocal.mockReset()
@@ -174,4 +186,27 @@ it('refuses a writer that cannot go to a variant, only for the main and what is 
   expect(refuseWhileVariantPreview('main1', ['#outside', '[data-doop-id="lab01"]'])).toBe(true)
   expect(mocks.notices).toHaveLength(1)
   expect(mocks.notices[0]).toContain('go back to the base')
+})
+
+it('refuses arrow-key nudges, layer drops and restacking of the main while a combination is previewed', () => {
+  mocks.picked = ['[data-doop-id="lab01"]']
+  /* at the base the nudge goes through */
+  expect(nudgeSelection(1, 0)).toBe(true)
+  expect(mocks.nudge).toHaveBeenCalledTimes(1)
+
+  previewing({ size: 'lg' })
+  expect(nudgeSelection(1, 0)).toBe(true)
+  expect(mocks.nudge).toHaveBeenCalledTimes(1)
+  expect(mocks.notices).toHaveLength(1)
+  expect(mocks.notices[0]).toContain('go back to the base')
+
+  const target = { kind: 'before', selector: '[data-doop-id="bare01"]' } as never
+  expect(moveLayer(frame, '[data-doop-id="lab01"]', target)).toBe(false)
+  expect(reorderLayers(frame, ['[data-doop-id="lab01"]'], 'front' as never)).toBe(false)
+  expect(mocks.notices).toHaveLength(3)
+
+  /* an element outside the main is still nudged */
+  mocks.picked = ['#outside']
+  expect(nudgeSelection(1, 0)).toBe(true)
+  expect(mocks.nudge).toHaveBeenCalledTimes(2)
 })

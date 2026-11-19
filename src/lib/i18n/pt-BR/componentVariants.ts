@@ -47,7 +47,7 @@ export const componentVariants = {
   previewAria: 'Visualizar {prop}',
   editing: 'Editando {combination}',
   editingHint:
-    'As mudanças de estilo neste painel e o redimensionamento agora valem só para essa combinação, e ⌘Z não as desfaz. Mover, girar e alinhar ficam desligados até você voltar à base.',
+    'As mudanças de estilo neste painel e o redimensionamento agora valem só para essa combinação, e {undo} não as desfaz. Mover, girar, agrupar e alinhar ficam desligados até você voltar à base.',
   backToBase: 'Voltar à base',
   styledProperties: {
     one: '{count} propriedade com estilo nesta combinação.',

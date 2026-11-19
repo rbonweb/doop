@@ -48,7 +48,7 @@ export const componentVariants = {
   previewAria: 'Preview {prop}',
   editing: 'Editing {combination}',
   editingHint:
-    'Style changes in this panel and resizing now apply to this combination only, and ⌘Z cannot undo them. Moving, turning and aligning are off until you go back to the base.',
+    'Style changes in this panel and resizing now apply to this combination only, and {undo} cannot undo them. Moving, turning, grouping and aligning are off until you go back to the base.',
   backToBase: 'Back to base',
   styledProperties: {
     one: '{count} property styled for this combination.',

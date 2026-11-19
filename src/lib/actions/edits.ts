@@ -270,6 +270,7 @@ export function groupSelection(kind: 'group' | 'frame'): boolean {
   const p = pickedLayers()
   if (!p || p.standalone || p.frame.locked) return false
   if (p.selectors.some((s) => isLayerLocked(p.frame, s))) return false
+  if (refuseWhileVariantPreview(p.frame.id, p.selectors)) return true
   void groupKeepingLayout(p, kind === 'group' ? t('actions.groupName') : t('actions.frameName'))
   return true
 }
@@ -557,6 +558,7 @@ async function groupKeepingLayout(p: Picked, name: string) {
 export function ungroupSelection(): boolean {
   const p = pickedLayers()
   if (!p || p.standalone || p.frame.locked) return false
+  if (refuseWhileVariantPreview(p.frame.id, p.selectors)) return true
   void ungroupKeepingPlaces(p)
   return true
 }
