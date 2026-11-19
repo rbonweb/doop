@@ -57,6 +57,8 @@ interface State {
   presences: Record<string, Presence>
   /** advisory claims on frames, keyed by frame id (the room sends the whole list; expired ones are dropped) */
   claims: Record<string, FrameClaimView>
+  /** frames still waiting for a change of a component's main to reach them, keyed by frame id */
+  catchingUp: Record<string, true>
   cursors: Record<string, { x: number; y: number }>
   /** peers' cameras, keyed by clientId. Kept out of `presences` on purpose:
    *  a camera moves many times a second, and a new presences map re-renders
@@ -243,6 +245,9 @@ interface State {
   setGuestNameRequest(request: State['guestNameRequest']): void
   setPresences(list: Presence[]): void
   setClaims(list: FrameClaimView[]): void
+  /** the whole set (a join), or ids that began waiting and ids that were visited (the room's updates) */
+  setCatchingUp(ids: readonly string[]): void
+  updateCatchingUp(added: readonly string[], removed: readonly string[]): void
   upsertPresence(p: Presence): void
   removePresence(clientId: string): void
   setCursor(clientId: string, x: number, y: number): void
@@ -432,6 +437,7 @@ export const useStore = create<State>((set, get) => ({
   activePageId: null,
   presences: {},
   claims: {},
+  catchingUp: {},
   cursors: {},
   peerViewports: {},
   activity: [],
@@ -610,6 +616,14 @@ export const useStore = create<State>((set, get) => ({
     }),
   setGuestNameRequest: (guestNameRequest) => set({ guestNameRequest }),
   setClaims: (list) => set({ claims: liveClaims(list, Date.now()) }),
+  setCatchingUp: (ids) => set({ catchingUp: Object.fromEntries(ids.map((id) => [id, true as const])) }),
+  updateCatchingUp: (added, removed) =>
+    set((s) => {
+      const next = { ...s.catchingUp }
+      for (const id of added) next[id] = true
+      for (const id of removed) delete next[id]
+      return { catchingUp: next }
+    }),
   setPresences: (list) =>
     set((s) => ({
       presences: Object.fromEntries(list.map((p) => [p.clientId, p])),

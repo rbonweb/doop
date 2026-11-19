@@ -2431,7 +2431,58 @@ function propagationDrained(canvasId: string, report: PropagationReport, actor: 
   touch(canvasId, actor)
 }
 
-propagation.registerFrameTask('propagate', { frame: propagateIntoFrame, drained: propagationDrained })
+/** Does the frame use one of the components being carried to it? A frame whose html is not in
+ *  memory yet is assumed to: it is looked at on its turn, and the mark goes then. */
+function propagationWaits(canvasId: string, frameId: string, componentIds: string[]): boolean {
+  const canvas = store.getCanvas(canvasId)
+  const frame = store.getFrame(frameId)
+  if (!canvas || !frame || frame.canvasId !== canvasId) return false
+  if (!store.isLoaded(canvasId)) return true
+  const followed = componentIds.filter((id) => !isDeleted(canvas.components?.find((def) => def.id === id)))
+  return followed.some((id) => referencesComponent(frame.html, id))
+}
+
+propagation.registerFrameTask('propagate', {
+  frame: propagateIntoFrame,
+  drained: propagationDrained,
+  waits: propagationWaits,
+})
+
+/* the room hears which frames are catching up with a main's change, as they are queued and visited */
+propagation.onCatchingUp((canvasId, added, removed) =>
+  broadcast(canvasId, { type: 'frame:catching-up', canvasId, added, removed }),
+)
+
+/**
+ * Pick the component work a restart interrupted back up: the rows of `component_propagation_queue`,
+ * one canvas at a time (a queued canvas is loaded and held until it drains). A row whose canvas or
+ * frame is gone is deleted. Rows for the propagation the kill switch turned off are deleted too.
+ */
+export async function resumePropagationQueue(): Promise<{ frames: number; canvases: number; dropped: number }> {
+  const rows = await persist.loadPropagationRows()
+  const byCanvas = new Map<string, typeof rows>()
+  for (const row of rows) byCanvas.set(row.canvasId, [...(byCanvas.get(row.canvasId) ?? []), row])
+  const gone: { frameId: string; task: string }[] = []
+  let frames = 0
+  let canvases = 0
+  for (const [canvasId, owed] of byCanvas) {
+    const canvas = store.getCanvas(canvasId)
+    const live = owed.filter(
+      (row) =>
+        !!canvas &&
+        canvas.frames.some((frame) => frame.id === row.frameId) &&
+        !(row.task === 'propagate' && env.DOOP_DEFER_COMPONENT_PROPAGATION),
+    )
+    for (const row of owed) if (!live.includes(row)) gone.push({ frameId: row.frameId, task: row.task })
+    if (!live.length) continue
+    frames += live.length
+    canvases += 1
+    propagation.restore(canvasId, live)
+    if (!env.DOOP_PROPAGATION_PAUSED) await propagation.whenCanvasIdle(canvasId)
+  }
+  if (gone.length) await persist.writePropagationRows([], gone)
+  return { frames, canvases, dropped: gone.length }
+}
 
 /**
  * Bring instances left on an older revision up to their component: the frames a propagation
@@ -2440,7 +2491,7 @@ propagation.registerFrameTask('propagate', { frame: propagateIntoFrame, drained:
  */
 export async function catchUpComponentsBehind(): Promise<{ components: number; canvases: number }> {
   /* propagation switched off: frames follow on their own next write, by choice */
-  if (env.DOOP_DEFER_COMPONENT_PROPAGATION) return { components: 0, canvases: 0 }
+  if (env.DOOP_DEFER_COMPONENT_PROPAGATION || env.DOOP_PROPAGATION_PAUSED) return { components: 0, canvases: 0 }
   const behind = await persist.componentsBehind()
   const byCanvas = new Map<string, Set<string>>()
   for (const { canvasId, componentId } of behind)

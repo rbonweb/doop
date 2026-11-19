@@ -125,6 +125,7 @@ function handle(msg: ServerMessage) {
       s.setPresences(msg.presences)
       /* the room sends the claims right after init when there are any */
       s.setClaims([])
+      s.setCatchingUp(msg.catchingUp ?? [])
       s.setActivity(msg.activity)
       s.setTasks(msg.tasks)
       s.setFeedback(msg.feedback)
@@ -160,6 +161,9 @@ function handle(msg: ServerMessage) {
       break
     case 'frame:claims':
       if (msg.canvasId === s.canvas?.id) s.setClaims(msg.claims)
+      break
+    case 'frame:catching-up':
+      if (msg.canvasId === s.canvas?.id) s.updateCatchingUp(msg.added, msg.removed)
       break
     case 'presence:leave':
       s.removePresence(msg.clientId)

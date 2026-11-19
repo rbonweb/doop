@@ -2,6 +2,8 @@ import type { Actor } from '../shared/types.ts'
 import { store } from './store.ts'
 import { detached } from './journal.ts'
 import { runOperation, WorkBudgetError } from './workBudget.ts'
+import { env } from './env.ts'
+import type { PropagationRow } from './db/persist.ts'
 
 /**
  * Whole-canvas component work, done in the background. A change to a main (or
@@ -15,6 +17,12 @@ import { runOperation, WorkBudgetError } from './workBudget.ts'
  * prepares each frame once. Canvases take turns, one frame each, so a large
  * canvas cannot starve the others. A canvas with work pending is loaded and
  * held (store.load / store.hold) until its queue drains.
+ *
+ * The queue is also kept in the database (`component_propagation_queue`, one row per frame and
+ * task, written once the work is queued and deleted once the frame has had its turn), so a restart
+ * resumes it (`restore`, called at boot) instead of leaving frames to catch up on their next write.
+ * Frames a task says are waiting for a main's change (`waits`) are also told to the room, so the
+ * editor can mark them while they catch up.
  *
  * What is done to a frame belongs to the task's handler (actions.ts registers
  * `propagate`, componentActions.ts `detach`); this file only decides which
@@ -54,6 +62,9 @@ export interface DrainReport {
 export interface FrameTaskHandler {
   /** Do the task on one frame. Synchronous: the read and the write share a tick. */
   frame(canvasId: string, frameId: string, componentIds: string[], actor: Actor): FrameOutcome
+  /** Is this frame, still queued, showing something other than what the task will make of it?
+   *  Only a task that has this is announced to the room as "catching up". */
+  waits?(canvasId: string, frameId: string, componentIds: string[]): boolean
   /** The canvas has no frame left waiting for this task. */
   drained(canvasId: string, report: DrainReport, actor: Actor): void
 }
@@ -85,6 +96,110 @@ export type DrainReports = Partial<Record<FrameTask, DrainReport>>
 const MAX_ATTEMPTS = 5
 
 const handlers = new Map<FrameTask, FrameTaskHandler>()
+
+/* ------------------------------------------------------------------ */
+/* The queue in the database                                           */
+/* ------------------------------------------------------------------ */
+
+/** Where queue rows are kept: set once at server start; without one (unit tests) the queue is memory only. */
+export interface QueueStore {
+  write(upserts: PropagationRow[], removals: { frameId: string; task: string }[]): Promise<void>
+}
+let queueStore: QueueStore | undefined
+export function useQueueStore(next: QueueStore | undefined) {
+  queueStore = next
+}
+
+/** Row changes not yet sent: the latest word per frame and task (a row, or null for "delete"),
+ *  so a burst of edits is one write and a delete can never overtake its upsert. */
+const dirtyRows = new Map<string, PropagationRow | null>()
+let flushScheduled = false
+const rowKey = (task: FrameTask, frameId: string) => `${task}\0${frameId}`
+
+function rememberRow(canvasId: string, task: FrameTask, frameId: string, componentIds: Iterable<string>, actor: Actor) {
+  if (!queueStore) return
+  dirtyRows.set(rowKey(task, frameId), {
+    frameId,
+    task,
+    canvasId,
+    componentIds: [...componentIds],
+    actor,
+    queuedAt: Date.now(),
+  })
+  scheduleFlush()
+}
+
+function forgetRow(task: FrameTask, frameId: string) {
+  if (!queueStore) return
+  dirtyRows.set(rowKey(task, frameId), null)
+  scheduleFlush()
+}
+
+function scheduleFlush() {
+  if (flushScheduled) return
+  flushScheduled = true
+  setImmediate(() => void flushQueueStore())
+}
+
+/** Send the row changes now; resolves once they are stored (shutdown, tests). */
+export async function flushQueueStore(): Promise<void> {
+  flushScheduled = false
+  if (!queueStore || !dirtyRows.size) return
+  const upserts: PropagationRow[] = []
+  const removals: { frameId: string; task: string }[] = []
+  for (const [key, row] of dirtyRows) {
+    if (row) upserts.push(row)
+    else removals.push({ frameId: key.slice(key.indexOf('\0') + 1), task: key.slice(0, key.indexOf('\0')) })
+  }
+  dirtyRows.clear()
+  await queueStore.write(upserts, removals)
+}
+
+/* ------------------------------------------------------------------ */
+/* Frames waiting for a main's change, as the room is told             */
+/* ------------------------------------------------------------------ */
+
+/** frame ids per canvas that are queued for a task whose handler `waits` */
+const catching = new Map<string, Set<string>>()
+type CatchingListener = (canvasId: string, added: string[], removed: string[]) => void
+let catchingListener: CatchingListener | undefined
+export function onCatchingUp(listener: CatchingListener | undefined) {
+  catchingListener = listener
+}
+
+/** The frames of a canvas still waiting for a change of a main to reach them. */
+export function catchingUp(canvasId: string): string[] {
+  return [...(catching.get(canvasId) ?? [])]
+}
+
+function markCatching(canvasId: string, frameIds: string[]) {
+  if (!frameIds.length) return
+  let set = catching.get(canvasId)
+  if (!set) catching.set(canvasId, (set = new Set()))
+  const added = frameIds.filter((id) => !set.has(id))
+  for (const id of added) set.add(id)
+  if (added.length) catchingListener?.(canvasId, added, [])
+}
+
+function unmarkCatching(canvasId: string, frameIds: string[]) {
+  const set = catching.get(canvasId)
+  if (!set) return
+  const removed = frameIds.filter((id) => set.delete(id))
+  if (!set.size) catching.delete(canvasId)
+  if (removed.length) catchingListener?.(canvasId, [], removed)
+}
+
+/** A frame's turn is over (visited, skipped or gone): nothing more is owed for the task. */
+function release(canvasId: string, task: FrameTask, frameId: string) {
+  forgetRow(task, frameId)
+  if (handlers.get(task)?.waits) unmarkCatching(canvasId, [frameId])
+}
+
+/** A canvas that is gone, or a job given up: its queued frames are owed nothing. */
+function abandon(job: Job) {
+  for (const [task, state] of job.tasks) for (const frameId of state.todo.keys()) release(job.canvasId, task, frameId)
+  finish(job)
+}
 const jobs = new Map<string, Job>()
 
 /** Work a frame is owed once it is free: asked for while an agent was streaming into it.
@@ -131,7 +246,12 @@ function ensureLoaded(job: Job): boolean {
     .finally(() => {
       job.loading = false
       /* a canvas that could not be read has nothing a job may touch */
-      if (!store.isLoaded(job.canvasId)) finish(job)
+      if (!store.isLoaded(job.canvasId)) {
+        /* the rows stay for the next boot; the room is no longer told these frames are waiting */
+        for (const [task, state] of job.tasks)
+          if (handlers.get(task)?.waits) unmarkCatching(job.canvasId, [...state.todo.keys()])
+        finish(job)
+      }
       schedule()
     })
   return false
@@ -159,18 +279,63 @@ export function enqueue(
   }
   state.actor = actor
   for (const id of componentIds) state.components.add(id)
+  const waits = handlers.get(task)?.waits
+  const newlyWaiting: string[] = []
   for (const frame of canvas.frames) {
     if (frame.id === options.exceptFrameId) continue
     if (options.onlyFrameIds && !options.onlyFrameIds.includes(frame.id)) continue
-    const waiting = state.todo.get(frame.id)
-    if (waiting) for (const id of componentIds) waiting.add(id)
+    const owed = state.todo.get(frame.id)
+    if (owed) for (const id of componentIds) owed.add(id)
     else state.todo.set(frame.id, new Set(componentIds))
+    const all = state.todo.get(frame.id)!
+    rememberRow(canvasId, task, frame.id, all, actor)
+    if (waits?.(canvasId, frame.id, [...all])) newlyWaiting.push(frame.id)
   }
+  markCatching(canvasId, newlyWaiting)
+  schedule()
+}
+
+/**
+ * Put back work a restart interrupted: the rows `component_propagation_queue` holds for one
+ * canvas, as the queue had them. Nothing is written (the rows are already stored); the frames
+ * are visited in the ordinary way, and each row goes once its frame has had its turn.
+ */
+export function restore(canvasId: string, rows: readonly PropagationRow[]) {
+  if (!rows.length || !store.getCanvas(canvasId)) return
+  const job = jobFor(canvasId)
+  for (const row of rows) {
+    const task = row.task as FrameTask
+    if (!handlers.has(task)) continue
+    let state = job.tasks.get(task)
+    if (!state) {
+      state = {
+        todo: new Map(),
+        attempts: new Map(),
+        components: new Set(),
+        touched: new Map(),
+        count: 0,
+        actor: row.actor,
+      }
+      job.tasks.set(task, state)
+    }
+    state.actor = row.actor
+    for (const id of row.componentIds) state.components.add(id)
+    const owed = state.todo.get(row.frameId)
+    if (owed) for (const id of row.componentIds) owed.add(id)
+    else state.todo.set(row.frameId, new Set(row.componentIds))
+    if (handlers.get(task)?.waits?.(canvasId, row.frameId, row.componentIds)) markCatching(canvasId, [row.frameId])
+  }
+  if (!job.tasks.size) finish(job)
+  schedule()
+}
+
+/** Start taking turns again after a pause (tests; `DOOP_PROPAGATION_PAUSED` is read on every turn). */
+export function wake() {
   schedule()
 }
 
 function schedule() {
-  if (scheduled || !ring.length) return
+  if (scheduled || !ring.length || env.DOOP_PROPAGATION_PAUSED) return
   scheduled = true
   /* detached: a tick is scheduled from inside whatever asked for work, and must never
      join that request's write boundary (server/journal.ts) */
@@ -187,7 +352,7 @@ function tick() {
     ring.splice(ring.indexOf(canvasId), 1)
     ring.push(canvasId)
     if (!store.getCanvas(canvasId)) {
-      finish(job)
+      abandon(job)
       continue
     }
     if (!ensureLoaded(job)) continue
@@ -234,7 +399,7 @@ function visit(job: Job, task: FrameTask, state: TaskState, frameId: string, com
       handlers.get(task)?.frame(job.canvasId, frameId, componentIds, state.actor),
     ),
   )
-  if (!outcome) return
+  if (!outcome) return release(job.canvasId, task, frameId)
   if (outcome.defer) return defer(job.canvasId, task, frameId, componentIds, state.actor)
   if (outcome.count) state.count += outcome.count
   if (outcome.touched) {
@@ -244,11 +409,11 @@ function visit(job: Job, task: FrameTask, state: TaskState, frameId: string, com
       approvalLost: outcome.touched.approvalLost || !!before?.approvalLost,
     })
   }
-  if (!outcome.requeue) return
+  if (!outcome.requeue) return release(job.canvasId, task, frameId)
   const attempts = (state.attempts.get(frameId) ?? 0) + 1
   if (attempts >= MAX_ATTEMPTS) {
     console.error(`[propagation] frame ${frameId} kept changing; left for its own next write`, job.canvasId)
-    return
+    return release(job.canvasId, task, frameId)
   }
   state.attempts.set(frameId, attempts)
   const waiting = state.todo.get(frameId)
