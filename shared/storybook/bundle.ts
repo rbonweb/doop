@@ -17,6 +17,7 @@ import {
 import type { StoryEntry, StorybookIssue } from './index.ts'
 import { bindHtml, findBindings, mapBindings } from './bindings.ts'
 import { guardCss, splitRules } from './cssGuard.ts'
+import { chooseExportName } from './exportName.ts'
 import { iconPackageOf } from './iconPackages.ts'
 import { MAX_PROBE_CHARS, probeInstallSource, probeName } from './probe.ts'
 import { captureRefusalSchema, storyCaptureSchema, storyMetaSchema } from './schemas.ts'
@@ -57,6 +58,8 @@ export interface StoryRender {
   capture: StoryCapture
   props: ArgProp[]
   displayName?: string
+  /** the component's function name, minified in a production build */
+  functionName?: string
   issues: StorybookIssue[]
 }
 
@@ -158,6 +161,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
     await page.evaluate(settleStory, 2000)
     let props: ArgProp[] = []
     let displayName: string | undefined
+    let functionName: string | undefined
     if (request.readMeta) {
       /* the answer comes from the page's own world: a bounded string, parsed and validated like anything else */
       const raw = await page.readMeta(probe, request.storyId).catch(() => null)
@@ -173,6 +177,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
         props = read.props
         issues.push(...read.issues)
         displayName = meta.data.displayName
+        functionName = meta.data.functionName
       } else {
         issues.push({
           code: 'argtypes_unavailable',
@@ -228,7 +233,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
         })
       }
     }
-    return { capture, props, displayName, issues }
+    return { capture, props, displayName, functionName, issues }
   } catch (error) {
     if (signal?.aborted) throw error
     return fail(reasonOf(error))
@@ -278,11 +283,6 @@ export function diffStyles(base: CapturedStory, variant: CapturedStory): string 
     if (declarations.length) rules.push(`${path} {\n${declarations.join('\n')}\n}`)
   }
   return guardCss(rules.join('\n')).css
-}
-
-function identifier(raw: string | undefined): string | undefined {
-  const value = raw?.trim()
-  return value && /^[A-Za-z_$][\w$]*$/.test(value) && value.length <= 100 ? value : undefined
 }
 
 export interface BundleInput {
@@ -464,6 +464,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     /* the story whose controls are varied, and what it looks like at its own resting args: the default story, unless it has no controls and a sibling (a Playground) does */
     let controls = { storyId: group.defaultStory.id, base: capture }
     let displayNameOf = base.displayName
+    let functionNameOf = base.functionName
     /* what the component ships: the story whose controls it has, so its variant rules and text bindings match the markup */
     let shipped = capture
     if (!props.length) {
@@ -503,6 +504,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         props = probe.props.map((prop) => ({ ...prop }))
         controls = { storyId: candidate.id, base: probe.capture }
         displayNameOf ??= probe.displayName
+        functionNameOf ??= probe.functionName
         break
       }
     }
@@ -626,14 +628,11 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       ...prop,
       ...(prop.type === 'boolean' && reflected.has(prop.name) ? { reflect: true } : {}),
     }))
-    const exportName =
-      identifier(displayNameOf) ??
-      identifier(
-        group.title
-          .split('/')
-          .pop()
-          ?.replace(/[^\w$]/g, ''),
-      )
+    const exportName = chooseExportName({
+      displayName: displayNameOf,
+      functionName: functionNameOf,
+      title: group.title,
+    })
     /* the code mapping names only props the component has */
     const iconPackage = useful.some((prop) => prop.componentExports)
       ? iconPackageOf([

@@ -81,4 +81,5 @@ export const storyMetaSchema = z.object({
   argTypes: boundedJson,
   initialArgs: boundedJson,
   displayName: z.string().max(100).optional(),
+  functionName: z.string().max(100).optional(),
 })

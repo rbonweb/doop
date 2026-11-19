@@ -4,7 +4,7 @@ import {
   type BundleComponent,
   type ComponentBundle,
 } from '../shared/componentBundle.ts'
-import type { ComponentCode } from '../shared/componentCode.ts'
+import { isAliasSpecifier, type ComponentCode } from '../shared/componentCode.ts'
 import {
   activeComponents,
   MAX_COMPONENT_NAME,
@@ -111,9 +111,25 @@ export function parseBundle(raw: unknown): ComponentBundle {
 /* Matching and capacity                                               */
 /* ------------------------------------------------------------------ */
 
+/** `AlertDialog` is `alert-dialog`: the file a path alias points at. */
+const kebabCase = (name: string): string =>
+  name
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase()
+
+/** A package is where every component is imported from. A path alias (`@/components/ui`) is a folder with one file per component, so each component's import is `<alias>/<kebab-case name>`. */
+function defaultImportFrom(pkg: string | undefined, name: string): string | undefined {
+  if (!pkg || !isAliasSpecifier(pkg.replace(/\/+$/, ''))) return pkg
+  const file = kebabCase(name)
+  return file ? `${pkg.replace(/\/+$/, '')}/${file}` : pkg
+}
+
 function codeOf(bundle: ComponentBundle, component: BundleComponent): ComponentCode {
   const { origin, ...rest } = component.code ?? {}
-  const importFrom = rest.importFrom ?? bundle.package
+  const importFrom = rest.importFrom ?? defaultImportFrom(bundle.package, rest.exportName ?? component.name)
   return {
     ...rest,
     ...(importFrom ? { importFrom } : {}),
@@ -142,8 +158,9 @@ function matchOf(
 
 /** The word a renamed component carries: the package's scope or name, else the source's name, else "Imported". */
 export function qualifierOf(bundle: Pick<ComponentBundle, 'package' | 'source'>): string {
-  const pkg = bundle.package?.trim()
-  const word = pkg ? (pkg.startsWith('@') ? pkg.slice(1) : pkg).split('/')[0] : bundle.source.name
+  const pkg = bundle.package?.trim().replace(/\/+$/, '')
+  const word =
+    pkg && !isAliasSpecifier(pkg) ? (pkg.startsWith('@') ? pkg.slice(1) : pkg).split('/')[0] : bundle.source.name
   const clean = cleanLabel(word ?? '', 40)
   return clean ? clean[0]!.toUpperCase() + clean.slice(1) : 'Imported'
 }

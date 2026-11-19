@@ -47,12 +47,17 @@ export interface ComponentCode {
   origin?: { kind: ComponentCodeOrigin; storyId?: string; url?: string }
 }
 
-/** A bare package specifier (`@scope/name`, `name`, either with a subpath) or a `@/` or `~/` alias: never a relative or absolute path or a URL. The export writes it into an `import`, so nothing else is let through. */
+/** A bare package specifier (`@scope/name`, `name`, either with a subpath) or a `@/` or `~/` path alias (`@/components/ui/button`): never a relative or absolute path or a URL. The export writes it into an `import`, so nothing else is let through. Alias segments are `[A-Za-z0-9._-]`, never empty, `.` or `..`. */
 const SPECIFIER = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*(?:\/[A-Za-z0-9._~@-]+)*$/
-const ALIAS = /^(?:@|~)\/[A-Za-z0-9_./-]+$/
+const ALIAS = /^(?:@|~)\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
+const MAX_SPECIFIER = 214
+
+const climbs = (value: string): boolean =>
+  value.includes('//') || value.split('/').some((part) => part === '.' || part === '..')
+
+/** A `@/` or `~/` alias such as `@/components/ui`, which an import points at one file per component. */
+export const isAliasSpecifier = (value: string): boolean =>
+  value.length <= MAX_SPECIFIER && ALIAS.test(value) && !climbs(value)
 
 export const isBareSpecifier = (value: string): boolean =>
-  value.length <= 214 &&
-  (SPECIFIER.test(value) || ALIAS.test(value)) &&
-  !value.includes('//') &&
-  !value.split('/').some((part) => part === '.' || part === '..')
+  value.length <= MAX_SPECIFIER && (SPECIFIER.test(value) || ALIAS.test(value)) && !climbs(value)

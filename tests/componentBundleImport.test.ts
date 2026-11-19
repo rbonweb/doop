@@ -93,6 +93,43 @@ describe('importing a component bundle', () => {
     expect(actions.getActivity(canvasId)[0]?.message).toBe('imported 1 component from Acme UI')
   })
 
+  it('defaults each import of a path-alias package to one file per component, and leaves an npm package alone', () => {
+    const named = (name: string, exportName?: string) => ({
+      name,
+      html: `<div class="x">${name}</div>`,
+      code: exportName ? { exportName } : {},
+    })
+    const aliased = run({
+      version: 1,
+      source: { kind: 'storybook' },
+      package: '@/components/ui',
+      components: [
+        named('Alert Dialog', 'AlertDialog'),
+        named('Card'),
+        { ...named('Badge', 'Badge'), code: { importFrom: '@/lib/badge', exportName: 'Badge' } },
+      ],
+    })
+    const mapped = Object.fromEntries(
+      aliased.created.map((entry) => [entry.name, findComponent(canvasId, entry.id)!.code]),
+    )
+    expect(mapped['Alert Dialog']).toMatchObject({
+      importFrom: '@/components/ui/alert-dialog',
+      exportName: 'AlertDialog',
+    })
+    expect(mapped['Card']).toMatchObject({ importFrom: '@/components/ui/card' })
+    expect(mapped['Badge']).toMatchObject({ importFrom: '@/lib/badge' })
+    const npm = run({
+      version: 1,
+      source: { kind: 'storybook' },
+      package: '@acme/ui',
+      components: [named('Tabs List', 'TabsList')],
+    })
+    expect(findComponent(canvasId, npm.created[0]!.id)!.code).toMatchObject({
+      importFrom: '@acme/ui',
+      exportName: 'TabsList',
+    })
+  })
+
   it('re-importing updates the same component in place, keeps history and an instance follows', async () => {
     const first = run(cardBundle())
     const id = first.created[0]!.id
