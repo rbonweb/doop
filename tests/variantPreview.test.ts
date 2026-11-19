@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   setComponentLocal: vi.fn(),
   notices: [] as string[],
   components: [] as unknown[],
+  frames: [] as unknown[],
 }))
 vi.mock('../src/lib/api', () => ({
   api: { editComponentVariants: mocks.editComponentVariants },
@@ -17,7 +18,7 @@ vi.mock('../src/lib/history', () => ({ recordCreate: () => {}, recordUpdate: () 
 vi.mock('../src/lib/store', () => {
   const state = {
     get canvas() {
-      return { id: 'canvas1', components: mocks.components, frames: [] }
+      return { id: 'canvas1', components: mocks.components, frames: mocks.frames }
     },
     pushNotice: (text: string) => mocks.notices.push(text),
     setComponentLocal: mocks.setComponentLocal,
@@ -28,6 +29,7 @@ import {
   combinationLabel,
   flushVariantStyles,
   previewOf,
+  refuseWhileVariantPreview,
   useVariantPreview,
   variantEditTarget,
   variantPropsOf,
@@ -63,6 +65,7 @@ const previewing = (picks: Record<string, string>) =>
 beforeEach(() => {
   vi.useFakeTimers()
   mocks.components = [component]
+  mocks.frames = [frame]
   mocks.notices.length = 0
   mocks.editComponentVariants.mockReset()
   mocks.editComponentVariants.mockImplementation(async () => ({ component }))
@@ -151,4 +154,24 @@ it('says what the server refused', async () => {
   writeVariantStyle(frame, '[data-doop-id="lab01"]', { background: 'url(x)' })
   await flushVariantStyles()
   expect(mocks.notices).toEqual(['url() is not allowed'])
+})
+
+it('works the target out once for the steps of a scrub', () => {
+  previewing({ size: 'lg' })
+  const first = variantEditTarget(frame, '[data-doop-id="lab01"]')
+  expect(variantEditTarget(frame, '[data-doop-id="lab01"]')).toBe(first)
+  /* a new preview, or a new document, asks again */
+  previewing({ size: 'sm' })
+  expect(variantEditTarget(frame, '[data-doop-id="lab01"]')).not.toBe(first)
+})
+
+it('refuses a writer that cannot go to a variant, only for the main and what is inside it, and only while previewing', () => {
+  expect(refuseWhileVariantPreview('main1', '[data-doop-id="main01"]')).toBe(false)
+  previewing({ size: 'lg' })
+  expect(refuseWhileVariantPreview('main1', ['#outside'])).toBe(false)
+  expect(refuseWhileVariantPreview('other', '[data-doop-id="main01"]')).toBe(false)
+  expect(mocks.notices).toEqual([])
+  expect(refuseWhileVariantPreview('main1', ['#outside', '[data-doop-id="lab01"]'])).toBe(true)
+  expect(mocks.notices).toHaveLength(1)
+  expect(mocks.notices[0]).toContain('go back to the base')
 })

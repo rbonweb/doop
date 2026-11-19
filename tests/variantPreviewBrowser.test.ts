@@ -155,4 +155,30 @@ describe.skipIf(!findBrowserPath())('variant preview in the Design panel', () =>
     await frame.waitForFunction(() => !document.querySelector('[data-doop-component]')!.hasAttribute('data-size'))
     expect(await sizeAttr()).toBeNull()
   }, 40_000)
+
+  it('sends the panel size to the variant too, and refuses a move or align there while a variant is previewed', async () => {
+    await page.select('select[aria-label="Preview size"]', 'lg')
+    await page.waitForSelector('[data-slot="variant-editing"]')
+
+    await page.click('input[aria-label="Width"]', { count: 3 })
+    await page.keyboard.press('Backspace')
+    await page.type('input[aria-label="Width"]', '90')
+    await page.keyboard.press('Enter')
+    await expect.poll(() => variantPosts.length).toBe(1)
+    expect(variantPosts[0]).toEqual({
+      ops: [{ op: 'set_style', element: 'root', when: { size: 'lg' }, declarations: { width: '90px' } }],
+    })
+    expect(framePatches).toEqual([])
+
+    /* an align would write an inline position on the main: nothing is written, and the person is told why */
+    await page.waitForSelector('[aria-label="Align layer left"]:not([disabled])')
+    await page.click('[aria-label="Align layer left"]')
+    await page.waitForFunction(() =>
+      (window.commentPositionStore.getState() as { notice?: { text?: string } }).notice?.text?.includes(
+        'go back to the base',
+      ),
+    )
+    expect(framePatches).toEqual([])
+    expect(variantPosts).toHaveLength(1)
+  }, 40_000)
 })
