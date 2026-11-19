@@ -230,6 +230,8 @@ function prepareMains(
   let sheetsCache: FrameSheet[] | undefined
   let headCache: string[] | undefined
   const sheet = (id: string) => sheetFor((sheetsCache ??= frameSheets(html)), id)
+  /* the sheet a definition stored before source blocks were kept apart was extracted from: every block of the frame */
+  const wholeSheet = () => (sheetsCache ??= frameSheets(html)).map((block) => block.text).join('\n')
   const headTags = () => [...(headCache ??= frameHeadTags(html))]
   for (const found of findMarked(html, COMPONENT_ATTR)) {
     const id = attrOf(found.el, COMPONENT_ATTR) ?? ''
@@ -275,7 +277,7 @@ function prepareMains(
     /* a definition stored before isolation, whose main is as it was, stays as it is: it is compared in
        the form it was written in. Once the main changes it is extracted in the isolating form */
     const isolating = extractComponentCss(sheet(id), found.el, id, variants)
-    const legacy = extractComponentCss(sheet(id), found.el, id, variants, { legacy: true })
+    const legacy = extractComponentCss(wholeSheet(), found.el, id, variants, { legacy: true })
     const unchangedLegacy =
       def.rev > 0 && !def.css.includes(SCOPE_MARK) && def.css === legacy.css && def.template === plainTemplate
     const { css, rawCss } = unchangedLegacy ? legacy : isolating
