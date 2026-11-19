@@ -31,7 +31,14 @@ import {
   type InstanceChange,
   type UpdateResult,
 } from './componentActions.ts'
-import { MANAGED_STYLE_ATTRS, parseCss, serializeNodes, splitTopLevel, type CssNode } from './componentCss.ts'
+import {
+  MANAGED_STYLE_ATTRS,
+  parseCss,
+  selectorBelongsTo,
+  serializeNodes,
+  splitTopLevel,
+  type CssNode,
+} from './componentCss.ts'
 import { attrOf, findAllMarked, kidsOf, parseTemplateRoot, partsOf, setAttr } from './componentEngine.ts'
 import { atomic } from './journal.ts'
 import { store } from './store.ts'
@@ -240,10 +247,22 @@ function rewriteSelectors(nodes: CssNode[], fn: (selector: string) => string | n
   })
 }
 
+/** Whether a rule found in a stylesheet this component does not own (its design frame's own, shared with other mains) is this main's. */
+function belongsToMain(work: Work, selector: string): boolean {
+  const root = parseTemplateRoot(work.template)
+  return !!root && selectorBelongsTo(selector, root, variantAttrs(work.props))
+}
+
+/** `fn` on every selector of the stylesheets that mention `mention`: all of the component's source block, and in a design's own
+ *  blocks only the rules that belong to this main, so another main's variants in the same frame are left alone. */
 function editSheet(work: Work, mention: string, fn: (selector: string) => string | null) {
-  work.blocks = work.blocks.map((block) => {
+  work.blocks = work.blocks.map((block, at) => {
     if (!block.includes(mention)) return block
-    const next = serializeNodes(rewriteSelectors(parseCss(block), fn))
+    const next = serializeNodes(
+      rewriteSelectors(parseCss(block), (selector) =>
+        at === work.target || belongsToMain(work, selector) ? fn(selector) : selector,
+      ),
+    )
     if (next !== block) work.cssChanged = true
     return next
   })
@@ -519,8 +538,10 @@ function setStyle(
 ) {
   const selector = partSelector(work, element, whenSelector(work, whenMap))
   /* the rule is edited where it already is (a design's own stylesheet may hold it), else it goes in the source block */
-  const holder = work.blocks.findIndex((block) =>
-    parseCss(block).some((node) => node.kind === 'rule' && node.selector.trim() === selector),
+  const holder = work.blocks.findIndex(
+    (block, at) =>
+      (at === work.target || selector.includes(PART_ATTR)) &&
+      parseCss(block).some((node) => node.kind === 'rule' && node.selector.trim() === selector),
   )
   const at = holder >= 0 ? holder : work.target
   const nodes = parseCss(work.blocks[at] ?? '')
@@ -869,7 +890,9 @@ export const editVariants = atomic(function editVariants(
     def.id,
     {
       ...(work.propsChanged ? { props: work.props } : {}),
-      ...(work.cssChanged && work.target >= loadedBlocks.found.length ? { css: work.blocks[work.target] ?? '' } : {}),
+      ...(work.cssChanged && work.target >= loadedBlocks.found.length && (work.blocks[work.target] || !def.mainFrameId)
+        ? { css: work.blocks[work.target] }
+        : {}),
       ...(work.cssChanged ? { restyle: restyleBlocks(def.id, loadedBlocks.found, work.blocks) } : {}),
       ...(work.templateChanged ? { html: work.template } : {}),
       ...(input.expectedRev !== undefined ? { expectedRev: input.expectedRev } : {}),

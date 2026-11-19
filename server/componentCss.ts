@@ -437,6 +437,11 @@ export function unmatchedSelectors(sheet: string, root: Element, variantAttrs: s
   return [...new Set(unmatched)]
 }
 
+/** Whether a rule of a shared stylesheet is this main's: the same test `extractComponentCss` keeps a rule by. */
+export function selectorBelongsTo(selector: string, root: Element, variantAttrs: string[] = []): boolean {
+  return relevantSelector(selector, mainTokens(root, variantAttrs)) !== null
+}
+
 const usedFonts = (css: string) =>
   new Set(
     [...css.matchAll(/font(?:-family)?\s*:([^;}]+)/gi)].flatMap((match) =>
