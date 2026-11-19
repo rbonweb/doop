@@ -1,7 +1,7 @@
 import { serializeOuter, type DefaultTreeAdapterTypes as Tree } from 'parse5'
 import { parse } from './workBudget.ts'
 import { elementIs } from './parse5Select.ts'
-import { CSS_ATTR, DETACHED_CSS_ATTR, HEAD_ATTR, INSTANCE_ATTR } from '../shared/components.ts'
+import { CSS_ATTR, DETACHED_CSS_ATTR, HEAD_ATTR, INSTANCE_ATTR, SOURCE_CSS_ATTR } from '../shared/components.ts'
 import { TOKEN_BLOCK_ATTR } from '../shared/designTokens.ts'
 import { FONT_BLOCK_ATTR } from '../shared/fonts.ts'
 import { WEB_FONT_LINK_ATTR } from '../shared/webFonts.ts'
@@ -457,18 +457,41 @@ function cssVarsIn(text: string): string[] {
    and reading them back would freeze a token's value into a component and bump it on the next save */
 export const MANAGED_STYLE_ATTRS = new Set([CSS_ATTR, DETACHED_CSS_ATTR, TOKEN_BLOCK_ATTR, FONT_BLOCK_ATTR])
 
-/** Everything in a frame's own stylesheets (never another component's copy, nor a managed block). */
-export function frameStylesheets(html: string): string {
+export interface FrameSheet {
+  text: string
+  /** the component whose source block this is: another main's rules, not the design's */
+  source?: string
+}
+
+/** A frame's own stylesheets in cascade order (never another component's copy, nor a managed block), one parse. */
+export function frameSheets(html: string): FrameSheet[] {
   const doc = parse(html)
-  const parts: string[] = []
+  const sheets: FrameSheet[] = []
   walkElements(doc, (el) => {
     if (el.tagName !== 'style') return
     if (el.attrs.some((attr) => MANAGED_STYLE_ATTRS.has(attr.name))) return
     const text = el.childNodes[0]
-    if (text && 'value' in text) parts.push(restoreStyleText(text.value))
+    if (text && 'value' in text) {
+      const source = el.attrs.find((attr) => attr.name === SOURCE_CSS_ATTR)?.value
+      sheets.push({ text: restoreStyleText(text.value), ...(source !== undefined ? { source } : {}) })
+    }
   })
   /* the walk runs last-to-first: put the sheets back in cascade order */
-  return parts.reverse().join('\n')
+  return sheets.reverse()
+}
+
+/** The sheet one main reads: the design's own rules and its own source block, never another component's source
+ *  block, so a rule of one main never lands in the stylesheet of another in the same frame. */
+export const sheetFor = (sheets: readonly FrameSheet[], componentId: string): string =>
+  sheets
+    .filter((sheet) => sheet.source === undefined || sheet.source === componentId)
+    .map((sheet) => sheet.text)
+    .join('\n')
+
+/** Everything in a frame's own stylesheets; with `forComponent`, as that main reads them. */
+export function frameStylesheets(html: string, forComponent?: string): string {
+  const sheets = frameSheets(html)
+  return forComponent === undefined ? sheets.map((sheet) => sheet.text).join('\n') : sheetFor(sheets, forComponent)
 }
 
 /** Font and framework tags from a frame's head: a design can rely on them without any rule saying so.
