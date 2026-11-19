@@ -1,4 +1,5 @@
-import { CSS_ATTR, DETACHED_CSS_ATTR } from '../shared/components.ts'
+import { parse, type DefaultTreeAdapterTypes as Tree } from 'parse5'
+import { COMPONENT_ATTR, CSS_ATTR, DETACHED_CSS_ATTR, INSTANCE_ATTR, PART_ATTR } from '../shared/components.ts'
 import { TOKEN_BLOCK_ATTR } from '../shared/designTokens.ts'
 import { FONT_BLOCK_ATTR } from '../shared/fonts.ts'
 
@@ -8,7 +9,7 @@ import { FONT_BLOCK_ATTR } from '../shared/fonts.ts'
  * A frame's own rules (`h2 { margin: 40px }`, `.card .title { color: red }`) used to match elements
  * inside an instance, so an instance no longer looked like its main. The fix keeps the author's rules
  * as written and adds one zero-specificity exclusion to each rule's subject: the element is not a
- * component-owned element inside an instance. Component-owned elements wear `data-doop-part`; slot
+ * component-owned element inside an instance, except in a main's own frame, where a main renders the same as its instances (the nested-component exception of a component's css applies in both). Component-owned elements wear `data-doop-part`; slot
  * content is the frame's own and does not, so a frame rule keeps styling what a person put in a slot,
  * and the instance root, which a frame lays out (margin, grid placement, width), is never excluded.
  * `:where()` inside `:not()` adds no specificity and works in every browser, with no `@scope`.
@@ -22,12 +23,11 @@ import { FONT_BLOCK_ATTR } from '../shared/fonts.ts'
 
 /** First line of a component stylesheet extracted in the isolating form. */
 export const SCOPE_MARK = '/* doop-scope:2 */'
-/** What a frame rule's subject must not be: an element a component owns, inside an instance. */
-export const FRAME_EXCLUSION = ':not(:where([data-doop-instance] [data-doop-part]))'
+/** What a frame rule's subject must not be: an element a component owns, inside an instance that is not part of a main. */
+export const FRAME_EXCLUSION = `:not(:where([${INSTANCE_ATTR}] [${PART_ATTR}]):not(:where([${COMPONENT_ATTR}] *)))`
 
 /* a stylesheet inside a main or an instance (`data-doop-part`) is the component's markup, not the frame's */
-const MANAGED_STYLE_ATTRS = [CSS_ATTR, DETACHED_CSS_ATTR, TOKEN_BLOCK_ATTR, FONT_BLOCK_ATTR, 'data-doop-part']
-const STYLE_BLOCK = /<style\b([^>]*)>([\s\S]*?)<\/style>/gi
+const MANAGED_STYLE_ATTRS = [CSS_ATTR, DETACHED_CSS_ATTR, TOKEN_BLOCK_ATTR, FONT_BLOCK_ATTR, PART_ATTR]
 const GROUPS = new Set(['media', 'supports', 'container', 'layer'])
 const PSEUDO_ELEMENT = /::|:(?:before|after|first-line|first-letter)(?![\w-])/i
 const DOCUMENT_SUBJECT = /^(?:html|body|:root)(?![\w-])/i
@@ -47,8 +47,9 @@ function blockClose(css: string, open: number): number {
   let depth = 0
   for (let i = open; i < css.length; i++) {
     const char = css[i]
-    if (char === '"' || char === "'") i = pastString(css, i) - 1
-    else if (char === '/' && css[i + 1] === '*') i = (css.indexOf('*/', i + 2) + 1 || css.length) - 1
+    if (char === '\\') i++
+    else if (char === '"' || char === "'") i = pastString(css, i) - 1
+    else if (char === '/' && css[i + 1] === '*') i = css.indexOf('*/', i + 2) + 1 || css.length
     else if (char === '{') depth++
     else if (char === '}' && --depth === 0) return i
   }
@@ -59,8 +60,9 @@ function blockClose(css: string, open: number): number {
 function hasNestedBlock(body: string): boolean {
   for (let i = 0; i < body.length; i++) {
     const char = body[i]
-    if (char === '"' || char === "'") i = pastString(body, i) - 1
-    else if (char === '/' && body[i + 1] === '*') i = (body.indexOf('*/', i + 2) + 1 || body.length) - 1
+    if (char === '\\') i++
+    else if (char === '"' || char === "'") i = pastString(body, i) - 1
+    else if (char === '/' && body[i + 1] === '*') i = body.indexOf('*/', i + 2) + 1 || body.length
     else if (char === '{') return true
   }
   return false
@@ -74,6 +76,7 @@ function splitRaw(list: string): string[] {
   for (let i = 0; i < list.length; i++) {
     const char = list[i]
     if (char === '\\') i++
+    else if (char === '/' && list[i + 1] === '*') i = list.indexOf('*/', i + 2) + 1 || list.length
     else if (char === '"' || char === "'") i = pastString(list, i) - 1
     else if (char === '(' || char === '[') depth++
     else if (char === ')' || char === ']') depth--
@@ -86,19 +89,42 @@ function splitRaw(list: string): string[] {
   return parts
 }
 
-/** Where the last compound of a selector starts. */
-function lastCompoundStart(selector: string): number {
+/** Where the last compound of a selector starts and where its last real character ends: comments and
+ *  the whitespace around them belong to neither. */
+function lastCompound(selector: string): { start: number; end: number } {
   let depth = 0
   let start = 0
+  let end = 0
+  /* where the next real character would start a compound, once a combinator, space or comment passed */
+  let boundary = -1
+  const real = (from: number, to: number) => {
+    if (boundary >= 0) {
+      start = from
+      boundary = -1
+    }
+    end = to
+  }
   for (let i = 0; i < selector.length; i++) {
     const char = selector[i]!
-    if (char === '\\') i++
-    else if (char === '"' || char === "'") i = pastString(selector, i) - 1
-    else if (char === '(' || char === '[') depth++
-    else if (char === ')' || char === ']') depth--
-    else if (depth === 0 && (/\s/.test(char) || char === '>' || char === '+' || char === '~')) start = i + 1
+    if (char === '/' && selector[i + 1] === '*') {
+      i = selector.indexOf('*/', i + 2) + 1 || selector.length
+      if (depth === 0) boundary = i + 1
+    } else if (char === '\\') {
+      real(i, i + 2)
+      i++
+    } else if (char === '"' || char === "'") {
+      const from = i
+      i = pastString(selector, i) - 1
+      real(from, i + 1)
+    } else if (depth === 0 && (/\s/.test(char) || char === '>' || char === '+' || char === '~')) {
+      boundary = i + 1
+    } else {
+      if (char === '(' || char === '[') depth++
+      else if (char === ')' || char === ']') depth--
+      real(i, i + 1)
+    }
   }
-  return start
+  return { start, end: Math.max(end, start) }
 }
 
 /** Index of the first top-level pseudo-element in a compound, or its length. */
@@ -120,15 +146,12 @@ function pseudoElementAt(compound: string): number {
 /** `selector` with `suffix` on its subject (the last compound, before any pseudo-element). A selector
  *  already carrying it, nesting (`&`) and one whose subject is the document are left alone. */
 export function withSubjectSuffix(selector: string, suffix: string): string {
-  const core = selector.trim()
-  if (!core || core.includes(suffix) || core.includes('&')) return selector
-  const start = lastCompoundStart(core)
-  const compound = core.slice(start)
+  if (!selector.trim() || selector.includes(suffix) || selector.includes('&')) return selector
+  const { start, end } = lastCompound(selector)
+  const compound = selector.slice(start, end)
   if (!compound || DOCUMENT_SUBJECT.test(compound)) return selector
   const at = start + pseudoElementAt(compound)
-  const rewritten = `${core.slice(0, at)}${suffix}${core.slice(at)}`
-  const lead = selector.slice(0, selector.indexOf(core))
-  return `${lead}${rewritten}${selector.slice(selector.indexOf(core) + core.length)}`
+  return `${selector.slice(0, at)}${suffix}${selector.slice(at)}`
 }
 
 /** Every style rule's selector list of a stylesheet through `map`, at any depth of `@media`, `@supports`,
@@ -141,8 +164,9 @@ function mapRuleSelectors(css: string, map: (selector: string) => string): strin
     let semi = -1
     for (let i = at; i < css.length; i++) {
       const char = css[i]
-      if (char === '"' || char === "'") i = pastString(css, i) - 1
-      else if (char === '/' && css[i + 1] === '*') i = (css.indexOf('*/', i + 2) + 1 || css.length) - 1
+      if (char === '\\') i++
+      else if (char === '"' || char === "'") i = pastString(css, i) - 1
+      else if (char === '/' && css[i + 1] === '*') i = css.indexOf('*/', i + 2) + 1 || css.length
       else if (char === '{') {
         open = i
         break
@@ -190,32 +214,63 @@ export function restoreStyleText(css: string): string {
   return css.includes(FRAME_EXCLUSION) ? css.replaceAll(FRAME_EXCLUSION, '') : css
 }
 
-const isManaged = (attrs: string) => MANAGED_STYLE_ATTRS.some((name) => new RegExp(`\\b${name}\\b`).test(attrs))
-
-function mapFrameStyles(html: string, map: (css: string) => string): string {
-  return html.replace(STYLE_BLOCK, (block, attrs: string, css: string) => {
-    if (isManaged(attrs)) return block
-    const next = map(css)
-    return next === css ? block : `<style${attrs}>${next}</style>`
-  })
+interface StyleBlock {
+  attrs: string[]
+  /** where the stylesheet text sits in the document */
+  start: number
+  end: number
+  text: string
 }
+
+/** The real `<style>` elements of a document, by source offset (never one inside a script, a comment,
+ *  a template or an attribute). */
+function styleBlocks(html: string): StyleBlock[] {
+  const blocks: StyleBlock[] = []
+  const stack: Tree.Node[] = [parse(html, { sourceCodeLocationInfo: true })]
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    if ('tagName' in node && node.tagName === 'style' && node.namespaceURI === 'http://www.w3.org/1999/xhtml') {
+      const open = node.sourceCodeLocation?.startTag
+      const close = node.sourceCodeLocation?.endTag
+      if (open && close)
+        blocks.push({
+          attrs: node.attrs.map((attr) => attr.name),
+          start: open.endOffset,
+          end: close.startOffset,
+          text: html.slice(open.endOffset, close.startOffset),
+        })
+    } else if ('childNodes' in node) stack.push(...node.childNodes)
+  }
+  return blocks
+}
+
+const isManaged = (block: StyleBlock) => block.attrs.some((name) => MANAGED_STYLE_ATTRS.includes(name))
+
+function mapFrameStyles(html: string, blocks: StyleBlock[], map: (css: string) => string): string {
+  let out = html
+  for (const block of blocks.filter((one) => !isManaged(one)).sort((a, b) => b.start - a.start)) {
+    const next = map(block.text)
+    if (next !== block.text) out = out.slice(0, block.start) + next + out.slice(block.end)
+  }
+  return out
+}
+
+const isolatingBlock = (block: StyleBlock) => block.attrs.includes(CSS_ATTR) && block.text.includes(SCOPE_MARK)
 
 /** Does this document hold a component stylesheet in the isolating form? */
 export function isIsolating(html: string): boolean {
-  if (!html.includes(SCOPE_MARK)) return false
-  for (const match of html.matchAll(STYLE_BLOCK)) {
-    if (new RegExp(`\\b${CSS_ATTR}=`).test(match[1]!) && match[2]!.includes(SCOPE_MARK)) return true
-  }
-  return false
+  return html.includes(SCOPE_MARK) && styleBlocks(html).some(isolatingBlock)
 }
 
 /** A frame's own stylesheets isolated from its instances, when it has instances of an isolating
- *  component; every other frame comes back as it was, byte for byte. */
+ *  component; every other frame comes back as it was, byte for byte. The choice is the frame's, not
+ *  the instance's: one instance in the isolating form isolates every rule of the frame. */
 export function isolateFrameStyles(html: string): string {
-  return isIsolating(html) ? mapFrameStyles(html, isolateStyleText) : html
+  if (!html.includes(SCOPE_MARK)) return html
+  const blocks = styleBlocks(html)
+  return blocks.some(isolatingBlock) ? mapFrameStyles(html, blocks, isolateStyleText) : html
 }
 
 /** The frame as an author reads it: the exclusion taken off the frame's own stylesheets. */
 export function restoreFrameStyles(html: string): string {
-  return html.includes(FRAME_EXCLUSION) ? mapFrameStyles(html, restoreStyleText) : html
+  return html.includes(FRAME_EXCLUSION) ? mapFrameStyles(html, styleBlocks(html), restoreStyleText) : html
 }

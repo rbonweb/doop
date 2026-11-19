@@ -133,4 +133,41 @@ describe.skipIf(!findBrowserPath())('component CSS scoping in a browser', { time
     )
     expect(await style('[data-doop-instance]', 'color')).toBe('rgb(200, 200, 200)')
   })
+
+  it('main frame: a nested component in a main looks the same as in its instances', async () => {
+    const button = blankComponent({ name: 'Button', by: 'Tester' })
+    store.saveComponent(canvasId, button)
+    const bf = actions.createFrame(canvasId, { name: 'ButtonMain', html: '' }, actor)!
+    actions.updateFrame(
+      bf.id,
+      {
+        html: doc(
+          `<button class="btn" ${COMPONENT_ATTR}="${button.id}"><span class="label">B</span></button>`,
+          '.btn { padding: 2px }',
+        ),
+      },
+      actor,
+    )
+    const panel = blankComponent({ name: 'Panel', by: 'Tester' })
+    store.saveComponent(canvasId, panel)
+    const pf = actions.createFrame(canvasId, { name: 'PanelMain', html: '' }, actor)!
+    actions.updateFrame(
+      pf.id,
+      {
+        html: doc(
+          `<div class="plan" ${COMPONENT_ATTR}="${panel.id}"><doop-use component="Button"></doop-use></div>`,
+          '.plan .btn .label { letter-spacing: 3px }',
+        ),
+      },
+      actor,
+    )
+    const inMain = store.getFrame(pf.id)!.html
+    const usage = actions.createFrame(canvasId, { name: 'Usage', html: '' }, actor)!
+    actions.updateFrame(usage.id, { html: doc('<doop-use component="Panel"></doop-use>') }, actor)
+    await page.setContent(inMain)
+    const main = await style('.plan .btn .label', 'letter-spacing')
+    await page.setContent(store.getFrame(usage.id)!.html)
+    expect(await style('.plan .btn .label', 'letter-spacing')).toBe(main)
+    expect(main).toBe('3px')
+  })
 })

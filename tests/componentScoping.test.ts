@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { parse } from 'parse5'
+import { parse, parseFragment } from 'parse5'
 import type { DefaultTreeAdapterTypes as Tree } from 'parse5'
 
 vi.mock('../server/db/persist.ts', () => ({
@@ -16,7 +16,8 @@ import { store } from '../server/store.ts'
 import * as actions from '../server/actions.ts'
 import { blankComponent, contextFor } from '../server/components.ts'
 import { compactDocument } from '../server/componentEngine.ts'
-import { extractComponentCss, scopeSelector, withVarFallbacks } from '../server/componentCss.ts'
+import { extractComponentCss, scopeSelector, templateWithFallbacks, withVarFallbacks } from '../server/componentCss.ts'
+import { buildReactExport } from '../server/reactExport/index.ts'
 import {
   FRAME_EXCLUSION,
   SCOPE_MARK,
@@ -26,7 +27,7 @@ import {
   restoreStyleText,
   withSubjectSuffix,
 } from '../server/frameIsolation.ts'
-import { COMPONENT_ATTR } from '../shared/components.ts'
+import { COMPONENT_ATTR, activeComponents } from '../shared/components.ts'
 import type { Actor } from '../shared/types.ts'
 
 const actor = { name: 'Tester', kind: 'user', color: '#000', clientId: 'x' } as unknown as Actor
@@ -211,5 +212,100 @@ describe('through the write pipeline', () => {
     expect(current().rev).toBe(rev)
     expect(current().css).toBe(legacy.css)
     expect(store.getFrame(mainFrameId)!.html).toBe(html)
+  })
+})
+
+describe('parser robustness of the frame exclusion', () => {
+  it('puts the suffix on the last compound, not after a trailing comment, and never splits inside one', () => {
+    const css = 'h2 /* note */ { color: red }\nh3 /* a, b */ { color: blue }\n/* x */ .a /* y */ , .b { top: 0 }'
+    const out = isolateStyleText(css)
+    expect(out).toContain(`h2${FRAME_EXCLUSION} /* note */ {`)
+    expect(out).toContain(`h3${FRAME_EXCLUSION} /* a, b */ {`)
+    expect(out).toContain(`.a${FRAME_EXCLUSION} /* y */ , .b${FRAME_EXCLUSION} {`)
+    expect(restoreStyleText(out)).toBe(css)
+  })
+
+  it('does not open a string at an escaped quote', () => {
+    const css = ".a\\'b { color: red }\nh2 { margin: 1px }"
+    const out = isolateStyleText(css)
+    expect(out).toContain(`h2${FRAME_EXCLUSION} { margin: 1px }`)
+    expect(restoreStyleText(out)).toBe(css)
+  })
+
+  it('rewrites real style elements only', () => {
+    const mark = `<style data-doop-component-css="abc">\n${SCOPE_MARK}\n</style>`
+    const html = `<!doctype html><html><head><style>h2 { margin: 1px }</style>${mark}<!-- <style>h3 { top: 0 }</style> --><script>const t = \`<style>.a \${sel} { x: y }</style>\`</script><template><style>h4 { top: 0 }</style></template></head><body></body></html>`
+    const out = isolateFrameStyles(html)
+    expect(out).toContain(`<style>h2${FRAME_EXCLUSION} { margin: 1px }</style>`)
+    expect(out).toContain('<!-- <style>h3 { top: 0 }</style> -->')
+    expect(out).toContain('<script>const t = `<style>.a ${sel} { x: y }</style>`</script>')
+    expect(out).toContain('<template><style>h4 { top: 0 }</style></template>')
+    expect(restoreFrameStyles(out)).toBe(html)
+  })
+
+  it('leaves the elements of instances nested in a main to the main (the nested-component exception reads the same there)', () => {
+    expect(FRAME_EXCLUSION).toContain(':not(:where([data-doop-component] *))')
+  })
+})
+
+describe('custom property fallbacks in template attributes', () => {
+  const props = new Map([
+    ['--font', '"Inter", sans-serif'],
+    ['--evil', `'a" onmouseover="x'`],
+  ])
+  it('substitutes on the attribute value and escapes the result', () => {
+    const template = `<p style="font-family: var(--font); content: var(--evil)" data-doop-part="a">x</p>`
+    const out = templateWithFallbacks(template, props)
+    const el = parseFragment(out).childNodes[0] as Tree.Element
+    expect(el.attrs.map((attr) => attr.name).sort()).toEqual(['data-doop-part', 'style'])
+    const value = el.attrs.find((attr) => attr.name === 'style')!.value
+    expect(value).toContain(`var(--font, "Inter", sans-serif)`)
+    expect(value).toContain(`var(--evil, 'a" onmouseover="x')`)
+    /* a value already escaped is read, not double-escaped */
+    expect(templateWithFallbacks(`<p style="font-family: &quot;A&quot;, var(--font)">x</p>`, props)).toContain(
+      `&quot;A&quot;, var(--font, &quot;Inter&quot;, sans-serif)`,
+    )
+  })
+})
+
+describe('read-back paths', () => {
+  it('React export gives page css without the exclusion', () => {
+    const canvas = store.createCanvas('react scoping')
+    const def = blankComponent({ name: 'Card', by: 'Tester' })
+    store.saveComponent(canvas.id, def)
+    const main = actions.createFrame(canvas.id, { name: 'Main', html: '' }, actor)!
+    actions.updateFrame(
+      main.id,
+      {
+        html: doc(
+          `<section class="card" ${COMPONENT_ATTR}="${def.id}"><h2 data-doop-prop="title">T</h2></section>`,
+          '.card h2 { margin: 0 }',
+        ),
+      },
+      actor,
+    )
+    const page = actions.createFrame(canvas.id, { name: 'Page', html: '' }, actor)!
+    actions.updateFrame(
+      page.id,
+      { html: doc(`<doop-use component="Card" title="Hi"></doop-use><h2>out</h2>`, 'h2 { margin: 40px }') },
+      actor,
+    )
+    const stored = store.getFrame(page.id)!.html
+    expect(stored).toContain(FRAME_EXCLUSION)
+    const result = buildReactExport({
+      canvasName: 'x',
+      components: activeComponents(store.getComponents(canvas.id)),
+      frames: [{ id: page.id, name: 'Page', html: stored }],
+      tokens: [],
+      themeOrder: [],
+      styling: 'modules',
+      assetOrigin: 'https://doop.example',
+    })
+    const css = result.files
+      .filter((file) => file.path.endsWith('.css'))
+      .map((file) => file.content)
+      .join('\n')
+    expect(css).toContain('margin: 40px')
+    expect(css).not.toContain('data-doop')
   })
 })

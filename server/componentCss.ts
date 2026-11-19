@@ -511,11 +511,19 @@ export function withVarFallbacks(
 /** The inline styles of a template, with the main's custom properties as fallbacks. */
 export function templateWithFallbacks(template: string, props: ReadonlyMap<string, string>): string {
   if (!props.size) return template
-  return template.replace(
-    /(\sstyle=")([^"]*)(")/g,
-    (_match, open: string, value: string, close: string) => `${open}${withVarFallbacks(value, props)}${close}`,
-  )
+  /* the substitution runs on the attribute's value, not on its escaped text, and the result is escaped
+     again: a custom property holding `"Inter", sans-serif` or a quote must not end the attribute */
+  return template.replace(/(\sstyle=")([^"]*)(")/g, (match, open: string, escaped: string, close: string) => {
+    const value = unescapeAttr(escaped)
+    const next = withVarFallbacks(value, props)
+    return next === value ? match : `${open}${escapeAttr(next)}${close}`
+  })
 }
+
+const unescapeAttr = (text: string) =>
+  text.replace(/&(quot|amp|lt|gt);/g, (_m, name: string) => ({ quot: '"', amp: '&', lt: '<', gt: '>' })[name]!)
+const escapeAttr = (text: string) =>
+  text.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
 
 export interface ExtractOptions {
   /** the form before isolation: custom properties frozen onto the instance root, no containment.
