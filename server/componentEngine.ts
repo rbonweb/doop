@@ -378,6 +378,8 @@ function applyAttrConditions(el: Element, def: Revision, overrides: InstanceOver
   if (raw === undefined) return
   setAttr(el, ATTR_IF_ATTR, null)
   const gone = new Set(attrsToRemove(raw, (prop) => propValue(def, overrides, prop)).map((name) => name.toLowerCase()))
+  /* the editor's own bookkeeping is never conditional (the sanitizer refuses such entries too) */
+  for (const name of gone) if (name.startsWith('data-doop-')) gone.delete(name)
   if (gone.size) el.attrs = el.attrs.filter((attr) => !gone.has(attr.name.toLowerCase()))
 }
 
@@ -1359,6 +1361,8 @@ const TEMPLATE_ONLY_ATTRS: Record<string, string> = {
   [BIND_ATTR]: `it forwards a prop of the component that holds this <doop-use>, so it only works inside a component's main. In a frame give the component fixed values (label="…"). ${FORWARD_GRAMMAR}`,
   [IF_ATTR]:
     "it shows or hides a <doop-use> inside a component's main, so it only works there. In a frame, put it on an element wrapped around the <doop-use>",
+  [ATTR_IF_ATTR]:
+    'it removes an attribute from the element that carries it, and a <doop-use> has no attributes of its own to condition: put it on an element wrapped around the <doop-use>',
   [SLOT_ATTR]: 'put it on an element wrapped around the <doop-use>, which is then the slot’s default content',
   [SLOT_SUGGEST_ATTR]: 'it belongs on the element that carries data-doop-slot',
 }

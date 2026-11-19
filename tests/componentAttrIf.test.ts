@@ -228,3 +228,48 @@ describe('stored markup without data-doop-attr-if', () => {
     expect(stored).toContain(INSTANCE_ATTR)
   })
 })
+
+describe('data-doop-attr-if on edge elements', () => {
+  const setup = (main: (nestedId: string, id: string) => string) => {
+    const canvasId = store.createCanvas('attr-if edge').id
+    const nested = blankComponent({ name: 'Inner', by: 'Tester' })
+    store.saveComponent(canvasId, nested)
+    const nestedMain = actions.createFrame(canvasId, { name: 'InnerMain', html: '' }, actor)!
+    actions.updateFrame(nestedMain.id, { html: doc(`<i ${COMPONENT_ATTR}="${nested.id}">n</i>`) }, actor)
+    const def = blankComponent({
+      name: 'Outer',
+      by: 'Tester',
+      props: [{ name: 'quiet', type: 'boolean', default: 'false' }],
+    })
+    store.saveComponent(canvasId, def)
+    const mainFrame = actions.createFrame(canvasId, { name: 'OuterMain', html: '' }, actor)!
+    actions.updateFrame(mainFrame.id, { html: doc(main(nested.id, def.id)) }, actor)
+    const page = actions.createFrame(canvasId, { name: 'Page', html: '' }, actor)!
+    actions.updateFrame(page.id, { html: doc(`<doop-use component="Outer" quiet="true"></doop-use>`) }, actor)
+    return { canvasId, page: page.id, main: mainFrame.id }
+  }
+
+  it('does not let a <doop-use> carry it onto the nested instance, and says it was ignored', () => {
+    const { page, main } = setup(
+      (nestedId, id) =>
+        `<div ${COMPONENT_ATTR}="${id}"><doop-use component="${nestedId}" data-doop-attr-if="title: !quiet"></doop-use></div>`,
+    )
+    const html = store.getFrame(page)!.html
+    expect(html).not.toContain(ATTR_IF_ATTR)
+    expect(html).not.toContain(OVERRIDES_ATTR)
+    expect(html).toContain('>n</i>')
+    const issues = [...actions.takeComponentIssues(main), ...actions.takeComponentIssues(page)]
+    expect(issues.some((issue) => issue.message.includes(ATTR_IF_ATTR))).toBe(true)
+  })
+
+  it('never removes a data-doop-* attribute', () => {
+    const { page } = setup(
+      (_nested, id) =>
+        `<div ${COMPONENT_ATTR}="${id}" data-doop-attr-if="data-doop-part: !quiet; data-doop-slot: !quiet; data-x: !quiet" data-x="1"><span data-doop-slot="body" data-doop-attr-if="data-doop-slot: !quiet"></span></div>`,
+    )
+    const html = store.getFrame(page)!.html
+    expect(html).toContain('data-doop-slot="body"')
+    expect(html).toMatch(/<div[^>]*data-doop-instance/)
+    expect(html).not.toMatch(/<div[^>]* data-x=/)
+  })
+})
