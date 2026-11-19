@@ -67,7 +67,7 @@ const HOSTILE = [
   '}{ </script><script>alert(1)</script>',
   '*/ alert(1) /*',
   '"double" \'single\' \\ back',
-  'line separator paragraph',
+  'line\u2028separator\u2029paragraph',
   '<img src=x onerror=alert(1)> & &amp; { title }',
   '${x} {x} >',
 ]
@@ -180,9 +180,9 @@ describe.each(['modules', 'tailwind'] as const)('list and rich-text props, %s st
   it('keeps every hostile value as a string literal that parses', () => {
     for (const code of [tsx, home]) expect(syntaxErrors(code)).toEqual([])
     const literals = stringLiterals(home)
-    expect(literals.has(HOSTILE[0])).toBe(true)
-    expect(literals.has(HOSTILE[1])).toBe(true)
-    expect(home).not.toContain(' ')
+    expect(literals.has(HOSTILE[0] ?? '')).toBe(true)
+    expect(literals.has(HOSTILE[1] ?? '')).toBe(true)
+    expect(home).not.toMatch(/[\u2028\u2029]/)
     expect(home).not.toContain('</script>')
     expect(home).not.toContain('<script')
   })
@@ -247,7 +247,7 @@ describe('list props: planning', () => {
               class: { type: 'text' },
               'a-1': { type: 'text' },
               a1: { type: 'text' },
-              constructor: { type: 'text' },
+              ['constructor']: { type: 'text' as const },
             },
           },
         ],
