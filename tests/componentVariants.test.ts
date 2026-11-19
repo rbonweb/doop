@@ -508,6 +508,35 @@ describe('two mains in one design frame', () => {
     expect(propsOf(canvas.id, tag).options).toEqual(['sm', 'lg'])
   })
 
+  it('renames and removes a prop in the design stylesheet, leaving the other main on its own prop', async () => {
+    const { canvas, frameId, pill, tag } = await twoMains()
+    expect((await edit(canvas.id, pill, [{ op: 'rename_prop', prop: 'size', to: 'scale' }])).isError).toBe(false)
+    let html = store.getFrame(frameId)!.html
+    expect(html).not.toContain('.pill[data-size')
+    expect(html).toMatch(/\.pill\[data-scale="sm"\]/)
+    expect(html).toContain('.tag[data-size="sm"]')
+    expect(findComponent(canvas.id, pill)!.rawCss).toContain('[data-scale="sm"]')
+    expect((await edit(canvas.id, pill, [{ op: 'remove_prop', prop: 'scale' }])).isError).toBe(false)
+    html = store.getFrame(frameId)!.html
+    expect(html).not.toContain('data-scale')
+    expect(html).toContain('.tag[data-size="lg"]')
+    expect(propsOf(canvas.id, tag).options).toEqual(['sm', 'lg'])
+  })
+
+  it("keeps one main's source block out of the other main's stylesheet", async () => {
+    const { canvas, pill, tag } = await twoMains()
+    await edit(canvas.id, pill, [
+      { op: 'set_style', element: 'root', when: { size: 'lg' }, declarations: { 'margin-top': '7px' } },
+    ])
+    await edit(canvas.id, tag, [
+      { op: 'set_style', element: 'root', when: { size: 'lg' }, declarations: { 'margin-bottom': '3px' } },
+    ])
+    expect(findComponent(canvas.id, tag)!.rawCss).toContain('margin-bottom: 3px')
+    expect(findComponent(canvas.id, tag)!.rawCss).not.toContain('7px')
+    expect(findComponent(canvas.id, pill)!.rawCss).toContain('margin-top: 7px')
+    expect(findComponent(canvas.id, pill)!.rawCss).not.toContain('3px')
+  })
+
   it('leaves no empty source block behind when only the design stylesheet changed', async () => {
     const { canvas, frameId, pill } = await twoMains()
     await edit(canvas.id, pill, [{ op: 'rename_value', prop: 'size', from: 'sm', to: 'small' }])

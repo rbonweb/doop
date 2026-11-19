@@ -427,6 +427,9 @@ export function cleanListValue(
 
 /** A value bound to a style property or custom property is one value: a `;` or a brace would add declarations, and a
  *  function that loads makes the viewer's browser fetch an address the value chose. */
+/** A binding target that writes CSS: one property (`style.color`), a custom property (`--x`) or the whole `style` attribute. */
+const isStyleTarget = (target: string) => target === 'style' || target.startsWith('style.') || target.startsWith('--')
+
 export const unsafeStyleValue = (value: string) =>
   /[;{}\\]|\/\*|\b(?:url|image-set|-webkit-image-set|src|image)\s*\(/i.test(value)
 
@@ -438,7 +441,7 @@ export const STYLE_VALUE_RULE =
 export function styleBound(template: string, name: string, list?: string): boolean {
   for (const info of partsOf(template).values()) {
     if ((info.inEach ?? undefined) !== list) continue
-    if ([...info.styleProps.values()].includes(name)) return true
+    if ([...info.styleProps.values()].includes(name) || info.attrProps.get('style') === name) return true
   }
   return false
 }
@@ -468,10 +471,10 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides,
     }
     if (scoped?.has(prop) && value === '' && target !== null) {
       /* an empty field leaves no address, title or the like behind; a style or custom property keeps the template's */
-      if (!target.startsWith('style.') && !target.startsWith('--')) setAttr(el, target, null)
+      if (!isStyleTarget(target)) setAttr(el, target, null)
       continue
     }
-    if (target !== null && (target.startsWith('style.') || target.startsWith('--')) && unsafeStyleValue(value)) {
+    if (target !== null && isStyleTarget(target) && unsafeStyleValue(value)) {
       ctx.issues.push({
         code: 'invalid_prop_value',
         message: `${prop} was not set as ${target}: ${STYLE_VALUE_RULE}`,
@@ -560,7 +563,7 @@ function sampleItem(el: Element, prop: ComponentProp): ListItem {
     for (const { target, prop: name } of parseBindings(attrOf(node, BIND_ATTR) ?? '', node.tagName)) {
       const field = Object.hasOwn(fields, name) ? fields[name] : undefined
       if (!field || field.type === 'boolean' || Object.hasOwn(item, name)) continue
-      if (target !== null && (target.startsWith('style.') || target.startsWith('--'))) continue
+      if (target !== null && isStyleTarget(target)) continue
       const value = target === null ? directText(node) : attrOf(node, target)
       if (!value || (field.type !== 'text' && unsafeUrl(value))) continue
       item[name] = value
@@ -2362,9 +2365,11 @@ export function newPartKey(taken: Set<string>): string {
 export function stampParts(root: Element): boolean {
   const taken = new Set<string>()
   let changed = false
+  /* a list's copies are keyed `<key>-<index>`: in a main that repeats an element, an authored key of that shape is re-keyed so it can never be mistaken for one */
+  const hasList = hasEachElement(root)
   const visit = (el: Element) => {
     const key = attrOf(el, PART_ATTR)
-    if (!key || taken.has(key)) {
+    if (!key || taken.has(key) || (hasList && COPY_KEY.test(key))) {
       setAttr(el, PART_ATTR, newPartKey(taken))
       changed = true
     } else taken.add(key)
@@ -2374,6 +2379,15 @@ export function stampParts(root: Element): boolean {
   }
   visit(root)
   return changed
+}
+
+function hasEachElement(root: Element): boolean {
+  const stack: Element[] = [root]
+  for (let el = stack.pop(); el; el = stack.pop()) {
+    if (el !== root && el.tagName !== USE_TAG && attrOf(el, EACH_ATTR) !== undefined) return true
+    if (!attrOf(el, INSTANCE_ATTR)) stack.push(...elementKids(el))
+  }
+  return false
 }
 
 /** The main's markup as a template: no main marker, no element ids (each instance
