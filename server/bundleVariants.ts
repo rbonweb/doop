@@ -59,14 +59,28 @@ function pseudoStart(compound: string): number {
   return compound.length
 }
 
+/** A CSS escape (`\[`, `\3a `) as the character it stands for. */
+function unescapeCss(escape: string): string {
+  const hex = /^\\([0-9a-fA-F]{1,6}) ?$/.exec(escape)?.[1]
+  const code = hex ? Number.parseInt(hex, 16) : undefined
+  return code !== undefined && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : escape.slice(1)
+}
+
 function matchesRoot(lead: string, root: RootInfo): boolean {
   if (!lead) return false
-  const plain = lead.replace(/\[[^\]]*\]/g, '').replace(/:[:\w-]+(?:\([^)]*\))?/g, '')
+  /* an escaped character (a Tailwind class such as `.data-\[state\=on\]\:bg-x`) is set aside, so the strips below see only the selector's own punctuation, and put back to compare with the root's class names */
+  const escapes: string[] = []
+  const masked = lead.replace(/\\(?:[0-9a-fA-F]{1,6} ?|[^\n\r])/g, (escape) => {
+    escapes.push(unescapeCss(escape))
+    return `\uE000${escapes.length - 1}\uE001`
+  })
+  const restore = (text: string) => text.replace(/\uE000(\d+)\uE001/g, (_all, at: string) => escapes[Number(at)] ?? '')
+  const plain = masked.replace(/\[[^\]]*\]/g, '').replace(/:[:\w-]+(?:\([^)]*\))?/g, '')
   const tag = /^[a-zA-Z][\w-]*/.exec(plain)?.[0]?.toLowerCase()
   if (tag && tag !== root.tag) return false
-  for (const [, name] of plain.matchAll(/\.((?:[\w\u0080-\uffff-]|\\.)+)/g))
-    if (name && !root.classes.has(name)) return false
-  for (const [, id] of plain.matchAll(/#((?:[\w\u0080-\uffff-]|\\.)+)/g)) if (id && id !== root.id) return false
+  for (const [, name] of plain.matchAll(/\.((?:[\w\u0080-\uffff-])+)/g))
+    if (name && !root.classes.has(restore(name))) return false
+  for (const [, id] of plain.matchAll(/#((?:[\w\u0080-\uffff-])+)/g)) if (id && restore(id) !== root.id) return false
   return true
 }
 

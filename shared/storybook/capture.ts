@@ -69,6 +69,8 @@ export interface CaptureOptions {
   maxElements: number
   /** a throwaway attribute name Doop chose for this render: when set, every element of `html` carries it with its index (root 0), so a binding found later can be written onto the right element */
   marker?: string
+  /** the name of the component this story is for: when the story renders it inside something else (a label next to its input, a card around a form), the element that names itself this (`data-slot` or `data-part`) is the root instead, so the component is its own part and not the whole story */
+  focus?: string
 }
 
 export interface CapturedStory {
@@ -87,6 +89,10 @@ export interface CapturedStory {
   styles: string[][] | null
   /** the attributes of each element in `html` that a prop might track (data-*, aria-*, role, disabled and the like; never class, style, id or a URL), by name; null above `maxElements` */
   attrs?: Record<string, string>[] | null
+  /** the text each element of `html` holds directly, whitespace collapsed and cut at 200 characters (empty when none); null above `maxElements` */
+  texts?: string[] | null
+  /** the `src` of each element of `html` (an http(s) address, or empty), for a prop that fills an image; null above `maxElements` */
+  srcs?: string[] | null
   /** the marker attribute the html was written with (set by the importer, not the page) */
   marker?: string
   issues: StorybookIssue[]
@@ -141,7 +147,7 @@ export async function settleStory(maxMs: number): Promise<void> {
 export function captureStory(options: CaptureOptions): CaptureResult {
   const issues: StorybookIssue[] = []
   const host = document.querySelector('#storybook-root') ?? document.querySelector('#root')
-  const live = host?.firstElementChild
+  let live = host?.firstElementChild
   if (!host || !live) return { ok: false, reason: 'The story rendered nothing into #storybook-root' }
   if (host.children.length > 1) {
     issues.push({
@@ -152,6 +158,23 @@ export function captureStory(options: CaptureOptions): CaptureResult {
 
   if (host.getElementsByTagName('*').length > 20000) {
     return { ok: false, reason: 'too_many_elements', bytes: host.getElementsByTagName('*').length }
+  }
+
+  /* a story that shows the component beside or inside others (a label with its input) is captured from the part that names itself after the component */
+  const identityOf = (el: Element) =>
+    ['data-slot', 'data-part']
+      .map((name) => (el.getAttribute(name) ?? '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+      .filter(Boolean)
+  const wanted = (options.focus ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  if (wanted && !identityOf(live).includes(wanted)) {
+    const part = Array.from(live.querySelectorAll('*')).find((el) => identityOf(el).includes(wanted))
+    if (part) {
+      issues.push({
+        code: 'composite_story',
+        message: `The story renders "${options.focus}" inside a <${live.localName}> with other content: only the "${options.focus}" part was captured`,
+      })
+      live = part
+    }
   }
 
   const banned =
@@ -216,6 +239,16 @@ export function captureStory(options: CaptureOptions): CaptureResult {
 
   /* what a prop can track: the plain attributes of each element, read before the markers go on */
   const followable = (globalThis as unknown as Record<string, (name: string) => boolean>)['__doopFollowableAttribute']!
+  const small = kept.length <= options.maxElements
+  const texts: string[] | null = small
+    ? kept.map(({ clone: el }) => ownText(el).replace(/\s+/g, ' ').slice(0, 200))
+    : null
+  const srcs: string[] | null = small
+    ? kept.map(({ clone: el }) => {
+        const value = el.getAttribute('src') ?? ''
+        return /^https?:\/\//.test(value) && value.length <= 500 ? value : ''
+      })
+    : null
   const attrs: Record<string, string>[] | null =
     kept.length <= options.maxElements
       ? kept.map(({ clone: el }) => {
@@ -487,6 +520,8 @@ export function captureStory(options: CaptureOptions): CaptureResult {
     paths,
     styles,
     attrs,
+    texts,
+    srcs,
     issues,
   })
   if (text.length > options.maxBytes) return { ok: false, reason: 'too_large', bytes: text.length }
