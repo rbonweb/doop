@@ -422,6 +422,18 @@ export async function computedStyles(
   return reply && reply.values && typeof reply.values === 'object' ? (reply.values as Record<string, string>) : null
 }
 
+/** Show a main's variant combination in the live document: `attrs` (`data-<prop>` -> value) go on the main's root,
+ *  and `null` takes them off. Nothing is saved, and the runtime puts them back after every render of the document.
+ *  Resolves false when the frame is not mounted. */
+export async function previewVariant(
+  frameId: string,
+  componentId: string,
+  attrs: Record<string, string> | null,
+): Promise<boolean> {
+  const reply = await requestFrame(frameId, 'doop:variant-preview', { component: componentId, attrs })
+  return reply?.ok === true
+}
+
 /** ⌘Y: draw every mounted frame (and any frame mounted later, through
  *  `outlinesOn`) as outlines. Nothing is saved. */
 export function setOutlines(on: boolean) {

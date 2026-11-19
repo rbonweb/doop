@@ -219,6 +219,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       doc = new DOMParser().parseFromString(html, 'text/html')
       /* the sleep rule sits in the head like any authored node, so the morph would pair it with one of the design's and overwrite it: lift it out first */
       if (sleeping) dropSleepStyle()
+      if (variantPreview) variantPreview.originals = {}
       syncAttrs(document.documentElement, doc.documentElement)
       /* the body's own attributes carry whole design systems (<body class="glaze">
          with every rule scoped under .glaze) — morphing only its children left
@@ -228,6 +229,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       morphChildren(document.body, doc.body)
       activateScripts()
       syncPathVisibility()
+      applyVariantPreview()
     } catch (e) {
       if (doc) document.documentElement.innerHTML = doc.documentElement.innerHTML
     }
@@ -509,6 +511,47 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     return !!s && !s.isCollapsed && el.contains(s.anchorNode) && el.contains(s.focusNode)
   }
 
+  /* ---- variant preview ----
+     The Design panel's "Preview variant": data-<prop> attributes on a main's root, so the variant rules of the frame's
+     stylesheet apply to it. Live only. A render morphs the root back to the saved markup and applies them again, and
+     cleanClone puts the root's own values back, so no save or export carries a preview. */
+  var variantPreview = null
+  function findVariantRoot(id) {
+    var roots = document.querySelectorAll('[data-doop-component]')
+    for (var i = 0; i < roots.length; i++) if (roots[i].getAttribute('data-doop-component') === id) return roots[i]
+    return null
+  }
+  function restoreVariantAttrs(el, originals) {
+    for (var name in originals) {
+      if (originals[name] === null) el.removeAttribute(name)
+      else el.setAttribute(name, originals[name])
+    }
+  }
+  function applyVariantPreview() {
+    if (!variantPreview) return
+    var el = findVariantRoot(variantPreview.component)
+    if (!el) return
+    for (var name in variantPreview.attrs) {
+      if (!(name in variantPreview.originals)) variantPreview.originals[name] = el.getAttribute(name)
+      el.setAttribute(name, variantPreview.attrs[name])
+    }
+  }
+  function setVariantPreview(component, attrs) {
+    if (variantPreview) {
+      var held = findVariantRoot(variantPreview.component)
+      if (held) restoreVariantAttrs(held, variantPreview.originals)
+      variantPreview = null
+    }
+    if (typeof component !== 'string' || !attrs || typeof attrs !== 'object') return true
+    var clean = {}
+    for (var name in attrs) {
+      if (/^data-[a-z][a-z0-9-]*$/.test(name) && name.indexOf('data-doop-') !== 0 && name.indexOf('data-v-') !== 0 && typeof attrs[name] === 'string') clean[name] = attrs[name]
+    }
+    variantPreview = { component: component, attrs: clean, originals: {} }
+    applyVariantPreview()
+    return true
+  }
+
   /* strip the runtime's own marks from a clone of the document */
   function cleanClone(root) {
     serializeText(root)
@@ -530,6 +573,12 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       marked[j].removeAttribute('contenteditable')
       marked[j].removeAttribute('data-v-active')
       marked[j].removeAttribute('data-v-hover')
+    }
+    if (variantPreview) {
+      var variantRoots = root.querySelectorAll('[data-doop-component]')
+      for (var vi = 0; vi < variantRoots.length; vi++) {
+        if (variantRoots[vi].getAttribute('data-doop-component') === variantPreview.component) restoreVariantAttrs(variantRoots[vi], variantPreview.originals)
+      }
     }
     root.removeAttribute('data-sl-play')
     root.removeAttribute('data-sl-entered')
@@ -2118,6 +2167,9 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       parent.postMessage({ type: 'doop:inspect-result', reqId: d.reqId, info: inspect(d.selector) }, '*')
     }
     if (d.type === 'doop:outlines') setOutlines(d.on === true)
+    if (d.type === 'doop:variant-preview') {
+      parent.postMessage({ type: 'doop:variant-preview-result', reqId: d.reqId, ok: setVariantPreview(d.component, d.attrs) }, '*')
+    }
     if (d.type === 'doop:bleed' && typeof d.px === 'number') setBleed(d.px)
     if (d.type === 'doop:computed' && Array.isArray(d.properties)) {
       var computedEl = styleTarget(d.selector)

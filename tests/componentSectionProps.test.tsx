@@ -20,7 +20,11 @@ const mocks = vi.hoisted(() => ({
   listeners: new Set<() => void>(),
 }))
 vi.mock('../src/lib/api', () => ({
-  api: { changeInstances: mocks.changeInstances, updateComponent: mocks.updateComponent },
+  api: {
+    changeInstances: mocks.changeInstances,
+    updateComponent: mocks.updateComponent,
+    componentVariants: async () => ({ props: [], rules: [] }),
+  },
   errorMessage: (_error: unknown, fallback: string) => fallback,
 }))
 vi.mock('../src/lib/history', () => ({ recordCreate: () => {}, recordUpdate: () => {}, recordUpdates: () => {} }))

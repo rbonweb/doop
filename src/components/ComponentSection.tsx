@@ -38,6 +38,7 @@ import { Textarea } from './ui/textarea'
 import { TokenMenu, fieldToken } from './TokenMenu'
 import { InstanceList } from './InstanceList'
 import { ComponentCodeSection } from './ComponentCodeSection'
+import { VariantsSection } from './VariantsSection'
 
 /** The Design panel's head when the selection belongs to a component. */
 export function ComponentSection({ frame, selector }: { frame: Frame; selector: string }) {
@@ -445,6 +446,7 @@ function MainControls({ frame, context }: { frame: Frame; context: Extract<Compo
           <span className="font-mono text-ink">{def.props.map((prop) => prop.name).join(', ')}</span>
         </p>
       )}
+      <VariantsSection key={def.id} frame={frame} def={def} />
       <ComponentCodeSection key={def.id} def={def} />
       {!isRoot && (
         <div className="flex flex-wrap gap-1.5">

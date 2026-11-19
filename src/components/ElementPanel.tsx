@@ -25,6 +25,7 @@ import {
   type SizeMode,
 } from '../lib/cssValues'
 import { flexSizeAxis } from '../lib/flexLayout'
+import { variantEditTarget, writeVariantStyle } from '../lib/variantPreview'
 import { cn } from '@/lib/utils'
 import { LayerKindIcon } from './LayerKindIcon'
 import { FlexLayoutControls, PaddingControls } from './FlexLayoutControls'
@@ -227,8 +228,20 @@ export function ElementPanel({
       .catch(console.error)
   }
 
+  /* a scrub that edits a previewed variant: the patch it has built up, written once when it ends */
+  const variantGesture = useRef<StylePatch | null>(null)
+
   function apply(styles: StylePatch) {
-    if (info) updateRead(styleElement(frame.id, selector, styles))
+    if (!info) return
+    /* while a variant combination is previewed the edit belongs to that combination, not to the element's own style */
+    if (variantEditTarget(frame, selector)) {
+      if (variantGesture.current) {
+        Object.assign(variantGesture.current, styles)
+        updateRead(styleElement(frame.id, selector, styles))
+      } else writeVariantStyle(frame, selector, styles)
+      return
+    }
+    updateRead(styleElement(frame.id, selector, styles))
   }
 
   function editGeometry(edit: GeometryEdit) {
@@ -236,6 +249,15 @@ export function ElementPanel({
   }
 
   function scrub(phase: 'begin' | 'commit' | 'cancel') {
+    if (phase === 'begin') variantGesture.current = variantEditTarget(frame, selector) ? {} : null
+    const patch = phase === 'begin' ? null : variantGesture.current
+    if (patch) {
+      /* the preview in the live document is put back; what the scrub chose is written to the variant */
+      variantGesture.current = null
+      updateRead(styleGesture(frame.id, selector, 'cancel'))
+      if (phase === 'commit' && Object.keys(patch).length) writeVariantStyle(frame, selector, patch)
+      return
+    }
     updateRead(styleGesture(frame.id, selector, phase))
   }
 
