@@ -481,8 +481,8 @@ function propsForUpdate(bundled: BundleComponent['props'], existing: readonly Co
 /** The markup as a new component would store it: with no bindings of its own, the text, image and link props a main infers.
  *  An update sends the same, so an unchanged bundle leaves the definition as it was. */
 function withInferredBindings(html: string, fromClasses = true, bundled?: readonly string[]): string {
-  /* a captured main that already follows props (a variant attribute) has no other inference, but its one text is still its label */
-  if (html.includes('data-doop-prop')) {
+  /* a main that already says what varies has no other inference (its slots are its author's: the text inside a slot is the instance's content, not a prop), but a captured main's one text is still its label */
+  if (html.includes('data-doop-prop') || html.includes('data-doop-slot')) {
     if (!bundled) return html
     const roots = kidsOf(rootFragment(html.trim()))
     if (roots.length !== 1) return html

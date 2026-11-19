@@ -109,12 +109,12 @@ export function findBindings(
 }
 
 /** The base's bindings placed on a variant render's own elements, by element path: an element is the same one when its path is, and only a path that is unique in the render counts. A variant whose markup differs (an icon added to the button) then still carries the bindings, so the importer branches only what really differs. */
-export function mapBindings(
+export function mapBindings<T = string[]>(
   base: CapturedStory,
   shot: CapturedStory,
-  bindings: Map<number, string[]>,
-): Map<number, string[]> {
-  const mapped = new Map<number, string[]>()
+  bindings: Map<number, T>,
+): Map<number, T> {
+  const mapped = new Map<number, T>()
   for (const [index, list] of bindings) {
     const path = base.paths[index]
     if (path === undefined) continue
@@ -127,12 +127,49 @@ export function mapBindings(
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
-/** The html with each element's marker taken off, and `data-doop-prop` set to its own text bindings and the found ones. */
-export function bindHtml(html: string, marker: string | undefined, bindings: Map<number, string[]>): string {
+/** The elements of the html that already carry a binding of their own (a text arg the capture bound), by index. */
+export function ownBindings(html: string, marker: string | undefined): Set<number> {
+  const bound = new Set<number>()
+  if (!marker) return bound
+  const found = new RegExp(` ${escapeRegExp(marker)}="(\\d{1,6})" data-doop-prop="[^"]*"`, 'g')
+  for (const match of html.matchAll(found)) bound.add(Number(match[1]))
+  return bound
+}
+
+/** The html with each element's marker taken off, `data-doop-prop` set to its own text bindings and the found ones, and `data-doop-slot` on the elements that are slots. */
+export function bindHtml(
+  html: string,
+  marker: string | undefined,
+  bindings: Map<number, string[]>,
+  slots?: Map<number, string>,
+): string {
   if (!marker) return html
   const found = new RegExp(` ${escapeRegExp(marker)}="(\\d{1,6})"(?: data-doop-prop="([^"]*)")?`, 'g')
   return html.replace(found, (_all, index: string, own: string | undefined) => {
     const parts = [...(own ? [own] : []), ...(bindings.get(Number(index)) ?? [])]
-    return parts.length ? ` data-doop-prop="${parts.join(',')}"` : ''
+    const slot = slots?.get(Number(index))
+    return `${parts.length ? ` data-doop-prop="${parts.join(',')}"` : ''}${slot ? ` data-doop-slot="${slot}"` : ''}`
+  })
+}
+
+/** Whether an element of the render for a value has an attribute that differs from the default's and that no binding of this prop follows (a `data-state` that flips beside the bound `aria-checked`): the look of that state is then not the library's rules alone. */
+export function unboundChange(
+  base: CapturedStory,
+  shot: CapturedStory,
+  bindings: Map<number, string[]>,
+  prop: string,
+): boolean {
+  if (!base.attrs || !shot.attrs || base.shape !== shot.shape) return false
+  return base.attrs.some((before, index) => {
+    const after = shot.attrs?.[index] ?? {}
+    const followed = new Set(
+      (bindings.get(index) ?? []).flatMap((binding) => {
+        const at = binding.lastIndexOf(':')
+        return at > 0 && binding.slice(at + 1) === prop ? [binding.slice(0, at)] : []
+      }),
+    )
+    return [...new Set([...Object.keys(before), ...Object.keys(after)])].some(
+      (name) => !followed.has(name) && before[name] !== after[name],
+    )
   })
 }

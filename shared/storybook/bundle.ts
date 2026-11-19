@@ -15,7 +15,8 @@ import {
   type StoryCapture,
 } from './capture.ts'
 import type { StoryEntry, StorybookIssue } from './index.ts'
-import { bindHtml, findBindings, mapBindings } from './bindings.ts'
+import { bindHtml, findBindings, mapBindings, ownBindings, unboundChange } from './bindings.ts'
+import { innerIdentities, onStateRules, planCompound } from './compound.ts'
 import { guardCss, splitRules } from './cssGuard.ts'
 import { chooseExportName } from './exportName.ts'
 import { iconPackageOf } from './iconPackages.ts'
@@ -69,6 +70,8 @@ export interface RenderRequest {
   storyId: string
   args: Record<string, string | number | boolean>
   readMeta: boolean
+  /** the component the story is for, so a story that shows it among other things is captured from its own part */
+  focus?: string
 }
 
 function refusalMessage(reason: string, bytes?: number): string {
@@ -197,6 +200,7 @@ export async function renderStory(page: StoryPage, request: RenderRequest, signa
       styleProperties: STYLE_PROPERTIES,
       maxBytes: STORYBOOK_LIMITS.captureBytes,
       maxElements: 300,
+      ...(request.focus ? { focus: request.focus } : {}),
     })
     /* serialized and measured in the isolated world: a string within the cap, or a small refusal. Anything else is not from the capture */
     if (typeof result !== 'string') {
@@ -285,6 +289,8 @@ export function diffStyles(base: CapturedStory, variant: CapturedStory): string 
   }
   return guardCss(rules.join('\n')).css
 }
+
+const normalName = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '')
 
 export interface BundleInput {
   entries: StoryEntry[]
@@ -392,6 +398,8 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
   }
   const concurrency = input.concurrency ?? 1
   const components: BundleComponent[] = []
+  const compounds: { name: string; inner: Set<string> }[] = []
+  const bundleNames = new Set(grouped.groups.map((group) => normalName(group.name)))
   const shared = new Set<string>()
   /* the story page's own body font, from the first component captured */
   let rootFont: string | undefined
@@ -399,10 +407,12 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
 
   /* a page that cannot be opened (the renderer is busy, the browser would not start) is not a story that failed: the import carries on without that render, and gives up with what it has after a few in a row */
   let openFailures = 0
+  /* the component being imported: each of its renders is captured from the part that names itself so */
+  let focusName: string | undefined
   const render = async (request: Omit<RenderRequest, 'baseUrl'>): Promise<StoryRender> => {
     try {
       const result = await input.withPage((page) =>
-        renderStory(page, { ...request, baseUrl: input.baseUrl }, input.signal),
+        renderStory(page, { focus: focusName, ...request, baseUrl: input.baseUrl }, input.signal),
       )
       openFailures = 0
       return result
@@ -423,6 +433,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       break
     }
     const note = (code: string, message: string) => issues.push({ component: group.name, code, message })
+    focusName = group.name
     if (now() - started > STORYBOOK_LIMITS.importMs) {
       issues.push({
         code: 'import_timeout',
@@ -541,13 +552,42 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
     const variants: NonNullable<BundleComponent['variants']> = {}
     const reflected = new Set<string>()
     /* a prop that an attribute of the real element follows is bound to that element, and the library's own rules for it (they match only while the attribute has the value, so they come from the renders of each value) style it: a CSS diff is only for a prop no attribute follows */
-    const { bindings, bound } = findBindings(
+    const found = findBindings(
       controls.base,
       rendered.flatMap(({ variant, result }) =>
         result.capture.ok ? [{ prop: variant.prop, value: variant.value, shot: result.capture }] : [],
       ),
       props,
     )
+    const { bound } = found
+    /* what the markup says of the component's parts and of the props the Storybook left unbound: parts become slots, and a prop whose value is on an element is bound to that attribute */
+    const followedNow = new Set(bound)
+    for (const match of shipped.html.matchAll(/ data-doop-prop="([^"]*)"/g)) {
+      for (const binding of (match[1] ?? '').split(','))
+        followedNow.add(binding.slice(binding.lastIndexOf(':') + 1).trim())
+    }
+    const compound = planCompound({
+      capture: shipped,
+      props,
+      bound: followedNow,
+      occupied: new Set([...ownBindings(shipped.html, shipped.marker), ...found.bindings.keys()]),
+      boundAttrs: new Set(
+        [...found.bindings].flatMap(([index, list]) =>
+          list.map((binding) => `${index}\u0000${binding.slice(0, Math.max(0, binding.lastIndexOf(':')))}`),
+        ),
+      ),
+      taken: new Set(props.map((prop) => prop.name)),
+      bundleNames,
+    })
+    const bindings = new Map(found.bindings)
+    for (const [index, list] of compound.bindings) bindings.set(index, [...(bindings.get(index) ?? []), ...list])
+    if (compound.slots.size) {
+      note('slots_from_parts', `Parts of the component became slots: ${[...compound.slots.values()].join(', ')}`)
+    }
+    for (const [name, type] of compound.retyped) {
+      const prop = props.find((entry) => entry.name === name)
+      if (prop) prop.type = type
+    }
     const known = new Set(splitRules(shipped.css).rules)
     const extraRules: string[] = []
     for (const { variant, result, identical } of rendered) {
@@ -569,6 +609,15 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
           known.add(rule)
           extraRules.push(rule)
         }
+        /* a state the library also says through an attribute no prop follows (`data-state` beside `aria-checked`) is no rule of the library's to apply here: the look it changes is the prop's, as a CSS diff */
+        const flag = props.find((prop) => prop.name === variant.prop)
+        if (flag?.type === 'boolean' && unboundChange(controls.base, shot, bindings, variant.prop)) {
+          const diff = diffStyles(controls.base, shot)
+          if (diff) {
+            ;(variants[variant.prop] ??= {})[variant.value] = { css: diff }
+            reflected.add(variant.prop)
+          }
+        }
         continue
       }
       const diff = diffStyles(controls.base, shot)
@@ -577,7 +626,12 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         if (diff) entry = { css: diff }
       } else {
         /* the variant's own markup carries the bindings found on the default, so only what differs is branched */
-        const html = bindHtml(shot.html, shot.marker, mapBindings(controls.base, shot, bindings))
+        const html = bindHtml(
+          shot.html,
+          shot.marker,
+          mapBindings(controls.base, shot, bindings),
+          mapBindings(controls.base, shot, compound.slots),
+        )
         /* its rules are scoped under the prop's value, which outranks the default's own: a rule the default already has (the base look, the theme variables) would beat the library's variant rules, so only the rules the default lacks go along */
         const own = splitRules(shot.css)
           .rules.filter((rule) => !known.has(rule))
@@ -605,7 +659,8 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
           "The rules for the props' values are over the bundle limit, so only the default look has them",
         )
     }
-    const finalHtml = bindHtml(shipped.html, shipped.marker, bindings)
+    const finalHtml = bindHtml(shipped.html, shipped.marker, bindings, compound.slots)
+    props.push(...compound.added)
     /* a prop is something in the markup follows: an enum (it sets data-<name> on the root and the variant rules read it), an attribute or text bound to it, or a boolean whose look is a CSS rule. The rest could never change anything here, and the importer would drop them */
     const followed = new Set(
       [...finalHtml.matchAll(/ data-doop-prop="([^"]*)"/g)].flatMap((match) =>
@@ -625,6 +680,14 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
           .map((prop) => prop.name)
           .join(', ')}`,
       )
+    }
+    /* the on state of a state the markup mirrors into `data-state`: the library's rules for that value, applied while the prop is on (a rule that names the other side stays as it is) */
+    for (const state of compound.states) {
+      const css = guardCss(onStateRules(shippedCss, state)).css
+      if (css && css.length <= MAX_BUNDLE_CSS_BYTES) {
+        ;(variants[state.prop] ??= {}).true = { css }
+        reflected.add(state.prop)
+      }
     }
     const outProps = useful.map(({ arg: _arg, initial: _initial, componentExports: _exports, ...prop }) => ({
       ...prop,
@@ -646,6 +709,7 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
       useful.flatMap((prop) => {
         const mapping: NonNullable<NonNullable<BundleComponent['code']>['props']>[string] = {}
         if (prop.arg !== prop.name) mapping.name = prop.arg
+        if (compound.omit.has(prop.name)) mapping.omit = true
         if (prop.componentExports) {
           /* the options are component references: the package when the markup names it, and the export of each option that is not its own name */
           mapping.component = iconPackage ? { importFrom: iconPackage } : {}
@@ -673,7 +737,22 @@ export async function buildComponentBundle(input: BundleInput): Promise<BundleRe
         },
       },
     })
+    compounds.push({ name: group.name, inner: innerIdentities(shipped) })
     finish(index, group.name)
+  }
+
+  /* a story that shows other components of the Storybook (a card with a form in it) is told once, since its markup holds their parts rather than instances of them */
+  const byNormal = new Map(components.map((component) => [normalName(component.name), component.name]))
+  for (const entry of compounds) {
+    const own = normalName(entry.name)
+    const others = [...entry.inner].flatMap((id) => (id !== own && byNormal.has(id) ? [byNormal.get(id)!] : []))
+    if (others.length) {
+      issues.push({
+        component: entry.name,
+        code: 'composite_story',
+        message: `The story also renders parts of ${others.slice(0, 6).join(', ')}, which are components of this Storybook; they stay part of this component's markup`,
+      })
+    }
   }
 
   if (!components.length) {

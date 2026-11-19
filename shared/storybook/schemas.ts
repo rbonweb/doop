@@ -36,6 +36,8 @@ export const capturedStorySchema = z
       .max(MAX_ELEMENTS)
       .nullable()
       .optional(),
+    texts: z.array(z.string().max(MAX_CELL)).max(MAX_ELEMENTS).nullable().optional(),
+    srcs: z.array(z.string().max(MAX_CELL)).max(MAX_ELEMENTS).nullable().optional(),
     issues: z.array(issue).max(20),
   })
   .refine((captured) => captured.styles === null || captured.styles.length === captured.paths.length, {
