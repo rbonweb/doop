@@ -234,7 +234,17 @@ function outcomeFrames(context: ToolContext, def: ComponentDef, extra: string[] 
   return context.canvas.frames.filter((frame) => ids.has(frame.id))
 }
 
-const asProps = (value: unknown) => value as Record<string, string> | undefined
+/** A list prop arrives as an array of items or as JSON text: it is stored, like every prop value, as text. */
+const PROP_VALUE = z.union([z.string(), z.array(z.record(z.unknown())).max(100)])
+const asProps = (value: unknown): Record<string, string> | undefined =>
+  value && typeof value === 'object'
+    ? Object.fromEntries(
+        Object.entries(value as Record<string, string | unknown[]>).map(([name, entry]) => [
+          name,
+          typeof entry === 'string' ? entry : JSON.stringify(entry),
+        ]),
+      )
+    : undefined
 
 const inferredProps = (names: string[]) => (names.length ? { inferred_props: names } : {})
 
@@ -314,7 +324,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     name: 'create_component',
     title: 'Create a component',
     description:
-      'Make a reusable component from new markup (html + css) or from an element already in a frame (frame_id + element). From markup, the main lands on the canvas\'s Components page and no instance is placed anywhere: to use it, write <doop-use component="…"> in a frame\'s HTML or call insert_instance. From an element (its data-doop-id from get_frame), that element stays where it is and becomes the main; pass replace_matching=true to turn every other element of the same shape on the canvas into a linked instance in one go, differing text and links becoming props. Unless the markup already says otherwise, leaf text, image sources and link targets become props, named after what each element is (title, label, image, link, text) or its class; the result lists them. Name your own with data-doop-prop="label" (text; declare it type richtext in props to let instances carry <b>, <i>, <em>, <strong>, <br>, <a href="https://…"> and <span class="…"> inside it, anything else is stripped), data-doop-prop="src:photo" (an image; on an <img> a bare name binds its src too), data-doop-prop="href:link,--accent:accent" (attributes, custom properties), data-doop-if="tone=ghost" or "show-icon" (conditional elements), data-doop-slot="actions" (content each instance supplies, add data-doop-slot-suggest="Button"). An enum prop in props sets data-<name> on the root, so variants are plain CSS: .btn[data-tone="ghost"] { … }. Give it a description saying when to use it: it is how the next agent knows.',
+      'Make a reusable component from new markup (html + css) or from an element already in a frame (frame_id + element). From markup, the main lands on the canvas\'s Components page and no instance is placed anywhere: to use it, write <doop-use component="…"> in a frame\'s HTML or call insert_instance. From an element (its data-doop-id from get_frame), that element stays where it is and becomes the main; pass replace_matching=true to turn every other element of the same shape on the canvas into a linked instance in one go, differing text and links becoming props. Unless the markup already says otherwise, leaf text, image sources and link targets become props, named after what each element is (title, label, image, link, text) or its class; the result lists them. Name your own with data-doop-prop="label" (text; declare it type richtext in props to let instances carry <b>, <i>, <em>, <strong>, <br>, <a href="https://…"> and <span class="…"> inside it, anything else is stripped), data-doop-prop="src:photo" (an image; on an <img> a bare name binds its src too), data-doop-prop="href:link,--accent:accent" (attributes, custom properties), data-doop-if="tone=ghost" or "show-icon" (conditional elements), data-doop-slot="actions" (content each instance supplies, add data-doop-slot-suggest="Button"), data-doop-each="items" (an element repeated once per item of a list prop: inside it data-doop-prop and data-doop-if name the item fields, e.g. <li data-doop-each="links"><a data-doop-prop="label,href:url">Home</a></li>; fields are inferred from the bindings, or declare the prop with type list and fields; instances give items=[{label,url}] and a fresh one shows the content of the main as its single item). An enum prop in props sets data-<name> on the root, so variants are plain CSS: .btn[data-tone="ghost"] { … }. Give it a description saying when to use it: it is how the next agent knows.',
     readOnly: false,
     shape: {
       name: z.string().describe('Short and unique, e.g. "Button", "Pricing Card"'),
@@ -580,7 +590,12 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     shape: {
       frame_id: FRAME_ID,
       component: COMPONENT_REF,
-      props: z.record(z.string()).optional().describe('Prop values, e.g. { "label": "Sign up", "tone": "ghost" }'),
+      props: z
+        .record(PROP_VALUE)
+        .optional()
+        .describe(
+          'Prop values, e.g. { "label": "Sign up", "tone": "ghost" }. A list prop takes an array of items, e.g. { "items": [{ "title": "A", "url": "https://…" }] } (or that as JSON text); its fields are in get_component',
+        ),
       target: z.string().optional().describe('A data-doop-id. Defaults to the page body'),
       position: z
         .enum(['append', 'prepend', 'before', 'after'])
@@ -614,7 +629,12 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
         .array(
           z.object({
             instance_id: z.string(),
-            props: z.record(z.string()).optional().describe('Merged over current props; "" clears one'),
+            props: z
+              .record(PROP_VALUE)
+              .optional()
+              .describe(
+                'Merged over current props; "" clears one. A list prop takes an array of items (or JSON text) that replaces the whole list, e.g. { "items": [{ "title": "A" }] }; [] shows no items',
+              ),
             overrides: z
               .record(z.any())
               .optional()
@@ -643,7 +663,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     run(input, { canvas, actor }) {
       const list = input.instances as {
         instance_id: string
-        props?: Record<string, string>
+        props?: Record<string, string | unknown[]>
         overrides?: Record<string, never>
         reset?: boolean | string[]
         detach?: boolean
@@ -654,7 +674,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
         String(input.frame_id),
         list.map((entry) => ({
           instanceId: entry.instance_id,
-          props: entry.props,
+          props: asProps(entry.props),
           overrides: entry.overrides,
           reset: entry.reset,
           detach: entry.detach,

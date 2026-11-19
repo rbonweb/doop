@@ -17,10 +17,14 @@ import {
   CSS_ATTR,
   DETACHED_ATTR,
   DETACHED_CSS_ATTR,
+  EACH_ATTR,
   IF_ATTR,
   HEAD_ATTR,
   INSTANCE_ATTR,
+  ITEM_ATTR,
   MAX_INSTANCE_DEPTH,
+  MAX_LIST_FIELDS,
+  MAX_LIST_TEXT,
   MAX_NESTING_DEPTH,
   OVERRIDES_ATTR,
   PART_ATTR,
@@ -32,8 +36,12 @@ import {
   conditionHolds,
   isDeleted,
   isHollow,
+  isListFieldName,
   isPropName,
   attrsToRemove,
+  listFieldsText,
+  listJson,
+  readList,
   parseAttrConditions,
   parseBindings,
   parseCondition,
@@ -47,6 +55,9 @@ import {
   type ComponentProp,
   type ComponentSlot,
   type InstanceOverrides,
+  type ListField,
+  type ListFieldType,
+  type ListItem,
   type PartOverride,
   styleText,
   unsafeBindingTarget,
@@ -352,20 +363,53 @@ export function cleanRichValue(def: Pick<Revision, 'name'>, prop: string, value:
   return html
 }
 
-/** The props with every rich-text value sanitised: the same object when nothing changed. */
-export function cleanRichProps(
+/** The props with every rich-text and list value in its one safe form: the same object when nothing changed. A list value
+ *  that cannot be read is dropped (the prop's default shows) and reported. */
+export function cleanPropValues(
   def: Pick<Revision, 'name' | 'props'>,
   props: Record<string, string> | undefined,
   ctx: EngineContext,
 ): Record<string, string> | undefined {
-  if (!props || !def.props.some((prop) => prop.type === 'richtext')) return props
+  if (!props || !def.props.some((prop) => prop.type === 'richtext' || prop.type === 'list')) return props
   let next: Record<string, string> | undefined
   for (const [name, value] of Object.entries(props)) {
-    if (!isRichProp(def, name)) continue
-    const clean = cleanRichValue(def, name, value, ctx)
-    if (clean !== value) (next ??= { ...props })[name] = clean
+    const prop = def.props.find((candidate) => candidate.name === name)
+    if (prop?.type === 'richtext') {
+      const clean = cleanRichValue(def, name, value, ctx)
+      if (clean !== value) (next ??= { ...props })[name] = clean
+    } else if (prop?.type === 'list' && value !== '') {
+      const clean = cleanListValue(def, prop, value, ctx)
+      if (clean === undefined) {
+        next ??= { ...props }
+        delete next[name]
+      } else if (clean !== value) (next ??= { ...props })[name] = clean
+    }
   }
   return next ?? props
+}
+
+/** A list prop's value in its one stored form (key-sorted JSON of declared fields only), or `undefined` with an issue when
+ *  it cannot be read. Fields the list does not declare are dropped and reported. The issue never quotes the value. */
+export function cleanListValue(
+  def: Pick<Revision, 'name'>,
+  prop: ComponentProp,
+  value: string,
+  ctx: EngineContext,
+): string | undefined {
+  const read = readList(prop, value)
+  if (read.problem || !read.items) {
+    ctx.issues.push({
+      code: 'invalid_prop_value',
+      message: `${def.name}: ${prop.name} was not set — ${read.problem ?? 'it is not a list'}`,
+    })
+    return undefined
+  }
+  if (read.dropped.length)
+    ctx.issues.push({
+      code: 'list_field_dropped',
+      message: `${def.name}: ${prop.name} gave ${read.dropped.length} value${read.dropped.length === 1 ? '' : 's'} the list has no field for, dropped (${read.dropped.slice(0, 5).join(', ')}${read.dropped.length > 5 ? `, and ${read.dropped.length - 5} more` : ''}); its fields are ${listFieldsText(prop.fields)}`,
+    })
+  return listJson(read.items)
 }
 
 function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides, ctx: EngineContext) {
@@ -379,7 +423,9 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides,
       if (on !== undefined) setAttr(el, target, on === 'false' ? null : '')
       continue
     }
-    const value = overrides.props?.[prop]
+    const scoped = itemScopes.get(overrides)
+    /* inside a list item a field the item leaves out is empty, not the template's sample */
+    const value = overrides.props?.[prop] ?? (scoped?.has(prop) ? '' : undefined)
     if (value === undefined) continue
     /* a bound value is instance data: it never becomes an event handler, and an address it sets cannot run code */
     if (target !== null && el.tagName !== USE_TAG && unsafeBindingTarget(target, el.tagName)) {
@@ -387,6 +433,11 @@ function applyBindings(el: Element, def: Revision, overrides: InstanceOverrides,
         code: 'ignored_attribute',
         message: `${prop} is bound to ${target}, which a component never sets (event handlers, srcdoc and an animation's attributeName stay out of instances)`,
       })
+      continue
+    }
+    if (scoped?.has(prop) && value === '' && target !== null) {
+      /* an empty field leaves no address, title or the like behind; a style or custom property keeps the template's */
+      if (!target.startsWith('style.') && !target.startsWith('--')) setAttr(el, target, null)
       continue
     }
     if (target !== null && URL_TARGETS.has(target.toLowerCase()) && unsafeUrl(value)) {
@@ -444,6 +495,125 @@ function applyPartOverride(el: Element, part: PartOverride) {
   if (part.text !== undefined) setText(el, part.text)
 }
 
+/* ------------------------------------------------------------------ */
+/* List props: data-doop-each                                          */
+/* ------------------------------------------------------------------ */
+
+const listPropOf = (def: Pick<Revision, 'props'>, name: string): ComponentProp | undefined => {
+  const prop = def.props.find((candidate) => candidate.name === name)
+  return prop?.type === 'list' && prop.fields && Object.keys(prop.fields).length ? prop : undefined
+}
+
+/** The scopes an item is rendered in, with the field names each one answers for: inside one an empty field is
+ *  empty, and a nested list is an ordinary element. */
+const itemScopes = new WeakMap<InstanceOverrides, ReadonlySet<string>>()
+
+/** The one item a main's own content stands for: what its bound elements hold, so a fresh instance shows the sample. */
+function sampleItem(el: Element, prop: ComponentProp): ListItem {
+  const fields = prop.fields ?? {}
+  const item: ListItem = {}
+  const stack: Element[] = [el]
+  const order: Element[] = []
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    order.push(node)
+    if (node.tagName !== USE_TAG) stack.push(...elementKids(node).reverse())
+  }
+  for (const node of order) {
+    for (const { target, prop: name } of parseBindings(attrOf(node, BIND_ATTR) ?? '', node.tagName)) {
+      const field = Object.hasOwn(fields, name) ? fields[name] : undefined
+      if (!field || field.type === 'boolean' || Object.hasOwn(item, name)) continue
+      if (target !== null && (target.startsWith('style.') || target.startsWith('--'))) continue
+      const value = target === null ? directText(node) : attrOf(node, target)
+      if (!value || (field.type !== 'text' && unsafeUrl(value))) continue
+      item[name] = value
+    }
+    const condition = node === el ? undefined : parseCondition(attrOf(node, IF_ATTR) ?? '')
+    if (condition?.equals === undefined && condition && fields[condition.prop]?.type === 'boolean')
+      if (!Object.hasOwn(item, condition.prop)) item[condition.prop] = !condition.negate
+  }
+  return item
+}
+
+/** The items an instance shows: its own, else the prop's declared default, else the one item the main's content is. */
+function listItemsOf(prop: ComponentProp, overrides: InstanceOverrides, el: Element): ListItem[] {
+  /* an empty value is no value: the default, as for any prop */
+  const source = overrides.props?.[prop.name] || prop.default
+  return source !== undefined ? (readList(prop, source).items ?? []) : [sampleItem(el, prop)]
+}
+
+/** What an item's elements read: the component's props, with each field the item answers for in front of the prop of that name. */
+function itemScope(
+  def: Revision,
+  prop: ComponentProp,
+  overrides: InstanceOverrides,
+  item: ListItem,
+): { def: Revision; overrides: InstanceOverrides } {
+  const fields = prop.fields ?? {}
+  const names = new Set(Object.keys(fields))
+  const props: Record<string, string> = {}
+  for (const [name, value] of Object.entries(overrides.props ?? {})) if (!names.has(name)) props[name] = value
+  for (const name of names) {
+    const value = Object.hasOwn(item, name) ? item[name] : undefined
+    if (value !== undefined) props[name] = typeof value === 'boolean' ? String(value) : value
+  }
+  const scoped: InstanceOverrides = { props }
+  itemScopes.set(scoped, names)
+  const fieldProps: ComponentProp[] = Object.entries(fields).map(([name, field]) => ({ name, type: field.type }))
+  return {
+    def: { ...def, props: [...fieldProps, ...def.props.filter((candidate) => !names.has(candidate.name))] },
+    overrides: scoped,
+  }
+}
+
+const COPY_KEY = /^(.*)-(\d+)$/
+
+/** Every element of a copy keyed `<key>-<index>`, so an item's parts never collide with another's or with the template's. */
+function keyCopy(root: Element, index: number) {
+  const stack: Element[] = [root]
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    const key = attrOf(node, PART_ATTR)
+    if (key) setAttr(node, PART_ATTR, `${key}-${index}`)
+    stack.push(...elementKids(node))
+  }
+}
+
+/** The element once per item, in order, each marked `data-doop-item`. */
+function renderEachCopies(
+  el: Element,
+  parent: ParentNode,
+  prop: ComponentProp,
+  items: readonly ListItem[],
+  def: Revision,
+  overrides: InstanceOverrides,
+  options: RenderOptions,
+): Element[] {
+  const markup = serializeOuter(el)
+  const copies: Element[] = []
+  for (const [index, item] of items.entries()) {
+    const copy = elementKids(rootFragment(markup))[0]
+    if (!copy) continue
+    keyCopy(copy, index)
+    setAttr(copy, EACH_ATTR, null)
+    setAttr(copy, ITEM_ATTR, String(index))
+    const scope = itemScope(def, prop, overrides, item)
+    renderPart(copy, scope.def, scope.overrides, undefined, options)
+    copy.parentNode = parent
+    copies.push(copy)
+  }
+  return copies
+}
+
+function renderEach(
+  el: Element,
+  parent: ParentNode,
+  prop: ComponentProp,
+  def: Revision,
+  overrides: InstanceOverrides,
+  options: RenderOptions,
+): Element[] {
+  return renderEachCopies(el, parent, prop, listItemsOf(prop, overrides, el), def, overrides, options)
+}
+
 function renderNode(el: Element, def: Revision, overrides: InstanceOverrides, options: RenderOptions) {
   const kept: ChildNode[] = []
   for (const child of el.childNodes) {
@@ -459,6 +629,13 @@ function renderNode(el: Element, def: Revision, overrides: InstanceOverrides, op
       if (parsed && !conditionHolds(parsed, propValue(def, overrides, parsed.prop))) continue
       setAttr(child, IF_ATTR, null)
     }
+    const list = child.tagName === USE_TAG ? undefined : listPropOf(def, (attrOf(child, EACH_ATTR) ?? '').trim())
+    if (list && !itemScopes.has(overrides)) {
+      kept.push(...renderEach(child, el, list, def, overrides, options))
+      continue
+    }
+    /* named no list prop, or inside an item (a list is not nested): an ordinary element */
+    if (attrOf(child, EACH_ATTR) !== undefined && child.tagName !== USE_TAG) setAttr(child, EACH_ATTR, null)
     if (part?.hidden) continue
     if (child.tagName === USE_TAG) {
       if (options.shallow) {
@@ -780,7 +957,9 @@ export function renderInstance(
     })
     return undefined
   }
-  const cleanProps = cleanRichProps(revision, overrides.props, options.ctx)
+  /* the root is the component itself: it cannot repeat */
+  if (attrOf(root, EACH_ATTR) !== undefined) setAttr(root, EACH_ATTR, null)
+  const cleanProps = cleanPropValues(revision, overrides.props, options.ctx)
   if (cleanProps !== overrides.props) overrides = { ...overrides, props: cleanProps }
   const id = instanceId || newElementId()
   const inner: RenderOptions = { ...options, stack: [...options.stack, revision.id], depth: depth + 1, ownerId: id }
@@ -863,14 +1042,21 @@ export interface PartInfo {
   styleProps: Map<string, string>
   isSlot: boolean
   isUse: boolean
+  /** a `data-doop-each` element that is not inside another: the list prop it repeats for */
+  each?: string
+  /** this part is, or is inside, the template of one list item: its bindings name the item's fields, not the component's props */
+  inEach?: string
 }
 
 export function partsOf(template: string): Map<string, PartInfo> {
   const parts = new Map<string, PartInfo>()
   const root = parseTemplateRoot(template)
   if (!root) return parts
-  const stack: Element[] = [root]
-  for (let el = stack.pop(); el; el = stack.pop()) {
+  const stack: [Element, string | undefined][] = [[root, undefined]]
+  for (let entry = stack.pop(); entry; entry = stack.pop()) {
+    const [el, within] = entry
+    const own = el !== root && el.tagName !== USE_TAG ? attrOf(el, EACH_ATTR)?.trim() : undefined
+    const inEach = within ?? own
     const key = attrOf(el, PART_ATTR)
     if (key) {
       const info: PartInfo = {
@@ -879,6 +1065,8 @@ export function partsOf(template: string): Map<string, PartInfo> {
         styleProps: new Map(),
         isSlot: attrOf(el, SLOT_ATTR) !== undefined,
         isUse: el.tagName === USE_TAG,
+        ...(within === undefined && own ? { each: own } : {}),
+        ...(inEach ? { inEach } : {}),
       }
       for (const { target, prop } of parseBindings(attrOf(el, BIND_ATTR) ?? '', el.tagName)) {
         if (target === null) info.textProp = prop
@@ -888,7 +1076,7 @@ export function partsOf(template: string): Map<string, PartInfo> {
       }
       parts.set(key, info)
     }
-    stack.push(...elementKids(el))
+    stack.push(...elementKids(el).map((kid): [Element, string | undefined] => [kid, inEach]))
   }
   return parts
 }
@@ -1247,7 +1435,8 @@ function pruneOverrides(
         prop.type === 'link' ||
         prop.type === 'number' ||
         prop.type === 'color' ||
-        prop.type === 'richtext')
+        prop.type === 'richtext' ||
+        prop.type === 'list')
     ) {
       if (templateValueOf(name, parts, prop) === value) continue
     }
@@ -1284,7 +1473,13 @@ function pruneOverrides(
 }
 
 function templateValueOf(prop: string, parts: Map<string, PartInfo>, declared?: ComponentProp): string | undefined {
+  if (declared?.type === 'list') {
+    const info = [...parts.values()].find((candidate) => candidate.each === prop)
+    return info ? listJson([sampleItem(info.el, declared)]) : undefined
+  }
   for (const info of parts.values()) {
+    /* an item's bindings name its fields, which a component prop of the same name is not */
+    if (info.inEach) continue
     if (info.textProp === prop)
       return declared?.type === 'richtext' ? sanitizeRichText(serialize(info.el)).html : directText(info.el)
     for (const [target, name] of info.attrProps) if (name === prop) return attrOf(info.el, target)
@@ -1332,13 +1527,192 @@ export function reconcileInstance(el: Element, ctx: EngineContext, inMain = fals
     ...(read.overrides.parts ? { parts: { ...read.overrides.parts } } : {}),
   }
   const rootKey = attrOf(base, PART_ATTR)
-  /* a nested root carries the outer component's key on it */
-  if (rootKey || attrOf(parseTemplateRoot(revision.template)!, PART_ATTR)) {
-    const key = attrOf(parseTemplateRoot(revision.template)!, PART_ATTR) ?? rootKey!
-    setAttr(base, PART_ATTR, key)
-    diffPart(base, el, key, parts, revision, true, state, ctx, marker.overrides.props)
+  /* the items of a list are read back into its prop, and their copies stay out of the diff: nothing else in one is kept */
+  const restore = readLists(base, el, parts, revision, marker, state, ctx)
+  try {
+    /* a nested root carries the outer component's key on it */
+    if (rootKey || attrOf(parseTemplateRoot(revision.template)!, PART_ATTR)) {
+      const key = attrOf(parseTemplateRoot(revision.template)!, PART_ATTR) ?? rootKey!
+      setAttr(base, PART_ATTR, key)
+      diffPart(base, el, key, parts, revision, true, state, ctx, marker.overrides.props)
+    }
+  } finally {
+    restore()
   }
   return { ...read, overrides: pruneOverrides(state, parts, revision, ctx) }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reconcile: list items                                               */
+/* ------------------------------------------------------------------ */
+
+/** The elements below `root` (not through a nested instance) that are copies of one of these list templates, in document order. */
+function copiesOf(root: Element, keys: ReadonlySet<string>): Element[] {
+  const found: Element[] = []
+  const walk = (node: Element) => {
+    for (const kid of elementKids(node)) {
+      const key = attrOf(kid, PART_ATTR)
+      const template = key === undefined ? undefined : (COPY_KEY.exec(key)?.[1] ?? key)
+      if (template !== undefined && keys.has(template)) found.push(kid)
+      else if (!attrOf(kid, INSTANCE_ATTR)) walk(kid)
+    }
+  }
+  walk(root)
+  return found
+}
+
+/** Take the copies out of the tree, and give back what puts them where they were. */
+function withoutNodes(root: Element, gone: ReadonlySet<Element>): () => void {
+  const changed: [Element, ChildNode[]][] = []
+  const walk = (node: Element) => {
+    if (node.childNodes.some((kid) => isElement(kid) && gone.has(kid))) {
+      changed.push([node, node.childNodes])
+      node.childNodes = node.childNodes.filter((kid) => !(isElement(kid) && gone.has(kid)))
+    }
+    for (const kid of elementKids(node)) if (!attrOf(kid, INSTANCE_ATTR)) walk(kid)
+  }
+  walk(root)
+  return () => {
+    for (const [node, kids] of changed) node.childNodes = kids
+  }
+}
+
+/** A copy as only its content shows: no bookkeeping attributes, text trimmed and collapsed, a nested instance as a stub. */
+function copyShape(copy: Element): string {
+  const clone = rootFragment(serializeOuter(copy))
+  const walk = (node: ParentNode) => {
+    node.childNodes = node.childNodes.flatMap((child): ChildNode[] => {
+      if (child.nodeName === '#text') {
+        const text = (child as Tree.TextNode).value.replace(/\s+/g, ' ').trim()
+        return text ? [{ ...(child as Tree.TextNode), value: text }] : []
+      }
+      if (!isElement(child)) return []
+      if (child.tagName === USE_TAG || attrOf(child, INSTANCE_ATTR))
+        return [defaultTreeAdapter.createElement('x-nested', parse5Html.NS.HTML, [])]
+      child.attrs = child.attrs
+        .filter((attr) => !attr.name.startsWith('data-doop-'))
+        .sort((a, b) => a.name.localeCompare(b.name))
+      walk(child)
+      return [child]
+    })
+  }
+  walk(clone)
+  return serialize(clone)
+}
+
+/** What one copy's bound elements say about its item: each field's value, for the fields whose element is still there. */
+function readCopy(
+  copy: Element,
+  prop: ComponentProp,
+  parts: Map<string, PartInfo>,
+  ctx: EngineContext,
+  def: Pick<Revision, 'name'>,
+): Map<string, string> {
+  const fields = prop.fields ?? {}
+  const byKey = new Map<string, Element>()
+  const stack: Element[] = [copy]
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    const key = attrOf(node, PART_ATTR)
+    if (key !== undefined) {
+      const template = COPY_KEY.exec(key)?.[1] ?? key
+      if (!byKey.has(template)) byKey.set(template, node)
+    }
+    if (!attrOf(node, INSTANCE_ATTR)) stack.push(...elementKids(node).reverse())
+  }
+  const values = new Map<string, string>()
+  const take = (name: string, value: string | undefined) => {
+    const field = Object.hasOwn(fields, name) ? fields[name] : undefined
+    if (value === undefined || !field || field.type === 'boolean' || values.has(name)) return
+    if (value.length > MAX_LIST_TEXT || (field.type !== 'text' && unsafeUrl(value))) {
+      ctx.issues.push({
+        code: 'invalid_prop_value',
+        message: `${def.name}: the edit to ${name} in a ${prop.name} item was not kept — ${propValueProblem({ name, type: field.type }, value) ?? 'it is too long'}`,
+      })
+      return
+    }
+    values.set(name, value)
+  }
+  for (const [key, info] of parts) {
+    if (info.inEach !== prop.name) continue
+    const el = byKey.get(key)
+    if (!el) continue
+    if (info.textProp) take(info.textProp, directText(el))
+    for (const [target, name] of info.attrProps) take(name, attrOf(el, target))
+  }
+  return values
+}
+
+/** Read an edited instance's list items back into their props, and take their copies out of the diff.
+ *  The edits that count are the ones a field says: text, an address, an image. Copies removed by hand remove
+ *  their items, one duplicated (or written without an index) adds an item, and anything else is reported
+ *  and left to the template. Returns what puts the copies back. */
+function readLists(
+  base: Element,
+  incoming: Element,
+  parts: Map<string, PartInfo>,
+  def: Revision,
+  marker: InstanceState,
+  state: InstanceOverrides,
+  ctx: EngineContext,
+): () => void {
+  const lists = [...parts].flatMap(([key, info]) => {
+    const prop = info.each ? listPropOf(def, info.each) : undefined
+    return prop ? [{ key, info, prop }] : []
+  })
+  if (!lists.length) return () => {}
+  const keys = new Set(lists.map((list) => list.key))
+  const copies = copiesOf(incoming, keys)
+  const gone = new Set(copies)
+  for (const { key, info, prop } of lists) {
+    const mine = copies.filter((copy) => {
+      const copyKey = attrOf(copy, PART_ATTR) ?? ''
+      return (COPY_KEY.exec(copyKey)?.[1] ?? copyKey) === key
+    })
+    const current = listItemsOf(prop, marker.overrides, info.el)
+    const next: ListItem[] = []
+    for (const copy of mine) {
+      const at = Number(attrOf(copy, ITEM_ATTR))
+      const known = Number.isInteger(at) && at >= 0 && at < current.length && attrOf(copy, PART_ATTR) === `${key}-${at}`
+      /* a copy duplicated by hand carries the same index: it starts from that item and adds one */
+      const item: ListItem = known ? { ...current[at] } : {}
+      for (const [name, value] of readCopy(copy, prop, parts, ctx, def)) {
+        const before = item[name]
+        if (before === value) continue
+        if (value === '' && before === undefined) continue
+        if (value === '') delete item[name]
+        else item[name] = value
+      }
+      next.push(item)
+    }
+    const read = readList(prop, next)
+    if (read.problem || !read.items) {
+      ctx.issues.push({
+        code: 'invalid_prop_value',
+        message: `${def.name}: the edit to ${prop.name} was not kept — ${read.problem ?? 'it is not a list'}`,
+      })
+      continue
+    }
+    const items = read.items
+    if (listJson(items) !== listJson(current)) (state.props ??= {})[prop.name] = listJson(items)
+    /* what the copies show beyond their fields is the template's: say so when an edit was dropped */
+    const options: RenderOptions = { ctx: silent(ctx), stack: [], shallow: true, ownerId: marker.instanceId }
+    const parent: ParentNode = (info.el.parentNode as ParentNode | null) ?? base
+    const reference = renderEachCopies(info.el, parent, prop, items, def, marker.overrides, options)
+    const dropped = mine.filter(
+      (copy, index) => !reference[index] || copyShape(copy) !== copyShape(reference[index]!),
+    ).length
+    if (dropped)
+      ctx.issues.push({
+        code: 'list_item_edit_dropped',
+        message: `${def.name}: ${dropped} item${dropped === 1 ? '' : 's'} of ${prop.name} had edits that are not one of its fields (${listFieldsText(prop.fields)}), which a list does not keep: change the component's template, or edit the field values`,
+      })
+  }
+  const undoBase = withoutNodes(base, new Set(copiesOf(base, keys)))
+  const undoIncoming = withoutNodes(incoming, gone)
+  return () => {
+    undoIncoming()
+    undoBase()
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1468,11 +1842,17 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
       if (problem) {
         ctx.issues.push({
           code: 'invalid_prop_value',
-          message: `${def.name}: "${shown(attr.value)}" is not a value of ${name} — ${problem}`,
+          message:
+            prop.type === 'list'
+              ? `${def.name}: ${name} was not set — ${problem}`
+              : `${def.name}: "${shown(attr.value)}" is not a value of ${name} — ${problem}`,
         })
         continue
       }
-      props[name] = prop.type === 'richtext' ? cleanRichValue(def, name, attr.value, ctx) : attr.value
+      if (prop.type === 'list') {
+        const clean = cleanListValue(def, prop, attr.value, ctx)
+        if (clean !== undefined) props[name] = clean
+      } else props[name] = prop.type === 'richtext' ? cleanRichValue(def, name, attr.value, ctx) : attr.value
       continue
     }
     if (name.startsWith('data-') || name.startsWith('aria-')) {
@@ -1496,7 +1876,7 @@ export function stateFromUseAttrs(use: Element, def: Revision, ctx: EngineContex
 }
 
 function assignSlots(use: Element, def: Revision, parts: Record<string, PartOverride>, ctx: EngineContext) {
-  const slotParts = [...partsOf(def.template)].filter(([, info]) => info.isSlot)
+  const slotParts = [...partsOf(def.template)].filter(([, info]) => info.isSlot && !info.inEach)
   if (!slotParts.length) return
   const byName = new Map(slotParts.map(([key, info]) => [attrOf(info.el, SLOT_ATTR) ?? '', key]))
   const fallback = slotParts[0]![0]
@@ -2041,15 +2421,44 @@ export function derivePropsAndSlots(
   for (const prop of declared) if (reflects(prop) && isPropName(prop.name)) props.set(prop.name, prop)
   const slots: ComponentSlot[] = []
   if (!root) return { props: [...props.values()], slots }
-  const stack: Element[] = [root]
+  const stack: [Element, ReadonlySet<string> | undefined][] = [[root, undefined]]
   const order: Element[] = []
-  for (let el = stack.pop(); el; el = stack.pop()) {
+  /* a list's element and everything below it is one item: what it names that the list has as a field is the item's, not a prop */
+  const fieldsAt = new Map<Element, ReadonlySet<string>>()
+  const lists = new Map<Element, Record<string, ListField>>()
+  for (let entry = stack.pop(); entry; entry = stack.pop()) {
+    const [el, within] = entry
     order.push(el)
-    stack.push(...elementKids(el).reverse())
+    let names = within
+    if (!within && isEachElement(el, root)) {
+      const known = declaredOf(declared, (attrOf(el, EACH_ATTR) ?? '').trim())
+      const fields = known?.type === 'list' && known.fields ? known.fields : inferFields(el)
+      lists.set(el, fields)
+      names = new Set(Object.keys(fields))
+    }
+    if (names) fieldsAt.set(el, names)
+    stack.push(
+      ...elementKids(el)
+        .reverse()
+        .map((kid): [Element, ReadonlySet<string> | undefined] => [kid, names]),
+    )
   }
   for (const el of order) {
+    const fields = fieldsAt.get(el)
+    const own = lists.get(el)
+    const each = (attrOf(el, EACH_ATTR) ?? '').trim()
+    if (own && isPropName(each) && !props.has(each)) {
+      const known = declaredOf(declared, each)
+      props.set(each, {
+        name: each,
+        type: 'list',
+        fields: own,
+        ...(known?.type === 'list' && known.default !== undefined ? { default: known.default } : {}),
+        ...descriptionOf(known),
+      })
+    }
     for (const { target, prop } of parseBindings(attrOf(el, BIND_ATTR) ?? '', el.tagName)) {
-      if (props.has(prop)) continue
+      if (fields?.has(prop) || props.has(prop)) continue
       const known = declaredOf(declared, prop)
       if (el.tagName === USE_TAG) {
         /* `inner:outer` on a nested use: the outer prop is the nested component's prop, handed up */
@@ -2086,7 +2495,8 @@ export function derivePropsAndSlots(
       ...parseAttrConditions(attrOf(el, ATTR_IF_ATTR) ?? '').flatMap((entry) => entry.conditions),
     ]
     for (const condition of conditions) {
-      if (!condition || !isPropName(condition.prop) || props.has(condition.prop)) continue
+      if (!condition || !isPropName(condition.prop) || props.has(condition.prop) || fields?.has(condition.prop))
+        continue
       const known = declaredOf(declared, condition.prop)
       props.set(condition.prop, {
         name: condition.prop,
@@ -2097,7 +2507,7 @@ export function derivePropsAndSlots(
         ...descriptionOf(known),
       })
     }
-    const slot = attrOf(el, SLOT_ATTR)
+    const slot = fields ? undefined : attrOf(el, SLOT_ATTR)
     if (slot !== undefined) {
       slots.push({
         name: slot || 'default',
@@ -2109,6 +2519,37 @@ export function derivePropsAndSlots(
     }
   }
   return { props: [...props.values()], slots }
+}
+
+/** An element that repeats for the items of a list (never the root, which is the component itself, and never a `<doop-use>`). */
+const isEachElement = (el: Element, root: Element) =>
+  el !== root && el.tagName !== USE_TAG && attrOf(el, EACH_ATTR) !== undefined
+
+/** The fields a list element's own bindings and conditions imply: an image's source an image, a link's target a link,
+ *  a condition a boolean, anything else text. First seen first, at most MAX_LIST_FIELDS. */
+function inferFields(el: Element): Record<string, ListField> {
+  const fields: Record<string, ListField> = {}
+  const add = (name: string, type: ListFieldType) => {
+    if (isListFieldName(name) && !Object.hasOwn(fields, name) && Object.keys(fields).length < MAX_LIST_FIELDS)
+      fields[name] = { type }
+  }
+  const stack: Element[] = [el]
+  const order: Element[] = []
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    order.push(node)
+    if (node.tagName !== USE_TAG) stack.push(...elementKids(node).reverse())
+  }
+  for (const node of order) {
+    for (const { target, prop } of parseBindings(attrOf(node, BIND_ATTR) ?? '', node.tagName))
+      add(prop, target === 'src' ? 'image' : target === 'href' ? 'link' : 'text')
+    const conditions = [
+      ...(node === el ? [] : [parseCondition(attrOf(node, IF_ATTR) ?? '')]),
+      ...parseAttrConditions(attrOf(node, ATTR_IF_ATTR) ?? '').flatMap((entry) => entry.conditions),
+    ]
+    for (const condition of conditions)
+      if (condition) add(condition.prop, condition.equals === undefined ? 'boolean' : 'text')
+  }
+  return fields
 }
 
 /** What a forwarded prop takes from the nested prop it feeds: its limits, never its default. */
@@ -2211,6 +2652,8 @@ export function inferBindings(root: Element, limit = 12, { fromClasses = true } 
     if (el.tagName === 'style' || el.tagName === 'script' || el.tagName === 'svg') continue
     /* a nested component, written out or still `<doop-use>`: its content is its own */
     if (attrOf(el, INSTANCE_ATTR) || el.tagName === USE_TAG) continue
+    /* a list's element: its bindings are the item's fields, named on purpose */
+    if (isEachElement(el, root)) continue
     order.push(el)
     stack.push(...elementKids(el).reverse())
   }

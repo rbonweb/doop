@@ -26,6 +26,10 @@ export const SLOT_SUGGEST_ATTR = 'data-doop-slot-suggest'
 export const BIND_ATTR = 'data-doop-prop'
 /** `showIcon`, `!showIcon`, `tone=ghost` or `tone!=ghost`: the element exists only when this holds. */
 export const IF_ATTR = 'data-doop-if'
+/** `items`: the element is the template of one item of that `list` prop and renders once per item. */
+export const EACH_ATTR = 'data-doop-each'
+/** On each rendered copy of a `data-doop-each` element: its place in the list (0, 1, 2…). */
+export const ITEM_ATTR = 'data-doop-item'
 /** `data-no-visuals: trailingVisual!=SearchIcon & !hasIcon; title: titled`: attributes the template writes literally, each kept on
  *  the rendered element only while every condition after its name holds (see `parseAttrConditions`). Removal only: it never adds one. */
 export const ATTR_IF_ATTR = 'data-doop-attr-if'
@@ -126,17 +130,33 @@ export const PROP_TYPES = [
   'color',
   'instance',
   'richtext',
+  'list',
 ] as const
 /** the longest rich-text value a prop takes: the sanitizer bounds its work by it (server/richText.ts) */
 export const MAX_RICHTEXT_CHARS = 20_000
 export type ComponentPropType = (typeof PROP_TYPES)[number]
+
+/** What one field of a list item holds: the types an item's values are checked as. */
+export const LIST_FIELD_TYPES = ['text', 'link', 'image', 'boolean'] as const
+export type ListFieldType = (typeof LIST_FIELD_TYPES)[number]
+export interface ListField {
+  type: ListFieldType
+}
+/** An item of a list prop: a value per field, text as a string and a boolean as one. */
+export type ListItem = Record<string, string | boolean>
+export const MAX_LIST_ITEMS = 100
+export const MAX_LIST_FIELDS = 12
+/** the longest text a list item field takes */
+export const MAX_LIST_TEXT = 4_000
+/** the longest JSON a list value is read from: bounds the work before anything is parsed */
+export const MAX_LIST_CHARS = 200_000
 
 export interface ComponentProp {
   /** lowercase, since it doubles as an HTML attribute on `<doop-use>` */
   name: string
   type: ComponentPropType
   /** enum, boolean, number, color and instance: what conditions see when an instance gives no value.
-   *  Text-like defaults are the template's own content */
+   *  Text-like defaults are the template's own content; a list's is a JSON array of items (else one item read from the main) */
   default?: string
   /** enum only */
   options?: string[]
@@ -148,6 +168,8 @@ export interface ComponentProp {
   accepts?: string[]
   /** boolean only: puts `data-<name>="true"|"false"` on the instance root, as an enum does, for CSS to key on */
   reflect?: boolean
+  /** list only: the fields of one item, by name (named like props, so bindings and conditions reach them). */
+  fields?: Record<string, ListField>
   description?: string
 }
 
@@ -292,6 +314,8 @@ export type ComponentIssueCode =
   | 'richtext_sanitized'
   | 'unnamed_slot_content'
   | 'unknown_slot'
+  | 'list_field_dropped'
+  | 'list_item_edit_dropped'
 
 /** Something an agent should hear about instead of finding out from a screenshot. */
 export interface ComponentIssue {
@@ -329,6 +353,99 @@ export function toPropName(value: string): string {
     .replace(/^[^a-z]+|-+$/g, '')
     .slice(0, 40)
   return isPropName(slug) ? slug : 'value'
+}
+
+/* a field is named like a prop, since bindings and conditions reach it by that name; these two would shadow what every object has */
+const RESERVED_FIELD_NAMES = new Set(['constructor', 'prototype'])
+
+export function isListFieldName(value: unknown): value is string {
+  return isPropName(value) && !RESERVED_FIELD_NAMES.has(value)
+}
+
+/** `title (text), url (link), done (boolean)`: what an item may hold, for messages and descriptions. */
+export function listFieldsText(fields: Record<string, ListField> | undefined): string {
+  const entries = Object.entries(fields ?? {})
+  return entries.length ? entries.map(([name, field]) => `${name} (${field.type})`).join(', ') : 'no fields declared'
+}
+
+export interface ListRead {
+  /** the items in their one safe form, `undefined` when the value is refused */
+  items?: ListItem[]
+  /** why the value is refused, saying what is allowed */
+  problem?: string
+  /** `item 2: nope` for each field an item gave that the list does not declare: dropped, not refused */
+  dropped: string[]
+}
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+function listFieldValue(field: ListField, value: unknown): string | boolean | undefined {
+  if (field.type === 'boolean') {
+    if (typeof value === 'boolean') return value
+    if (value === 'true' || value === 'false') return value === 'true'
+    return undefined
+  }
+  const text = typeof value === 'number' && Number.isFinite(value) ? String(value) : value
+  if (typeof text !== 'string' || text.length > MAX_LIST_TEXT) return undefined
+  if (field.type !== 'text' && unsafeUrl(text)) return undefined
+  return text
+}
+
+/** A list prop's value (JSON text, or an array already parsed) as the items it holds. Only declared
+ *  fields survive, each checked as its type (a text is plain text, a link and an image pass the same
+ *  address guard link and image props do, a boolean is true or false); an unknown field is dropped and
+ *  reported, anything else wrong refuses the whole value. */
+export function readList(prop: Pick<ComponentProp, 'fields'>, value: unknown): ListRead {
+  const allowed = `use a JSON array of at most ${MAX_LIST_ITEMS} items with the fields ${listFieldsText(prop.fields)}`
+  const fields = prop.fields ?? {}
+  if (!Object.keys(fields).length) return { problem: 'this list declares no fields, so it takes no items', dropped: [] }
+  let parsed: unknown = value
+  if (typeof value === 'string') {
+    if (value.length > MAX_LIST_CHARS)
+      return { problem: `${allowed}, in at most ${MAX_LIST_CHARS} characters`, dropped: [] }
+    try {
+      parsed = JSON.parse(value)
+    } catch {
+      return { problem: `${allowed}; that is not valid JSON`, dropped: [] }
+    }
+  }
+  if (!Array.isArray(parsed)) return { problem: `${allowed}; that is not an array`, dropped: [] }
+  if (parsed.length > MAX_LIST_ITEMS) return { problem: `${allowed}; that has ${parsed.length} items`, dropped: [] }
+  const items: ListItem[] = []
+  const dropped: string[] = []
+  for (const [at, raw] of parsed.entries()) {
+    if (!isPlainRecord(raw)) return { problem: `${allowed}; item ${at} is not an object`, dropped }
+    const item: ListItem = {}
+    for (const name of Object.keys(raw)) {
+      const field = Object.hasOwn(fields, name) ? fields[name] : undefined
+      if (!field) {
+        dropped.push(`item ${at}: ${name.slice(0, 40).replace(/[^\w .:-]/g, '?')}`)
+        continue
+      }
+      const entry = listFieldValue(field, raw[name])
+      if (entry === undefined)
+        return {
+          problem: `${allowed}; item ${at} gives ${name} a value that is not ${
+            field.type === 'boolean'
+              ? 'true or false'
+              : field.type === 'text'
+                ? `text of at most ${MAX_LIST_TEXT} characters`
+                : 'a web address, mailto:, tel: or relative path (never javascript:, vbscript: or data:text/html)'
+          }`,
+          dropped,
+        }
+      item[name] = entry
+    }
+    items.push(item)
+  }
+  return { items, dropped }
+}
+
+/** The one stored form of a list: key-sorted JSON, so the same items always write the same bytes. */
+export function listJson(items: readonly ListItem[]): string {
+  /* no angle bracket survives into the marker an item is stored in: the JSON escape reads back the same */
+  return stableJson(items).replace(/</g, '\\u003c').replace(/>/g, '\\u003e')
 }
 
 export type Condition = { prop: string; equals?: string; negate: boolean }
@@ -591,6 +708,10 @@ export function propValueProblem(prop: ComponentProp, value: string, lookup?: Co
       return value.length > MAX_RICHTEXT_CHARS
         ? `use at most ${MAX_RICHTEXT_CHARS.toLocaleString('en-US')} characters of text with <b>, <i>, <strong>, <em>, <br>, <a href="https://…"> and <span class="…">`
         : undefined
+    case 'list': {
+      const read = readList(prop, value)
+      return read.problem
+    }
     case 'color':
       return isColorValue(value)
         ? undefined
@@ -631,7 +752,11 @@ export function componentSignature(def: Pick<ComponentDef, 'name' | 'props' | 's
           ? `number(${numberRange(prop)}${prop.step !== undefined ? `${numberRange(prop) ? ' ' : ''}step ${prop.step}` : ''})`
           : prop.type === 'instance' && prop.accepts?.length
             ? `instance(${prop.accepts.join('|')})`
-            : prop.type
+            : prop.type === 'list' && prop.fields
+              ? `list(${Object.entries(prop.fields)
+                  .map(([name, field]) => `${name}: ${field.type}`)
+                  .join(', ')})`
+              : prop.type
     return `${prop.name}: ${type}${prop.default !== undefined ? ` = ${prop.default}` : ''}`
   })
   const slots = def.slots.length ? ` slots: ${def.slots.map((slot) => slot.name).join(', ')}` : ''

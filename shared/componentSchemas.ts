@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { CODE_ORIGINS } from './componentCode.ts'
-import { PROP_TYPES } from './components.ts'
+import { LIST_FIELD_TYPES, MAX_LIST_FIELDS, PROP_TYPES } from './components.ts'
 
 /**
  * The zod shapes of a component's props and code mapping, shared by the agent tools (server/componentTools.ts),
@@ -13,12 +13,14 @@ export const propSchema = z.object({
     .enum(PROP_TYPES)
     .optional()
     .describe(
-      'text (default), richtext (inline <b> <i> <a href> <span class>, sanitized), image, link, boolean, number, color, instance, or enum with options',
+      'text (default), richtext (inline <b> <i> <a href> <span class>, sanitized), image, link, boolean, number, color, instance, list (needs fields; an element marked data-doop-each repeats per item), or enum with options',
     ),
   default: z
     .string()
     .optional()
-    .describe('enum, boolean, number, color and instance only; text-like defaults are the template content'),
+    .describe(
+      'enum, boolean, number, color, instance and list only; text-like defaults are the template content. A list default is a JSON array of items',
+    ),
   options: z
     .array(z.string())
     .optional()
@@ -35,6 +37,12 @@ export const propSchema = z.object({
     .boolean()
     .optional()
     .describe('boolean only: put data-<name>="true"|"false" on the root, for CSS to key on like an enum'),
+  fields: z
+    .record(z.object({ type: z.enum(LIST_FIELD_TYPES) }))
+    .optional()
+    .describe(
+      `list only: the fields of one item, e.g. { "title": { "type": "text" }, "url": { "type": "link" } } (type text, link, image or boolean; at most ${MAX_LIST_FIELDS}, named like props). An element marked data-doop-each="<list prop>" is repeated per item, and its data-doop-prop bindings and data-doop-if conditions read the item's fields`,
+    ),
   description: z.string().optional().describe('When to use it, in a line'),
 })
 
