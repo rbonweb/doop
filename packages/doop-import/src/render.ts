@@ -74,7 +74,10 @@ async function openStoryPage(
       errors: {
         access: () => new StorybookError(SIGN_IN_HINT),
         /* the CLI is running on the person's own machine: its own failures show what happened */
-        render: (message, cause) => new Error(cause instanceof Error ? cause.message : message),
+        render: (message, cause) => {
+          const text = cause instanceof Error ? cause.message : message
+          return cause === undefined ? new Error(text) : new Error(text, { cause })
+        },
       },
       denied,
     })

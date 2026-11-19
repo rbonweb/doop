@@ -46,6 +46,22 @@ function json(body: unknown, init: ResponseInit = {}): Response {
   })
 }
 
+/** A body that arrives in chunks and declares no length, so only counting while reading can stop it. */
+function streamedBody(total: number): ReadableStream<Uint8Array> {
+  const chunk = new Uint8Array(64 * 1024).fill(0x20)
+  let sent = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent > total) {
+        controller.close()
+        return
+      }
+      sent += chunk.byteLength
+      controller.enqueue(chunk)
+    },
+  })
+}
+
 const v3 = {
   v: 3,
   stories: {
@@ -54,8 +70,13 @@ const v3 = {
 }
 
 describe('the shared story-page module', () => {
-  it('is what both callers import, and neither keeps a copy', async () => {
-    for (const file of [serverPath, cliPath]) {
+  it('is what both callers import and call, and neither keeps a copy', async () => {
+    /* the CLI imports the shared reader under its own name, so the call is checked against that name */
+    const callers = [
+      { file: serverPath, call: /\breadStorybookIndex\s*\(/ },
+      { file: cliPath, call: /\breadPageIndex\s*\(/ },
+    ]
+    for (const { file, call } of callers) {
       const source = await readFile(file, 'utf8')
       expect(source, file).toMatch(
         /import\s*\{[^}]*\bstoryPageAdapter\b[^}]*\}\s*from\s*'[^']*shared\/storybook\/page\.ts'/,
@@ -63,6 +84,8 @@ describe('the shared story-page module', () => {
       expect(source, file).toMatch(
         /import\s*\{[^}]*\breadStorybookIndex\b[^}]*\}\s*from\s*'[^']*shared\/storybook\/page\.ts'/,
       )
+      /* an import that is never called would leave the caller on a copy of its own */
+      expect(source, file).toMatch(call)
       for (const gone of [
         'waitForFunction(',
         'isolatedRealm',
@@ -141,6 +164,19 @@ describe('readStorybookIndex', () => {
       readStorybookIndex(base, {
         fetchUrl: async () =>
           new Response('', { status: 200, headers: { 'content-length': String(MAX_INDEX_BYTES + 1) } }),
+        errors,
+        notFoundMessage: 'not found',
+        tooLargeMessage: 'the index is too large',
+      }),
+    ).rejects.toThrow()
+    expect(calls).toEqual([{ kind: 'index', message: 'the index is too large', readBody: true }])
+  })
+
+  it('refuses a streamed index body over the limit with no content-length', async () => {
+    const { calls, errors } = recordingErrors()
+    await expect(
+      readStorybookIndex(base, {
+        fetchUrl: async () => new Response(streamedBody(MAX_INDEX_BYTES), { status: 200 }),
         errors,
         notFoundMessage: 'not found',
         tooLargeMessage: 'the index is too large',
