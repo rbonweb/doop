@@ -1,7 +1,15 @@
 import { once } from 'node:events'
-import { createConnection } from 'node:net'
-import { expect, it } from 'vitest'
+import { createConnection, createServer } from 'node:net'
+import { expect, it as run } from 'vitest'
 import { startServer } from './harness'
+
+/* Linux answers on all of 127.0.0.0/8; macOS only has 127.0.0.1 on lo0, so 127.0.0.2 cannot be reached there at all */
+const hasAlternateLoopback = await new Promise<boolean>((resolve) => {
+  const probe = createServer()
+  probe.once('error', () => resolve(false))
+  probe.listen(0, '127.0.0.2', () => probe.close(() => resolve(true)))
+})
+const it = run.skipIf(!hasAlternateLoopback)
 
 async function connectToAlternateLoopback(port: number): Promise<void> {
   const socket = createConnection({ host: '127.0.0.2', port })

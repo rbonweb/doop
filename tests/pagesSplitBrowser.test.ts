@@ -29,7 +29,8 @@ describe.skipIf(!findBrowserPath())('the Pages and Layers split', () => {
     page.evaluate(() => {
       const pagesEl = document.querySelector<HTMLElement>('[data-slot="pages-panel"]')!
       const rail = pagesEl.closest<HTMLElement>('[data-slot="panel"]')!
-      const tree = rail.querySelector<HTMLElement>('[role="tree"]')!
+      /* the fork's page list is a tree too, so the Layers tree is the one outside the Pages section */
+      const tree = [...rail.querySelectorAll<HTMLElement>('[role="tree"]')].find((el) => !pagesEl.contains(el))!
       return {
         pages: pagesEl.getBoundingClientRect().height,
         tree: tree.getBoundingClientRect().height,
@@ -74,6 +75,8 @@ describe.skipIf(!findBrowserPath())('the Pages and Layers split', () => {
     await page.mouse.down()
     await page.mouse.move(x, y + dy, { steps: 8 })
     await page.mouse.up()
+    /* a pointer move renders in the next task, not inside the event: lay it out before anything measures */
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
   }
 
   /** Leave a large split on the current canvas, then open a different canvas. */
