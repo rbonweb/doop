@@ -422,10 +422,16 @@ describe('children and component props of a mapped export', () => {
 
   it('takes the export name from values when it differs from the option', () => {
     const btn = button({
-      props: { 'trailing-visual': { component: { importFrom: OCTICONS }, values: { HeartIcon: 'HeartFillIcon' } } },
+      props: {
+        'trailing-visual': {
+          name: 'trailingVisual',
+          component: { importFrom: OCTICONS },
+          values: { HeartIcon: 'HeartFillIcon' },
+        },
+      },
     })
     const { home } = homeOf(btn, use(btn, 'trailing-visual="HeartIcon"'))
-    expect(home).toContain('trailing-visual={HeartFillIcon}'.replace('trailing-visual', 'trailing-visual'))
+    expect(home).toContain('trailingVisual={HeartFillIcon}')
   })
 
   it('looks a runtime value up over every option and imports them all', () => {
@@ -514,9 +520,18 @@ describe('children and component props of a mapped export', () => {
   })
 
   it('leaves a plain enum a string', () => {
-    const btn = button({})
+    const btn = button({ props: { label: { name: 'children' }, 'trailing-visual': { name: 'trailingVisual' } } })
     const { home } = homeOf(btn, use(btn, 'trailing-visual="HeartIcon"'))
-    expect(home).toContain('trailing-visual={"HeartIcon"}')
+    expect(home).toContain('trailingVisual={"HeartIcon"}')
+  })
+
+  it('leaves out a hyphenated enum the mapping does not rename, and says so', () => {
+    const btn = button({})
+    const { out, home } = homeOf(btn, use(btn, 'trailing-visual="HeartIcon"'))
+    expect(home).not.toContain('trailing-visual')
+    expect(out.report.issues.map((issue) => issue.detail)).toEqual([
+      expect.stringContaining('Button: prop "trailing-visual" was set to "HeartIcon" on an instance and left out'),
+    ])
   })
 })
 
@@ -1190,5 +1205,80 @@ describe('data-doop-attr-if', () => {
     const out = exportOf([mapped], frame(`<doop-use component="${mapped.id}"></doop-use>`))
     expect(fileOf(out, 'src/pages/Home.tsx')).toContain('from "@acme/ui"')
     expect(fileOf(out, 'src/pages/Home.tsx')).toMatch(/<Button\b[^>]*\/>/)
+  })
+})
+
+describe('props a mapped component cannot receive', () => {
+  const CARD = (code: NonNullable<ComponentDef['code']> = {}) =>
+    def(
+      'Card',
+      '<div data-doop-part="r"><h3 data-doop-part="h" data-doop-prop="text">Sign in</h3><p data-doop-part="p" data-doop-prop="text-2">Welcome</p></div>',
+      {
+        props: [
+          { name: 'text', type: 'text' },
+          { name: 'text-2', type: 'text' },
+          { name: 'variant', type: 'enum', options: ['default', 'outline'], default: 'default' },
+        ],
+        code: { importFrom: '@acme/ui', exportName: 'Card', ...code },
+      },
+    )
+  const body = (card: ComponentDef, attrs: string) => `<doop-use component="${card.id}" ${attrs}></doop-use>`
+  const STUB = {
+    '@acme/ui/package.json': '{"name":"@acme/ui","main":"index.js","types":"index.d.ts"}\n',
+    '@acme/ui/index.d.ts':
+      "import type { ReactNode } from 'react'\nexport declare function Card(props: { variant?: 'default' | 'outline'; children?: ReactNode }): JSX.Element\n",
+    '@acme/ui/index.js': 'exports.Card = () => null\n',
+  }
+
+  it('passes a prop whose name is an identifier, leaves the rest out and reports each one with its value', () => {
+    const card = CARD({ props: { text: { omit: true } } })
+    const out = exportOf([card], frame(body(card, 'variant="outline" text="Join us" text-2="Welcome back"')))
+    const home = fileOf(out, 'src/pages/Home.tsx')
+    expect(home).toMatch(/<Card variant=\{"outline"\} \/>/)
+    expect(home).not.toContain('text-2')
+    expect(home).not.toContain('text=')
+    const details = out.report.issues.map((issue) => issue.detail)
+    expect(details).toHaveLength(2)
+    expect(details.find((detail) => detail.includes('"text-2"'))).toMatch(
+      /Card: prop "text-2" was set to "Welcome back"/,
+    )
+    expect(details.find((detail) => detail.includes('"text"'))).toMatch(
+      /Card: prop "text" was set to "Join us".*omits it/,
+    )
+    expect(out.report.issues.every((issue) => issue.file === 'src/pages/Home.tsx')).toBe(true)
+  })
+
+  it('stays quiet when an instance leaves the prop alone or sets its default', () => {
+    const card = CARD({ props: { text: { omit: true } } })
+    const out = exportOf([card], frame(`${body(card, 'variant="outline"')}${body(card, 'text="Sign in"')}`))
+    expect(out.report.issues).toEqual([])
+  })
+
+  it('type-checks the generated page against a component that declares only variant and children', () => {
+    const card = CARD({ props: { text: { name: 'children' } } })
+    const out = exportOf([card], frame(body(card, 'variant="outline" text="Join us" text-2="Welcome back"')))
+    const home = fileOf(out, 'src/pages/Home.tsx')
+    expect(home).toMatch(/<Card variant=\{"outline"\}>\s*Join us\s*<\/Card>/)
+    expect(out.report.issues.map((issue) => issue.detail)).toEqual([
+      expect.stringContaining('Card: prop "text-2" was set to "Welcome back"'),
+    ])
+    const project = writeProject(out.files, STUB)
+    try {
+      expect(typecheck(project)).toEqual([])
+    } finally {
+      project.cleanup()
+    }
+  })
+
+  it('reports from a generated component that nests the mapped one, and the report keeps it', () => {
+    const card = CARD({ props: { text: { name: 'children' } } })
+    const wrap = def(
+      'Wrap',
+      `<div data-doop-part="r"><doop-use component="${card.id}" data-doop-part="u" text-2="x"></doop-use></div>`,
+    )
+    const out = exportOf([card, wrap], [], { componentIds: [wrap.id] })
+    expect(
+      out.report.issues.some((issue) => issue.file === 'src/components/Wrap.tsx' && issue.detail.includes('"text-2"')),
+    ).toBe(true)
   })
 })
