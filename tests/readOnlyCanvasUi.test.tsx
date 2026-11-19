@@ -145,7 +145,11 @@ describe.each(['view', 'comment'] as const)('with the %s role', (role) => {
   })
 
   it('lets the page tree navigate but not add, move or move frames', async () => {
-    await mount(<PagesPanel />)
+    await mount(
+      <div data-slot="panel">
+        <PagesPanel canvasId="c1" />
+      </div>,
+    )
     expect(container.textContent).toContain('One')
     expect(container.textContent).toContain('Two')
     expect(labels()).not.toContain('Add page')
@@ -210,7 +214,11 @@ describe('with the edit role', () => {
     await mount(<StickyNote note={note} />)
     expect(labels()).toContain('Delete note')
     expect(labels()).toContain('Resize note')
-    await mount(<PagesPanel />)
+    await mount(
+      <div data-slot="panel">
+        <PagesPanel canvasId="c1" />
+      </div>,
+    )
     expect(labels()).toContain('Add page')
     await mount(<FrameHistoryModal frame={frame} onClose={() => {}} />)
     const row = [...document.body.querySelectorAll<HTMLButtonElement>('button[data-slot="list-row"]')].find((b) =>

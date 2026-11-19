@@ -54,6 +54,7 @@ export const panels: Catalog['panels'] = {
   pagesExpand: 'Expandir {name}',
   pagesCollapse: 'Recolher {name}',
   pagesHiddenSubpages: { one: '{count} subpágina oculta', other: '{count} subpáginas ocultas' },
+  pagesResize: 'Redimensionar páginas',
 
   memoryIntro: 'A Memória é como este canvas lembra do seu gosto — e como cada agente cria designs com ele.',
   memoryReferences: 'Referências',
