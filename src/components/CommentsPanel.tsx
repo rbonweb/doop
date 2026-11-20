@@ -2,7 +2,6 @@ import { useMemo, useRef, useState } from 'react'
 import { colorFor } from '../../shared/types'
 import { useStore } from '../lib/store'
 import { api } from '../lib/api'
-import { authClient } from '../lib/auth'
 import { postReply } from '../lib/commenting'
 import { useCanComment, useCanEdit, useIsGuest } from '../lib/role'
 import { posthog } from '../lib/posthog'
@@ -13,10 +12,13 @@ import { pageThreads, threadState, type CommentThreadGroup, type ThreadState } f
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { PanelBody } from './ui/panel'
-import { CheckIcon } from './ui/icons'
+import { CheckIcon, LinkIcon } from './ui/icons'
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from './ui/context-menu'
+import { MentionText, useMentionPicker } from './MentionPicker'
+import { copyCommentLink } from '../lib/commentLink'
 import { Disclosure } from './ui/collapsible'
 import { isResidentLimit } from './TeamAllowance'
-import { MentionTextarea, mentionIds, type MentionTextareaHandle } from './MentionTextarea'
+import { Textarea } from './ui/textarea'
 import { useT } from '../lib/i18n'
 
 const emptyNote = 'px-4 py-6 text-center text-[12px] leading-[1.45] text-ink-faint'
@@ -109,8 +111,8 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
-  const replyRef = useRef<MentionTextareaHandle>(null)
-  const myId = authClient.useSession().data?.user.id
+  const fieldRef = useRef<HTMLTextAreaElement>(null)
+  const mentions = useMentionPicker({ value: draft, onChange: setDraft, fieldRef })
   /* below comment a thread is read-only; a guest can reply but not close it;
      only an editor may @mention an agent */
   const mayComment = useCanComment()
@@ -135,11 +137,11 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
   async function reply() {
     const text = draft.trim()
     if (!text || sending) return
-    const mentions = mentionIds(text, replyRef.current?.picked() ?? [])
+    const picked = mentions.picked(text)
     setSending(true)
     setFailed(false)
     try {
-      await postReply(root.id, text, mentions)
+      await postReply(root.id, text, picked)
       posthog.capture('element_comment_replied')
       setDraft((current) => (current === draft ? '' : current))
     } catch (err) {
@@ -159,57 +161,68 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
 
   return (
     <div className="mx-1.5 py-1">
-      <div
-        role="button"
-        tabIndex={0}
-        title={frame ? t('stage.goToFrame', { name: frame.name }) : t('stage.goToPin')}
-        onClick={goToThread}
-        onKeyDown={(e) => {
-          if (e.target !== e.currentTarget) return
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            goToThread()
-          }
-        }}
-        className="grid cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-[2px] rounded-[8px] px-1.5 py-2 text-[12px] leading-[18px] hover:bg-sub focus-visible:bg-sub focus-visible:outline-none"
-      >
-        <span className="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
-          <span
-            aria-hidden
-            className="grid size-4 flex-none place-items-center rounded-full text-[8px] leading-none font-medium text-white"
-            style={{ background: colorFor(root.from) }}
+      <ContextMenu>
+        {/* a resolved thread has no pin for a link to open */}
+        <ContextMenuTrigger asChild disabled={resolved}>
+          <div
+            role="button"
+            tabIndex={0}
+            title={frame ? t('stage.goToFrame', { name: frame.name }) : t('stage.goToPin')}
+            onClick={goToThread}
+            onKeyDown={(e) => {
+              if (e.target !== e.currentTarget) return
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                goToThread()
+              }
+            }}
+            className="grid cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-[2px] rounded-[8px] px-1.5 py-2 text-[12px] leading-[18px] hover:bg-sub focus-visible:bg-sub focus-visible:outline-none"
           >
-            {root.from.slice(0, 1).toUpperCase()}
-          </span>
-          <b className="truncate font-medium text-ink">{root.from}</b>
-        </span>
-        <span className="text-[11px] text-ink-faint tabular-nums">{timeAgo(root.at)}</span>
-        {/* open threads clamp (the pin shows the whole conversation); a
+            <span className="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
+              <span
+                aria-hidden
+                className="grid size-4 flex-none place-items-center rounded-full text-[8px] leading-none font-medium text-white"
+                style={{ background: colorFor(root.from) }}
+              >
+                {root.from.slice(0, 1).toUpperCase()}
+              </span>
+              <b className="truncate font-medium text-ink">{root.from}</b>
+            </span>
+            <span className="text-[11px] text-ink-faint tabular-nums">{timeAgo(root.at)}</span>
+            {/* open threads clamp (the pin shows the whole conversation); a
             resolved one has no pin to open, so it reads in full here */}
-        <span className={cn('col-span-2 min-w-0 break-words pl-[22px] text-ink-soft', !resolved && 'line-clamp-3')}>
-          {root.text}
-        </span>
-        {(frame || resolved) && (
-          <span className="col-span-2 flex min-w-0 items-center gap-[7px] pl-[22px] text-[11px] text-ink-faint">
-            {resolved && (
-              <span className="grid size-3 flex-none place-items-center rounded-full bg-ink text-paper">
-                <CheckIcon className="size-[8px]" strokeWidth={2.4} />
+            <span className={cn('col-span-2 min-w-0 break-words pl-[22px] text-ink-soft', !resolved && 'line-clamp-3')}>
+              <MentionText text={root.text} />
+            </span>
+            {(frame || resolved) && (
+              <span className="col-span-2 flex min-w-0 items-center gap-[7px] pl-[22px] text-[11px] text-ink-faint">
+                {resolved && (
+                  <span className="grid size-3 flex-none place-items-center rounded-full bg-ink text-paper">
+                    <CheckIcon className="size-[8px]" strokeWidth={2.4} />
+                  </span>
+                )}
+                {frame && (
+                  <span className="min-w-0 truncate" title={frame.name}>
+                    {frame.name}
+                  </span>
+                )}
+                {resolved && root.resolvedBy && (
+                  <span className="min-w-0 truncate">
+                    {frame ? '· ' : ''}
+                    {t('stage.resolvedBy', { name: root.resolvedBy })}
+                  </span>
+                )}
               </span>
             )}
-            {frame && (
-              <span className="min-w-0 truncate" title={frame.name}>
-                {frame.name}
-              </span>
-            )}
-            {resolved && root.resolvedBy && (
-              <span className="min-w-0 truncate">
-                {frame ? '· ' : ''}
-                {t('stage.resolvedBy', { name: root.resolvedBy })}
-              </span>
-            )}
-          </span>
-        )}
-      </div>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={() => void copyCommentLink(root)}>
+            <LinkIcon size="rail" />
+            {t('stage.copyCommentLink')}
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {resolved && thread.replies.length > 0 && (
         <Disclosure
           label={t('stage.replies', { count: thread.replies.length })}
@@ -222,7 +235,9 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
                   <span className="truncate font-medium text-ink">{reply.from}</span>
                   <span className="shrink-0 text-caption text-ink-faint">{timeAgo(reply.at)}</span>
                 </div>
-                <p className="whitespace-pre-wrap break-words">{reply.text}</p>
+                <p className="whitespace-pre-wrap break-words">
+                  <MentionText text={reply.text} />
+                </p>
               </li>
             ))}
           </ol>
@@ -230,24 +245,29 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
       )}
       {!resolved && mayComment && (
         <div className="flex items-start gap-1.5 py-1 pr-1.5 pl-[28px]">
-          <MentionTextarea
-            ref={replyRef}
-            canvasId={root.canvasId}
-            people={!guest}
-            agents={mayEdit}
-            myId={myId}
-            className="min-h-7 min-w-0 flex-1 rounded-[7px] bg-surface px-2.5 py-1 shadow-ring focus:shadow-elevation-1-focus md:text-[12px]"
-            placeholder={mayEdit ? t('stage.replyPanelMention') : t('stage.replyEllipsis')}
-            ariaLabel={t('stage.replyTo', { name: root.from })}
-            value={draft}
-            onChange={setDraft}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !isComposingEnter(e)) {
-                e.preventDefault()
-                void reply()
-              }
-            }}
-          />
+          <div className="relative min-w-0 flex-1">
+            <Textarea
+              ref={fieldRef}
+              variant="bare"
+              className="min-h-7 w-full min-w-0 rounded-[7px] bg-surface px-2.5 py-1 shadow-ring focus:shadow-elevation-1-focus md:text-[12px]"
+              placeholder={mayEdit ? t('stage.replyPanelMention') : t('stage.replyEllipsis')}
+              aria-label={t('stage.replyTo', { name: root.from })}
+              value={draft}
+              onChange={(e) => {
+                setDraft(e.target.value)
+                mentions.onCaret(e)
+              }}
+              {...mentions.fieldProps}
+              onKeyDown={(e) => {
+                if (mentions.onKeyDown(e)) return
+                if (e.key === 'Enter' && !e.shiftKey && !isComposingEnter(e)) {
+                  e.preventDefault()
+                  void reply()
+                }
+              }}
+            />
+            {mentions.list}
+          </div>
           {!guest && (
             <Button
               variant="bare"

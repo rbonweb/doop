@@ -33,7 +33,9 @@ import {
   align,
   arrangeCount,
   canEdit,
+  canGroup,
   canPickColor,
+  canUngroup,
   copyProperties,
   distributeEdgesOf,
   distributeSpacingOf,
@@ -742,7 +744,7 @@ export const ACTIONS: readonly CanvasAction[] = [
     section: 0,
     keys: [mod('g')],
     edit: true,
-    enabled: hasInnerPick,
+    enabled: canGroup,
     run: () => groupSelection('group'),
   },
   {
@@ -752,7 +754,7 @@ export const ACTIONS: readonly CanvasAction[] = [
     section: 0,
     keys: [mod('g', { shift: true }), mod('Backspace')],
     edit: true,
-    enabled: hasInnerPick,
+    enabled: canUngroup,
     run: ungroupSelection,
   },
   {

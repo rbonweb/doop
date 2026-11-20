@@ -40,12 +40,11 @@ export const GUIDE_TOPIC_SUMMARIES: Record<GuideTopic, string> = {
   export: 'images, PDF and React code (export_react)',
   'react-import': 'bringing a team’s React component system in: a Storybook, the CLI or a bundle',
   'imported-frames': 'frames imported from a GitHub repo or synced from a live app',
-  'editing-tools': 'part of a frame or many frames: sections, patches, search, bulk, claims, compose',
-  'checking-tools': 'measure, lint, targeted screenshots, compare, snapshot',
-  'canvas-tools': 'duplicate, arrange, check layout, batch many calls',
+  'editing-tools': 'edit without the whole HTML: get_section, patch_frame, find_frames, bulk, expected_version',
+  'checking-tools': 'judge a render by numbers first: measure_frame, lint_frame, inspect_frame, compare',
+  'canvas-tools': 'duplicate_frames, arrange_frames, check_layout, run_batch',
   'pages-decks-notes': 'pages and nesting, slide decks, sticky notes',
-  'working-with-people':
-    'show the work first, fork a reviewed frame instead of rewriting it, pin questions, roll back versions',
+  'working-with-people': 'show the work first, fork a reviewed frame, pin questions, roll back versions',
 }
 
 /** The check a frame-writing tool's description asks for, at the moment the HTML is written:
@@ -214,7 +213,8 @@ export const FRAME_STYLES = `- Style an element on the element itself: style="�
  *  guide and the resident agents' system prompt. */
 export const LEAN_FRAMES = `- Frames carry markup, never files. A frame is sent whole to every viewer and agent on each
   edit, so anything pasted into it is paid for on every round-trip. A base64 data: URI of any
-  kind is refused and nothing is written. Put each heavy thing where it belongs:
+  kind is refused and nothing is written, and so is a long block of base64 text in a script or
+  anywhere else (a packed bundle, a compressed data file). Put each heavy thing where it belongs:
   - Fonts: a family the canvas library or the hosted fonts already have is used by name alone.
     Any other font file goes into the library with upload_font, then is named in CSS: never an
     @font-face with the file inlined.
@@ -229,7 +229,9 @@ export const LEAN_FRAMES = `- Frames carry markup, never files. A frame is sent 
     <script src> or <link>, never pasted in. Better still, write only the CSS the design uses.
   - Data: a chart or table needs a few representative rows, not the dataset. Keep inline JSON to a
     few KB.
-  - Icon sets: hotlink each icon you use from search_icons, not a sprite sheet of the whole set.`
+  - Icon sets: hotlink each icon you use from search_icons, not a sprite sheet of the whole set.
+  - An application: a frame is one screen. Never pack an app's bundles and pages into a frame to
+    make it clickable; put each screen in its own frame and wire them as a prototype.`
 
 export const COMPONENTS = `A component is one design used in many places: change its main and every instance follows.
 get_canvas and list_components show a canvas's components with their props.
@@ -384,7 +386,8 @@ and judge the render like a senior designer. Evaluate each item, give a one-line
 and fix real issues before moving on:
 
 - **Fit**: content clipped at the frame edge, or a large dead zone below? Resize the frame
-  (update_frame width/height) or rework the layout — frames do not scroll.
+  (update_frame width/height) or rework the layout — frames do not scroll. inspect_frame
+  measures clipping and overlaps.
 - **Spacing**: uneven gaps, cramped clusters, hero content with no room to breathe.
 - **Hierarchy**: can you tell heading from body from caption at a glance?
 - **Contrast**: text you would squint at; elements dissolving into their background.
@@ -468,7 +471,7 @@ ${FRAME_STYLES}
 - Size frames to their content: mobile screen 390×844, desktop page 1280×800, card or
   component 480×360, square social post 640×640. Set width/height on create_frame, or
   adjust later with update_frame.
-- Pages: a canvas is a set of pages, each its own board. One screen is a frame, a body of work a page: create_canvas_page (optional parent_id) returns an id for create_frame's pageId; set_canvas_pages renames, reorders, nests or deletes (topic "pages-decks-notes"). A page link is /c/<canvas_id>?page=<page_id>.
+- Pages: a canvas is a set of pages, each its own board. One screen is a frame, a body of work a page: create_canvas_page (optional parent_id) returns an id for create_frame's pageId; set_canvas_pages renames, reorders, nests or deletes (topic "pages-decks-notes"); update_canvas renames the canvas itself. A page link is /c/<canvas_id>?page=<page_id>.
 - Element links: /c/<canvas_id>?frame=<frame_id>&element=<element_id> points at the one
   element carrying data-doop-id="<element_id>" in that frame's HTML. Find that attribute with
   get_frame before applying the feedback; if no element carries it any more, ask for an
@@ -548,12 +551,6 @@ for a direction you choose yourself: the decision and why, never a list of value
 rationale per call, at most ${MAX_DECISION_CHARS} characters; split longer feedback into separate
 decisions by topic, preserving the reason for each choice. Design taste only —
 never one-off content edits like typos or copy tweaks.
-
-## Fast tools for big canvases
-
-- Edit without the whole HTML: get_section, replace_section, patch_frame, find_frames (topic "editing-tools"). Pass expected_version (your last read) when another agent may edit.
-- Judge a render by numbers first: measure_frame, lint_frame (topic "checking-tools").
-- duplicate_frames instead of re-typing a frame; arrange_frames, check_layout, run_batch (topic "canvas-tools").
 
 ## Report back — honest, with the link
 
@@ -826,8 +823,9 @@ reply inherits the root's element anchor, so an @mention reaches the resident ag
 the same context the conversation is about. Close the thread with resolve_comment once the
 request is carried out; resolving an @mention thread also records the exchange in the
 canvas Memory. Writing is metered only when a reply @mentions a resident role, exactly
-like a comment left in the browser. Reading does not claim work or resolve it; task
-feedback is separate (get_feedback).
+like a comment left in the browser. To tag a person, write @ and their name as a comment's
+\`from\` spells it ("@Ana Souza"): they are emailed at once. Reading does not claim work or
+resolve it; task feedback is separate (get_feedback).
 `,
   export: `# Exporting (images, PDF, React code)
 

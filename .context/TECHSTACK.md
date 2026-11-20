@@ -29,7 +29,7 @@
   internal selection language.
 - Element links use `/c/<canvasId>?frame=<frameId>&element=<data-doop-id>` (no selector form,
   and no backwards compatibility for the old one). `src/lib/elementLink.ts` owns copying from the
-  element toolbar and Layers menu, stamping first when the element has no id; `Stage.tsx`
+  element menu and Layers menu, stamping first when the element has no id; `Stage.tsx`
   focuses its page and frame; `FrameView.tsx` resolves the id in the ready iframe, including
   script-created elements, re-picks the positional path so the Layers panel follows, and falls
   back to frame details if nothing carries the id. Browser regressions in
@@ -225,14 +225,14 @@
   migration 0051, so a trimmed task history cannot move it). Tests: `agentRunner.test.ts`,
   `runnerQueue.test.ts`, `modelPickerRunners.test.tsx`, the pick cases in
   `localAgentRouting.test.ts`.
-- Pages over MCP (`server/mcp.ts`): `get_canvas` lists `pages` (id, name, `startFrameId`) and every frame's `pageId`, and narrows to one page with `page_id`; `create_canvas_page` adds an empty page at the end (`actions.createCanvasPage`, a server-minted id, `MAX_PAGES` enforced) and returns it for `create_frame`'s `pageId`; `set_canvas_pages` stays the whole-list call for rename, reorder and delete; `update_frame` moves a frame between pages (it keeps its x/y; an unknown `pageId` is refused with the canvas's page list). The guide's "Frames and HTML" section says when a page beats a frame. The resident agent has the same three tools under the same names; both surfaces run `server/pageTools.ts`, its kickoff lists the pages and each frame's page and position, and a run whose only work was arranging counts as delivered (`arrangeWrites`). Tests: the page cases in `mcp-tools.test.ts`, `residentPageTools.test.ts`.
+- Pages over MCP (`server/mcp.ts`): `get_canvas` lists `pages` (id, name, `startFrameId`) and every frame's `pageId`, and narrows to one page with `page_id`; `create_canvas_page` adds an empty page at the end (`actions.createCanvasPage`, a server-minted id, `MAX_PAGES` enforced) and returns it for `create_frame`'s `pageId`; `set_canvas_pages` stays the whole-list call for rename, reorder and delete; `update_frame` moves a frame between pages (it keeps its x/y; an unknown `pageId` is refused with the canvas's page list). `update_canvas` renames the canvas itself (`actions.renameCanvas`, the app's own rename; a name it already has changes nothing); agents' canvas names are capped at `MAX_CANVAS_NAME` as page names are at `MAX_PAGE_NAME`. The guide's "Frames and HTML" section says when a page beats a frame. The resident agent has the same three tools under the same names; both surfaces run `server/pageTools.ts`, its kickoff lists the pages and each frame's page and position, and a run whose only work was arranging counts as delivered (`arrangeWrites`). Tests: the page and `update_canvas` cases in `mcp-tools.test.ts`, `residentPageTools.test.ts`.
 - Duplicating frames (`server/agentTools/canvasDuplicate.ts`, `actions.duplicateFrames`): MCP `duplicate_frames` (and the resident agent's twin) copies up to 50 frames of one canvas in one call, each the source's HTML byte for byte (element ids and prototype attributes kept) with its size, slide flag, speaker notes, hidden, locked and rotation, but not its approval, comments, versions or sticky notes; the whole call is validated first (every frame on the canvas, every page a page of it) and refused naming the item. Copies are placed with `freeSpotBeside` (`shared/arrange.ts`) clear of every frame on the target page and of earlier copies, links between frames copied in the same call follow the copies (`remapFrameTargets`, ids pre-minted through `store.createFrame`'s optional `id`), only a real component main (`data-doop-component="`) sends a copy through `prepareWrite` so the canvas keeps one main (`rewritten`), and peers get one `frame:created` per copy without a reveal plus one activity line. Tests: `duplicateFrames.test.ts`, `duplicateFramesMcp.test.ts`.
 - Layout tools (`server/agentTools/canvasLayout.ts`, `shared/arrange.ts`): MCP `arrange_frames` (edit role) lays frames out in rows through `arrangeRows`, by `frame_ids` (one page) or `page_id` (demo frames excepted), with `rows` (`min_width`, `max_width`, `name`, `order`), `gap` (default 300) and `origin` (default: the top-left of the frames arranged); default rows are desktops (900 px and wider) then the rest; locked frames never move (`skipped_locked`), frames already in place are not written, each move is one `actions.updateFrame` so attached sticky notes follow; `dry_run: true` answers with `planned` (`frame_id`, `from`, `to`) and writes nothing; `check_layout` (view role, read only) lists overlaps and gaps under `min_gap` (default 40) between a page's visible frames and sticky notes via `layoutIssues`, never reporting a note with its own frame; both have resident twins under the same names and the resident's arranging counts as delivered work (`arrangeWrites`). `shared/arrange.ts` holds the pure arrange geometry (align, distribute, pack, tidy up) plus the agent layout checks — `gapBetween`, `tooClose`, `freeSpotBeside`, `arrangeRows` with `RowRule`/`DEFAULT_ROWS` and `layoutIssues` — so frames and agent tools share one implementation; `src/lib/actions/arrange.ts` re-exports it. Tests: `arrangeFramesTools.test.ts`, `arrangeShared.test.ts`, `arrange.test.ts`.
 - Batches (`server/agentTools/canvasBatch.ts`, `server/toolLoads.ts`): MCP `run_batch` runs up to 50 `{ tool, args }` ops in order in one round trip; `loadToolTargets` records each registered tool's wrapped callback in a per-server registry (`registeredTool`, a WeakMap keyed by the `McpServer`, never global), and an op validates its arguments the way the SDK does and calls that same callback, so access roles, rate limits (`takeSlot` and the module limits in `mcp.ts`), canvas loads and version checks run per op exactly as for a direct call; unknown tools, nested `run_batch` and bad arguments fail that op only, `stop_on_error` (default true) skips the rest, the loop stops when the request is aborted, and the answer is a JSON summary followed by each op's own output. Ops inside `run_batch` never get the one-line Claude Code summary — an AsyncLocalStorage flag, `batchScope`, keeps them out of it. The resident agent has no twin (it already runs several calls per turn). Tests: `runBatch.test.ts`.
 - Response shaping (`server/responseShaping.ts`, `server/reviewNudge.ts`): `buildMcpServer` wraps `registerTool` right after `loadToolTargets`, keyed by the caller's credential (a hash of the bearer, else `user:<id>`). The review reminder (`REVIEW_NUDGE`, also the `Stream complete.` variant) is sent once per frame per session and dropped after (in memory: 2,000 sessions, 500 frames each, 2 h idle), and a read-only tool's JSON text becomes one summary line for clients in `STRUCTURED_CONTENT_CLIENTS` (`claude-code`), whose `structuredContent` carries the full payload; every other client keeps the full text. Tests: `responseShaping.test.ts`, `responseShapingMcp.test.ts`.
 - `get_canvas` paging (`server/canvasListing.ts`, `server/mcp.ts`): `limit`, `cursor`, `fields` and `frame_fields` page and trim large canvases, and the hosted font roster is stated once as `webFonts` data instead of being repeated in `note`. `page_id` narrows every part of the answer to that page: frames, notes, `claims` (only frames listed, so a `limit` never names a frame outside the answer), `flow` (only navigation between frames of that page) and the `structuredContent` copy. Tests: `canvasListing.test.ts`.
 - Guide sections (`server/guideSections.ts`): `get_guide({ topic, section })` reads one `## ` section of the loaded topic (the main guide by default; upstream's topics such as `doop-instructions`, images, components and prototypes each load their own text) by slug or title, or `section: "index"` lists every section of it with its size; the full topic stays the default, an unknown section answers `no guide section "x" in topic "y"`. The main guide stays within upstream's 30,000 characters (`MAIN_GUIDE_BUDGET`): the fork's speed-tool guide (`server/agentTools/guide/`) and its page, deck, note and working-with-people text load as the topics `editing-tools`, `checking-tools`, `canvas-tools`, `pages-decks-notes` and `working-with-people`, and the main guide holds one pointer line per area. A section that is not in the loaded topic is looked up in the other topics, so the old slugs (`seeing-and-checking-your-work`, `canvas-tools`) still resolve. Tests: `guideSections.test.ts`, `guide.test.ts`.
-- MCP handshake and tool set after the 0.15 sync (`server/mcp.ts`, `server/guide.ts`): the `INSTRUCTIONS` the server sends on connect are upstream's short text (about 2,000 characters, capped at 2,048 by `mcpInstructions.test.ts`) and point at `get_guide({ topic: "doop-instructions" })`; the fork's handshake rules (fork rather than overwrite, questions go on the frame, report back, version history, show the work first, human sign-off) live in the guide's main topic instead. `get_canvas` keeps the fork's payload (paging, `page_id`, `claims`, `webFonts`) and adds upstream's `customAgents`, `deletedComponents`, `workspaceLibraries`, the `activeComponents` catalog with usage, `existingStyle` and the `NO_TOKENS_BRIEF`. Every upstream tool (`export_layer`, `upload_font`, `set_frame_approval`, `create_components`) is registered and has its resident twin; `find_component_candidates` and `/api/canvases/:id/component-candidates` are gone (upstream removed them), and `inspect_frame` stays resident-only. A comment-only reply to an agent mention stays plain text (the fork's rule, not upstream's refusal), and every mention check reads the canvas roster (`actions.canvasRoster`). Writes keep the fork's `expected_version` and claims beside upstream's inline-data refusal and compose check.
+- MCP handshake and tool set after the 0.15 sync (`server/mcp.ts`, `server/guide.ts`): the `INSTRUCTIONS` the server sends on connect are upstream's short text (about 2,000 characters, capped at 2,048 by `mcpInstructions.test.ts`) and point at `get_guide({ topic: "doop-instructions" })`; the fork's handshake rules (fork rather than overwrite, questions go on the frame, report back, version history, show the work first, human sign-off) live in the guide's main topic instead. `get_canvas` keeps the fork's payload (paging, `page_id`, `claims`, `webFonts`) and adds upstream's `customAgents`, `deletedComponents`, `workspaceLibraries`, the `activeComponents` catalog with usage, `existingStyle` and the `NO_TOKENS_BRIEF`. Every upstream tool (`export_layer`, `upload_font`, `set_frame_approval`, `create_components`) is registered and has its resident twin; `find_component_candidates` and `/api/canvases/:id/component-candidates` are gone (upstream removed them), and `inspect_frame` reaches MCP agents too since the b2b4536e sync (upstream #566). A comment-only reply to an agent mention stays plain text (the fork's rule, not upstream's refusal), and every mention check reads the canvas roster (`actions.canvasRoster`). Writes keep the fork's `expected_version` and claims beside upstream's inline-data refusal and compose check.
 - Note tombstones (`server/recentDeletions.ts`): the cause of a deleted note is kept for 24 h (at most 5,000 entries, in memory) so `delete_note`/`update_note` can say the note went with its frame or was already deleted. Tests: `noteTombstones.test.ts`.
 - Feature usage events: a feature an agent can reach reports from the server through `captureFeature` (`server/featureEvents.ts`) at the REST route, MCP tool and resident tool, on the signed-in user, the agent's connecting user or the resident run's requester, with `via` (`ui`, `mcp`, `resident`, `automation`): `tokens_changed`, `token_themes_set`, `page_background_changed`, `prototype_start_set`, `frame_version_restored`. Browser-only features capture with posthog-js: every export and Copy as PNG through `src/lib/exportEvents.ts` (`frames_exported` with `source` and `target`, `png_copied`), `prototype_played`, `prototype_interactions_saved`, `text_formatted`, `svg_imported`, `pdf_imported`.
 - `ws` 8.18.0 - WebSocket server for realtime multiplayer (cursors, presence, frame edits,
@@ -262,7 +262,10 @@
   healed document, so a cut-off script never runs).
 - No files inside frames (`server/inlineData.ts`, `LEAN_FRAMES` in `server/guide.ts`): an agent
   write that adds a base64 `data:` URI of any kind is refused and nothing is written, with what to
-  do per kind (font, picture, SVG, media). Checked on what the call submits: MCP `create_frame`,
+  do per kind (font, picture, SVG, media). So is one that adds a block of 4,096 or more base64
+  characters that is not a data: URI (`EMBEDDED_MIN_LENGTH`: a packed script bundle, a compressed
+  data file in a string literal; one canvas held 6 MB of it per frame, 13 GB across its kept
+  versions). Checked on what the call submits: MCP `create_frame`,
   `set_frame_html`, `append_frame_html` chunks, `edit_frame_html`'s `new_str`, every component
   tool's strings, and the resident's create / set / edit / rewrite chunks. A URI the frame already
   holds may be carried over (a PDF import embeds its fonts), so such a frame stays editable.
@@ -489,7 +492,9 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   (`store.pickElements`), and ⌘] / ⌘[ step the picked elements, together, or the selected frame
   forward or backward, ⌘⌥] / ⌘⌥[ to the front or back (`reorderElements` / `reorderLayers`,
   `restackFrame`), one undo step each. A picked standalone shape is its page's row: Tab, ⌘A and
-  the brackets treat it as a frame, and ⌘A skips stack-locked shapes (`isStackLocked`). ↩ and Tab act only when no control has the keyboard (`isControlTarget`) and
+  the brackets treat it as a frame, and ⌘A skips stack-locked shapes (`isStackLocked`). In the Layers panel ⇧/⌘-click on a
+  top-level row (frame or canvas shape) adds it to the selection or drops it, as ⇧-click does on the canvas,
+  and ⌫ in the tree deletes every selected one. ↩ and Tab act only when no control has the keyboard (`isControlTarget`) and
   something is selected, so buttons, menus and the Layers tree keep theirs. The bracket chords are
   read by `code` too, since ⌥ changes the typed character on macOS. Tests: `selectionKeys.test.ts`.
 - Canvas commands (`src/lib/actions/`): every editor command is one entry in `registry.ts` (id,
@@ -538,7 +543,18 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   (`planGroup`: direction from the wider run, gap the mean space, `align-items` the shared edge,
   children reordered to the flow and given `flex-shrink:0`) when they do not overlap along it, else
   pinned (an absolute box of their bounds, children re-based). Layers in flow keep the
-  flow-carrying group. ⇧⌘G on an absolute group puts its layers back absolute where they show. A
+  flow-carrying group. ⇧⌘G on an absolute group puts its layers back absolute where they show. Shapes on the canvas
+  (`src/lib/canvasGroups.ts`): ⌘G on two or more unlocked, unturned standalone shapes of one page keeps the
+  frontmost one's frame (its id, comments, versions and stack place) and moves the others' layers into it,
+  inside one `data-doop-drawing="group"` layer placed by percentages so the frame's grips scale them; the
+  others' frames go, all as one undo step (`recordShellRewrite`). A shape whose frame would go is refused
+  when it carries comments or a component main. ⇧⌘G on such a group gives each layer a frame of its own
+  just behind, the group's frame keeping the frontmost. Every write is conditional: a shape a teammate edited
+  meanwhile stays on the canvas and leaves the group (`keepShell`), and the step is `guarded`: undo or redo
+  refuses once someone else (as the room reports, `src/lib/theirSaves.ts`) has saved a frame it would overwrite or delete since its own save (`noteSaved`); this browser's later steps and their undo do not count. It checks again before each write, and each write is conditional on the newest version this browser knows, so a save landing meanwhile is a conflict, not overwritten. Refused
+  too: moving the frame's corner under comments pinned to the frame (they are frame-relative), splitting a
+  group turned or flipped as a whole, and splitting one whose wrapper has comments; a hidden group splits into hidden shapes. A split is tracked whole, so an undo pressed meanwhile waits for it, and
+  it selects the new shapes only if the selection and page are still the ones it started from. Tests: `canvasGroups.test.ts`. A
   click picks the outermost canvas group around the hit, a double-click on a picked group goes one
   level in, and with a layer inside picked clicks pick its siblings (`groupLevel`); comments still
   pin to the element under the pointer. Drops (`frameDropRuntime.ts`, canvas drags of layers and
@@ -683,9 +699,21 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   bounds and turned with it, so a turned layer keeps its grips and resizes along its own axes
   (`derotateDelta`; no guide snapping while turned). `sizable` now admits the element's own turn
   and still refuses a turned, skewed, 3D or nonuniformly scaled ancestor; unsupported transforms
-  use the axis-aligned rendered bounds for the selection outline. The element toolbar lifts to 30px above a
-  selection wearing furniture, clear of the top zones. Tests: `elementRotate.test.ts`,
+  use the axis-aligned rendered bounds for the selection outline. Tests: `elementRotate.test.ts`,
   `elementRotateBrowser.test.ts`, the turned cases in `elementResizeBrowser.test.ts`.
+- Distances (`src/lib/measure.ts`, `src/lib/measureKey.ts`, `src/components/MeasureOverlay.tsx`): holding ⌥
+  with the Select tool and something selected shows, as Figma does, red lines labelled with the distance
+  from the selection to what the pointer is over. The picked elements are measured, as one box, to the
+  element under the pointer in their frame (the runtime's `doop:measure`, `measureElement` in
+  `frameBridge.ts`), or to the box around the primary one (its parent, the frame for a root layer) when
+  the pointer is on one of them; selected frames are measured, as one box, to another frame under the
+  pointer, which is also what a picked element's frame gets once the pointer is over another frame.
+  Boxes that overlap are measured edge to matching edge, boxes apart across the gap, with a dashed
+  extension of the target's edge when it is off to one side (`measureBetween`, pure). The overlay lives
+  in the Stage's world and reads at most once a frame, on pointer events and on changes to the canvas,
+  selection or camera; nothing shows during a drag, while typing in a field, or with ⌘ / Ctrl held, and
+  letting ⌥ go over the canvas does not open the browser's menu bar. Turned frames and layers are
+  measured by their bounds. Tests: `measure.test.ts`, `measureBrowser.test.ts`.
 - Rulers and guides (`src/components/Rulers.tsx`, math in `src/lib/rulers.ts`): ⇧R or the zoom menu
   toggles `<canvas>` rulers docked on the stage's top and left edges (the top bar and the floating
   chrome step in by `RULER_PX`) (remembered under
@@ -798,6 +826,44 @@ data-doop-webfonts>` for the roster families the frame names and does not load i
   (`actions.handBackComment`: unclaimed, no longer an agent item in memory and in its row, the thread open), so the
   person's `@mention` answer queues fresh work carrying the whole conversation. MCP agents have
   had the same two tools all along. Tests: `residentComments.test.ts`, `agentToolParity.test.ts`.
+- People in comments (`shared/personMentions.ts`, `server/canvasPeople.ts`, `src/components/MentionPicker.tsx`):
+  a mention is `@` plus the person's account name in the text (`@Ana Souza`, longest name first,
+  no case, a name ends where no letter, combining mark, digit or `_` follows). Typing `@` in the
+  composer, a thread reply or the Comments panel's reply lists the canvas's people (owner,
+  members, workspace members, from `GET /api/canvases/:id/people`, comment role, names and faces
+  only, asked again whenever a field mounts) and, for editors, its agents; the thread draws
+  mentions in brand. Names are not unique, so the picker sends the ids it picked as `mentions`
+  beside the text (the latest pick of a name in the draft; an agent picked over a person
+  named like its handle rides as `agent:<id>`, so the agent gets it). The routes, MCP `reply_to_comment` and the resident's reply resolve the text
+  once (`resolveCommentMentions` → `resolvePersonMentions`) against everyone eligible (those
+  people plus the thread's authors) before any filtering: a name several people share reaches
+  only the picked ones, and nobody when none was picked. The result's `roleText` (people
+  blanked out) is what the agent matcher, the edit-access check and the meter read, so
+  `@Doop Fan` is not `@doop`; the resident strips agent mentions only outside people's
+  (`withoutAgentMentions`). The ids ride the `comment.created` / `comment.replied` event, and
+  `commentNotifications.ts` emails each at once (`mentionEmail`) and leaves them out of that
+  comment's digest. The author, someone who switched comment emails off, a banned account or
+  someone who lost access is not written to. Comment links (`src/lib/commentLink.ts`, the shape
+  of `server/links.ts`'s `commentLink`): "Copy link to comment" on a pin's right-click menu, an
+  open Comments panel row's, and the link button on a thread's first message. Opening one,
+  `Stage` follows the root to its current frame, not the one the link names. Tests:
+  `personMentions.test.ts`, `commentLink.test.ts`, the `@mentions` cases in
+  `commentNotifications.test.ts`, the picker cases in `commentsPanel.test.tsx`, the mention and
+  `/people` cases in `canvasCommentsRoute.test.ts`, the person case in `residentComments.test.ts`.
+- People in comments, the fork's wiring (since the b2b4536e sync): the fork had its own picker
+  (`MentionTextarea`, removed) and kept mentions as account ids on the comment; it now uses
+  upstream's picker and resolver and keeps the ids. One route answers `GET /api/canvases/:id/people`
+  (`sharingRouter`, `server/sharing.ts` `viewablePeople`): upstream's `mentionableIds` plus everyone
+  who already wrote on the canvas, each re-checked with `canView` (domain grants and link roles
+  count), `{ id, name, image }`, owner first. Every route, MCP `add_comment` and `reply_to_comment`
+  and the resident's reply resolve through `validMentions` (`resolvePersonMentions` against all
+  those candidates, then `canView`), and pass `{ mentions: ids, roleText }` as `CommentOptions`
+  beside the fork's `allowAgent`; the ids are stored in the `comments.mentions` column, so the
+  pulsing pin, the live `mention` toast, `shared/marks.ts` and later replies' email still find
+  the person. A comment-only author's agent mention is kept as plain text with a notice
+  (`agentNotice` reads `roleText`), not refused. The picker skips signed-out guests (they post
+  through `src/lib/commenting.ts` with no ids) and never offers the viewer themselves. Tests:
+  the mention cases in `sharingRoutes.test.ts` and the upstream ones above.
 - Chat in the Agents tab (`src/components/AgentChat.tsx`, `src/lib/agentChat.ts`): under Recent
   tasks, each composer prompt (a board card without a `kind`) and any feedback left on it is a
   turn, oldest first, with the agent's answer under it: waiting, working, the run's closing words,

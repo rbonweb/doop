@@ -238,7 +238,8 @@ async function frameHtml(frameId: string): Promise<string> {
 describe('true section sizes and element ids in the outline', () => {
   let viewerAgent: McpClient
   let plain: Frame
-  const footerFiller = 'F'.repeat(30_000)
+  /* prose, not one unbroken run: a 4,096-character run of base64 letters is refused (inlineData) */
+  const footerFiller = 'Footer link text. '.repeat(1_700)
   /* no ids anywhere, and a footer whose <p> is closed by the footer's end tag, not its own */
   const bare = `<!doctype html><html><body><header><h1>Top</h1></header><section><h2>Middle</h2></section><footer><p>${footerFiller}</footer></body></html>`
 
