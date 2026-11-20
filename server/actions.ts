@@ -60,6 +60,7 @@ import { decodeEscapedHtml, looksEscapedHtml, repairEscapedHtml } from './escape
 import { rememberDeletedNote } from './recentDeletions.ts'
 import { forgetLibrary } from './componentLibrary.ts'
 import { withCanvasFaces, withCanvasFacesMidStream } from './canvasFaces.ts'
+import { EMBEDDED_MIN_LENGTH } from './inlineData.ts'
 import {
   MAX_TOKENS,
   MAX_TOKEN_DESCRIPTION,
@@ -727,6 +728,9 @@ export interface CommentOptions {
   allowAgent?: boolean
   /** account ids of the people the text @mentions — already checked by the caller, order kept */
   mentions?: string[]
+  /** the text with every person's mention blanked out (shared/personMentions.ts), for the
+   *  agent matcher: `@Brand Smith` must not read as `@brand`. Defaults to the text. */
+  roleText?: string
 }
 
 /** Where a new comment sits: on an element inside a frame (by its
@@ -1231,9 +1235,11 @@ function postComment(
 ): ElementComment | undefined {
   const clean = text.trim()
   if (!clean) return undefined
-  /* @Doop, @brand, @a11y… — whichever resident agent is mentioned picks it up,
-     unless the author may not ask agents to change the canvas */
-  const mentioned = options.allowAgent === false ? undefined : mentionedRole(clean, canvasRoster(canvasId))
+  /* @Doop, @brand, @a11y… — whichever resident agent is mentioned picks it
+     up, unless the author may not ask agents to change the canvas; a
+     person's name (`@Brand Smith`) is not an agent's */
+  const mentioned =
+    options.allowAgent === false ? undefined : mentionedRole(options.roleText ?? clean, canvasRoster(canvasId))
   const people = [...new Set(options.mentions ?? [])]
   const list = commentLog.get(canvasId) ?? []
   /* strictly increasing per canvas: thread order is reconstructed from `at`
@@ -1278,6 +1284,7 @@ function postComment(
     comment,
     frame,
     actorKind: kind,
+    ...(people.length ? { mentions: people } : {}),
   })
   return comment
 }
@@ -1975,12 +1982,15 @@ interface StreamState {
   /** the frame's HTML before the opening chunk replaced it: what a later chunk
    *  may carry over (server/inlineData.ts compares against it) */
   base: string
-  /** the end of the agent's last chunk as it sent it, before components expanded:
-   *  enough to catch a data: URI prefix split across two chunks */
+  /** the end of the agent's stream as it sent it, before components expanded: what the
+   *  next chunk is joined to, so base64 split across chunks is seen whole */
   tail: string
 }
 
-const STREAM_TAIL_CHARS = 256
+/* enough for a data: URI's prefix split across two chunks, and for a block of base64 text sent
+   in pieces: a run is refused once it reaches EMBEDDED_MIN_LENGTH (server/inlineData.ts), so one
+   still growing at the end of the stream is shorter than that and is held here whole */
+const STREAM_TAIL_CHARS = Math.max(256, EMBEDDED_MIN_LENGTH)
 
 const streams = new Map<string, StreamState>() // frameId -> state
 
@@ -3236,6 +3246,9 @@ export const deleteCanvas = atomic(function deleteCanvas(canvasId: string): bool
 })
 
 export function renameCanvas(canvasId: string, name: string, actor: Actor) {
+  /* the same name changes nothing, so nobody is told it did */
+  const current = store.getCanvas(canvasId)
+  if (current?.name === name) return current
   const canvas = store.renameCanvas(canvasId, name)
   if (!canvas) return undefined
   broadcast(canvasId, { type: 'canvas:renamed', name, actor })

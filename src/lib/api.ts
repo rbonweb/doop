@@ -145,6 +145,13 @@ import type { DesignToken, DesignTokenInput, ThemeRename, TokenEdit, TokenResult
 
 export type HomeActivity = ActivityItem & { canvasId: string; canvasName: string }
 
+/** someone a comment may @mention */
+export interface CanvasPerson {
+  id: string
+  name: string
+  image?: string
+}
+
 export interface CanvasMember {
   userId: string
   name: string
@@ -158,12 +165,6 @@ export interface CanvasMember {
 
 /** A comment as the create/reply routes answer: `notice` says something was held back. */
 export type PostedComment = ElementComment & { notice?: string }
-
-/** A person the @mention picker can offer. */
-export interface MentionPerson {
-  userId: string
-  name: string
-}
 
 /** What the share link currently does, as the server confirms it. */
 export interface LinkState {
@@ -606,8 +607,6 @@ export const api = {
     }),
   declineAccessRequest: (canvasId: string, userId: string) =>
     req(`/api/canvases/${canvasId}/access-requests/${userId}/decline`, { method: 'POST' }),
-  /* the @mention picker */
-  mentionPeople: (canvasId: string) => req<MentionPerson[]>(`/api/canvases/${canvasId}/people`),
   /* the pages a signed-out visitor can reach */
   publicGate: (canvasId: string) => req<PublicGate>(`/api/public/canvas/${canvasId}`),
   unlockCanvas: (canvasId: string, password: string) =>
@@ -1028,6 +1027,7 @@ export const api = {
       x: number
       y: number
       elementOrigin?: { x: number; y: number }
+      /** the people picked from the @ list, for names several share */
       mentions?: string[]
     },
   ) => req<PostedComment>(`/api/frames/${frameId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
@@ -1042,7 +1042,8 @@ export const api = {
     canvasId: string,
     input: { pageId: string; x: number; y: number; text: string; mentions?: string[] },
   ) => req<PostedComment>(`/api/canvases/${canvasId}/comments`, { method: 'POST', body: JSON.stringify(input) }),
-  replyComment: (commentId: string, text: string, mentions?: string[]) =>
+  /** `mentions`: the people picked from the @ list, for names several share */
+  replyComment: (commentId: string, text: string, mentions: string[] = []) =>
     req<PostedComment>(`/api/comments/${commentId}/replies`, {
       method: 'POST',
       body: JSON.stringify({ text, mentions }),
@@ -1064,6 +1065,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ frames, replace: true }),
     }),
+  /** who a comment on this canvas may @mention: owner, members, workspace members */
+  canvasPeople: (canvasId: string) => req<CanvasPerson[]>(`/api/canvases/${canvasId}/people`),
   /** re-pin a thread (its root or any reply names it) where its pin was dropped */
   moveComment: (commentId: string, anchor: CommentAnchorInput) =>
     req<ElementComment>(`/api/comments/${commentId}/anchor`, { method: 'PATCH', body: JSON.stringify(anchor) }),

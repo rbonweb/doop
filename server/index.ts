@@ -3205,26 +3205,27 @@ app.post('/api/frames/:id/comments', async (req, res) => {
   if (!frame) return
   const canvas = store.getCanvas(frame.canvasId)!
   const { selector, elementId, snippet, text, x, y, elementOrigin } = req.body ?? {}
+  /* who the text @mentions; a person's name (`@Brand Smith`) is never an agent's */
+  const mentions = await validMentions(canvas, String(text ?? ''), req.body?.mentions)
   /* Asking an agent for something would make it edit frames, so only editors
      may. Anyone else's @agent mention is kept as a plain comment, and they are
      told so — the agent is never queued and no resident task is spent. */
-  const notice = agentNotice(String(text ?? ''), roleFor(req, canvas), actions.canvasRoster(frame.canvasId))
+  const notice = agentNotice(mentions.roleText, roleFor(req, canvas), actions.canvasRoster(frame.canvasId))
   /* a comment that @mentions a resident agent is a new command to the team,
      so it's metered like a card; plain comments and replies stay free */
-  if (!notice && mentionedRole(String(text ?? ''), actions.canvasRoster(frame.canvasId))) {
+  if (!notice && mentionedRole(mentions.roleText, actions.canvasRoster(frame.canvasId))) {
     const gate = await allowance.consumeResidentTask(req.user!.id)
     if (!gate.ok) {
       return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
     }
   }
-  const mentions = await validMentions(canvas, String(text ?? ''), req.body?.mentions)
   const comment = await actions.addElementComment(
     req.params.id,
-    { selector, elementId, snippet, text: String(text ?? ''), x, y, elementOrigin },
+    { selector, elementId, snippet, text, x, y, elementOrigin },
     req.user!.name,
     req.user!.id,
     'user',
-    { allowAgent: !notice, mentions },
+    { allowAgent: !notice, mentions: mentions.ids, roleText: mentions.roleText },
   )
   if (!comment) return res.status(404).json({ error: 'frame not found or empty text' })
   res.json(notice ? { ...comment, notice } : comment)
@@ -3259,22 +3260,22 @@ app.post('/api/canvases/:id/comments', async (req, res) => {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return res.status(400).json({ error: 'x and y must be numbers' })
   const body = String(text ?? '')
   if (!body.trim()) return res.status(400).json({ error: 'empty text' })
-  const notice = agentNotice(body, roleFor(req, canvas), actions.canvasRoster(canvas.id))
+  const mentions = await validMentions(canvas, body, req.body?.mentions)
+  const notice = agentNotice(mentions.roleText, roleFor(req, canvas), actions.canvasRoster(canvas.id))
   let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
-  if (!notice && mentionedRole(body, actions.canvasRoster(canvas.id))) {
+  if (!notice && mentionedRole(mentions.roleText, actions.canvasRoster(canvas.id))) {
     gate = await allowance.consumeResidentTask(req.user!.id)
     if (!gate.ok) {
       return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
     }
   }
-  const mentions = await validMentions(canvas, body, req.body?.mentions)
   const comment = actions.addCanvasComment(
     canvas.id,
     { pageId, x: Number(x), y: Number(y), text: body },
     req.user!.name,
     req.user!.id,
     'user',
-    { allowAgent: !notice, mentions },
+    { allowAgent: !notice, mentions: mentions.ids, roleText: mentions.roleText },
   )
   if (!comment) {
     /* the page went away while the meter was being written: give the task
@@ -3298,20 +3299,22 @@ app.post('/api/comments/:id/replies', async (req, res) => {
   if (!text.trim() || !actions.openThread(req.params.id)) {
     return res.status(404).json({ error: 'thread resolved or empty text' })
   }
+  /* the thread's authors are among the people it may @mention */
+  const mentions = await validMentions(canvas, text, req.body?.mentions)
   /* same rules as a fresh comment: only an editor's @agent mention queues
      the agent and costs a resident task */
-  const notice = agentNotice(text, roleFor(req, canvas), actions.canvasRoster(found.canvasId))
+  const notice = agentNotice(mentions.roleText, roleFor(req, canvas), actions.canvasRoster(found.canvasId))
   let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
-  if (!notice && mentionedRole(text, actions.canvasRoster(found.canvasId))) {
+  if (!notice && mentionedRole(mentions.roleText, actions.canvasRoster(found.canvasId))) {
     gate = await allowance.consumeResidentTask(req.user!.id)
     if (!gate.ok) {
       return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
     }
   }
-  const mentions = await validMentions(canvas, text, req.body?.mentions)
   const reply = actions.replyToComment(req.params.id, text, req.user!.name, req.user!.id, 'user', {
     allowAgent: !notice,
-    mentions,
+    mentions: mentions.ids,
+    roleText: mentions.roleText,
   })
   if (!reply) {
     /* the thread closed while the meter was being written: give the task

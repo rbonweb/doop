@@ -26,6 +26,7 @@ import { GhostFrames } from './GhostFrames'
 import { Cursors } from './Cursors'
 import { FollowFrame } from './FollowFrame'
 import { cameraOnCursor, cameraToFollow } from '../lib/follow'
+import { MeasureOverlay } from './MeasureOverlay'
 import { SnapGuides } from './SnapGuides'
 import { GuideLines, Rulers } from './Rulers'
 import { useIsMobile } from '../hooks/use-mobile'
@@ -57,7 +58,7 @@ import {
 } from './ui/icons'
 import { TOOLS, isDrawingTool, resolvePointerAction, toolForKey, type Tool } from '../lib/tools'
 import { useCanvasDrawing } from './CanvasDrawing'
-import { FrameLabelLayer } from './FrameLabelLayer'
+import { CommentThreadLayer, FrameLabelLayer } from './FrameLabelLayer'
 import { useT, type PlainMessageKey } from '../lib/i18n'
 import { NO_INSETS, fitBox, fitColumnStart, type StageInsets } from '../lib/viewFit'
 import { spaceWouldScroll } from '../lib/spaceScroll'
@@ -238,6 +239,7 @@ export function Stage({
   const gridRef = useRef<HTMLDivElement>(null)
   const pixelGridRef = useRef<HTMLDivElement>(null)
   const [labelLayer, setLabelLayer] = useState<HTMLDivElement | null>(null)
+  const [threadLayer, setThreadLayer] = useState<HTMLDivElement | null>(null)
   const zoomLabelRef = useRef<HTMLSpanElement>(null)
   const setViewport = useStore((s) => s.setViewport)
   const canvas = usePageCanvas()
@@ -357,7 +359,11 @@ export function Stage({
         const py = (((vp.y % vp.zoom) + vp.zoom) % vp.zoom) - vp.zoom
         pixels.style.transform = `translate(${px}px, ${py}px)`
       }
-      if (zoomLabelRef.current) zoomLabelRef.current.textContent = `${Math.round(vp.zoom * 100)}%`
+      /* only on a change: rewriting the text replaces its node on every pan
+         tick, and a node inserted anywhere re-runs `body:has(…)` rules */
+      const zoomText = `${Math.round(vp.zoom * 100)}%`
+      if (zoomLabelRef.current && zoomLabelRef.current.textContent !== zoomText)
+        zoomLabelRef.current.textContent = zoomText
     }
     apply(useStore.getState().viewport)
     /* the size the frames judge "off screen" against */
@@ -619,11 +625,18 @@ export function Stage({
     }
     const params = deepLinkHandled.current ? null : new URLSearchParams(linkSearch)
     deepLinkHandled.current = true
-    const focusId = params?.get('frame')
+    /* a thread moved since its link was made is where it is now: the
+       linked root's own frame wins over the one the link names */
+    const linkedId = params?.get('comment')
+    const linked = linkedId ? state.comments.find((c) => c.id === linkedId && !c.parentId) : undefined
+    const focusId = linked ? linked.frameId : params?.get('frame')
     const target = focusId ? state.canvas?.frames.find((f) => f.id === focusId) : null
     if (target) {
       const element = params?.get('element')
       focusFrame(target, isElementId(element) ? elementIdSelector(element) : null)
+      /* the frame may be on another page, mounting already selected and
+         with the page switch's URL: ask its view to open the thread */
+      if (linked) useStore.getState().requestOpenThread(linked.id)
       return
     }
     const pinned = params ? linkedCanvasComment(params.get('comment')) : null
@@ -1216,34 +1229,40 @@ export function Stage({
             {/* `world` is likewise a behaviour hook: pan hit-testing checks
             classList.contains('world') to tell background from frame */}
             <div className="world absolute left-0 top-0 origin-top-left" ref={worldRef}>
-              <FrameLabelLayer.Provider value={labelLayer}>
-                <FrameStack frames={canvas?.frames ?? []} />
-              </FrameLabelLayer.Provider>
-              {notesVisible &&
-                pageNotes.map((n) => (
-                  <StickyNote
-                    key={n.id}
-                    note={n}
-                    frameName={n.frameId ? fullCanvas?.frames.find((f) => f.id === n.frameId)?.name : undefined}
+              <CommentThreadLayer.Provider value={threadLayer}>
+                <FrameLabelLayer.Provider value={labelLayer}>
+                  <FrameStack frames={canvas?.frames ?? []} />
+                </FrameLabelLayer.Provider>
+                {notesVisible &&
+                  pageNotes.map((n) => (
+                    <StickyNote
+                      key={n.id}
+                      note={n}
+                      frameName={n.frameId ? fullCanvas?.frames.find((f) => f.id === n.frameId)?.name : undefined}
+                    />
+                  ))}
+                <GhostFrames />
+                <GuideLines stage={ref} />
+                <PrototypeOverlay />
+                <SnapGuides />
+                <MeasureOverlay />
+                <CanvasComments composeAt={composeAt} onComposeDone={dismissCompose} />
+                {showCursors && <Cursors />}
+                {drawing.preview}
+                {marquee && (
+                  <div
+                    className="pointer-events-none absolute bg-brand/10 [box-shadow:inset_0_0_0_calc(1px/var(--zoom,1))_var(--brand)]"
+                    style={{ left: marquee.x, top: marquee.y, width: marquee.width, height: marquee.height }}
                   />
-                ))}
-              <GhostFrames />
-              <GuideLines stage={ref} />
-              <PrototypeOverlay />
-              <SnapGuides />
-              <CanvasComments composeAt={composeAt} onComposeDone={dismissCompose} />
-              {showCursors && <Cursors />}
-              {drawing.preview}
-              {marquee && (
-                <div
-                  className="pointer-events-none absolute bg-brand/10 [box-shadow:inset_0_0_0_calc(1px/var(--zoom,1))_var(--brand)]"
-                  style={{ left: marquee.x, top: marquee.y, width: marquee.width, height: marquee.height }}
-                />
-              )}
+                )}
+              </CommentThreadLayer.Provider>
             </div>
             {/* the selected frame's size badge, in screen px (FrameLabelLayer); after
                 the world so no frame, however it stacks, covers it */}
             <div className="pointer-events-none absolute inset-0" ref={setLabelLayer} />
+            {/* an open comment thread, in screen px above the badges, so no
+                badge covers it; CommentPin keeps it on its pin */}
+            <div data-comment-ui className="pointer-events-none absolute inset-0" ref={setThreadLayer} />
             {showRulers && <Rulers stage={ref} />}
           </div>
         </ContextMenuTrigger>

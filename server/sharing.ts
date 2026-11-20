@@ -26,6 +26,8 @@ import {
 import { clientIp, createRateLimiter } from './rateLimit.ts'
 import { mentionedRole, type Roster } from '../shared/agents.ts'
 import { canvasPages } from '../shared/pages.ts'
+import { resolvePersonMentions, type ResolvedMentions } from '../shared/personMentions.ts'
+import { mentionableIds, pickedIds, type CanvasPerson } from './canvasPeople.ts'
 import {
   AGENT_REQUEST_NOTICE,
   isMemberRole,
@@ -166,41 +168,56 @@ export function canvasManagerIds(canvas: Canvas): string[] {
 
 /* ---- people @mentions ---- */
 
-/** Everyone who can view the canvas and might be @mentioned: the owner,
- *  members, the workspace's members and the people who already wrote in its
- *  threads. Each is re-checked against the resolver (a banned or removed
- *  account never shows). Link-only visitors who never commented are not
- *  listed: the server knows nothing durable about them. */
-export async function viewablePeople(canvas: Canvas): Promise<{ userId: string; name: string }[]> {
-  const ids = new Set<string>()
-  if (canvas.ownerId) ids.add(canvas.ownerId)
-  for (const id of canvas.memberIds ?? []) ids.add(id)
-  if (canvas.workspaceId) for (const id of workspaces.workspaceMemberIds(canvas.workspaceId)) ids.add(id)
+/** Everyone who might be @mentioned on a canvas: the people who have it for
+ *  good (server/canvasPeople.ts mentionableIds: owner, members, workspace
+ *  members) and the people who already wrote in its threads. Link-only
+ *  visitors who never commented are not listed: the server knows nothing
+ *  durable about them, and their names would reach everyone holding the link. */
+function mentionCandidateIds(canvas: Canvas): string[] {
+  const ids = new Set(mentionableIds(canvas))
   for (const c of actions.getComments(canvas.id)) if (c.fromUserId) ids.add(c.fromUserId)
-  const people = await peopleByIds([...ids])
-  return [...people.values()]
-    .filter((p) => canView(p, canvas))
-    .map((p) => ({ userId: p.id, name: p.name }))
-    .sort((a, b) => a.name.localeCompare(b.name))
+  return [...ids]
 }
 
-/** Keep the mentioned account ids that name a person who can view the canvas
- *  AND whose `@name` actually appears in the text; drop every other id
- *  silently. Order of first mention in the list is kept. */
-export async function validMentions(canvas: Canvas, text: string, claimed: unknown): Promise<string[]> {
-  if (!Array.isArray(claimed)) return []
-  const ids = [...new Set(claimed.filter((id): id is string => typeof id === 'string'))].slice(0, 10)
-  if (!ids.length) return []
+/** Those candidates who can view the canvas now (a banned or removed account
+ *  never shows), with names and faces only — never addresses. Owner first,
+ *  then members, workspace members and thread authors. */
+export async function viewablePeople(canvas: Canvas): Promise<CanvasPerson[]> {
+  const ids = mentionCandidateIds(canvas)
   const people = await peopleByIds(ids)
-  const lower = text.toLowerCase()
-  const kept: string[] = []
-  for (const id of ids) {
+  return ids.flatMap((id) => {
     const person = people.get(id)
-    if (!person || !canView(person, canvas)) continue
-    if (!lower.includes(`@${person.name.toLowerCase()}`)) continue
-    kept.push(id)
+    if (!person || !canView(person, canvas)) return []
+    const image = avatarUrl(person.image)
+    return [{ id, name: person.name, ...(image ? { image } : {}) }]
+  })
+}
+
+/** Who a comment's text @mentions (shared/personMentions.ts): every `@Name`
+ *  is read against all the candidates first, so a longer name is never handed
+ *  to a shorter one, with `claimed` (the ids the editor's picker chose) for a
+ *  name several people share. Only people who can view the canvas are kept.
+ *  `roleText` is the text with those mentions blanked out, for the agent
+ *  matcher. A failure to read the people still lets the comment post. */
+export async function validMentions(canvas: Canvas, text: string, claimed?: unknown): Promise<ResolvedMentions> {
+  if (!text.includes('@')) return { ids: [], roleText: text }
+  try {
+    const ids = mentionCandidateIds(canvas)
+    const people = await peopleByIds(ids)
+    const named = ids.flatMap((id) => {
+      const person = people.get(id)
+      return person ? [{ id, name: person.name }] : []
+    })
+    const resolved = resolvePersonMentions(text, named, pickedIds(claimed))
+    const kept = resolved.ids.filter((id) => {
+      const person = people.get(id)
+      return !!person && canView(person, canvas)
+    })
+    return { ids: kept, roleText: resolved.roleText }
+  } catch (err) {
+    console.error(`[comments] could not read the people on ${canvas.id}`, err)
+    return { ids: [], roleText: text }
   }
-  return kept
 }
 
 /** The notice for a comment that tried to ask an agent for something the

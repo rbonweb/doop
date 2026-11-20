@@ -107,6 +107,8 @@ export function CanvasComments({
     }
     function onPress(e: PointerEvent) {
       if (rootRef.current?.contains(e.target as Node)) return
+      /* an open thread is portalled out of this root (CommentPin) */
+      if (e.target instanceof Element && e.target.closest('[data-comment-thread-anchor]')) return
       close()
     }
     window.addEventListener('keydown', onKey)
@@ -151,7 +153,6 @@ export function CanvasComments({
           >
             <CommentThread
               thread={thread}
-              canvasId={c.canvasId}
               canReply={mayComment}
               canResolve={mayComment && !guest}
               canRetry={mayEdit}
@@ -208,12 +209,7 @@ export function CanvasComments({
             className={cn('absolute -top-[13px]', composeAt.placement.side === 'left' ? 'right-[20px]' : 'left-[20px]')}
             style={composeAt.placement.shift ? { transform: `translateX(${composeAt.placement.shift}px)` } : undefined}
           >
-            <CommentComposer
-              canvasId={canvasId}
-              placeholder={t('stage.commentHere')}
-              onSubmit={post}
-              onCancel={close}
-            />
+            <CommentComposer placeholder={t('stage.commentHere')} onSubmit={post} onCancel={close} />
           </div>
         </div>
       )}

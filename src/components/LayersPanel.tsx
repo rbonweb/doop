@@ -20,7 +20,6 @@ import { layerPlacement } from '../lib/frameBridge'
 import { currentPageCanvas, usePageCanvas } from '../lib/pages'
 import { PagesPanel, sectionHeading } from './PagesPanel'
 import { getIdentity } from '../lib/identity'
-import { deleteFramesTracked } from '../lib/history'
 import { renameComponent, rootPartKey } from '../lib/components'
 import {
   ancestorsOf,
@@ -33,6 +32,7 @@ import {
 } from '../lib/layers'
 import {
   deleteLayers,
+  deleteSelection,
   renameFrame,
   renameLayer,
   dropLayer,
@@ -280,6 +280,7 @@ export function LayersPanel({
   /* each slide's place in the deck this page plays */
   const deckNumber = useMemo(() => new Map(deckOf(frames).map((f, i) => [f.id, i + 1])), [frames])
   const selectedId = useStore((s) => s.selectedId)
+  const selectedIds = useStore((s) => s.selectedIds)
   const selectedElement = useStore((s) => s.selectedElement)
   /* every row of a multi-element pick is highlighted; a string key keeps
      the selection identity-stable between store updates */
@@ -354,7 +355,10 @@ export function LayersPanel({
   useEffect(() => {
     rowsRef.current = rows
   }, [rows])
-  const currentKey = selectedElement ? rowKey(selectedElement.frameId, selectedElement.selector) : selectedId
+  /* a canvas shape selected as a whole is listed as its one layer's row */
+  const currentKey = selectedElement
+    ? rowKey(selectedElement.frameId, selectedElement.selector)
+    : (rows.find((r) => isRoot(r) && r.frame.id === selectedId)?.key ?? selectedId)
 
   /* before the list is measured (and where nothing is laid out) the window's
      height stands in, which only mounts a few rows more than needed */
@@ -397,6 +401,12 @@ export function LayersPanel({
      and leaves the frame's own inspector to the frame-name click */
   function activate(row: VisibleRow, toggle = false) {
     const s = useStore.getState()
+    /* ⇧/⌘-click on a frame or a canvas shape adds it to the selection, or
+       drops it, as ⇧-click does on the canvas */
+    if (toggle && isRoot(row)) {
+      s.toggleSelect(row.frame.id)
+      return
+    }
     /* ⇧/⌘-click adds a layer to the frame's picked set, or drops it */
     if (toggle && row.kind === 'node' && s.selectedElement?.frameId === row.frame.id) {
       s.toggleElement({ frameId: row.frame.id, selector: row.node.selector })
@@ -602,9 +612,10 @@ export function LayersPanel({
         if (e.repeat || readOnly) break
         /* a locked frame stays; deleteLayers refuses a locked element itself
            and takes a standalone element's shell frame along with its layer */
-        if (row?.kind === 'frame') {
-          if (!row.frame.locked) deleteFramesTracked([row.frame])
-        } else if (row) deleteLayers(row.frame, pickedSelectors(useStore.getState()))
+        /* with no layer picked, every selected frame and canvas shape goes,
+           as ⌫ on the canvas takes them */
+        if (row && !useStore.getState().selectedElement) deleteSelection()
+        else if (row) deleteLayers(row.frame, pickedSelectors(useStore.getState()))
         break
       default:
         return
@@ -736,20 +747,23 @@ export function LayersPanel({
                     <FrameRow
                       key={row.key}
                       row={row}
-                      selected={row.frame.id === selectedId && !selectedElement}
+                      selected={selectedIds.includes(row.frame.id) && !selectedElement}
                       current={row.frame.id === selectedId}
                       deck={deckNumber.get(row.frame.id)}
                       dragging={drag?.key === row.key}
                       drop={drop?.key === row.key ? drop.place : undefined}
                       onToggle={() => setOpen(row.key, !row.open)}
-                      onActivate={() => activate(row)}
+                      onActivate={(toggle) => activate(row, toggle)}
                       onPointerDown={(e) => onRowPointerDown(e, row)}
                     />
                   ) : (
                     <NodeRow
                       key={row.key}
                       row={row}
-                      selected={pickedRows.has(row.key)}
+                      selected={
+                        pickedRows.has(row.key) ||
+                        (!!row.standalone && !selectedElement && selectedIds.includes(row.frame.id))
+                      }
                       dragging={drag?.key === row.key}
                       drop={drop?.key === row.key ? drop.place : undefined}
                       onToggle={() => setOpen(row.key, !row.open)}
@@ -975,7 +989,7 @@ function FrameRow({
   dragging: boolean
   drop?: Drop['place']
   onToggle: () => void
-  onActivate: () => void
+  onActivate: (toggle: boolean) => void
   onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void
 }) {
   const { frame } = row
@@ -1016,11 +1030,11 @@ function FrameRow({
             onToggleHidden={readOnly ? undefined : () => setFrameHidden(frame, !frame.hidden)}
             locked={!!frame.locked}
             onToggleLocked={readOnly ? undefined : () => setFramesLocked([frame], !frame.locked)}
-            onClick={onActivate}
+            onClick={(e) => onActivate(e.shiftKey || e.metaKey || e.ctrlKey)}
             onDoubleClick={startRename}
             onContextMenu={() => {
               pasteAt.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 }
-              if (!useStore.getState().selectedIds.includes(frame.id)) onActivate()
+              if (!useStore.getState().selectedIds.includes(frame.id)) onActivate(false)
             }}
             onPointerDown={onPointerDown}
             trailing={
@@ -1181,7 +1195,9 @@ function NodeRow({
           }}
           onContextMenu={() => {
             pasteAt.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 }
-            onActivate(false)
+            /* a right-click on a shape in a multi-selection keeps the selection */
+            const s = useStore.getState()
+            if (!(standalone && s.selectedIds.length > 1 && s.selectedIds.includes(frame.id))) onActivate(false)
           }}
           onPointerDown={onPointerDown}
           /* the row under the pointer is outlined on the canvas too, as a
